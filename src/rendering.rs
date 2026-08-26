@@ -200,86 +200,104 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
     render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_styles, &border_status, &border_format, &mut 0, bchars);
     let buf_area = f.buffer_mut().area;
-    let mask = border_mask_from_node(&win.root, area, buf_area);
-    fix_border_intersections(f.buffer_mut(), bchars, &mask);
+    let borders = border_geometry_from_node(&win.root, area, buf_area);
+    fix_border_intersections(f.buffer_mut(), bchars, &borders);
 }
 
-/// Post-pass: fix border intersection characters where horizontal and vertical
-/// separator lines meet. Converts plain '│' and '─' to proper junction
-/// characters ('┼', '├', '┤', '┬', '┴') at intersection points.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BorderOrientation {
+    Horizontal,
+    Vertical,
+}
+
+/// Final separator orientation at each drawn buffer cell.
+#[derive(Default)]
+pub struct BorderGeometry {
+    cells: std::collections::BTreeMap<usize, BorderOrientation>,
+}
+
+impl BorderGeometry {
+    pub(crate) fn set_vertical(&mut self, idx: usize) {
+        self.cells.insert(idx, BorderOrientation::Vertical);
+    }
+
+    pub(crate) fn set_horizontal(&mut self, idx: usize) {
+        self.cells.insert(idx, BorderOrientation::Horizontal);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, idx: &usize) -> bool {
+        self.cells.contains_key(idx)
+    }
+
+    fn has_orientation(&self, idx: usize, orientation: BorderOrientation) -> bool {
+        self.cells.get(&idx) == Some(&orientation)
+    }
+}
+
+/// Replace straight separator glyphs at oriented crossings.
 ///
-/// `sep_cells` is the sorted, deduplicated list of cell indices psmux actually
-/// drew separators on (indexed like `buf.content`, i.e. `row * buf.area.width +
-/// col` relative to `buf.area`). Both the candidate cell and the crossing
-/// neighbour must be in `sep_cells` before a junction glyph is pushed, so
-/// box-drawing characters printed by child programs inside pane content (which
-/// are never in the list) are left untouched.
-pub fn fix_border_intersections(buf: &mut Buffer, bchars: Option<crate::border_lines::BorderChars>, sep_cells: &[usize]) {
-    // `none` (bchars == None) draws no separators, and `spaces` has no distinct
-    // junction glyphs, so intersection-fixing is a no-op for both.
-    let Some(bc) = bchars else { return; };
-    if !bc.has_junctions { return; }
-    let vert = bc.vertical;
-    let horiz = bc.horizontal;
+/// The returned indices identify every junction, including space-mode
+/// junctions whose glyph does not change.
+pub fn fix_border_intersections(
+    buf: &mut Buffer,
+    bchars: Option<crate::border_lines::BorderChars>,
+    borders: &BorderGeometry,
+) -> Vec<usize> {
+    let Some(bc) = bchars else { return Vec::new(); };
+    let width = buf.area.width as usize;
+    if width == 0 { return Vec::new(); }
+    let mut junctions = Vec::new();
 
-    let w = buf.area.width as usize;
-    let h = buf.area.height as usize;
-    if w == 0 || h == 0 { return; }
-
-    let is_sep = |i: usize| sep_cells.binary_search(&i).is_ok();
-
-    // Collect fixes first so detection sees only original characters.
-    let mut fixes: Vec<(usize, char)> = Vec::new();
-
-    // Walk only the drawn separator cells rather than scanning the whole buffer.
-    for &idx in sep_cells {
+    for (&idx, &orientation) in &borders.cells {
+        if orientation != BorderOrientation::Vertical {
+            continue;
+        }
         if idx >= buf.content.len() { continue; }
-        let row = idx / w;
-        let col = idx % w;
-        let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
-
-        if ch == vert {
-            // Cell already has vertical (up+down). Check for horizontal neighbours.
-            let has_left = col > 0 && {
-                let li = row * w + (col - 1);
-                li < buf.content.len() && is_sep(li)
-                    && buf.content[li].symbol().starts_with(horiz)
-            };
-            let has_right = col + 1 < w && {
-                let ri = row * w + (col + 1);
-                ri < buf.content.len() && is_sep(ri)
-                    && buf.content[ri].symbol().starts_with(horiz)
-            };
-            match (has_left, has_right) {
-                (true, true)  => fixes.push((idx, bc.cross)),
-                (true, false) => fixes.push((idx, bc.right_tee)),
-                (false, true) => fixes.push((idx, bc.left_tee)),
-                _ => {}
-            }
-        } else if ch == horiz {
-            // Cell already has horizontal (left+right). Check for vertical neighbours.
-            let has_up = row > 0 && {
-                let ui = (row - 1) * w + col;
-                ui < buf.content.len() && is_sep(ui)
-                    && buf.content[ui].symbol().starts_with(vert)
-            };
-            let has_down = row + 1 < h && {
-                let di = (row + 1) * w + col;
-                di < buf.content.len() && is_sep(di)
-                    && buf.content[di].symbol().starts_with(vert)
-            };
-            match (has_up, has_down) {
-                (true, true)  => fixes.push((idx, bc.cross)),
-                (true, false) => fixes.push((idx, bc.bottom_tee)),
-                (false, true) => fixes.push((idx, bc.top_tee)),
-                _ => {}
+        let col = idx % width;
+        let left = col > 0
+            && borders.has_orientation(idx - 1, BorderOrientation::Horizontal);
+        let right = col + 1 < width
+            && borders.has_orientation(idx + 1, BorderOrientation::Horizontal);
+        let glyph = match (left, right) {
+            (true, true) => Some(bc.cross),
+            (true, false) => Some(bc.right_tee),
+            (false, true) => Some(bc.left_tee),
+            (false, false) => None,
+        };
+        if let Some(glyph) = glyph {
+            junctions.push(idx);
+            if bc.has_distinct_junction_glyphs {
+                buf.content[idx].set_char(glyph);
             }
         }
     }
 
-    for (idx, ch) in fixes {
-        buf.content[idx].set_char(ch);
+    for (&idx, &orientation) in &borders.cells {
+        if orientation != BorderOrientation::Horizontal {
+            continue;
+        }
+        if idx >= buf.content.len() { continue; }
+        let row = idx / width;
+        let up = row > 0
+            && borders.has_orientation(idx - width, BorderOrientation::Vertical);
+        let down = row + 1 < buf.area.height as usize
+            && borders.has_orientation(idx + width, BorderOrientation::Vertical);
+        let glyph = match (up, down) {
+            (true, true) => Some(bc.cross),
+            (true, false) => Some(bc.bottom_tee),
+            (false, true) => Some(bc.top_tee),
+            (false, false) => None,
+        };
+        if let Some(glyph) = glyph {
+            junctions.push(idx);
+            if bc.has_distinct_junction_glyphs {
+                buf.content[idx].set_char(glyph);
+            }
+        }
     }
+    junctions.sort_unstable();
+    junctions
 }
 
 /// Collect the buffer-cell indices where psmux draws a pane separator,
@@ -288,18 +306,24 @@ pub fn fix_border_intersections(buf: &mut Buffer, bchars: Option<crate::border_l
 /// the split's own `area`).
 ///
 /// Indices match `Buffer::content` (`(y - buf_area.y) * buf_area.width +
-/// (x - buf_area.x)`). The result is sorted and deduplicated so callers can
-/// iterate the drawn cells directly and test membership with `binary_search`
-/// (see [`fix_border_intersections`]) — no whole-buffer array needed.
-pub fn border_mask_from_node(root: &Node, area: Rect, buf_area: Rect) -> Vec<usize> {
-    let mut cells = Vec::new();
-    mark_node_borders(root, area, buf_area, &mut cells);
-    cells.sort_unstable();
-    cells.dedup();
-    cells
+/// (x - buf_area.x)`). Child geometry is recorded before parent separators so
+/// the final orientation at an overwritten cell matches rendering order.
+pub fn border_geometry_from_node(
+    root: &Node,
+    area: Rect,
+    buf_area: Rect,
+) -> BorderGeometry {
+    let mut borders = BorderGeometry::default();
+    mark_node_borders(root, area, buf_area, &mut borders);
+    borders
 }
 
-fn mark_node_borders(node: &Node, area: Rect, buf_area: Rect, cells: &mut Vec<usize>) {
+fn mark_node_borders(
+    node: &Node,
+    area: Rect,
+    buf_area: Rect,
+    borders: &mut BorderGeometry,
+) {
     let Node::Split { kind, sizes, children } = node else { return; };
     let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
         sizes.clone()
@@ -308,7 +332,7 @@ fn mark_node_borders(node: &Node, area: Rect, buf_area: Rect, cells: &mut Vec<us
     let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
     for (i, child) in children.iter().enumerate() {
         if i < rects.len() {
-            mark_node_borders(child, rects[i], buf_area, cells);
+            mark_node_borders(child, rects[i], buf_area, borders);
         }
     }
 
@@ -321,7 +345,10 @@ fn mark_node_borders(node: &Node, area: Rect, buf_area: Rect, cells: &mut Vec<us
                 for y in area.y..area.y + area.height {
                     if y >= buf_area.y && y < buf_area.y + buf_area.height {
                         // Guards above bound y/x to buf_area, so idx < w*h.
-                        cells.push((y - buf_area.y) as usize * w + (sep_x - buf_area.x) as usize);
+                        borders.set_vertical(
+                            (y - buf_area.y) as usize * w
+                                + (sep_x - buf_area.x) as usize,
+                        );
                     }
                 }
             }
@@ -330,7 +357,10 @@ fn mark_node_borders(node: &Node, area: Rect, buf_area: Rect, cells: &mut Vec<us
             if sep_y < buf_area.y + buf_area.height && sep_y >= buf_area.y {
                 for x in area.x..area.x + area.width {
                     if x >= buf_area.x && x < buf_area.x + buf_area.width {
-                        cells.push((sep_y - buf_area.y) as usize * w + (x - buf_area.x) as usize);
+                        borders.set_horizontal(
+                            (sep_y - buf_area.y) as usize * w
+                                + (x - buf_area.x) as usize,
+                        );
                     }
                 }
             }

@@ -52,9 +52,12 @@ class ConPtyHostE {
 
     static void Main(string[] args) {
         string cmd = args.Length > 0 ? string.Join(" ", args) : "cmd.exe";
-        string ctrlFile = Environment.GetEnvironmentVariable("TEMP") + "\\conpty_ctrl.txt";
-        string outFile = Environment.GetEnvironmentVariable("TEMP") + "\\conpty_out.bin";
-        string logFile = Environment.GetEnvironmentVariable("TEMP") + "\\conpty_host.log";
+        string ctrlFile = Environment.GetEnvironmentVariable("PSMUX_CONPTY_CTRL")
+            ?? Environment.GetEnvironmentVariable("TEMP") + "\\conpty_ctrl.txt";
+        string outFile = Environment.GetEnvironmentVariable("PSMUX_CONPTY_OUT")
+            ?? Environment.GetEnvironmentVariable("TEMP") + "\\conpty_out.bin";
+        string logFile = Environment.GetEnvironmentVariable("PSMUX_CONPTY_LOG")
+            ?? Environment.GetEnvironmentVariable("TEMP") + "\\conpty_host.log";
         var log = new System.Text.StringBuilder();
 
         IntPtr inRead, inWrite, outRead, outWrite;
@@ -81,7 +84,9 @@ class ConPtyHostE {
         log.Append("CreateProcess ok=" + ok + " e=" + Marshal.GetLastWin32Error() + " childPid=" + pi.pid + "\r\n");
         System.IO.File.WriteAllText(logFile, log.ToString());
         if (!ok) return;
-        System.IO.File.WriteAllText(Environment.GetEnvironmentVariable("TEMP") + "\\conpty_childpid.txt", pi.pid.ToString());
+        string pidFile = Environment.GetEnvironmentVariable("PSMUX_CONPTY_PID")
+            ?? Environment.GetEnvironmentVariable("TEMP") + "\\conpty_childpid.txt";
+        System.IO.File.WriteAllText(pidFile, pi.pid.ToString());
 
         // Reader thread: drain child output so the pipe never blocks.
         var outFs = new System.IO.FileStream(outFile, System.IO.FileMode.Create, System.IO.FileAccess.Write);

@@ -24,6 +24,8 @@ fn render_with_styles(
     cw: u16,
     ch: u16,
     styles: WindowContentStyles,
+    border_style: ratatui::style::Style,
+    active_border_style: ratatui::style::Style,
 ) -> ratatui::buffer::Buffer {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -36,13 +38,22 @@ fn render_with_styles(
             Rect::new(0, 0, cw, ch),
             std::slice::from_ref(fl),
             styles,
+            border_style,
+            active_border_style,
         );
     }).unwrap();
     term.backend().buffer().clone()
 }
 
 fn render(fl: &FloatJson, cw: u16, ch: u16) -> ratatui::buffer::Buffer {
-    render_with_styles(fl, cw, ch, WindowContentStyles::default())
+    render_with_styles(
+        fl,
+        cw,
+        ch,
+        WindowContentStyles::default(),
+        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+        ratatui::style::Style::default().fg(ratatui::style::Color::Green),
+    )
 }
 
 fn cell_char(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> char {
@@ -118,7 +129,14 @@ fn floating_panes_apply_active_and_inactive_window_colors() {
         ..Default::default()
     };
     let active = make_float(1, 1, 8, 5, "single");
-    let active_buffer = render_with_styles(&active, 20, 10, window_styles);
+    let active_buffer = render_with_styles(
+        &active,
+        20,
+        10,
+        window_styles,
+        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::Green),
+    );
     assert_eq!(
         active_buffer[(2, 2)].style().fg,
         Some(Color::Yellow),
@@ -131,7 +149,14 @@ fn floating_panes_apply_active_and_inactive_window_colors() {
     let mut inactive = active;
     inactive.focused = false;
     inactive.rows[0].runs[0].bg = "magenta".to_string();
-    let inactive_buffer = render_with_styles(&inactive, 20, 10, window_styles);
+    let inactive_buffer = render_with_styles(
+        &inactive,
+        20,
+        10,
+        window_styles,
+        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::Green),
+    );
     assert_eq!(
         inactive_buffer[(2, 2)].style().bg,
         Some(Color::Magenta),
@@ -198,8 +223,8 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
                 &layout,
                 area,
                 false,
-                Color::DarkGray,
-                Color::Green,
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Green),
                 false,
                 Color::Reset,
                 compute_active_rect_json(&layout, area),
@@ -217,6 +242,8 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
                 area,
                 std::slice::from_ref(&floating),
                 window_styles,
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Green),
             );
         })
         .unwrap();
@@ -224,4 +251,34 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(0, 0)].style().bg, Some(Color::DarkGray));
     assert_eq!(buffer[(3, 2)].style().bg, Some(Color::Blue));
+}
+
+#[test]
+fn floating_panes_preserve_active_and_inactive_border_backgrounds() {
+    use ratatui::style::{Color, Style};
+
+    let inactive_style = Style::default().fg(Color::DarkGray).bg(Color::Blue);
+    let active_style = Style::default().fg(Color::Green).bg(Color::Red);
+    let active = make_float(1, 1, 8, 5, "single");
+    let active_buffer = render_with_styles(
+        &active,
+        20,
+        10,
+        WindowContentStyles::default(),
+        inactive_style,
+        active_style,
+    );
+    assert_eq!(active_buffer[(1, 1)].style().bg, Some(Color::Red));
+
+    let mut inactive = active;
+    inactive.focused = false;
+    let inactive_buffer = render_with_styles(
+        &inactive,
+        20,
+        10,
+        WindowContentStyles::default(),
+        inactive_style,
+        active_style,
+    );
+    assert_eq!(inactive_buffer[(1, 1)].style().bg, Some(Color::Blue));
 }

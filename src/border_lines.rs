@@ -39,9 +39,8 @@ pub struct BorderChars {
     pub top_tee: char,
     /// Tee opening upward (left+right+up), e.g. `┴`.
     pub bottom_tee: char,
-    /// Whether junctions differ from the straight lines. `false` for `spaces`,
-    /// where every glyph is a space, so intersection-fixing is a no-op.
-    pub has_junctions: bool,
+    /// Whether junction glyphs differ from straight-line glyphs.
+    pub has_distinct_junction_glyphs: bool,
 }
 
 /// The default `pane-border-lines` value (tmux `PANE_LINES_SINGLE`).
@@ -53,7 +52,7 @@ pub const CHOICES: &[&str] = &["single", "double", "heavy", "simple", "number", 
 const SINGLE: BorderChars = BorderChars {
     vertical: '│', horizontal: '─', cross: '┼',
     left_tee: '├', right_tee: '┤', top_tee: '┬', bottom_tee: '┴',
-    has_junctions: true,
+    has_distinct_junction_glyphs: true,
 };
 
 /// Resolve a `pane-border-lines` value to its glyph set.
@@ -66,22 +65,22 @@ pub fn border_chars(name: &str) -> Option<BorderChars> {
         "double" => Some(BorderChars {
             vertical: '║', horizontal: '═', cross: '╬',
             left_tee: '╠', right_tee: '╣', top_tee: '╦', bottom_tee: '╩',
-            has_junctions: true,
+            has_distinct_junction_glyphs: true,
         }),
         "heavy" => Some(BorderChars {
             vertical: '┃', horizontal: '━', cross: '╋',
             left_tee: '┣', right_tee: '┫', top_tee: '┳', bottom_tee: '┻',
-            has_junctions: true,
+            has_distinct_junction_glyphs: true,
         }),
         "simple" => Some(BorderChars {
             vertical: '|', horizontal: '-', cross: '+',
             left_tee: '+', right_tee: '+', top_tee: '+', bottom_tee: '+',
-            has_junctions: true,
+            has_distinct_junction_glyphs: true,
         }),
         "spaces" => Some(BorderChars {
             vertical: ' ', horizontal: ' ', cross: ' ',
             left_tee: ' ', right_tee: ' ', top_tee: ' ', bottom_tee: ' ',
-            has_junctions: false,
+            has_distinct_junction_glyphs: false,
         }),
         // "single", "default", "number", and any unknown value.
         _ => Some(SINGLE),
@@ -107,7 +106,7 @@ mod tests {
         let bc = border_chars("single").unwrap();
         assert_eq!((bc.vertical, bc.horizontal, bc.cross), ('│', '─', '┼'));
         assert_eq!((bc.left_tee, bc.right_tee, bc.top_tee, bc.bottom_tee), ('├', '┤', '┬', '┴'));
-        assert!(bc.has_junctions);
+        assert!(bc.has_distinct_junction_glyphs);
         // The catalog default resolves to the single glyph set.
         assert_eq!(border_chars(DEFAULT), Some(bc));
     }
@@ -135,11 +134,11 @@ mod tests {
     }
 
     #[test]
-    fn spaces_has_no_junctions() {
+    fn spaces_use_the_same_glyph_for_lines_and_junctions() {
         let bc = border_chars("spaces").unwrap();
         assert_eq!(bc.vertical, ' ');
         assert_eq!(bc.horizontal, ' ');
-        assert!(!bc.has_junctions, "spaces must skip intersection fixing");
+        assert!(!bc.has_distinct_junction_glyphs);
     }
 
     #[test]

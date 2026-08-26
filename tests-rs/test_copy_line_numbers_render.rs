@@ -49,7 +49,9 @@ fn render_gutters(leaf: &LayoutJson, mode: CopyLnMode, hsize: usize, w: u16, h: 
         let area = Rect::new(0, 0, w, h);
         let active_rect = crate::client::compute_active_rect_json(leaf, area);
         crate::client::render_layout_json(
-            f, leaf, area, false, Color::DarkGray, Color::Green,
+            f, leaf, area, false,
+            ratatui::style::Style::default().fg(Color::DarkGray),
+            ratatui::style::Style::default().fg(Color::Green),
             false, Color::Reset, active_rect, "", false, "off", "", 1,
             crate::border_lines::border_chars("single"), copy_ln,
             crate::client::WindowContentStyles::default(),
@@ -116,7 +118,9 @@ fn off_draws_no_gutter_and_keeps_content() {
         let area = Rect::new(0, 0, 40, h);
         let active_rect = crate::client::compute_active_rect_json(&leaf, area);
         crate::client::render_layout_json(
-            f, &leaf, area, false, Color::DarkGray, Color::Green,
+            f, &leaf, area, false,
+            ratatui::style::Style::default().fg(Color::DarkGray),
+            ratatui::style::Style::default().fg(Color::Green),
             false, Color::Reset, active_rect, "", false, "off", "", 1,
             crate::border_lines::border_chars("single"), None,
             crate::client::WindowContentStyles::default(),
@@ -150,7 +154,9 @@ fn gutter_shifts_content_right() {
             let area = Rect::new(0, 0, 40, h);
             let active_rect = crate::client::compute_active_rect_json(&leaf, area);
             crate::client::render_layout_json(
-                f, &leaf, area, false, Color::DarkGray, Color::Green,
+                f, &leaf, area, false,
+                ratatui::style::Style::default().fg(Color::DarkGray),
+                ratatui::style::Style::default().fg(Color::Green),
                 false, Color::Reset, active_rect, "", false, "off", "", 1,
                 crate::border_lines::border_chars("single"), copy_ln,
                 crate::client::WindowContentStyles::default(),

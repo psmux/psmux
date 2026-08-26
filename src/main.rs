@@ -886,20 +886,40 @@ fn run_main() -> io::Result<()> {
                 let area = Rect::new(0, 0, w, h);
                 let active_rect = crate::client::compute_active_rect_json(&layout, area);
                 let total_panes = layout.count_leaves();
+                let border_style = ratatui::style::Style::default().fg(Color::DarkGray);
+                let active_border_style = ratatui::style::Style::default().fg(Color::Green);
+                let border_chars = crate::border_lines::border_chars(crate::border_lines::DEFAULT);
                 crate::client::render_layout_json(
                     f, &layout, area,
                     false,
-                    Color::DarkGray, Color::Green,
+                    border_style,
+                    active_border_style,
                     false, Color::Reset,
                     active_rect,
                     "", false, "off", "",
                     total_panes,
-                    crate::border_lines::border_chars(crate::border_lines::DEFAULT),
+                    border_chars,
                     None,
                     crate::client::WindowContentStyles::default(),
                 );
-                let border_mask = crate::client::border_mask_from_layout(&layout, area, f.buffer_mut().area, false);
-                crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT), &border_mask);
+                let borders = crate::client::border_geometry_from_layout(
+                    &layout,
+                    area,
+                    f.buffer_mut().area,
+                    false,
+                );
+                let junctions = crate::rendering::fix_border_intersections(
+                    f.buffer_mut(),
+                    border_chars,
+                    &borders,
+                );
+                crate::client::recolor_border_junctions(
+                    f.buffer_mut(),
+                    &junctions,
+                    active_rect,
+                    border_style,
+                    active_border_style,
+                );
             }).unwrap();
             // Dump the buffer as ANSI escape sequences so colors are visible.
             let buf = term.backend().buffer().clone();

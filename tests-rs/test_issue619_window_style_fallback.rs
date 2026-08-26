@@ -240,7 +240,10 @@ fn dim_reaches_the_rendered_pane_background() {
         let area = ratatui::layout::Rect::new(0, 0, 2, 1);
         let active_rect = crate::client::compute_active_rect_json(&layout, area);
         crate::client::render_layout_json(
-            frame, &layout, area, false, Color::DarkGray, Color::Green, false,
+            frame, &layout, area, false,
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Green),
+            false,
             Color::Reset, active_rect, "", false, "off", "", 1,
             crate::border_lines::border_chars("single"), None, styles,
         );

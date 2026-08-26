@@ -689,8 +689,8 @@ pub fn render_dump_tree(
     f: &mut ratatui::Frame,
     layout: &crate::layout::LayoutJson,
     area: ratatui::layout::Rect,
-    border_fg: Color,
-    active_border_fg: Color,
+    border_style: ratatui::style::Style,
+    active_border_style: ratatui::style::Style,
     _highlight_pid: Option<usize>,
 ) {
     if area.width == 0 || area.height == 0 { return; }
@@ -699,7 +699,7 @@ pub fn render_dump_tree(
     crate::client::render_layout_json(
         f, layout, area,
         false,            // dim_preds: never dim predictions in preview
-        border_fg, active_border_fg,
+        border_style, active_border_style,
         false,            // clock_mode off in preview
         Color::Reset,     // clock_colour irrelevant
         active_rect,
@@ -712,8 +712,24 @@ pub fn render_dump_tree(
         None,
         crate::client::WindowContentStyles::default(),
     );
-    let border_mask = crate::client::border_mask_from_layout(layout, area, f.buffer_mut().area, false);
-    crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT), &border_mask);
+    let borders = crate::client::border_geometry_from_layout(
+        layout,
+        area,
+        f.buffer_mut().area,
+        false,
+    );
+    let junctions = crate::rendering::fix_border_intersections(
+        f.buffer_mut(),
+        crate::border_lines::border_chars(crate::border_lines::DEFAULT),
+        &borders,
+    );
+    crate::client::recolor_border_junctions(
+        f.buffer_mut(),
+        &junctions,
+        active_rect,
+        border_style,
+        active_border_style,
+    );
 }
 
 #[cfg(test)]

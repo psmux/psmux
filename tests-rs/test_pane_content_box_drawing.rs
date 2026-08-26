@@ -1,17 +1,5 @@
-// Regression test for #452: a Markdown table (box-drawing │ ─ ┼) printed by a
-// program *inside* pane content must never be mistaken for a psmux-drawn pane
-// border. Before the geometry-mask fix, the whole-buffer recolor pass in
-// `run_remote` restyled every junction glyph ('┼', '├', '┤', '┬', '┴') with
-// the pane-border color, dimming a table's joints while its '│'/'─' lines
-// kept the content's own colors — mismatched joints. `fix_border_intersections`
-// had the same character-sniffing problem and could also rewrite content
-// '│'/'─' adjacent to a perpendicular '─'/'│' into junction glyphs.
-//
-// This test builds a real split layout (so a genuine separator exists
-// elsewhere in the buffer), injects a small box-drawing table into one pane's
-// content region, builds the geometry mask via `border_mask_from_layout`, and
-// asserts `fix_border_intersections` leaves every content cell's glyph AND
-// style untouched.
+// Geometry-scoped border passes preserve box-drawing glyphs and styles emitted
+// by applications inside pane content.
 
 use crate::layout::LayoutJson;
 
@@ -88,7 +76,7 @@ fn fix_border_intersections_leaves_pane_content_table_untouched() {
         crate::client::render_layout_json(
             f, &layout, area,
             false,
-            border_fg, active_border_fg,
+            Style::default().fg(border_fg), Style::default().fg(active_border_fg),
             false, Color::Reset,
             active_rect,
             "", false, "off", "",
@@ -127,15 +115,16 @@ fn fix_border_intersections_leaves_pane_content_table_untouched() {
             }
         }
 
-        let border_mask = crate::client::border_mask_from_layout(&layout, area, buf.area, false);
+        let borders =
+            crate::client::border_geometry_from_layout(&layout, area, buf.area, false);
 
-        // Sanity: the mask must be false for every injected content cell,
+        // Sanity: geometry must exclude every injected content cell,
         // otherwise this test isn't exercising the guard.
         for &(idx, _, _) in &snapshot {
-            assert!(border_mask.binary_search(&idx).is_err(), "content cell idx {} unexpectedly marked as a separator", idx);
+            assert!(!borders.contains(&idx), "content cell idx {} unexpectedly marked as a separator", idx);
         }
 
-        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
+        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &borders);
     }).unwrap();
 
     let buf = term.backend().buffer().clone();
@@ -149,11 +138,12 @@ fn fix_border_intersections_leaves_pane_content_table_untouched() {
     }
 }
 
-// Regression test for the zoom-unaware follow-up bug: `border_mask_from_layout`
+// Regression test for the zoom-unaware follow-up bug:
+// `border_geometry_from_layout`
 // must mirror `render_layout_json`'s zoom early-return exactly. When zoomed,
 // `window_ops::toggle_zoom` encodes the layout with sizes like `[100, 0]`.
 // `split_with_gaps`'s min-1-cell-stealing turns `[100, 0]` into e.g. `[78, 1]`
-// for width 80, which (if the mask were computed as though unzoomed) would
+// for width 80, which (if geometry were computed as though unzoomed) would
 // mark a phantom separator column at `area.x + 78` — squarely inside content
 // that `render_layout_json` actually rendered edge-to-edge across the full
 // area for the zoomed pane. A junction char sitting on that column must never
@@ -201,7 +191,7 @@ fn fix_border_intersections_leaves_zoomed_pane_content_untouched() {
         crate::client::render_layout_json(
             f, &layout, area,
             false,
-            border_fg, active_border_fg,
+            Style::default().fg(border_fg), Style::default().fg(active_border_fg),
             false, Color::Reset,
             active_rect,
             "", true, "off", "",
@@ -239,20 +229,21 @@ fn fix_border_intersections_leaves_zoomed_pane_content_untouched() {
             }
         }
 
-        let border_mask = crate::client::border_mask_from_layout(&layout, area, buf.area, true);
+        let borders =
+            crate::client::border_geometry_from_layout(&layout, area, buf.area, true);
 
         // The phantom-separator column (78) for the equivalent unzoomed
         // [78, 1] split geometry must NOT be marked as a separator when zoomed.
         assert!(
-            border_mask.binary_search(&phantom_col_idx).is_err(),
-            "zoomed mask incorrectly marked phantom separator column 78 (idx {}) as a real border",
+            !borders.contains(&phantom_col_idx),
+            "zoomed geometry marked phantom separator column 78 (idx {}) as a real border",
             phantom_col_idx
         );
         for &(idx, _, _) in &snapshot {
-            assert!(border_mask.binary_search(&idx).is_err(), "content cell idx {} unexpectedly marked as a separator under zoom", idx);
+            assert!(!borders.contains(&idx), "content cell idx {} unexpectedly marked as a separator under zoom", idx);
         }
 
-        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
+        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &borders);
     }).unwrap();
 
     let buf = term.backend().buffer().clone();
