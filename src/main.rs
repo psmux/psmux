@@ -389,6 +389,31 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
 /// returns true — conservative on purpose, so a busy server is never wrongly
 /// declared dead (used by kill-session to decide when the kill has landed).
 fn probe_session_alive(session_name: &str) -> bool {
+    probe_session_alive_inner(session_name, true)
+}
+
+/// The same probe, but a connect failure of ANY kind counts as gone.
+///
+/// The lenient reading (`Err(_) => true`) is right for kill-session, which is
+/// waiting for a server it just asked to die. It is wrong for the attach gate.
+/// Windows does not reliably answer a connect to an unbound loopback port with
+/// a prompt `WSAECONNREFUSED`: the SYN is dropped and retransmitted, so the
+/// refusal can take about two seconds to surface and a 500ms probe sees a plain
+/// timeout instead. Reading that as "alive" let `attach` commit to a server
+/// that was not there, and the client's own connect then failed with whatever
+/// the OS happened to report, printed verbatim as
+/// `psmux: No connection could be made because the target machine actively
+/// refused it. (os error 10061)` (issue #605).
+///
+/// On loopback a live server always completes the handshake (the kernel accepts
+/// into the listen backlog before the app calls accept), which is the same
+/// reasoning `session::probe_session_liveness` already documents, so a strict
+/// reading cannot starve a healthy-but-busy server.
+fn probe_session_alive_strict(session_name: &str) -> bool {
+    probe_session_alive_inner(session_name, false)
+}
+
+fn probe_session_alive_inner(session_name: &str, connect_failure_means_alive: bool) -> bool {
     let path = crate::paths::port_file(session_name);
     let port = match std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()) {
         Some(p) => p,
@@ -408,11 +433,14 @@ fn probe_session_alive(session_name: &str) -> bool {
             let mut buf = [0u8; 256];
             match std::io::Read::read(&mut s, &mut buf) {
                 Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).contains("OK"),
-                _ => true, // connected but silent → assume alive
+                // Connected but silent. Something IS listening, so the attach
+                // will at worst report an auth/read failure rather than a
+                // connect error; treat it as alive in both modes.
+                _ => true,
             }
         }
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => false, // gone
-        Err(_) => true, // timeout/other → can't confirm dead, assume alive
+        Err(_) => connect_failure_means_alive,
     }
 }
 
@@ -1157,18 +1185,27 @@ fn run_main() -> io::Result<()> {
                 // a scripted `attach -t missing` reported OK for a session that
                 // never existed (#29). Probe before committing to the attach.
                 //
-                // probe_session_alive is conservative in the right direction: a
-                // timeout counts as alive, so a busy server is never mistaken for
-                // a missing one and refused.
-                if !probe_session_alive(&name) {
-                    let shown = l_socket_name
-                        .as_deref()
-                        .and_then(|l| name.strip_prefix(&format!("{}__", l)))
-                        .unwrap_or(&name);
+                // The gate is STRICT here (issue #605): a connect that does not
+                // complete means no server, whatever error the OS chose to
+                // report. The lenient reading let a stale registry entry pass
+                // the gate and the raw winsock error surfaced from the client.
+                let shown = l_socket_name
+                    .as_deref()
+                    .and_then(|l| name.strip_prefix(&format!("{}__", l)))
+                    .unwrap_or(&name)
+                    .to_string();
+                if !probe_session_alive_strict(&name) {
+                    // Nothing is listening on the registered port. Reap the
+                    // entry so the next `ls`/`attach` does not re-litigate it,
+                    // unless the pid anchor still vouches for a live server.
+                    if crate::session::registry_pid_anchor_alive(&name) != Some(true) {
+                        crate::session::remove_session_registry(&name);
+                    }
                     eprintln!("psmux: can't find session: {}", shown);
                     std::process::exit(1);
                 }
                 env::set_var("PSMUX_SESSION_NAME", name);
+                env::set_var("PSMUX_SESSION_DISPLAY_NAME", shown);
                 env::set_var("PSMUX_REMOTE_ATTACH", "1");
             }
             "server" => {

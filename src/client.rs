@@ -1397,13 +1397,35 @@ struct ClientDragState {
 /// thread, and return a (writer, frame_rx) pair ready for the event loop.
 /// Sets a 5-second write timeout so blocked writes never freeze the client.
 fn establish_connection(addr: &str, key: &str) -> io::Result<Connection> {
+    establish_connection_with_timeout(addr, key, RECONNECT_CONNECT_TIMEOUT)
+}
+
+/// Connect budget for a RE-connect: generous, because the server is known to
+/// have existed a moment ago and may simply be busy.
+const RECONNECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Connect budget for the FIRST attach. A live server on loopback completes the
+/// handshake in about a millisecond (the kernel accepts into the listen backlog
+/// before the app ever calls accept), so a short budget cannot starve a healthy
+/// server. It does cap how long a DEAD port can stall the attach: Windows drops
+/// the SYN for an unbound loopback port and retransmits, so a refusal can take
+/// upwards of two seconds to surface (issue #605). Waiting that out only to
+/// print an OS error wastes the user's time; the liveness verdict is the same
+/// either way.
+const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
+
+fn establish_connection_with_timeout(
+    addr: &str,
+    key: &str,
+    connect_timeout: Duration,
+) -> io::Result<Connection> {
     // Bounded connect: a wedged/backlogged server otherwise makes `attach` hang
     // until the ~21s Windows SYN-retransmit and surface as `os error 10060`.
-    // A 2s timeout turns that into a fast, clear failure the caller can report
-    // (and lets try_reconnect back off promptly instead of stalling).
+    // A bounded timeout turns that into a fast, clear failure the caller can
+    // report (and lets try_reconnect back off promptly instead of stalling).
     let sockaddr: std::net::SocketAddr = addr.parse()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, format!("bad server address: {addr}")))?;
-    let stream = std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_secs(2))?;
+    let stream = std::net::TcpStream::connect_timeout(&sockaddr, connect_timeout)?;
     stream.set_nodelay(true)?;
     let mut writer = stream.try_clone()?;
     writer.set_nodelay(true)?;
@@ -1502,11 +1524,27 @@ fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
     None
 }
 
+/// tmux's wording for an attach that cannot reach its session, verbatim:
+/// `can't find session: NAME`, which `main` prints as `psmux: <msg>` and exits
+/// 1. `-L` namespaces are stored on disk as `<ns>__<session>`; the attach gate
+/// publishes the user-facing spelling in `PSMUX_SESSION_DISPLAY_NAME` so this
+/// message shows the name that was typed rather than the internal one.
+pub(crate) fn no_such_session(name: &str) -> io::Error {
+    let shown = std::env::var("PSMUX_SESSION_DISPLAY_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| name.to_string());
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("can't find session: {}", shown),
+    )
+}
+
 pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("can't find session '{}' (no server running)", name)))?;
+        .ok_or_else(|| no_such_session(&name))?;
     let addr = format!("127.0.0.1:{}", port);
     // The .port file can be visible a beat before the .key has readable
     // content (servers before the issue #496 fix wrote .port first, and a
@@ -1533,7 +1571,33 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     }
 
     // ── Open persistent TCP connection ───────────────────────────────────
-    let (mut writer, mut frame_rx) = establish_connection(&addr, &session_key)?;
+    // A failure here is NOT something to report in the operating system's own
+    // words. The registry named a server; if it cannot be reached the session
+    // is gone, and tmux says so in one line. Letting the raw io::Error escape
+    // printed `psmux: No connection could be made because the target machine
+    // actively refused it. (os error 10061)` (issue #605), which names neither
+    // psmux's own concept (a session) nor anything the user can act on.
+    let (mut writer, mut frame_rx) =
+        match establish_connection_with_timeout(&addr, &session_key, ATTACH_CONNECT_TIMEOUT) {
+            Ok(conn) => conn,
+            Err(e) => {
+                // Nothing answered on the registered port. Reap the entry so
+                // the next `ls`/`attach` is clean, but only once the pid anchor
+                // agrees the process is gone: a live server that was merely too
+                // slow must keep its registration (it rewrites these files on
+                // its own 5s tick anyway).
+                if crate::session::registry_pid_anchor_alive(&name) != Some(true) {
+                    crate::session::remove_session_registry(&name);
+                }
+                if std::env::var("PSMUX_AUTH_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                    eprintln!(
+                        "[auth-debug pid={}] attach connect to {} failed: {} (kind {:?})",
+                        std::process::id(), addr, e, e.kind()
+                    );
+                }
+                return Err(no_such_session(&name));
+            }
+        };
     // Pending background reconnect: Some(rx) while a reconnect thread is running.
     // Kept as None in normal operation. When the channel yields Some(result),
     // the result replaces writer/frame_rx; if it yields None all attempts failed.
@@ -7030,3 +7094,7 @@ mod test_pane_wants_mouse_selection;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue507_popup_cursor.rs"]
 mod test_issue507_popup_cursor;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue605_stale_port_attach.rs"]
+mod test_issue605_stale_port_attach;
