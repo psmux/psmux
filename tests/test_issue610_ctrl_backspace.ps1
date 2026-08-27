@@ -304,6 +304,84 @@ if (-not $node) {
     Drop-StaleClients $sess
 }
 
+# =============================================================================
+# TEST 6: the VT input path (SSH / WezTerm / JetBrains) must agree with the
+# console path. needs_vt_input() switches the client to the VT parser when
+# SSH_CONNECTION/SSH_CLIENT/SSH_TTY is set, TERM_PROGRAM=WezTerm, or
+# TERMINAL_EMULATOR contains JetBrains. That parser used to map the incoming
+# byte 0x08 to an unmodified Backspace, dropping the modifier exactly like the
+# console path did, and additionally corrupting Ctrl+H from 0x08 into 0x7f.
+# =============================================================================
+Write-Host "`n[Test 6] the VT input path decodes Ctrl+Backspace and Ctrl+H like the console path" -ForegroundColor Yellow
+
+function Probe-VtPath {
+    param([string]$Label, [string]$ExtraEnv)
+    $sess = "i610_vt"
+    $log  = "$env:TEMP\psmux_610_vt_$Label.txt"
+    $lc   = "$env:TEMP\psmux_610_vt_$Label.cmd"
+    Remove-Item -Force -EA SilentlyContinue $log
+    @"
+@echo off
+set PSMUX_SESSION_NAME=
+set PSMUX_SESSION=
+set PSMUX_PANE=
+set TMUX=
+set TMUX_PANE=
+set PSMUX=
+set NO_COLOR=
+$ExtraEnv
+"$PSMUX" -L $SOCK -f "$emptyConf" new-session -s %1 -x 120 -y 30 -- %2 %3 %4
+"@ | Set-Content -Path $lc -Encoding ASCII
+    Cleanup-Session $sess
+    Drop-StaleClients $sess
+    Start-Process -FilePath $lc -ArgumentList @($sess, "`"$reclog`"", 'vt', "`"$log`"") | Out-Null
+    Start-Sleep -Seconds 9
+    $cp = Get-ClientPid $sess
+    if (-not $cp -or -not (Test-Path $log)) {
+        Write-Skip "$Label : client or logging pane did not start"
+        Cleanup-Session $sess; Drop-StaleClients $sess
+        return
+    }
+    # Wake the client's input pump before the measured keys.
+    $ready = $false
+    for ($t = 0; $t -lt 10; $t++) {
+        & $inject $cp 'text:0' 'sleep:200' | Out-Null
+        Start-Sleep -Milliseconds 700
+        if ((Get-Content $log -EA SilentlyContinue) -match 'hex=') { $ready = $true; break }
+    }
+    if (-not $ready) {
+        Write-Skip "$Label : client never acknowledged a probe keystroke"
+        Cleanup-Session $sess; Drop-StaleClients $sess
+        return
+    }
+    & $inject $cp 'text:1' 'sleep:300' 'bs'    'sleep:400' `
+                  'text:2' 'sleep:300' 'cbs'   'sleep:400' `
+                  'text:3' 'sleep:300' 'ctrlh' 'sleep:400' `
+                  'text:4' 'sleep:300' 'ctrlw' 'sleep:600' | Out-Null
+    Start-Sleep -Seconds 2
+    $b = @()
+    foreach ($l in (Get-Content $log -EA SilentlyContinue)) {
+        if ($l -match 'hex=\[ ([0-9A-Fa-f ]+) \]') { $b += ($Matches[1].Trim() -split '\s+') }
+    }
+    $stream = ($b -join ' ').ToUpper()
+    foreach ($c in @(
+        @{ mk='31'; want='7F'; n='plain Backspace' },
+        @{ mk='32'; want='08'; n='Ctrl+Backspace' },
+        @{ mk='33'; want='08'; n='Ctrl+H' },
+        @{ mk='34'; want='17'; n='Ctrl+W' })) {
+        if ($stream -match ($c.mk + ' ' + $c.want)) {
+            Write-Pass "$Label : $($c.n) -> $($c.want)"
+        } else {
+            Write-Fail "$Label : $($c.n) did not yield $($c.want); stream was [$stream]"
+        }
+    }
+    Cleanup-Session $sess
+    Drop-StaleClients $sess
+}
+
+Probe-VtPath 'ssh'     'set SSH_CONNECTION=1.2.3.4 5 6.7.8.9 22'
+Probe-VtPath 'wezterm' 'set TERM_PROGRAM=WezTerm'
+
 & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null
 
 Write-Host "`n=== Issue #610 Results ===" -ForegroundColor Cyan

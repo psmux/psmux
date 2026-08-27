@@ -166,3 +166,82 @@ fn bound_ctrl_backspace_matches_a_real_ctrl_backspace_event() {
     let ctrl_h = normalize_key_for_binding((KeyCode::Char('h'), KeyModifiers::CONTROL));
     assert_ne!(bound, ctrl_h, "C-BSpace and C-h are different keys on Windows");
 }
+
+// ── The VT input path: SSH, WezTerm and JetBrains clients ────────────────────
+//
+// needs_vt_input() routes SSH sessions, WezTerm and JetBrains terminals through
+// the VT parser instead of the console reader, and that parser carried the SAME
+// modifier-blind bug: a special case mapped the incoming byte 0x08 to an
+// UNMODIFIED Backspace.  Measured on a real attached client with a byte logging
+// pane, injecting real keystrokes (a marker digit, then the key):
+//
+//   console path             1 7F  2 08  3 08  4 17  5 1B 7F   correct
+//   SSH_CONNECTION set       1 7F  2 7F  3 7F  4 17  5 1B 7F   broken
+//   TERM_PROGRAM=WezTerm     1 7F  2 7F  3 7F  4 17  5 1B 7F   broken
+//   markers: 1 Backspace, 2 Ctrl+Backspace, 3 Ctrl+H, 4 Ctrl+W, 5 Alt+Backspace
+//
+// So on those clients Ctrl+Backspace lost its word delete, and Ctrl+H was
+// additionally corrupted from 0x08 into 0x7f, which no interpretation allows.
+//
+// 0x08 must decode to C-h.  That is not a preference: writing a raw 0x08 into a
+// real tmux 3.4 client pty, with both candidates bound in the root table, fired
+// `bind-key -n C-h` and never `bind-key -n C-BSpace`.  Both candidate decodes
+// would put the same 0x08 byte on the pane, so PSReadLine kills a word either
+// way; tmux settles only which NAME a binding sees.
+
+use crate::ssh_input::test_support::decode_vt_byte;
+
+#[test]
+fn vt_input_decodes_0x08_as_ctrl_h_like_tmux() {
+    assert_eq!(
+        decode_vt_byte(0x08),
+        Some((KeyCode::Char('h'), KeyModifiers::CONTROL)),
+        "0x08 must decode to C-h, matching what a raw 0x08 fires in tmux 3.4"
+    );
+}
+
+#[test]
+fn vt_input_keeps_plain_backspace_on_0x7f() {
+    // Terminals send 0x7f for the Backspace key; that must not move.
+    assert_eq!(
+        decode_vt_byte(0x7f),
+        Some((KeyCode::Backspace, KeyModifiers::NONE)),
+        "0x7f is the plain Backspace key and must stay unmodified"
+    );
+}
+
+#[test]
+fn vt_input_0x08_no_longer_collapses_onto_bare_backspace() {
+    // The exact regression: 0x08 used to come out as an unmodified Backspace,
+    // indistinguishable from 0x7f, which is what erased the modifier.
+    assert_ne!(
+        decode_vt_byte(0x08),
+        decode_vt_byte(0x7f),
+        "0x08 and 0x7f are different keys and must not decode to the same event"
+    );
+}
+
+#[test]
+fn vt_input_other_control_bytes_are_unchanged() {
+    // Guard the neighbours of the arm that was removed.
+    assert_eq!(decode_vt_byte(0x17), Some((KeyCode::Char('w'), KeyModifiers::CONTROL)));
+    assert_eq!(decode_vt_byte(0x01), Some((KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    assert_eq!(decode_vt_byte(0x1a), Some((KeyCode::Char('z'), KeyModifiers::CONTROL)));
+    assert_eq!(decode_vt_byte(0x00), Some((KeyCode::Char(' '), KeyModifiers::CONTROL)));
+    assert_eq!(decode_vt_byte(0x09), Some((KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(decode_vt_byte(0x0d), Some((KeyCode::Enter, KeyModifiers::NONE)));
+}
+
+#[test]
+fn vt_input_ctrl_h_round_trips_back_to_0x08_on_the_pane() {
+    // End to end on this path: the decoded key must be one the pane writer
+    // encodes back into the byte the terminal sent, so 0x08 in means 0x08 out.
+    let (code, mods) = decode_vt_byte(0x08).expect("0x08 must decode to something");
+    assert_eq!(code, KeyCode::Char('h'));
+    assert!(mods.contains(KeyModifiers::CONTROL));
+    assert_eq!(
+        crate::input::ctrl_char_send_keys_byte('h'),
+        Some(0x08),
+        "C-h must be written to the pane as 0x08, closing the round trip"
+    );
+}

@@ -854,7 +854,18 @@ impl VtParser {
             '\r' | '\n' => emit(make_key(KeyCode::Enter, KeyModifiers::empty())),
             '\t' => emit(make_key(KeyCode::Tab, KeyModifiers::empty())),
             '\x7f' => emit(make_key(KeyCode::Backspace, KeyModifiers::empty())),
-            '\x08' => emit(make_key(KeyCode::Backspace, KeyModifiers::empty())),
+            // NOTE: 0x08 deliberately has NO arm here.  It falls through to the
+            // Ctrl+A..Ctrl+Z arm below, which turns it into C-h, matching tmux
+            // exactly: writing a raw 0x08 into a real tmux client pty fires
+            // `bind-key -n C-h` and not `bind-key -n C-BSpace` (measured against
+            // tmux 3.4).  A special case used to sit here mapping 0x08 to an
+            // UNMODIFIED Backspace, which dropped the modifier on this path the
+            // same way the console path did before #610: over SSH, WezTerm and
+            // JetBrains terminals (every client where needs_vt_input() is true)
+            // both Ctrl+Backspace and Ctrl+H reached the pane as 0x7f instead of
+            // 0x08, so PSReadLine deleted one character instead of killing a
+            // word and no `bind-key C-h` could ever match.  Plain Backspace is
+            // unaffected: terminals send 0x7f for it, handled by the arm above.
             '\0' => emit(make_key(KeyCode::Char(' '), KeyModifiers::CONTROL)),
             c if c as u32 >= 1 && (c as u32) <= 26 => {
                 // Ctrl+A … Ctrl+Z
@@ -1944,6 +1955,32 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
         })?;
 
     Ok(rx)
+}
+
+/// Test-only window onto the VT input parser.
+///
+/// `VtParser` and its `feed` are private, and the #610 regression tests live
+/// beside the rest of that issue's unit tests rather than in this module, so
+/// they need one narrow accessor to pin what a single input byte decodes to.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Feed one byte through a fresh parser and return the first key event it
+    /// produces, as a `(code, modifiers)` pair.
+    pub(crate) fn decode_vt_byte(b: u8) -> Option<(KeyCode, KeyModifiers)> {
+        let mut parser = VtParser::new();
+        let mut out: Option<(KeyCode, KeyModifiers)> = None;
+        let mut sink = |e: Event| {
+            if let Event::Key(k) = e {
+                if out.is_none() {
+                    out = Some((k.code, k.modifiers));
+                }
+            }
+        };
+        parser.feed(b as char, &mut sink);
+        out
+    }
 }
 
 #[cfg(test)]
