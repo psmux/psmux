@@ -246,35 +246,100 @@ pub(crate) fn default_shell_needs_fresh_eval(default_shell: &str) -> bool {
     default_shell.contains("#{")
 }
 
+/// Command syntax a pane's shell understands for the injected rehome line.
+///
+/// The rehome is typed into an *already running* shell, so the snippet has to
+/// parse in the language that shell speaks. Keying it on the host OS instead
+/// of the shell is what broke Git Bash panes on Windows (#600): the PowerShell
+/// form was typed into bash, which answered with
+/// `bash: syntax error near unexpected token '('` and never changed directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RehomeSyntax {
+    /// pwsh / powershell.
+    PowerShell,
+    /// bash, sh, zsh, fish, dash, ksh, csh and friends.
+    Posix,
+    /// cmd.exe.
+    Cmd,
+}
+
+/// Pick the rehome syntax from the shell that is actually running in the pane.
+///
+/// `shell` is the configured `default-shell` (possibly a whole command line
+/// with arguments, possibly empty). Empty means psmux spawned its own default
+/// shell, which is pwsh/powershell on Windows and a POSIX shell elsewhere.
+/// An unrecognised program keeps the platform default rather than guessing.
+pub(crate) fn rehome_syntax_for_shell(shell: &str) -> RehomeSyntax {
+    let platform_default = if cfg!(windows) { RehomeSyntax::PowerShell } else { RehomeSyntax::Posix };
+    let shell = shell.trim();
+    if shell.is_empty() {
+        return platform_default;
+    }
+    let (program, _) = resolve_shell_program(shell);
+    let program = remap_git_bash_launcher(program);
+    let stem = std::path::Path::new(&program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program.as_str())
+        .to_ascii_lowercase();
+    if POSIX_SHELL_STEMS.contains(&stem.as_str()) || stem == "ash" || stem == "busybox" {
+        RehomeSyntax::Posix
+    } else if stem == "cmd" {
+        RehomeSyntax::Cmd
+    } else if stem == "pwsh" || stem == "powershell" {
+        RehomeSyntax::PowerShell
+    } else {
+        platform_default
+    }
+}
+
 /// Build the command injected to silently re-home a pane's shell to `dir`.
 ///
-/// The trailing clear (`cls` on Windows, `clear` elsewhere) wipes the visible
-/// echo; single quotes in the path are doubled so the single-quoted string
-/// stays well-formed; the trailing `\r` submits it as one command line. The
-/// leading space asks shells that ignore space-prefixed commands to skip the
-/// history entry (best-effort — not every shell honours it).
+/// The trailing clear (`cls` for PowerShell and cmd, `clear` for POSIX shells)
+/// wipes the visible echo and its CSI 2J is what ends the render squelch; the
+/// trailing `\r` submits it as one command line. The leading space asks shells
+/// that ignore space-prefixed commands to skip the history entry (best-effort,
+/// not every shell honours it).
 ///
-/// Also explicitly syncs the OS-level current directory via
-/// `[System.IO.Directory]::SetCurrentDirectory` (PowerShell only). PowerShell's
-/// `cd`/`Set-Location` updates its own `$PWD` provider location but does NOT
-/// call Win32 `SetCurrentDirectory()`, so the process's PEB — which is what
-/// `#{pane_current_path}` reads via a PEB walk — keeps reporting the
+/// Quoting is per shell: PowerShell doubles an embedded single quote, POSIX
+/// shells use the `'\''` idiom (a single-quoted string cannot contain an
+/// escape), and cmd wraps in double quotes (a Windows path cannot contain one).
+///
+/// The PowerShell form also explicitly syncs the OS-level current directory via
+/// `[System.IO.Directory]::SetCurrentDirectory`. PowerShell's `cd`/`Set-Location`
+/// updates its own `$PWD` provider location but does NOT call Win32
+/// `SetCurrentDirectory()`, so the process's PEB (which is what
+/// `#{pane_current_path}` reads via a PEB walk) keeps reporting the
 /// directory the shell was originally spawned in. Normally psmux's own
 /// CWD_SYNC profile hook (`build_psrl_init`) papers over this by wrapping
 /// `Set-Location`, but that hook is skipped whenever `-NoProfile` is in
 /// effect (see `build_default_shell`). Embedding the sync directly in the
 /// injected command keeps the rehome correct regardless of whether that
-/// hook is installed.
-pub(crate) fn rehome_command(dir: &str) -> String {
-    let escaped = dir.replace('\'', "''");
-    let clear = if cfg!(windows) { "cls" } else { "clear" };
-    if cfg!(windows) {
-        format!(
-            " cd '{}'; try {{ [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) }} catch {{}}; {}\r",
-            escaped, clear
-        )
-    } else {
-        format!(" cd '{}'; {}\r", escaped, clear)
+/// hook is installed. `cd` in a POSIX shell and `cd /d` in cmd both move the
+/// process CWD themselves, so neither needs an equivalent.
+pub(crate) fn rehome_command(dir: &str, syntax: RehomeSyntax) -> String {
+    match syntax {
+        RehomeSyntax::PowerShell => {
+            let escaped = dir.replace('\'', "''");
+            format!(
+                " cd '{}'; try {{ [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) }} catch {{}}; cls\r",
+                escaped
+            )
+        }
+        RehomeSyntax::Posix => {
+            // A Windows path reaches a POSIX shell (Git Bash, MSYS2, Cygwin)
+            // with backslashes; forward slashes are accepted by the same
+            // shells and leave nothing for the reader to misparse. Off
+            // Windows a backslash is an ordinary filename character, so the
+            // path is passed through untouched.
+            let dir = if cfg!(windows) { dir.replace('\\', "/") } else { dir.to_string() };
+            let escaped = dir.replace('\'', r"'\''");
+            format!(" cd '{}'; clear\r", escaped)
+        }
+        RehomeSyntax::Cmd => {
+            let escaped = dir.replace('"', "");
+            format!(" cd /d \"{}\" & cls\r", escaped)
+        }
     }
 }
 
@@ -287,9 +352,14 @@ pub(crate) fn rehome_command(dir: &str) -> String {
 /// since a running process's CWD cannot be set externally, the shell moves
 /// itself with `cd`. The shell must be at a fresh prompt so the injected line
 /// runs immediately.
-pub(crate) fn silent_rehome(pane: &mut Pane, dir: &str) {
+///
+/// `syntax` must describe the shell actually running in `pane` (derive it with
+/// [`rehome_syntax_for_shell`] from the effective `default-shell`); typing the
+/// wrong dialect leaves stray text on screen and the pane in the wrong
+/// directory (#600).
+pub(crate) fn silent_rehome(pane: &mut Pane, dir: &str, syntax: RehomeSyntax) {
     use std::io::Write as _;
-    let cd_cmd = rehome_command(dir);
+    let cd_cmd = rehome_command(dir, syntax);
     // Tell the vt100 parser to watch for the next screen-clear (CSI 2J/3J);
     // its arrival tells the layout serialiser the clear finished (event-driven).
     if let Ok(mut parser) = pane.term.lock() {
@@ -382,8 +452,12 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
             let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell.
+            // The snippet has to be written in the dialect of the shell the
+            // warm pane is actually running, which is whatever `default-shell`
+            // was when the pool spawned it (#600).
             if let Some(dir) = start_dir {
-                silent_rehome(&mut pane, dir);
+                let syntax = rehome_syntax_for_shell(configured_shell.unwrap_or(""));
+                silent_rehome(&mut pane, dir, syntax);
             }
             let win_name = default_shell_name(None, configured_shell);
             let initial_pane_id = wp.pane_id;
@@ -726,9 +800,11 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let new_pane_id = wp.pane_id;
             let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
-            // Honour `-c <dir>`: silently re-home the transplanted warm shell.
+            // Honour `-c <dir>`: silently re-home the transplanted warm shell,
+            // in the dialect that shell speaks (#600).
             if let Some(dir) = start_dir {
-                silent_rehome(&mut new_pane, dir);
+                let syntax = rehome_syntax_for_shell(&app.default_shell);
+                silent_rehome(&mut new_pane, dir, syntax);
             }
             let new_leaf = Node::Leaf(new_pane);
             let win = &mut app.windows[app.active_idx];
@@ -2661,3 +2737,7 @@ mod tests_pane_writer_transient_error;
 #[cfg(test)]
 #[path = "../tests-rs/test_dashdash_window_name.rs"]
 mod tests_dashdash_window_name;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue600_bash_rehome.rs"]
+mod tests_issue600_bash_rehome;
