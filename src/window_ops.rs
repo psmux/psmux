@@ -441,6 +441,27 @@ fn write_mouse_to_pty(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press:
     let _ = pane.writer.flush();
 }
 
+/// Does this native ConPTY mouse event get the Win32 `MOUSE_EVENT` record in
+/// addition to the SGR write into the pane's ConPTY input pipe?
+///
+/// Split out from `inject_mouse_combined` so the whole routing table can be
+/// asserted without building a live pane (#597).  Two rules, and only two:
+///
+///   * the wheel always gets the record, on every build.  That is #277, and it
+///     is what makes the wheel work for Bubble Tea style apps whose VTI
+///     console turns the pipe's SGR into KEY_EVENT text.
+///   * every other event gets it only on a build whose conhost cannot deliver
+///     the pipe write at all (`conpty_needs_mouse_record_bypass`), where the
+///     record is the only channel that reaches the child.
+///
+/// The caller gates (`pane_wants_click`, `pane_wants_bare_motion`, the #598
+/// wheel gate) run BEFORE this and are untouched: this decides how a report
+/// travels, never whether one is owed.
+pub(crate) fn record_bypass_applies(event_flags: u32) -> bool {
+    event_flags & mouse_inject::MOUSE_WHEELED != 0
+        || crate::ssh_input::conpty_needs_mouse_record_bypass()
+}
+
 /// Inject a mouse event into a pane using the best available method.
 ///
 /// Architecture (mirrors Windows Terminal):
@@ -569,7 +590,7 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         ensure_vti(pane);
         write_mouse_to_pty(pane, col, row, vt_button, press);
 
-        // For wheel events, also inject a Win32 MOUSE_EVENT record.
+        // Also inject a Win32 MOUSE_EVENT record.
         //
         // Some TUI frameworks (Bubble Tea / Go apps like opencode) enable
         // VT input mode (ENABLE_VIRTUAL_TERMINAL_INPUT) for keyboard but
@@ -581,12 +602,35 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // The Win32 MOUSE_EVENT injection bypasses ConPTY entirely and
         // delivers the event directly to the child's console input buffer.
         //
-        // This is done only for wheel events (not click/drag/hover) to
-        // minimize risk of duplicate events for apps where ConPTY already
-        // converts SGR to MOUSE_EVENT (e.g. crossterm with VTI off).
-        // (fixes #277)
-        if _event_flags & mouse_inject::MOUSE_WHEELED != 0 {
-            mouse_log(&format!("  -> also injecting Win32 MOUSE_EVENT (wheel, fixes #277)"));
+        // On 22523 and above this stays wheel only, exactly as #277 shipped
+        // it: the pipe write above already reaches the child there, and
+        // widening the record channel would risk a second copy of every
+        // click for apps where conhost does convert SGR to MOUSE_EVENT.
+        //
+        // Below 22523 the record channel is the ONLY one that works, so it
+        // covers clicks, releases, drags and motion as well (#597).  Those
+        // builds are the ones CONPTY_MOUSE_MIN_BUILD already documents as
+        // unable to hand an inbound SGR mouse report to the child, so the
+        // pipe write cannot be the duplicate: the reporter measured a
+        // crossterm app receiving every wheel notch through this record
+        // channel on real 19045 while a node child reading VT bytes received
+        // nothing at all.  There is no double delivery to create, only the
+        // clicks that were missing.  Every event that gets here has already
+        // passed its own caller gate (pane_wants_click, or
+        // pane_wants_bare_motion for DECSET 1003, or the wheel gate above),
+        // so this widens the CHANNEL, never the audience: an application
+        // that never asked for the mouse still receives nothing (#598).
+        //
+        // tmux parity: tmux writes SGR bytes and has no record channel at
+        // all.  The MOUSE_EVENT bypass is a Windows only extension that
+        // exists because conhost sits between psmux and the pane child.
+        if record_bypass_applies(_event_flags) {
+            let reason = if _event_flags & mouse_inject::MOUSE_WHEELED != 0 {
+                "wheel, fixes #277"
+            } else {
+                "build below CONPTY_MOUSE_MIN_BUILD, #597"
+            };
+            mouse_log(&format!("  -> also injecting Win32 MOUSE_EVENT ({})", reason));
             inject_mouse(pane, col, row, _button_state, _event_flags);
         }
     }
@@ -2453,3 +2497,7 @@ mod test_discussion349_podman_motion_leak;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue604_wsl_nvim_mouse.rs"]
 mod test_issue604_wsl_nvim_mouse;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue597_legacy_mouse_bypass.rs"]
+mod test_issue597_legacy_mouse_bypass;

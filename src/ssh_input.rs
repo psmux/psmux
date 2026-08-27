@@ -425,6 +425,37 @@ pub fn conpty_mouse_supported() -> bool {
     windows_build_number().map_or(false, |b| b >= CONPTY_MOUSE_MIN_BUILD)
 }
 
+/// Does this host need the Win32 `MOUSE_EVENT` record bypass for mouse events
+/// other than the wheel (issue #597 follow up)?
+///
+/// [`CONPTY_MOUSE_MIN_BUILD`] documents an INPUT direction defect: below that
+/// build conhost's inbound VT parser does not hand an SGR mouse report
+/// (`\x1b[<…M`) written into a ConPTY input pipe to the child.  psmux writes
+/// exactly such a report into every pane (`write_mouse_to_pty`), so on those
+/// builds the pipe channel is dead and the only thing that reaches the child is
+/// the Win32 record psmux injects with `WriteConsoleInputW`.  That record
+/// channel was wheel only ("fixes #277"), so an application that reads records
+/// (crossterm, Bubble Tea, PSReadLine, a native Win32 TUI) got the wheel on
+/// Windows 10 and nothing else: no clicks, no releases, no drags.
+///
+/// The reporter measured both halves on real 19045 (#597): a crossterm app
+/// received every wheel notch through the record bypass, while a node child
+/// waiting on VT bytes received nothing at all.  Widening the record channel on
+/// these builds cannot deliver twice, because the pipe write that would be the
+/// other copy is precisely what conhost drops there.
+///
+/// Deliberately NOT routed through [`forced_mouse_setting`].
+/// `PSMUX_FORCE_MOUSE` is about the CLIENT to terminal direction (whether psmux
+/// may write mouse DECSET out over SSH); this is a property of the pane's
+/// conhost in the opposite direction, and the two are independent.  An unknown
+/// build answers `false`, keeping today's behaviour rather than guessing.
+///
+/// `PSMUX_FAKE_WIN_BUILD` moves the answer for diagnostics and tests, since the
+/// branch is otherwise unreachable on a modern host.
+pub fn conpty_needs_mouse_record_bypass() -> bool {
+    windows_build_number().map_or(false, |b| b < CONPTY_MOUSE_MIN_BUILD)
+}
+
 /// Whether the local-console keep-alive may re-assert `ENABLE_MOUSE_INPUT`
 /// on this host (issue #597).
 ///
