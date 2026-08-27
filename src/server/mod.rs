@@ -2463,10 +2463,25 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::MouseUp(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::MouseUpRight(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 2, false); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::MouseUpMiddle(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 1, false); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
-                CtrlReq::MouseMove(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_motion(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // #604: a bare pointer move only earns a redraw if it actually
+                // reached a pane.  Nothing the server renders depends on the
+                // pointer position (border hover highlighting is drawn by the
+                // client from its own pointer state), so marking the whole
+                // state dirty here pushed a full frame and repainted the entire
+                // screen for every pointer sample.  This is the same rule as
+                // the PaneMouse arm below, for pointer samples that land
+                // outside every pane.
+                CtrlReq::MouseMove(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); if remote_mouse_motion(&mut app, x, y) { state_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 CtrlReq::ScrollUp(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::ScrollDown(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_down(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
-                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_pane_mouse(&mut app, pane_id, button, col, row, press); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // #604: `pane-mouse <id> 35 ...` is a bare pointer move.  When
+                // the pane never asked for any-event tracking it changes
+                // nothing, so it must not push a frame and repaint the client.
+                // Measured on this tree with PSMUX_CLIENT_DEBUG=1: sweeping the
+                // pointer 60 times across a pane running nvim drove 24 full
+                // client redraws, against 0 while idle.  With this gate and the
+                // client-side one in client.rs it is 1, the same as idle.
+                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); handle_pane_mouse(&mut app, pane_id, button, col, row, press); if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 CtrlReq::CopyDragBegin(cid, pane_id, a_col, a_row, c_col, c_row, rect_sel) => { if app.mouse_enabled { app.latest_client_id = Some(cid); copy_drag_begin(&mut app, pane_id, a_col, a_row, c_col, c_row, rect_sel); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::PaneScroll(cid, pane_id, up, at) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_pane_scroll(&mut app, pane_id, up, at); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::SplitSetSizes(cid, path, sizes) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_set_sizes(&mut app, &path, &sizes); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }

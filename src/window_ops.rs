@@ -192,23 +192,84 @@ pub(crate) fn pane_wants_click(pane: &Pane) -> bool {
     false
 }
 
-/// Strict check for hover/motion events.  Returns true only when the child
-/// has EXPLICITLY enabled mouse motion tracking (DECSET 1002 ButtonMotion or
-/// DECSET 1003 AnyMotion).
+/// Strict check for BARE motion events: the pointer moved with no button held
+/// (SGR button 35).  Returns true only when the child asked for any-event
+/// tracking, DECSET 1003.
 ///
 /// This does not use alt-screen or screen-content heuristics. Sending
 /// unsolicited SGR motion sequences to apps that haven't
 /// enabled mouse tracking (e.g. nvim without `set mouse=a`, or any TUI app
 /// that only uses alt-screen for rendering) corrupts their input and makes
 /// them appear hung.  (fixes #296)
-pub(crate) fn pane_wants_hover(pane: &Pane) -> bool {
+///
+/// DECSET 1002 is NOT enough (#604).  1002 is button-event tracking: report
+/// motion only WHILE A BUTTON IS HELD.  Only 1003 asks for motion with no
+/// button.  tmux draws the line in exactly the same place: a bare motion
+/// report reaches a pane only under `MODE_MOUSE_ALL` (input-keys.c:737):
+///
+///     if (MOUSE_DRAG(m->sgr_b) &&
+///         MOUSE_RELEASE(m->sgr_b) &&
+///         (~s->mode & MODE_MOUSE_ALL))
+///             return (0);
+///
+/// (SGR button 35 is the motion bit 32 plus the "no button" low bits 3, so it
+/// is both MOUSE_DRAG and MOUSE_RELEASE.)  tmux does not even ask the OUTER
+/// terminal for bare motion unless a pane wants 1003 (tty.c:897):
+///
+///     if (mode & MODE_MOUSE_ALL)
+///             tty_puts(tty, "\033[?1000h\033[?1002h\033[?1003h");
+///     else if (mode & MODE_MOUSE_BUTTON)
+///             tty_puts(tty, "\033[?1000h\033[?1002h");
+///
+/// psmux accepted 1002 here, so merely moving the pointer over a pane running
+/// `nvim -u NONE` (mouse=nvi, which enables 1002+1006 and never 1003) sprayed
+/// an `ESC[<35;col;rowM` report at nvim for every pointer sample (#604).
+pub(crate) fn pane_wants_bare_motion(pane: &Pane) -> bool {
     if let Ok(parser) = pane.term.lock() {
-        let screen = parser.screen();
-        matches!(screen.mouse_protocol_mode(),
-            vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion)
+        mode_reports_bare_motion(parser.screen().mouse_protocol_mode())
     } else {
         false
     }
+}
+
+/// The mouse-mode half of `pane_wants_bare_motion`, split out so the tmux rule
+/// itself can be asserted without building a live pane (#604).
+pub(crate) fn mode_reports_bare_motion(mode: vt100::MouseProtocolMode) -> bool {
+    mode == vt100::MouseProtocolMode::AnyMotion
+}
+
+/// Is this client mouse event a bare pointer move that nothing will act on?
+///
+/// The client sends `pane-mouse <id> 35 <col> <row> M` for every pointer
+/// sample that lands inside a pane.  When the pane never asked for any-event
+/// tracking the event forwards nothing, focuses nothing and selects nothing,
+/// so the server state is byte for byte what it already was.  Pushing a frame
+/// for it repaints the whole client screen at pointer-motion rate, which is
+/// the flicker in #604: measured on this tree, sweeping the pointer 60 times
+/// across a pane produced 60 full state frames and a redraw storm, against 0
+/// while idle.
+///
+/// Copy mode is deliberately excluded: there a motion event does move the
+/// selection cursor, so it is not inert.
+pub fn pane_mouse_is_inert_motion(app: &AppState, pane_id: usize, button: u8) -> bool {
+    if button != 35 {
+        return false;
+    }
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        return false;
+    }
+    let Some(win) = app.windows.get(app.active_idx) else { return true };
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, app.last_window_area, &mut rects);
+    for (path, _) in &rects {
+        if crate::tree::get_active_pane_id(&win.root, path) == Some(pane_id) {
+            return match active_pane(&win.root, path) {
+                Some(p) => !pane_wants_bare_motion(p),
+                None => true,
+            };
+        }
+    }
+    true
 }
 
 /// Detect whether a pane has a VT bridge descendant (wsl.exe, ssh.exe, etc.)
@@ -417,15 +478,20 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // remote shell prints raw escape sequences at the prompt.
         // This is the root cause of issue #77 (mouse events leak as raw
         // text into SSH panes).
-        let wants = pane.term.lock().ok()
-            .map_or(false, |t| t.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None);
+        let mode = pane.term.lock().ok()
+            .map_or(vt100::MouseProtocolMode::None, |t| t.screen().mouse_protocol_mode());
+        let wants = mode != vt100::MouseProtocolMode::None;
         if !wants {
-            mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true -> SUPPRESSED (remote has no mouse tracking)",
-                col, row, vt_button, press, win_name));
+            // The mode is part of the message on purpose: #604 was a case where
+            // the remote app HAD enabled 1002 and psmux itself knocked the mode
+            // back to None, which is indistinguishable from "never asked"
+            // unless the log says which one it saw.
+            mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true mode={:?} -> SUPPRESSED (remote has no mouse tracking)",
+                col, row, vt_button, press, win_name, mode));
             return;
         }
-        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true -> WriteConsoleInputW KEY_EVENT injection",
-            col, row, vt_button, press, win_name));
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true mode={:?} -> WriteConsoleInputW KEY_EVENT injection",
+            col, row, vt_button, press, win_name, mode));
         inject_sgr_mouse(pane, col, row, vt_button, press);
     } else {
         // Native ConPTY child — write SGR mouse to PTY pipe.
@@ -886,8 +952,8 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
 
 /// Forward bare mouse motion (hover) to the child PTY.
 ///
-/// Only forwarded when the child has EXPLICITLY enabled mouse motion
-/// tracking (`pane_wants_hover`, DECSET 1002/1003). Screen-content heuristics
+/// Only forwarded when the child has EXPLICITLY enabled any-event motion
+/// tracking (`pane_wants_bare_motion`, DECSET 1003). Screen-content heuristics
 /// false-positive on a filled screen with a NON-shell foreground
 /// (podman/docker interactive containers, discussion #349), spraying raw
 /// SGR motion bytes (35;x;yM...) into the container tty as visible garbage.
@@ -896,11 +962,16 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
 ///
 /// Same-coordinate events are suppressed (Windows Terminal parity: the
 /// terminal only sends motion when coordinates actually change).
-pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
+///
+/// Returns true when a report was actually written into a pane.  The caller
+/// uses that to decide whether the move is worth a redraw: a bare pointer
+/// move that reaches no pane changes nothing on screen, and repainting for it
+/// is what made the cursor flicker while the mouse was merely moving (#604).
+pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) -> bool {
     let (x, y) = map_client_coords(app, x, y);
     // WT parity: suppress same-coordinate duplicates
     if app.last_hover_pos == Some((x, y)) {
-        return;
+        return false;
     }
     app.last_hover_pos = Some((x, y));
 
@@ -917,12 +988,14 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_hover(active) {
+            if pane_wants_bare_motion(active) {
                 inject_mouse_combined(active, col, row, 35, true,
                     0, mouse_inject::MOUSE_MOVED, &win_name);
+                return true;
             }
         }
     }
+    false
 }
 
 fn wheel_cell_for_area(area: Rect, x: u16, y: u16) -> (u16, u16) {
@@ -1155,7 +1228,8 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
     // Forward mouse event to PTY if pane wants it.
     //
     // Bare motion (SGR button 35, no button held) requires the child to have
-    // EXPLICITLY enabled motion tracking (pane_wants_hover, DECSET 1002/1003).
+    // EXPLICITLY enabled any-event tracking (pane_wants_bare_motion, DECSET
+    // 1003, because 1002 only asks for motion while a button is held, #604).
     // Clicks/drags (buttons 0/1/2/32) use pane_wants_click, which avoids
     // screen-content heuristics that false-positive on a
     // filled screen with a non-shell foreground (podman/docker interactive
@@ -1166,7 +1240,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
     let win = &mut app.windows[app.active_idx];
     let win_name = win.name.clone();
     if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
-        let wants = if button == 35 { pane_wants_hover(pane) } else { pane_wants_click(pane) };
+        let wants = if button == 35 { pane_wants_bare_motion(pane) } else { pane_wants_click(pane) };
         if wants {
             let button_state = match (button, press) {
                 (0, true) => mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
@@ -2375,3 +2449,7 @@ mod test_issue442_swap_pane_source;
 #[cfg(test)]
 #[path = "../tests-rs/test_discussion349_podman_motion_leak.rs"]
 mod test_discussion349_podman_motion_leak;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue604_wsl_nvim_mouse.rs"]
+mod test_issue604_wsl_nvim_mouse;

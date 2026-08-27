@@ -498,6 +498,25 @@ fn pane_wants_mouse_json(layout: &LayoutJson, pane_id: usize) -> bool {
     }
 }
 
+/// Is this batched client command nothing but a bare pointer move?
+///
+/// The client emits `pane-mouse <id> 35 <col> <row> M` when the pointer moves
+/// inside a pane and `mouse-move <col> <row>` when it moves anywhere else.
+/// SGR button 35 is the motion bit (32) plus the "no button held" low bits (3),
+/// so it is the one mouse verb that carries no user intent: it must not be
+/// mistaken for a keystroke and drive the typing fast-poll and an immediate
+/// state round trip (#604).
+pub(crate) fn is_bare_motion_cmd(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.starts_with("mouse-move ") {
+        return true;
+    }
+    let Some(rest) = cmd.strip_prefix("pane-mouse ") else { return false };
+    let mut fields = rest.split_whitespace();
+    let _pane_id = fields.next();
+    fields.next() == Some("35")
+}
+
 fn client_selection_owns_drag(
     mouse_selection: bool,
     mouse_selection_force: bool,
@@ -5036,11 +5055,24 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
             let _ = writer.flush(); // push keys to server NOW
-            last_key_send_time = Some(Instant::now());
-            key_send_instant = Some(Instant::now());
-            // Force immediate dump-state so we start the echo-detection
-            // polling chain right away (eliminates 0-10ms initial wait).
-            force_dump = true;
+            // #604: a batch that is nothing but bare pointer motion is not a
+            // keystroke.  It produces no echo to chase, and when no pane is
+            // tracking motion it changes no server state at all, so neither the
+            // typing fast-poll nor an immediate dump-state is warranted.
+            // Treating every pointer sample as a keystroke pulled a full state
+            // frame (~12 KB) and repainted the whole screen at pointer-motion
+            // rate, which is what the reporter saw as the cursor flickering
+            // while the mouse merely moved.  If the motion DOES reach an app,
+            // the server pushes the resulting output frame on its own (see the
+            // "Server auto-pushes frames when state changes" note below).
+            let only_bare_motion = cmd_batch.iter().all(|c| is_bare_motion_cmd(c));
+            if !only_bare_motion {
+                last_key_send_time = Some(Instant::now());
+                key_send_instant = Some(Instant::now());
+                // Force immediate dump-state so we start the echo-detection
+                // polling chain right away (eliminates 0-10ms initial wait).
+                force_dump = true;
+            }
         }
 
         // ── STEP 2b: Request screen update (non-blocking) ────────────────

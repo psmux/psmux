@@ -1310,11 +1310,35 @@ pub mod mouse_inject {
             let h = handle as *mut c_void;
             let mut original_mode: u32 = 0;
             let got_mode = GetConsoleMode(h, &mut original_mode) != 0;
-            if got_mode {
-                let desired = (original_mode | ENABLE_EXTENDED_FLAGS | 0x0200 /*ENABLE_VIRTUAL_TERMINAL_INPUT*/)
-                              & !ENABLE_QUICK_EDIT_MODE;
-                if desired != original_mode {
-                    SetConsoleMode(h, desired);
+            // Issue #604: touch ONLY ENABLE_VIRTUAL_TERMINAL_INPUT, and only
+            // when it is actually missing.
+            //
+            // This used to also set ENABLE_EXTENDED_FLAGS and clear
+            // ENABLE_QUICK_EDIT_MODE, then restore the saved mode after the
+            // write.  Neither bit has anything to do with putting KEY_EVENT
+            // records into an input buffer, and toggling quick edit is not
+            // free: conhost derives "is this client tracking the mouse" from
+            // the console input mode, so every set/restore pair was mirrored
+            // back up the ConPTY into the PANE'S OUTPUT as `ESC[?1003;1006h`
+            // immediately followed by `ESC[?1003;1006l`.  psmux's own vt100
+            // parser applied both, and since DECRST 1003 clears the mouse
+            // protocol (tmux does the same, input.c: `case 1000: case 1001:
+            // case 1002: case 1003: screen_write_mode_clear(sctx,
+            // ALL_MOUSE_MODES)`), the trailing DECRST wiped the mode the
+            // application had really asked for.  nvim running under wsl.exe
+            // enables 1002+1006, so from the very first forwarded mouse event
+            // onward `mouse_protocol_mode()` read None and the bridge gate in
+            // window_ops::inject_mouse_combined suppressed every later click:
+            // clicking in nvim inside WSL stopped moving the cursor (#604).
+            //
+            // Measured on this tree: the pane raw stream (PSMUX_PANE_RAW=1)
+            // showed exactly one `ESC[?1003;1006h ESC[?1003;1006l` pair per
+            // injected event, and the pane's mouse mode went ButtonMotion ->
+            // None across the first one.
+            let mut restore_mode = false;
+            if got_mode && (original_mode & 0x0200 /*ENABLE_VIRTUAL_TERMINAL_INPUT*/) == 0 {
+                if SetConsoleMode(h, original_mode | 0x0200) != 0 {
+                    restore_mode = true;
                 }
             }
 
@@ -1365,8 +1389,10 @@ pub mod mouse_inject {
                 &mut written,
             );
 
-            // Restore original console mode to prevent pollution
-            if got_mode {
+            // Restore original console mode to prevent pollution, but only if
+            // we actually changed it (#604: a redundant SetConsoleMode is a
+            // mouse-registration event as far as conhost is concerned).
+            if restore_mode {
                 SetConsoleMode(h, original_mode);
             }
 

@@ -14,8 +14,9 @@
 //   shell never enabled mouse tracking, so the tty echoed them as garbage.
 //
 // CONTRACT:
-//   Bare motion (button 35) is gated on pane_wants_hover(), which requires the
-//   child to have EXPLICITLY enabled motion tracking (DECSET 1002/1003).
+//   Bare motion (button 35) is gated on pane_wants_bare_motion(), which requires the
+//   child to have EXPLICITLY enabled any-event tracking (DECSET 1003; #604
+//   narrowed this from 1002/1003, see the 1002 case below).
 //   Clicks and drags use pane_wants_click(); wheel uses pane_wheel_forward().
 //
 // Registered from src/window_ops.rs so it can call the pub(crate) helpers.
@@ -104,10 +105,10 @@ fn discussion349_filled_container_screen_does_not_get_hover() {
     let term = filled_parser(10, 60);
     let pane = make_pane(term, 10, 60);
 
-    let hover = pane_wants_hover(&pane);
+    let hover = pane_wants_bare_motion(&pane);
     assert!(!hover,
         "bare motion must not be forwarded: the child never enabled \
-         DECSET 1002/1003, so pane_wants_hover must be false");
+         DECSET 1002/1003, so pane_wants_bare_motion must be false");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -119,16 +120,24 @@ fn discussion349_filled_container_screen_does_not_get_hover() {
 fn discussion349_decset_1003_any_motion_still_gets_hover() {
     let term = filled_parser_with_decset(10, 60, b"\x1b[?1003h\x1b[?1006h");
     let pane = make_pane(term, 10, 60);
-    assert!(pane_wants_hover(&pane),
+    assert!(pane_wants_bare_motion(&pane),
         "a child that enabled AnyMotion (DECSET 1003) must still receive bare motion (#60)");
 }
 
+// Narrowed by #604.  DECSET 1002 is BUTTON-event tracking: report motion only
+// WHILE A BUTTON IS HELD.  Only 1003 asks for motion with no button, and tmux
+// draws the line in the same place (input-keys.c:737 discards a bare motion
+// report unless `s->mode & MODE_MOUSE_ALL`).  psmux treated 1002 as consent for
+// bare motion, so simply moving the pointer over `nvim -u NONE` (mouse=nvi,
+// which enables 1002+1006 and never 1003) sprayed an ESC[<35;col;rowM report at
+// nvim for every pointer sample.
 #[test]
-fn discussion349_decset_1002_button_motion_still_gets_hover() {
+fn discussion349_decset_1002_button_motion_gets_no_bare_motion() {
     let term = filled_parser_with_decset(10, 60, b"\x1b[?1002h\x1b[?1006h");
     let pane = make_pane(term, 10, 60);
-    assert!(pane_wants_hover(&pane),
-        "a child that enabled ButtonMotion (DECSET 1002) must still receive bare motion");
+    assert!(!pane_wants_bare_motion(&pane),
+        "ButtonMotion (DECSET 1002) asks for motion only while a button is held, \
+         so a BARE pointer move must not be forwarded (#604)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -140,7 +149,7 @@ fn discussion349_decset_1002_button_motion_still_gets_hover() {
 fn discussion349_alt_screen_without_mouse_protocol_gets_no_hover() {
     let term = filled_parser_with_decset(10, 60, b"\x1b[?1049h");
     let pane = make_pane(term, 10, 60);
-    assert!(!pane_wants_hover(&pane),
+    assert!(!pane_wants_bare_motion(&pane),
         "alt-screen without an explicit mouse protocol must not receive bare motion (#296)");
 }
 
