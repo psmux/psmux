@@ -4109,6 +4109,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "paste-detection" => { app.paste_detection = true; }
                             "choose-tree-preview" => { app.choose_tree_preview = false; }
                             "escape-time" => { app.escape_time_ms = 500; }
+                            // #606: tmux restores the table default on -u.
+                            "repeat-time" => { app.repeat_time_ms = 500; }
                             "history-limit" => { app.history_limit = 2000; }
                             "alternate-screen" => { app.allow_alternate_screen = true; }
                             "display-time" => { app.display_time_ms = 750; }
@@ -4205,6 +4207,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("history-limit {}\n", app.history_limit));
                     output.push_str(&format!("display-time {}\n", app.display_time_ms));
                     output.push_str(&format!("display-panes-time {}\n", app.display_panes_time_ms));
+                    // #606: repeat-time answered `show-options -g repeat-time`
+                    // but was missing from this full dump, so the obvious way
+                    // to check it (`show-options -g | findstr repeat`) said the
+                    // option did not exist. Same shape as #559 for
+                    // monitor-silence.
+                    output.push_str(&format!("repeat-time {}\n", app.repeat_time_ms));
                     output.push_str(&format!("mode-keys {}\n", app.mode_keys));
                     output.push_str(&format!("focus-events {}\n", if app.focus_events { "on" } else { "off" }));
                     output.push_str(&format!("renumber-windows {}\n", if app.renumber_windows { "on" } else { "off" }));

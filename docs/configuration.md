@@ -123,7 +123,7 @@ Details worth knowing:
 | `base-index` | Int | `0` | First window number |
 | `pane-base-index` | Int | `0` | First pane number |
 | `escape-time` | Int | `500` | Escape delay (ms) |
-| `repeat-time` | Int | `500` | Repeat key timeout (ms) |
+| `repeat-time` | Int | `500` | How long a key bound with `bind-key -r` keeps repeating without the prefix, in ms. Range `0` to `2000000`; `0` disables repeat |
 | `history-limit` | Int | `2000` | Scrollback lines per pane |
 | `display-time` | Int | `750` | Message display time (ms) |
 | `display-panes-time` | Int | `1000` | Pane overlay time (ms) |

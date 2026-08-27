@@ -1049,6 +1049,22 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
                 app.escape_time_ms = ms;
             }
         }
+        // Issue #606: repeat-time was documented, catalogued and honoured by
+        // the server's set-option, but this match had no arm for it, so a
+        // `.tmux.conf` line fell through to the catch-all below, was reported
+        // as "unknown option 'repeat-time'" and left `repeat_time_ms` at its
+        // 500 ms default. tmux (options-table.c) bounds it to
+        // 0..=REPEAT_TIME_MAX_MS milliseconds; 0 disables repeat entirely.
+        "repeat-time" => match value.parse::<i64>() {
+            Ok(ms) if (0..=crate::server::options::REPEAT_TIME_MAX_MS).contains(&ms) => {
+                app.repeat_time_ms = ms as u64;
+            }
+            Ok(ms) if ms < 0 => warn_config(app, format!("value is too small: {}", value)),
+            Ok(_) => warn_config(app, format!("value is too large: {}", value)),
+            // A non-numeric value already produced the catalog type warning
+            // above, so do not warn about it twice.
+            Err(_) => {}
+        },
         "prediction-dimming" | "dim-predictions" => {
             app.prediction_dimming = !matches!(value, "off" | "false" | "0");
         }
@@ -2405,3 +2421,7 @@ mod tests_issue504_ctrl_space_nul;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue536_config_quoted_whitespace.rs"]
 mod tests_issue536_config_quoted_whitespace;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue606_repeat_time.rs"]
+mod tests_issue606_repeat_time;

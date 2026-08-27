@@ -3539,6 +3539,24 @@ fn run_main() -> io::Result<()> {
                             eprintln!("psmux: set-option: value for '{}' must be a number, got '{}'", name, val);
                             std::process::exit(1);
                         }
+                        // Issue #606: repeat-time is bounded in tmux
+                        // (options-table.c: 0..=2000000 ms). Without this the
+                        // number check above waved through 2000001 and -5
+                        // alike: the first installed a 33 minute repeat
+                        // window, the second was dropped server-side at exit
+                        // 0 so a typo looked like it had been applied.
+                        if *name == "repeat-time" {
+                            if let Ok(ms) = val.parse::<i64>() {
+                                if ms < 0 {
+                                    eprintln!("psmux: set-option: value is too small: {}", val);
+                                    std::process::exit(1);
+                                }
+                                if ms > crate::server::options::REPEAT_TIME_MAX_MS {
+                                    eprintln!("psmux: set-option: value is too large: {}", val);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
                     }
                     flags.contains('p')
                 };

@@ -1,6 +1,11 @@
 use crate::types::AppState;
 use crate::config::{format_key_binding, parse_key_string};
 
+/// Upper bound for `repeat-time`, in milliseconds. tmux declares the option as
+/// a number with minimum 0 and maximum 2000000 in options-table.c, so psmux
+/// refuses anything outside that range on every route (#606).
+pub(crate) const REPEAT_TIME_MAX_MS: i64 = 2_000_000;
+
 fn is_window_option(name: &str) -> bool {
     matches!(
         name,
@@ -398,8 +403,14 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
             }
         }
         "repeat-time" => {
-            if let Ok(ms) = value.parse::<u64>() {
-                app.repeat_time_ms = ms;
+            // Bounded like tmux (options-table.c: minimum 0, maximum
+            // 2000000 ms). An out of range value is refused rather than
+            // stored, so the command prompt and TCP routes cannot install a
+            // repeat window the CLI guard would have rejected (#606).
+            if let Ok(ms) = value.parse::<i64>() {
+                if (0..=REPEAT_TIME_MAX_MS).contains(&ms) {
+                    app.repeat_time_ms = ms as u64;
+                }
             }
         }
         "mode-keys" => { app.mode_keys = value.to_string(); }
