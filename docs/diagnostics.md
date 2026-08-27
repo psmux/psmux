@@ -5,7 +5,9 @@ nowhere for an error message to land on screen, so psmux writes what it knows to
 This page lists every diagnostic file psmux can produce, the environment variables that turn the
 optional ones on, and what to attach when you file a bug report.
 
-Everything on this page is read-only observation. None of it changes how psmux behaves.
+Everything on this page is read only observation, with one exception called out where it appears:
+`PSMUX_FAKE_WIN_BUILD` moves psmux onto a different branch on purpose, so that a platform specific
+path can be reproduced on a machine that is not that platform.
 
 ## Debug Logging
 
@@ -65,6 +67,25 @@ To turn a logger back off, clear the variable and restart:
 Remove-Item Env:\PSMUX_INPUT_DEBUG
 psmux kill-server
 ```
+
+### The Windows Build Seam
+
+| Variable | What it does |
+|---|---|
+| `PSMUX_FAKE_WIN_BUILD=19045` | Makes psmux report that build number instead of the real one |
+
+Several mouse code paths branch on the Windows build number, because conhost handles VT mouse
+input differently below build 22523 (see [mouse-ssh.md](mouse-ssh.md) and
+[faq.md](faq.md)). Those branches are unreachable on a modern host, so this variable exists to
+exercise them: set it to `19045` to see what a Windows 10 pane does, or to `26100` to see the
+modern path from an older machine.
+
+This is diagnostic only. It changes nothing about the machine and nothing about the console, it
+only changes which branch psmux picks, so a build set here that does not match reality gives you
+a mouse path your conhost was not built for. Set it while reproducing a report, then clear it. It
+must be set on the **server** process to affect a pane, so kill the server first and add
+`$env:PSMUX_NO_WARM = "1"` so that a warm server spawned earlier, without your setting, does not
+answer instead.
 
 ## Always On Diagnostic Files
 
