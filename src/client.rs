@@ -1225,7 +1225,13 @@ pub fn render_layout_json(
             let para = Paragraph::new(Text::from(lines));
             f.render_widget(para, inner);
 
-            if *copy_mode && *active {
+            // tmux draws the copy-mode position indicator out of each pane's
+            // OWN mode screen (`window-copy.c` `window_copy_write_line`), so
+            // every pane that is in copy mode is marked, focused or not.
+            // psmux used to gate this on `active` because only one pane could
+            // ever be in copy mode; now that a mode belongs to its pane
+            // (#607), mark every pane that holds one.
+            if *copy_mode {
                 let label = "[copy mode]";
                 let lw = label.len() as u16;
                 if area.width >= lw {

@@ -555,7 +555,9 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                     hide_cursor: hide_cursor_flag,
                     cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
                     active: false,
-                    copy_mode: false,
+                    // The pane's OWN mode (#607).  `mark_active` overwrites
+                    // this for the focused pane with the live global mode.
+                    copy_mode: p.copy_state.is_some(),
                     scroll_offset: 0,
                     view_offset: screen.scrollback(),
                     sel_start_row: None,
@@ -816,6 +818,14 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
 
                 let is_active    = cur_path.as_slice() == active_path;
                 let need_content = in_copy && is_active;
+                // The wire's per-pane `copy_mode` used to be `need_content`,
+                // so it could only ever be true for the focused pane and the
+                // client drew the copy-mode marker on that pane alone.  tmux
+                // draws the marker from each pane's own mode screen
+                // (`window-copy.c` `window_copy_write_line`), so report the
+                // pane's OWN mode here (#607).  Everything the client gates on
+                // `copy_mode && active` is unchanged by this.
+                let pane_in_copy = need_content || p.copy_state.is_some();
 
                 // ── Snapshot cell data under the mutex, then release ──
                 // This minimises the time we block the reader thread (which
@@ -996,7 +1006,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     p.id, p.last_rows, p.last_cols,
                     snap.cr, snap.cc, snap.alt, snap.wants_mouse, snap.hide_cursor,
                     cs,
-                    is_active, need_content, so, snap.view_offset,
+                    is_active, pane_in_copy, so, snap.view_offset,
                 ));
 
                 // selection bounds + copy cursor position

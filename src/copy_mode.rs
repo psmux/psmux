@@ -161,6 +161,62 @@ pub fn switch_with_copy_save<F: FnOnce(&mut AppState)>(app: &mut AppState, switc
     }
 }
 
+/// Id of the pane that is active right now, if there is one.
+pub fn active_pane_id(app: &AppState) -> Option<usize> {
+    let win = app.windows.get(app.active_idx)?;
+    crate::tree::get_active_pane_id(&win.root, &win.active_path)
+}
+
+/// Copy mode belongs to the pane it was entered in, exactly as it does in
+/// tmux, where a mode is a property of one `window_pane` (`window.c`
+/// `window_pane_create` starts every pane with an empty mode stack).  psmux
+/// keeps the live copy cursor and selection in `AppState`, so those globals
+/// are really "the mode of whichever pane is active", and `Pane::copy_state`
+/// is where each pane's own mode is parked while another pane holds focus.
+///
+/// Focus commands keep the two in step through `switch_with_copy_save`.
+/// Creating a pane or a window and killing a pane also change which pane is
+/// active, and before #607 they did it without telling the copy layer: the
+/// global `Mode::CopyMode` simply stayed put and became the brand new pane's
+/// mode, or the dead pane's mode became the survivor's.
+///
+/// `park_mode_on_active_pane` hands the outgoing pane its own state back;
+/// `retarget_mode_to_active_pane` makes the incoming pane's own state the
+/// live one.  Call the first before the active pane changes and the second
+/// after, passing the pane id captured before the change.
+pub fn park_mode_on_active_pane(app: &mut AppState) {
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        save_copy_state_to_pane(app);
+    }
+}
+
+/// Adopt the newly active pane's own mode.  `prev` is the pane id that was
+/// active before the change; when the active pane did not actually move this
+/// is a no-op, so a caller can use it unconditionally without clobbering the
+/// live copy cursor with the parked (older) copy of it.
+pub fn retarget_mode_to_active_pane(app: &mut AppState, prev: Option<usize>) {
+    let now = active_pane_id(app);
+    if now == prev {
+        return;
+    }
+    let has_copy = app.windows.get(app.active_idx)
+        .and_then(|w| active_pane(&w.root, &w.active_path))
+        .map_or(false, |p| p.copy_state.is_some());
+    if has_copy {
+        restore_copy_state_from_pane(app);
+    } else if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        // The pane that owned copy mode is no longer the active one, and the
+        // pane that is has never been in copy mode.  Drop the live copy
+        // cursor with the mode so nothing of the old pane's selection is left
+        // pointing into the new pane's grid.
+        app.mode = Mode::Passthrough;
+        app.copy_anchor = None;
+        app.copy_pos = None;
+        app.copy_scroll_offset = 0;
+        app.copy_mouse_down_cell = None;
+    }
+}
+
 pub fn current_prompt_pos(app: &mut AppState) -> Option<(u16,u16)> {
     let win = &mut app.windows[app.active_idx];
     let p = active_pane_mut(&mut win.root, &win.active_path)?;

@@ -381,6 +381,13 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
 /// process only, after the session environment, so `-e` wins over
 /// `set-environment`.
 pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>, empty: bool, extra_env: &[(String, String)]) -> io::Result<()> {
+    // #607: the new window's pane becomes the active one, so hand the pane
+    // that is losing focus its own copy mode back before that happens and let
+    // the new pane adopt its own (a fresh pane has none) afterwards.  Without
+    // this the global `Mode::CopyMode` just stayed put and the brand new
+    // window opened in copy mode.
+    let prev_pane = crate::copy_mode::active_pane_id(app);
+    crate::copy_mode::park_mode_on_active_pane(app);
     // ── Empty window (tmux new-window -E): a new window whose single pane has
     // no command/process. It renders blank until respawn-pane gives it one. ──
     if empty {
@@ -395,6 +402,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             app.active_idx = app.windows.len() - 1;
             app.on_window_appended();
         }
+        crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
         return Ok(());
     }
     // ── Fast path: use pre-spawned warm pane when creating a default shell ──
@@ -465,6 +473,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             app.next_win_id += 1;
             app.active_idx = app.windows.len() - 1;
             app.on_window_appended();
+            crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
             return Ok(());
         }
         // Dead spare: make sure the corpse is fully gone, then cold-spawn.
@@ -552,6 +561,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
     Ok(())
 }
 
@@ -629,6 +639,9 @@ pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
 
 /// Create a new window with a raw command (program + args, no shell wrapping)
 pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, raw_args: &[String]) -> io::Result<()> {
+    // #607: same copy-mode ownership handover as create_window_with_env.
+    let prev_pane = crate::copy_mode::active_pane_id(app);
+    crate::copy_mode::park_mode_on_active_pane(app);
     let area = app.client_area;
     let rows = if area.height > 1 { area.height } else { 30 };
     let cols = if area.width > 1 { area.width } else { 120 };
@@ -684,6 +697,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
     Ok(())
 }
 
@@ -704,6 +718,12 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
 /// `split_active_with_command` plus per-pane environment from
 /// `split-window -e KEY=VALUE` (tmux parity, issue #489).
 pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Option<&str>, pty_system_ref: Option<&dyn portable_pty::PtySystem>, start_dir: Option<&str>, extra_env: &[(String, String)]) -> io::Result<()> {
+    // #607: the split's new pane becomes the active one.  Park the copy mode
+    // on the pane it was entered in first, then let the new pane adopt its
+    // own (none), so the split does not open in copy mode and the pane the
+    // user was reading does not silently leave it.
+    let prev_pane = crate::copy_mode::active_pane_id(app);
+    crate::copy_mode::park_mode_on_active_pane(app);
     // ── Guard: refuse split if the active pane is too small ──────────
     // After splitting, each half gets roughly (dim / 2) - 1 (for the divider).
     // If that would be below MIN_PANE_DIM, deny the split to avoid crashing
@@ -814,6 +834,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
             win.active_path = new_path;
             // Add new pane to MRU (most recent)
             crate::tree::touch_mru(&mut win.pane_mru, new_pane_id);
+            crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
             return Ok(());
         }
         // Dead spare: make sure the corpse is fully gone, then cold-spawn.
@@ -882,6 +903,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     win.active_path = new_path;
     // Add new pane to MRU (most recent)
     crate::tree::touch_mru(&mut win.pane_mru, split_pane_id);
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
     Ok(())
 }
 
@@ -928,13 +950,20 @@ fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
 }
 
 pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {
+    // #607: the survivor must land in ITS OWN mode, not in the dead pane's.
+    let prev_pane = crate::copy_mode::active_pane_id(app);
     let win = &mut app.windows[app.active_idx];
     let active_path = win.active_path.clone();
     kill_pane_at_path(win, &active_path);
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
     Ok(())
 }
 
 pub fn kill_pane_by_id(app: &mut AppState, pane_id: usize) -> io::Result<()> {
+    // #607: same as kill_active_pane.  `retarget` is a no-op when the active
+    // pane did not move (killing a pane in another window), so the live copy
+    // cursor of a pane that keeps focus is never clobbered by its parked copy.
+    let prev_pane = crate::copy_mode::active_pane_id(app);
     let restore_idx = app.active_idx;
     let restore_path = app.windows[restore_idx].active_path.clone();
     let restore_pane_id = crate::tree::get_active_pane_id(&app.windows[restore_idx].root, &restore_path);
@@ -966,6 +995,7 @@ pub fn kill_pane_by_id(app: &mut AppState, pane_id: usize) -> io::Result<()> {
         restore_win.active_path = resolved_restore_path;
     }
 
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
     Ok(())
 }
 
@@ -2741,3 +2771,7 @@ mod tests_dashdash_window_name;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue600_bash_rehome.rs"]
 mod tests_issue600_bash_rehome;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue607_copy_mode_inherit.rs"]
+mod tests_issue607_copy_mode_inherit;
