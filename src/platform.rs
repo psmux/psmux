@@ -4045,6 +4045,19 @@ pub fn resolve_priority(from_option: Option<&str>, warn: bool) -> String {
         .to_string()
 }
 
+/// The class a claiming client wants its server to end up at, resolved under
+/// the documented precedence (env, then the `priority` option in the config
+/// file, then the default).
+///
+/// This exists so `claim-session -p <value>` is built the same way at all three
+/// send sites (#608). The resolution happens on the CLIENT because that is the
+/// only process that can see the user's shell environment: a warm standby was
+/// spawned by an earlier server generation and inherits ITS environment, never
+/// the claimant's.
+pub fn claim_priority_arg() -> String {
+    resolve_priority(crate::config::priority_from_config().as_deref(), false)
+}
+
 /// Set THIS process's priority class. Never raises pane children: a Windows
 /// child created without an explicit class flag gets NORMAL_PRIORITY_CLASS
 /// unless its creator is idle or below-normal, so the shells and programs psmux

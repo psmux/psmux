@@ -2287,7 +2287,15 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                             ).is_ok() {
                                 let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
                                 if !warm_key.is_empty() {
-                                    let claim_cmd = format!("claim-session {}\n", crate::util::quote_arg(&name));
+                                    // In-TUI new-session runs inside psmux, so the
+                                    // resolve reads this server's own environment and
+                                    // config rather than a user shell. Sending it is
+                                    // still right: a session created from the TUI
+                                    // should land on the same class as the psmux the
+                                    // user is sitting in, not on the standby's stale
+                                    // one (#608).
+                                    let claim_prio = crate::platform::claim_priority_arg();
+                                    let claim_cmd = format!("claim-session {} -p {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio));
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,
                                         claim_cmd.as_bytes(),

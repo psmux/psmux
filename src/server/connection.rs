@@ -1791,12 +1791,15 @@ match cmd {
     }
     "claim-session" => {
         // Warm-server claim: rename + synchronous response so CLI knows it's done.
-        // Usage: claim-session <name> [<client-cwd>]
-        let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| &**s).collect();
-        if let Some(name) = non_flag.first().copied() {
-            let client_cwd = non_flag.get(1).map(|s| s.to_string());
+        // Usage: claim-session <name> [<client-cwd>] [-p <priority>]
+        //
+        // Positionals and the -p flag are split by crate::util::parse_claim_args
+        // so the wire contract has one implementation and one set of tests.
+        let (non_flag, client_priority) = crate::util::parse_claim_args(&args);
+        if let Some(name) = non_flag.first().cloned() {
+            let client_cwd = non_flag.get(1).cloned();
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ClaimSession(name.to_string(), client_cwd, rtx));
+            let _ = tx.send(CtrlReq::ClaimSession(name, client_cwd, client_priority, rtx));
             if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
                 let _ = write!(write_stream, "{}", resp);
                 let _ = write_stream.flush();

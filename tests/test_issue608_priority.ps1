@@ -377,6 +377,99 @@ if ($sp -eq 0) {
 }
 Kill-Sess $name
 
+# ============================================================================
+Write-Host "`n[8] A CLAIMED WARM server adopts the claiming client's class" -ForegroundColor Yellow
+# ============================================================================
+# The hole this closes: a warm standby is spawned ahead of time by an earlier
+# server generation and sets its class from THAT environment, which predates
+# the user's shell. Before the fix, claiming it never re-applied the claimant's
+# PSMUX_PRIORITY, so the documented escape hatch silently failed on the path
+# most users take, and worked only when no standby happened to be waiting.
+#
+# Two things make this test non vacuous, and both matter:
+#   1. PSMUX_NO_WARM is NOT set, so the warm path is genuinely exercised.
+#   2. The standby's PID is recorded BEFORE, and the claimed session's .pid is
+#      compared against it. A cold spawn would otherwise pass every assertion
+#      while testing nothing at all, which is exactly how this bug survived the
+#      first round of tests.
+Remove-Item env:PSMUX_NO_WARM -EA SilentlyContinue
+
+function Get-MyWarmPid {
+    $w = @(Get-CimInstance Win32_Process -Filter "Name='psmux.exe'" -EA SilentlyContinue |
+           Where-Object { $_.CommandLine -and $_.CommandLine -like "*$PSMUX*" -and
+                          $_.CommandLine -like '*-s __warm__*' })
+    if ($w.Count -eq 0) { return 0 }
+    return [int]$w[0].ProcessId
+}
+
+# Prime the pool with NO PSMUX_PRIORITY set, so the standby lands on the
+# default and every case below is a real change of class rather than a no-op.
+function Initialize-Warm {
+    $p = Get-MyWarmPid
+    if ($p -gt 0) { return $p }
+    Remove-Item env:PSMUX_PRIORITY -EA SilentlyContinue
+    $prime = 'i608_warmprime'
+    & $PSMUX new-session -d -s $prime 2>&1 | Out-Null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt 25000) {
+        if ((Get-MyWarmPid) -gt 0) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Kill-Sess $prime
+    Start-Sleep -Seconds 2
+    return (Get-MyWarmPid)
+}
+
+foreach ($wc in @(
+    @{ v = '';       want = $DEFAULT_CLASS; label = 'unset' },
+    @{ v = 'normal'; want = 'Normal';       label = 'normal' },
+    @{ v = 'high';   want = 'High';         label = 'high' }
+)) {
+    Remove-Item env:PSMUX_PRIORITY -EA SilentlyContinue
+    $warmPid = Initialize-Warm
+    if ($warmPid -eq 0) {
+        Write-Skip "warm claim ($($wc.label)): no standby appeared, warm pool may be disabled here"
+        continue
+    }
+    $script:Spawned += $warmPid
+    $warmCls = Get-Class $warmPid
+
+    if ($wc.v) { $env:PSMUX_PRIORITY = $wc.v }
+    $wname = 'i608_warm' + $wc.label
+    & $PSMUX kill-session -t $wname 2>&1 | Out-Null
+    & $PSMUX new-session -d -s $wname 2>&1 | Out-Null
+    Start-Sleep -Seconds 4
+    $sp = Get-ServerPid $wname
+    if ($sp -gt 0) { $script:Spawned += $sp }
+
+    if ($sp -ne $warmPid) {
+        # Not a claim, so this case proves nothing either way. Loudly skipped
+        # rather than counted as a pass.
+        Write-Skip "warm claim ($($wc.label)): COLD SPAWN (server $sp, standby was $warmPid), case proves nothing"
+    } else {
+        $cls = Get-Class $sp
+        $opt = (& $PSMUX show-options -t $wname -g -v priority 2>&1 | Out-String).Trim()
+        $wantOpt = if ($wc.v) { $wc.v } else { 'above-normal' }
+        if ($cls -eq $wc.want) {
+            Write-Pass "warm claim ($($wc.label)): standby was $warmCls, claimed server is $cls"
+        } else {
+            Write-Fail "warm claim ($($wc.label)): claimed server is $cls, expected $($wc.want) (standby was $warmCls)"
+        }
+        if ($opt -eq $wantOpt) {
+            Write-Pass "  show-options on the claimed server reports '$opt'"
+        } else {
+            Write-Fail "  show-options on the claimed server reports '$opt', expected '$wantOpt'"
+        }
+    }
+    Remove-Item env:PSMUX_PRIORITY -EA SilentlyContinue
+    Kill-Sess $wname
+    # Drop the replacement standby so the next case primes a fresh one whose
+    # class was chosen with no PSMUX_PRIORITY in the environment.
+    $leftover = Get-MyWarmPid
+    if ($leftover -gt 0) { try { Stop-Process -Id $leftover -Force -EA Stop } catch {} }
+    Start-Sleep -Milliseconds 800
+}
+
 }
 finally {
     foreach ($v in 'PSMUX_PRIORITY','PSMUX_NO_WARM') { Remove-Item "env:$v" -EA SilentlyContinue }

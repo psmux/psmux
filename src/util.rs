@@ -319,6 +319,38 @@ pub fn quote_arg(s: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
+/// Split `claim-session` arguments into its positionals and its `-p` priority.
+///
+/// Lives here rather than inline in the connection handler so the wire contract
+/// can be unit tested against the real parser instead of a copy that drifts
+/// (#608). Returns `(positionals, priority)`, where positionals keep their
+/// historical meaning: `[0]` session name, `[1]` optional client CWD.
+///
+/// Priority is a FLAG and not a third positional on purpose. The CWD is
+/// optional, so a bare third positional would slide into index 1 whenever the
+/// CWD was omitted and be silently mistaken for the directory. Consuming
+/// `-p <value>` as a pair leaves both existing positionals exactly where they
+/// were, and cannot collide with a real path, because the pre-existing filter
+/// this replaces already assumed no positional starts with a dash.
+pub fn parse_claim_args(args: &[&str]) -> (Vec<String>, Option<String>) {
+    let mut priority: Option<String> = None;
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let a = args[i];
+        if a == "-p" {
+            priority = args.get(i + 1).map(|s| (*s).to_string());
+            i += 2;
+            continue;
+        }
+        if !a.starts_with('-') {
+            positionals.push(a.to_string());
+        }
+        i += 1;
+    }
+    (positionals, priority)
+}
+
 /// Quote an argument for the wire only when the server's quote-aware
 /// re-tokenizer would otherwise corrupt it: empty (collapses into joining
 /// whitespace), whitespace (re-split), or quote characters (stripped as

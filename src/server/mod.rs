@@ -3373,7 +3373,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
                 }
-                CtrlReq::ClaimSession(name, client_cwd, resp) => {
+                CtrlReq::ClaimSession(name, client_cwd, client_priority, resp) => {
                     // Guard against clobbering an already-claimed session. Under
                     // rapid `new-session`, a stale __warm__.port (or OS ephemeral
                     // port reuse) can route a claim to a server that has ALREADY
@@ -3492,6 +3492,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Update shared aliases after config reload
                     if let Ok(mut w) = shared_aliases_main.write() {
                         *w = app.command_aliases.clone();
+                    }
+                    // Adopt the claiming client's scheduling class (#608).
+                    //
+                    // MUST be after load_config above, not before: that reload
+                    // re-applies the `priority` option out of the config file
+                    // and would clobber anything set earlier in this arm.
+                    //
+                    // This is what makes the documented escape hatch work on
+                    // the path most users actually take. A warm standby set its
+                    // class at its OWN startup, from the environment of
+                    // whichever server generation spawned it, which predates
+                    // the user's shell entirely. Claiming it used to leave that
+                    // stale class in place, so `PSMUX_PRIORITY=normal psmux`
+                    // silently kept the above-normal default whenever a standby
+                    // happened to be waiting, and cold spawned correctly
+                    // whenever one did not. The value arrives already resolved
+                    // by the client under the documented precedence (env, then
+                    // option, then default), so applying it here simply
+                    // finishes that resolution on the right process.
+                    if let Some(ref want) = client_priority {
+                        if crate::platform::normalize_priority(want).is_some() {
+                            app.priority = crate::platform::resolve_priority(Some(want), false);
+                            crate::platform::set_process_priority(&app.priority);
+                            warm_debug(&format!("CLAIM: priority -> {}", app.priority));
+                        }
                     }
                     // Fire client-attached/session-created for the now-real session:
                     // the startup path skips these while warm, so this is where a

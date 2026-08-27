@@ -1494,10 +1494,14 @@ fn run_main() -> io::Result<()> {
                                     let client_cwd = std::env::current_dir()
                                         .ok()
                                         .and_then(|p| p.to_str().map(|s| s.to_string()));
+                                    // -p carries this shell's PSMUX_PRIORITY (or the
+                                    // config value) onto the standby, which set its
+                                    // own class before this shell existed (#608).
+                                    let claim_prio = crate::platform::claim_priority_arg();
                                     let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                        format!("claim-session {} {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd))
+                                        format!("claim-session {} {} -p {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio))
                                     } else {
-                                        format!("claim-session {}\n", crate::util::quote_arg(&name))
+                                        format!("claim-session {} -p {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio))
                                     };
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,
@@ -4636,10 +4640,14 @@ fn run_main() -> io::Result<()> {
                         let client_cwd = std::env::current_dir()
                             .ok()
                             .and_then(|p| p.to_str().map(|s| s.to_string()));
+                        // See the new-session claim above: -p is what lets a bare
+                        // `psmux` in a shell with PSMUX_PRIORITY set reach a standby
+                        // that was spawned long before that shell (#608).
+                        let claim_prio = crate::platform::claim_priority_arg();
                         if let Some(ref cwd) = client_cwd {
-                            let _ = write!(stream, "claim-session {} {}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(cwd));
+                            let _ = write!(stream, "claim-session {} {} -p {}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio));
                         } else {
-                            let _ = write!(stream, "claim-session {}\n", crate::util::quote_arg(&session_name));
+                            let _ = write!(stream, "claim-session {} -p {}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(&claim_prio));
                         }
                         let _ = stream.flush();
                         // Committed: we atomically own this warm (won the .port
