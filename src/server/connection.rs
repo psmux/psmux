@@ -187,6 +187,13 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
 /// content is fully literal in `parse_command_line`, so `'\''` cannot work);
 /// everything else uses single quotes. Chain separators (`;`, `\;`) are left
 /// bare so command chaining still splits.
+/// Value that follows `flag` in `args`, e.g. the `-s` of `swap-window -s 2`.
+/// Kept RAW: window target specs are resolved on the server, which is the only
+/// place that knows whether `+1` is a window, an index or a name (issue #602).
+fn flag_value(args: &[&str], flag: &str) -> Option<String> {
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].to_string())
+}
+
 fn requote_command_tail(args: &[&str]) -> String {
     args.iter().map(|t| {
         if t.is_empty() {
@@ -2708,63 +2715,74 @@ match cmd {
         }
     }
     "move-window" | "movew" => {
-        // Destination display index: the parsed -t window target (arrives via the
-        // TARGET line / `-t :N`), else a bare positional (`move-window N`). The
-        // -t value was stripped from `args`, so scan positionals for the fallback
-        // (skipping the `-s` source value). Server handler honors gapped indices.
-        let target = target_win.or_else(|| {
-            args.iter().enumerate()
-                .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
-                .find_map(|(_, a)| a.trim_start_matches(':').parse::<usize>().ok())
+        // Both ends stay RAW here: `+1`, `-1`, `{last}`, `$`, a window name and
+        // a plain index all mean different things, and only the server holds the
+        // window list needed to tell them apart (issue #602). The old code
+        // parsed the destination to a usize and never looked at `-s` at all, so
+        // `move-window -s S:2 -t S:9` moved the ACTIVE window.
+        let src = flag_value(&args, "-s");
+        let dst = raw_target.clone()
+            .or_else(|| flag_value(&args, "-t"))
+            .or_else(|| {
+                args.iter().enumerate()
+                    .find(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
+                    .map(|(_, a)| a.to_string())
+            });
+        let has = |f: &str| args.iter().any(|a| *a == f);
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::MoveWindow {
+            src,
+            dst,
+            detach: has("-d"),
+            kill: has("-k"),
+            renumber: has("-r"),
+            after: has("-a"),
+            before: has("-b"),
+            resp: resp_s,
         });
-        let _ = tx.send(CtrlReq::MoveWindow(target));
-    }
-    "swap-window" | "swapw" => {
-        // Source: `-s <win>`. Accept bare index, ':'-prefixed, and the
-        // qualified `session:index` form (take the part after the last
-        // colon) — #559: `-s sess:99` used to fail the bare parse and fall
-        // back to the ACTIVE window silently.
-        let src_raw = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].to_string());
-        let src = src_raw.as_deref().and_then(|s| {
-            s.rsplit(':').next().unwrap_or(s).parse::<usize>().ok()
-        });
-        // -s was given but names nothing resolvable: error out instead of
-        // silently swapping the ACTIVE window (the old fallback).
-        let bad_src = src_raw.is_some() && src.is_none();
-        if bad_src {
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
             if !persistent {
-                let _ = writeln!(write_stream, "ERROR: can't find window: {}", src_raw.as_deref().unwrap_or(""));
+                let _ = writeln!(write_stream, "ERROR: {}", e);
                 let _ = write_stream.flush();
             }
-        } else {
-            // Destination: parsed -t window target; else the raw -t value
-            // (#559: a bare `-t 0` from a raw TCP client parses as a SESSION
-            // target, leaving target_win None and silently doing nothing —
-            // the CLI only worked because main.rs coerces "N" to ":N");
-            // else a bare positional.
-            let target = target_win
-                .or_else(|| raw_target.as_deref().and_then(|t| {
-                    t.rsplit(':').next().unwrap_or(t).parse::<usize>().ok()
-                }))
-                .or_else(|| {
-                    args.iter().enumerate()
-                        .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
-                        .find_map(|(_, a)| a.trim_start_matches(':').parse::<usize>().ok())
-                });
-            if let Some(t) = target {
+        }
+    }
+    "swap-window" | "swapw" => {
+        // Source: `-s <win>`, kept raw for the server-side resolver (#559:
+        // `-s sess:99` used to fail a bare usize parse and silently fall back
+        // to the ACTIVE window).
+        let src = flag_value(&args, "-s");
+        // Destination: the raw -t value (#559: a bare `-t 0` from a raw TCP
+        // client parses as a SESSION target, leaving target_win None and
+        // silently doing nothing), else a bare positional.
+        let dst = raw_target.clone()
+            .or_else(|| flag_value(&args, "-t"))
+            .or_else(|| target_win.map(|w| w.to_string()))
+            .or_else(|| {
+                args.iter().enumerate()
+                    .find(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
+                    .map(|(_, a)| a.to_string())
+            });
+        match dst {
+            Some(d) => {
                 let (resp_s, resp_r) = mpsc::channel();
-                let _ = tx.send(CtrlReq::SwapWindow(src, t, resp_s));
+                let _ = tx.send(CtrlReq::SwapWindow {
+                    src,
+                    dst: d,
+                    detach: args.iter().any(|a| *a == "-d"),
+                    resp: resp_s,
+                });
                 if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
                     if !persistent {
                         let _ = writeln!(write_stream, "ERROR: {}", e);
                         let _ = write_stream.flush();
                     }
                 }
-            } else if let Some(ref rt) = raw_target {
-                // -t was given but names nothing resolvable: report it
-                // instead of silently doing nothing (tmux exits 1).
+            }
+            None => {
+                // tmux requires -t; without one there is nothing to swap with.
                 if !persistent {
-                    let _ = writeln!(write_stream, "ERROR: can't find window: {}", rt);
+                    let _ = writeln!(write_stream, "ERROR: can't find window: ");
                     let _ = write_stream.flush();
                 }
             }

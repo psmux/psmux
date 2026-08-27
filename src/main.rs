@@ -617,13 +617,28 @@ fn run_main() -> io::Result<()> {
     let mut explicit_session_target = false;
     if let Some(pos) = target_position {
         if let Some(target) = args.get(pos + 1) {
-            // move-window/swap-window: a bare numeric -t is a WINDOW index (tmux
+            // move-window/swap-window: a bare -t that names a WINDOW (tmux
             // target-window semantics), not a session. Coerce "N" -> ":N" so the
             // generic parser treats it as a window and routing stays on the current
             // server. Every other command keeps bare = session.
+            //
+            // The relative and symbolic forms need the same coercion (issue
+            // #602): without it `-t -1` was read as the session named "-1" and
+            // died in the CLI with "no server running on session '-1'", and
+            // `-t {last}` the same way, so neither ever reached the server that
+            // knows what they mean. Bare NAMES still mean a session.
             let is_window_move = args.iter().any(|a|
                 a == "move-window" || a == "movew" || a == "swap-window" || a == "swapw");
-            let target: String = if is_window_move && target.parse::<usize>().is_ok() {
+            let looks_like_window = |t: &str| {
+                if t.parse::<usize>().is_ok() { return true; }
+                if matches!(t, "!" | "^" | "$") { return true; }
+                if t.starts_with('{') && t.ends_with('}') && t.len() > 2 { return true; }
+                if let Some(n) = t.strip_prefix(['+', '-']) {
+                    return n.is_empty() || n.chars().all(|c| c.is_ascii_digit());
+                }
+                false
+            };
+            let target: String = if is_window_move && looks_like_window(target) {
                 format!(":{}", target)
             } else {
                 target.to_string()
@@ -3768,7 +3783,14 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // #602: move-window was fire-and-forget, so "index in use: 1"
+                // and an unresolvable -s both exited 0 with nothing done. The
+                // server now answers; surface it the way swap-window does.
+                let resp = send_control_with_response(cmd)?;
+                if !resp.trim().is_empty() {
+                    eprint!("{}", resp);
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // swap-window - Swap windows

@@ -909,6 +909,27 @@ pub struct AppState {
     pub next_forward_id: u64,
 }
 
+/// What a tmux window target spec resolved to, the output of
+/// [`AppState::resolve_window_spec`].
+///
+/// The two cases are tmux's: an existing window, or (only where tmux sets
+/// `CMD_FIND_WINDOW_INDEX`, i.e. move-window/link-window `-t`) a destination
+/// number that no window holds yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowTarget {
+    /// Vec position of an existing window.
+    Pos(usize),
+    /// A display index that currently holds no window.
+    FreeIndex(usize),
+}
+
+impl WindowTarget {
+    /// Vec position of the existing window, or None for a free index.
+    pub fn pos(self) -> Option<usize> {
+        match self { WindowTarget::Pos(p) => Some(p), WindowTarget::FreeIndex(_) => None }
+    }
+}
+
 impl AppState {
     /// Whether this is the hidden `__warm__` pre-spawn server: a server started
     /// ahead of time so the next `new-session` can claim it instead of paying a
@@ -1039,14 +1060,253 @@ impl AppState {
     /// holds `target`, matching tmux. Returns false when indices are not tracked
     /// so the caller can use the legacy Vec-position move.
     pub fn move_active_window_to_index(&mut self, target: usize) -> bool {
-        if !self.window_indices_valid() { return false; }
-        if let Some(p) = self.win_pos(target) {
-            if p != self.active_idx { return false; } // occupied by another window
-            return true; // already at target
+        let pos = self.active_idx;
+        self.move_window_to_index(pos, target).is_ok()
+    }
+
+    /// move-window for an arbitrary source: give the window at Vec position
+    /// `pos` the display index `target`, then keep the arrays sorted by index.
+    ///
+    /// tmux (server_link_window) refuses when another window already holds the
+    /// destination index unless the caller killed the occupant first (-k), and
+    /// reports it as `index in use: N` at exit 1. That refusal used to be a
+    /// bare `false` that every caller discarded, so the command exited 0 having
+    /// done nothing (issue #602).
+    pub fn move_window_to_index(&mut self, pos: usize, target: usize) -> Result<(), String> {
+        if self.windows.is_empty() { return Err("can't find window".to_string()); }
+        if !self.window_indices_valid() {
+            // A state that pushed windows straight onto the Vec (mock AppState,
+            // and any path that skipped `on_window_appended`) has no parallel
+            // array. `win_pos`/`win_display_index` already fall back to the
+            // affine pos+base mapping there, so materialise exactly that rather
+            // than refusing: the alternative was a legacy Vec-position splice
+            // whose result did not match tmux for any layout with a gap.
+            let base = self.window_base_index;
+            self.window_indices = (0..self.windows.len()).map(|i| i + base).collect();
         }
-        self.window_indices[self.active_idx] = target;
+        if pos >= self.windows.len() {
+            return Err(format!("can't find window: {}", pos));
+        }
+        if let Some(p) = self.win_pos(target) {
+            if p != pos { return Err(format!("index in use: {}", target)); }
+            return Ok(()); // already at target
+        }
+        self.window_indices[pos] = target;
         self.resort_windows_by_index();
-        true
+        Ok(())
+    }
+
+    /// Make room at display index `idx` by pushing every window at `idx` or
+    /// above one index higher, tmux's `winlink_shuffle_up`. Used by
+    /// move-window/link-window `-a` (after) and `-b` (before).
+    pub fn shuffle_window_indices_up(&mut self, idx: usize) {
+        if !self.window_indices_valid() { return; }
+        for wi in self.window_indices.iter_mut() {
+            if *wi >= idx { *wi += 1; }
+        }
+    }
+
+    /// Renumber every window contiguously from `base-index`, tmux's
+    /// `session_renumber_windows` (what `move-window -r` runs).
+    pub fn renumber_windows(&mut self) {
+        if !self.window_indices_valid() { return; }
+        self.renumber_windows_contiguous();
+    }
+
+    /// Apply one move-window request, tmux cmd-move-window.c order of
+    /// operations, shared by the server, the CLI and the in-process command
+    /// prompt so all three agree (issue #602).
+    ///
+    /// `src`/`dst` are RAW target specs. The error string is what tmux prints
+    /// on stderr and exits 1 with; `-k` (kill the occupant of an index already
+    /// in use) is the caller's job, because only the server owns PTY teardown:
+    /// it sees `index in use: N` and may kill and retry.
+    pub fn move_window(
+        &mut self,
+        src: Option<&str>,
+        dst: Option<&str>,
+        detach: bool,
+        renumber: bool,
+        after: bool,
+        before: bool,
+    ) -> Result<(), String> {
+        // -r renumbers the session and ignores the window target entirely.
+        if renumber {
+            self.renumber_windows();
+            return Ok(());
+        }
+        if self.windows.is_empty() { return Err("can't find window".to_string()); }
+        // Source: -s, else the current window (tmux's `.source` default).
+        let spos = match src {
+            Some(s) => self.resolve_window_spec(s, false)?.pos()
+                .ok_or_else(|| format!("can't find window: {}", s))?,
+            None => self.active_idx.min(self.windows.len() - 1),
+        };
+        // Destination resolved with CMD_FIND_WINDOW_INDEX, so a number naming
+        // no window is a free slot rather than an error. A bare `move-window`
+        // with no -t takes the next free index.
+        let mut idx = match dst {
+            Some(d) => match self.resolve_window_spec(d, true)? {
+                WindowTarget::Pos(p) => self.win_display_index(p),
+                WindowTarget::FreeIndex(i) => i,
+            },
+            None => self.alloc_window_index(),
+        };
+        // -a / -b push the destination and everything above it up by one so the
+        // moved window lands after / before the target (winlink_shuffle_up).
+        if after || before {
+            if after { idx += 1; }
+            self.shuffle_window_indices_up(idx);
+        }
+        if self.win_display_index(spos) == idx { return Ok(()); }
+        let moved_id = self.windows.get(spos).map(|w| w.id);
+        // Occupied and no -k: tmux's "index in use: N" at exit 1. This used to
+        // be a discarded `false`, so the command exited 0 having done nothing.
+        if let Some(occupant) = self.win_pos(idx) {
+            if occupant != spos { return Err(format!("index in use: {}", idx)); }
+        }
+        self.move_window_to_index(spos, idx)?;
+        // Without -d the moved window becomes current and the window that WAS
+        // current becomes the last window (tmux passes `!dflag` to
+        // server_link_window as its select flag).
+        if !detach {
+            if let Some(id) = moved_id {
+                if let Some(newpos) = self.windows.iter().position(|w| w.id == id) {
+                    let prev = self.active_idx;
+                    if prev != newpos {
+                        self.last_window_idx = prev;
+                        self.active_idx = newpos;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Vec position of the window a move-window `-k` would have to kill first:
+    /// the current occupant of the destination index, when it is not the source
+    /// itself. Only the server can act on it (PTY teardown lives there).
+    pub fn move_window_kill_target(
+        &self,
+        src: Option<&str>,
+        dst: Option<&str>,
+    ) -> Option<usize> {
+        let d = dst?;
+        let spos = match src {
+            Some(s) => self.resolve_window_spec(s, false).ok()?.pos()?,
+            None => self.active_idx,
+        };
+        match self.resolve_window_spec(d, true).ok()? {
+            WindowTarget::Pos(p) if p != spos => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Resolve a tmux window target spec against this session, the single
+    /// resolver every window-target path shares (issue #602).
+    ///
+    /// `spec` is a whole `-t`/`-s` value: an optional `session:` prefix is
+    /// dropped, because routing already picked the server. What is left is
+    /// resolved the way tmux's `cmd_find_get_window_with_session` does, in the
+    /// same order: `@id`, `+N`/`-N` offsets, the symbolic `!`/`^`/`$` (and
+    /// their `{last}`/`{start}`/`{end}`/`{next}`/`{previous}` spellings), a
+    /// display index, then an exact window name.
+    ///
+    /// `index_ok` mirrors tmux's `CMD_FIND_WINDOW_INDEX`, which only
+    /// move-window's and link-window's `-t` set:
+    ///   * set   - `+N`/`-N` are ARITHMETIC on the current window's display
+    ///             index, and a number naming no window is a free destination
+    ///             index rather than an error.
+    ///   * clear - `+N`/`-N` step N places through the session's ordered window
+    ///             list, wrapping (tmux `winlink_next_by_number`), and a number
+    ///             naming no window is `can't find window: N`.
+    ///
+    /// Before this existed, `swap-window -t +1` reached the server as the
+    /// unsigned 1 (Rust's `usize` parser accepts a leading `+`), `-t -1` never
+    /// left the CLI because it was read as a session name, and an index that
+    /// named no window silently fell back to a raw Vec position.
+    pub fn resolve_window_spec(&self, spec: &str, index_ok: bool) -> Result<WindowTarget, String> {
+        let raw = spec.trim();
+        // Drop a leading `session:`; tmux splits on the FIRST colon too.
+        let body = match raw.find(':') { Some(p) => &raw[p + 1..], None => raw };
+        let body = body.trim();
+        // tmux reports only the WINDOW part: `swap-window -t p:77` prints
+        // "can't find window: 77", not the whole "p:77".
+        let missing = || format!("can't find window: {}", body);
+        if self.windows.is_empty() { return Err(missing()); }
+        let last_pos = self.windows.len() - 1;
+        // `sess:` with nothing after it (and a bare `-t sess`) means the
+        // session's current window.
+        if body.is_empty() { return Ok(WindowTarget::Pos(self.active_idx.min(last_pos))); }
+        // tmux's symbolic spellings (cmd-find.c window_table).
+        let body = match body {
+            "{start}" => "^",
+            "{last}" => "!",
+            "{end}" => "$",
+            "{next}" => "+",
+            "{previous}" => "-",
+            other => other,
+        };
+        if let Some(id) = body.strip_prefix('@') {
+            let id: usize = id.parse().map_err(|_| missing())?;
+            return self.windows.iter().position(|w| w.id == id)
+                .map(WindowTarget::Pos).ok_or_else(missing);
+        }
+        if let Some(digits) = body.strip_prefix(['+', '-']) {
+            let forward = body.starts_with('+');
+            if !digits.is_empty() && !digits.chars().all(|c| c.is_ascii_digit()) {
+                return Err(missing());
+            }
+            let n: usize = if digits.is_empty() { 1 } else { digits.parse().map_err(|_| missing())? };
+            let cur = self.active_idx.min(last_pos);
+            if index_ok {
+                // CMD_FIND_WINDOW_INDEX: arithmetic on the display index.
+                let base = self.win_display_index(cur);
+                let idx = if forward {
+                    base.checked_add(n).ok_or_else(missing)?
+                } else {
+                    base.checked_sub(n).ok_or_else(missing)?
+                };
+                return Ok(match self.win_pos(idx) {
+                    Some(p) => WindowTarget::Pos(p),
+                    None => WindowTarget::FreeIndex(idx),
+                });
+            }
+            // winlink_next_by_number / winlink_previous_by_number: N steps
+            // through the ordered list, wrapping at either end. NOT index
+            // arithmetic: with windows 0, 2, 9, 10, `+1` from 2 is 9.
+            let len = self.windows.len();
+            let step = n % len;
+            let pos = if forward { (cur + step) % len } else { (cur + len - step) % len };
+            return Ok(WindowTarget::Pos(pos));
+        }
+        match body {
+            "!" => {
+                let p = self.last_window_idx;
+                if p < self.windows.len() { Ok(WindowTarget::Pos(p)) } else { Err(missing()) }
+            }
+            "^" => Ok(WindowTarget::Pos(0)),
+            "$" => Ok(WindowTarget::Pos(last_pos)),
+            _ => {
+                if body.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(idx) = body.parse::<usize>() {
+                        if let Some(p) = self.win_pos(idx) { return Ok(WindowTarget::Pos(p)); }
+                        if index_ok { return Ok(WindowTarget::FreeIndex(idx)); }
+                        return Err(missing());
+                    }
+                }
+                // Exact name. tmux refuses an ambiguous match rather than
+                // picking one, so more than one hit is still "can't find".
+                let mut hit = None;
+                for (i, w) in self.windows.iter().enumerate() {
+                    if w.name == body {
+                        if hit.is_some() { return Err(missing()); }
+                        hit = Some(i);
+                    }
+                }
+                hit.map(WindowTarget::Pos).ok_or_else(missing)
+            }
+        }
     }
 
     /// Display (tmux-style) index of the window at Vec position `pos`.
@@ -1114,9 +1374,13 @@ impl AppState {
 
     /// Keep `windows` and `window_indices` sorted ascending by index, preserving
     /// which window is active by re-resolving `active_idx` via the window id.
+    /// `last_window_idx` is a Vec position too and is re-resolved the same way,
+    /// or a move-window would leave `#{window_last_flag}` pointing at whichever
+    /// window happened to slide into the old slot.
     fn resort_windows_by_index(&mut self) {
         if !self.window_indices_valid() { return; }
         let active_id = self.windows.get(self.active_idx).map(|w| w.id);
+        let last_id = self.windows.get(self.last_window_idx).map(|w| w.id);
         let mut order: Vec<usize> = (0..self.windows.len()).collect();
         order.sort_by_key(|&i| self.window_indices[i]);
         if order.iter().enumerate().all(|(i, &o)| i == o) { return; } // already sorted
@@ -1135,6 +1399,11 @@ impl AppState {
         if let Some(aid) = active_id {
             if let Some(p) = self.windows.iter().position(|w| w.id == aid) {
                 self.active_idx = p;
+            }
+        }
+        if let Some(lid) = last_id {
+            if let Some(p) = self.windows.iter().position(|w| w.id == lid) {
+                self.last_window_idx = p;
             }
         }
     }
@@ -1694,12 +1963,40 @@ pub enum CtrlReq {
     /// `run-shell "helper --path '#{pane_current_path}'"` handed the helper that
     /// literal string.
     ExpandFormat(String, mpsc::Sender<String>),
-    MoveWindow(Option<usize>),
-    // (source display index, target display index, reply); source None =
-    // active window. #559: the reply reports "can't find window: N" when
-    // either side does not resolve, so swap-window can exit 1 instead of
-    // silently no-opping (tmux parity).
-    SwapWindow(Option<usize>, usize, mpsc::Sender<Result<(), String>>),
+    /// move-window. `src`/`dst` are RAW tmux target specs, resolved on the
+    /// server against the live window list by `AppState::resolve_window_spec`.
+    ///
+    /// It used to carry only the destination as a plain number, so `-s` had
+    /// nowhere to go and the handler always moved the ACTIVE window; `-t +1`
+    /// arrived as the unsigned 1; and there was no reply channel, so every
+    /// refusal (`index in use`, unknown source) exited 0 (issue #602).
+    MoveWindow {
+        src: Option<String>,
+        dst: Option<String>,
+        /// -d: leave the current window alone instead of selecting the moved one.
+        detach: bool,
+        /// -k: kill whatever window already holds the destination index.
+        kill: bool,
+        /// -r: renumber the session's windows contiguously (ignores src/dst).
+        renumber: bool,
+        /// -a / -b: insert after / before the destination instead of at it.
+        after: bool,
+        before: bool,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
+    /// swap-window. `src` (`-s`, default the current window) and `dst` (`-t`)
+    /// are RAW tmux target specs. #559: the reply reports "can't find window: N"
+    /// when either side does not resolve, so swap-window can exit 1 instead of
+    /// silently no-opping (tmux parity).
+    SwapWindow {
+        src: Option<String>,
+        dst: String,
+        /// -d. tmux's swap-window selects the destination index only WITH -d
+        /// (cmd-swap-window.c `if (args_has(args, 'd'))`); without it the
+        /// current window number does not move.
+        detach: bool,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
     /// link-window: (source window index, target insertion index)
     LinkWindow(Option<usize>, Option<usize>),
     UnlinkWindow,
@@ -2326,3 +2623,7 @@ mod tests_issue450_heal_option;
 #[cfg(test)]
 #[path = "../tests-rs/test_base_index_rebase.rs"]
 mod tests_base_index_rebase;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue601_602_move_swap_window.rs"]
+mod tests_issue601_602_move_swap_window;

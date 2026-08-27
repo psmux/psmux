@@ -1980,21 +1980,18 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                // Destination: `-t <win>` (accept ':'-prefixed) or bare positional.
-                let target = parts.windows(2).find(|w| w[0] == "-t")
-                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok())
-                    .or_else(|| parts[1..].iter()
-                        .filter(|a| !a.starts_with('-'))
-                        .find_map(|s| s.trim_start_matches(':').parse::<usize>().ok()));
-                if let Some(t) = target {
-                    if app.window_indices_valid() {
-                        app.move_active_window_to_index(t);
-                    } else if t < app.windows.len() && app.active_idx != t {
-                        let win = app.windows.remove(app.active_idx);
-                        let insert_idx = if t > app.active_idx { t - 1 } else { t };
-                        app.windows.insert(insert_idx.min(app.windows.len()), win);
-                        app.active_idx = insert_idx.min(app.windows.len() - 1);
-                    }
+                // Same shared resolver the server path uses, so the command
+                // prompt and a config `move-window` agree with the CLI on what
+                // `-s`, `+1` and `{last}` mean (issue #602).
+                let src = parts.windows(2).find(|w| w[0] == "-s").map(|w| w[1].to_string());
+                let dst = parts.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string())
+                    .or_else(|| parts[1..].iter().find(|a| !a.starts_with('-')).map(|s| s.to_string()));
+                let has = |f: &str| parts[1..].iter().any(|a| *a == f);
+                if let Err(msg) = app.move_window(
+                    src.as_deref(), dst.as_deref(),
+                    has("-d"), has("-r"), has("-a"), has("-b"))
+                {
+                    app.status_message = Some((format!("move-window: {}", msg), std::time::Instant::now(), None));
                 }
             }
         }
@@ -2002,18 +1999,33 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                let src = parts.windows(2).find(|w| w[0] == "-s")
-                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
-                let target = parts.windows(2).find(|w| w[0] == "-t")
-                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok())
-                    .or_else(|| parts[1..].iter()
-                        .filter(|a| !a.starts_with('-'))
-                        .find_map(|s| s.trim_start_matches(':').parse::<usize>().ok()));
-                if let Some(t) = target {
-                    let spos = match src { Some(d) => app.win_pos(d).unwrap_or(d), None => app.active_idx };
-                    let tpos = app.win_pos(t).unwrap_or(t);
-                    if spos != tpos && spos < app.windows.len() && tpos < app.windows.len() {
+                let src = parts.windows(2).find(|w| w[0] == "-s").map(|w| w[1].to_string());
+                let dst = parts.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string())
+                    .or_else(|| parts[1..].iter().find(|a| !a.starts_with('-')).map(|s| s.to_string()));
+                let detach = parts[1..].iter().any(|a| *a == "-d");
+                let resolved = dst.as_deref().ok_or_else(|| "can't find window: ".to_string())
+                    .and_then(|d| {
+                        let spos = match src.as_deref() {
+                            Some(s) => app.resolve_window_spec(s, false)?.pos()
+                                .ok_or_else(|| format!("can't find window: {}", s))?,
+                            None => app.active_idx,
+                        };
+                        let tpos = app.resolve_window_spec(d, false)?.pos()
+                            .ok_or_else(|| format!("can't find window: {}", d))?;
+                        Ok((spos, tpos))
+                    });
+                match resolved {
+                    Ok((spos, tpos)) if spos != tpos => {
                         app.windows.swap(spos, tpos);
+                        // tmux selects the destination index only WITH -d.
+                        if detach && app.active_idx != tpos {
+                            app.last_window_idx = app.active_idx;
+                            app.active_idx = tpos;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(msg) => {
+                        app.status_message = Some((format!("swap-window: {}", msg), std::time::Instant::now(), None));
                     }
                 }
             }

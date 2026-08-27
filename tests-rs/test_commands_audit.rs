@@ -311,21 +311,35 @@ fn findw_alias_works() {
 
 #[test]
 fn move_window_changes_position() {
+    // `-t` names a display INDEX, and tmux refuses one another window already
+    // holds. Verified on tmux 3.4 with 0:first* 1:second 2:third:
+    //   move-window -t 2  ->  rc 1, "index in use: 2", list unchanged
+    //   move-window -t 5  ->  rc 0, 1:second 2:third 5:first*
+    // This used to splice the Vec instead, which produced an order tmux never
+    // produces for any layout with a gap (issue #602).
     let mut app = mock_app_with_windows(&["first", "second", "third"]);
     app.active_idx = 0; // "first" is active
     execute_command_string(&mut app, "move-window -t 2").unwrap();
-    // After move, "first" should now be at position 1 (moved toward index 2)
     let names: Vec<&str> = app.windows.iter().map(|w| w.name.as_str()).collect();
-    assert_eq!(names[0], "second", "second should be at 0 after move");
-    assert!(names.contains(&"first"), "first should still exist");
+    assert_eq!(names, vec!["first", "second", "third"],
+        "an occupied destination is refused, so nothing moves");
+
+    execute_command_string(&mut app, "move-window -t 5").unwrap();
+    let names: Vec<&str> = app.windows.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(names, vec!["second", "third", "first"], "first moved to index 5");
+    assert_eq!(app.window_indices, vec![1, 2, 5]);
+    assert_eq!(app.windows[app.active_idx].name, "first",
+        "without -d the moved window stays current");
 }
 
 #[test]
 fn movew_alias_works() {
     let mut app = mock_app_with_windows(&["a", "b", "c"]);
     app.active_idx = 2;
-    execute_command_string(&mut app, "movew -t 0").unwrap();
-    assert_eq!(app.windows[0].name, "c", "moving window 2 to position 0");
+    execute_command_string(&mut app, "movew -t 7").unwrap();
+    assert_eq!(app.window_indices, vec![0, 1, 7], "c took index 7");
+    assert_eq!(app.windows[2].name, "c");
+    assert_eq!(app.windows[app.active_idx].name, "c");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

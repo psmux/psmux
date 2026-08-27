@@ -803,6 +803,29 @@ fn kill_window_at(app: &mut AppState, pos: usize) {
     }
 }
 
+/// Apply one move-window request. The move itself lives on `AppState` so the
+/// CLI, the command prompt and this path cannot drift; the only extra the
+/// server can do is `-k`, which kills the window occupying the destination
+/// index (PTY teardown is server-only).
+fn move_window_request(
+    app: &mut AppState,
+    src: Option<&str>,
+    dst: Option<&str>,
+    detach: bool,
+    kill: bool,
+    renumber: bool,
+    after: bool,
+    before: bool,
+) -> Result<(), String> {
+    // -a/-b make room by shuffling, so they never collide and never need -k.
+    if kill && !renumber && !after && !before {
+        if let Some(occupant) = app.move_window_kill_target(src, dst) {
+            kill_window_at(app, occupant);
+        }
+    }
+    app.move_window(src, dst, detach, renumber, after, before)
+}
+
 fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_base: &str) {
     *guard = None; // drop releases + closes the old name's mutex
     *guard = crate::platform::acquire_session_mutex(new_base);
@@ -1535,8 +1558,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::PaneForwardResize(..) => "PaneForwardResize",
                         CtrlReq::PaneForwardStatus(..) => "PaneForwardStatus",
                         CtrlReq::PaneForwardKill(..) => "PaneForwardKill",
-                        CtrlReq::MoveWindow(..) => "MoveWindow",
-                        CtrlReq::SwapWindow(..) => "SwapWindow",
+                        CtrlReq::MoveWindow { .. } => "MoveWindow",
+                        CtrlReq::SwapWindow { .. } => "SwapWindow",
                         _ => "",
                     };
                     match req {
@@ -4305,47 +4328,61 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                     meta_dirty = true;
                 }
-                CtrlReq::MoveWindow(target) => {
-                    if let Some(t) = target {
-                        if app.window_indices_valid() {
-                            // t is a display index; give it to the active window.
-                            app.move_active_window_to_index(t);
-                        } else if t < app.windows.len() && app.active_idx != t {
-                            // legacy Vec-position move (mock AppState)
-                            let win = app.windows.remove(app.active_idx);
-                            let insert_idx = if t > app.active_idx { t - 1 } else { t };
-                            app.windows.insert(insert_idx.min(app.windows.len()), win);
-                            app.active_idx = insert_idx.min(app.windows.len() - 1);
+                CtrlReq::MoveWindow { src, dst, detach, kill, renumber, after, before, resp } => {
+                    // tmux cmd-move-window.c.
+                    let outcome = move_window_request(
+                        &mut app, src.as_deref(), dst.as_deref(),
+                        detach, kill, renumber, after, before);
+                    match outcome {
+                        Ok(()) => {
+                            resize_all_panes(&mut app);
+                            let _ = resp.send(Ok(()));
                         }
-                    }
-                }
-                CtrlReq::SwapWindow(src, target, resp) => {
-                    // Both are display indices; map to Vec positions honoring gaps.
-                    // The two windows trade Vec positions while `window_indices`
-                    // stays put, so they exchange display numbers (tmux swap-window).
-                    // #559: an index that resolves to no window is an error the
-                    // caller must see (tmux: "can't find window: N", exit 1);
-                    // it used to fall through the bounds check as a silent no-op.
-                    let spos = match src { Some(d) => app.win_pos(d).unwrap_or(d), None => app.active_idx };
-                    let tpos = app.win_pos(target).unwrap_or(target);
-                    let bad: Option<String> = if spos >= app.windows.len() {
-                        Some(format!("can't find window: {}", src.unwrap_or(spos)))
-                    } else if tpos >= app.windows.len() {
-                        Some(format!("can't find window: {}", target))
-                    } else {
-                        None
-                    };
-                    match bad {
-                        Some(msg) => {
+                        Err(msg) => {
                             // Persistent (TUI) clients have no reply stream for
                             // this path; surface the error in the status bar
                             // like kill-window does.
+                            app.status_message = Some((format!("move-window: {}", msg), Instant::now(), None));
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
+                }
+                CtrlReq::SwapWindow { src, dst, detach, resp } => {
+                    // The two windows trade Vec positions while `window_indices`
+                    // stays put, so they exchange display numbers (tmux swap-window
+                    // swaps the two winlinks' window pointers, leaving the indices
+                    // and therefore the current window NUMBER alone).
+                    // #559: a spec that resolves to no window is an error the
+                    // caller must see (tmux: "can't find window: N", exit 1).
+                    let resolved = (|| -> Result<(usize, usize), String> {
+                        let spos = match src.as_deref() {
+                            Some(s) => app.resolve_window_spec(s, false)?.pos()
+                                .ok_or_else(|| format!("can't find window: {}", s))?,
+                            None => app.active_idx,
+                        };
+                        let tpos = app.resolve_window_spec(&dst, false)?.pos()
+                            .ok_or_else(|| format!("can't find window: {}", dst))?;
+                        Ok((spos, tpos))
+                    })();
+                    match resolved {
+                        Err(msg) => {
                             app.status_message = Some((format!("swap-window: {}", msg), Instant::now(), None));
                             let _ = resp.send(Err(msg));
                         }
-                        None => {
+                        Ok((spos, tpos)) => {
                             if spos != tpos {
                                 app.windows.swap(spos, tpos);
+                                // tmux only re-selects WITH -d, and it selects the
+                                // DESTINATION index (cmd-swap-window.c), which now
+                                // holds the window that used to be the source.
+                                if detach && tpos < app.windows.len() {
+                                    let prev = app.active_idx;
+                                    if prev != tpos {
+                                        app.last_window_idx = prev;
+                                        app.active_idx = tpos;
+                                    }
+                                }
+                                resize_all_panes(&mut app);
                             }
                             let _ = resp.send(Ok(()));
                         }
