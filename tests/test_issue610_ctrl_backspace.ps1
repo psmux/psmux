@@ -169,7 +169,7 @@ set TMUX=
 set TMUX_PANE=
 set PSMUX=
 set NO_COLOR=
-"$PSMUX" -L $SOCK -f "$emptyConf" new-session -s %1 -x 120 -y 30 "pwsh -NoLogo -NoProfile -NoExit -Command \"function prompt { 'PSX> ' }\""
+"$PSMUX" -L $SOCK -f "$emptyConf" new-session -s %1 -x 120 -y 30 "pwsh -NoLogo -NoProfile -NoExit"
 "@ | Set-Content -Path $launchShell -Encoding ASCII
 
 $launchLog = "$env:TEMP\psmux_610_launch_log.cmd"
