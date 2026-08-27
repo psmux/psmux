@@ -67,7 +67,7 @@ fn extract_confirm_command(args: &str) -> String {
 }
 
 /// Build a send-key name with modifier prefix (e.g. "C-Left", "S-Right", "C-S-Up").
-fn modified_key_name(base: &str, mods: KeyModifiers) -> String {
+pub(crate) fn modified_key_name(base: &str, mods: KeyModifiers) -> String {
     let mut prefix = String::new();
     if mods.contains(KeyModifiers::CONTROL) { prefix.push_str("C-"); }
     if mods.contains(KeyModifiers::ALT) { prefix.push_str("M-"); }
@@ -4238,7 +4238,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     { cmd_batch.push("send-key tab\n".into()); }
                                 }
                                 KeyCode::BackTab => { cmd_batch.push("send-key btab\n".into()); }
-                                KeyCode::Backspace => { cmd_batch.push("send-key backspace\n".into()); }
+                                // Backspace has to carry its modifiers like every
+                                // other special key here (issue #610).  Naming it
+                                // "backspace" unconditionally threw Ctrl away on the
+                                // wire, so the server could only ever write a plain
+                                // 0x7f and no bind-key C-BSpace could match.  The
+                                // unmodified case still lowercases to "backspace",
+                                // exactly as before.
+                                KeyCode::Backspace => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Backspace", key.modifiers))); }
                                 KeyCode::Delete => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Delete", key.modifiers))); }
                                 KeyCode::Esc => { cmd_batch.push("send-key esc\n".into()); }
                                 KeyCode::Left => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Left", key.modifiers))); }

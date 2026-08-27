@@ -1764,6 +1764,35 @@ pub fn parse_modified_special_key(s: &str) -> Option<String> {
             let sm = (bits | 1) + 1;
             Some(format!("\x1b[9;{}~", sm))
         }
+        // Backspace is the one modified special key whose Windows encoding is a
+        // RAW BYTE rather than a CSI sequence, so it cannot use `m` (issue #610).
+        //
+        // Measured against a real pseudoconsole (the same thing psmux gives a
+        // pane), in both directions:
+        //   * ConPTY's input parser turns the byte 0x7f into VK_BACK with no
+        //     modifiers, and the byte 0x08 into VK_BACK with LEFT_CTRL_PRESSED.
+        //   * conhost's own record to VT encoder produces exactly those two
+        //     bytes for Backspace and Ctrl+Backspace, and 1b 7f for Alt+Backspace.
+        // So 0x08 is not an approximation of Ctrl+Backspace on Windows, it IS
+        // the encoding, and it is what a record reading app such as PSReadLine
+        // needs to run BackwardKillWord.
+        //
+        // A CSI form would deliver NOTHING: ESC [ 127;5 u, ESC [ 8;5 u and
+        // ESC [ 27;5;127 ~ were all measured to be silently discarded by the
+        // ConPTY input parser, producing zero input records.
+        //
+        // Alt takes the usual ESC prefix, matching tmux 3.4, whose
+        // `send-keys M-BSpace` writes 1b 7f into the pane.  Shift has no
+        // distinct encoding on either side (conhost sends plain 0x7f for
+        // Shift+Backspace), so S- collapses onto the unmodified byte.
+        "BSPACE" | "BACKSPACE" => {
+            let base = if bits & 4 != 0 { '\u{8}' } else { '\u{7f}' };
+            if bits & 2 != 0 {
+                Some(format!("\x1b{}", base))
+            } else {
+                Some(base.to_string())
+            }
+        }
         "LEFT" => Some(format!("\x1b[1;{}D", m)),
         "RIGHT" => Some(format!("\x1b[1;{}C", m)),
         "UP" => Some(format!("\x1b[1;{}A", m)),
@@ -3350,3 +3379,7 @@ mod tests_copy_mode_key_tables;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue596_copy_scroll_keys.rs"]
 mod tests_issue596_copy_scroll_keys;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue610_ctrl_backspace.rs"]
+mod tests_issue610_ctrl_backspace;
