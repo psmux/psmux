@@ -4329,20 +4329,29 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                 }
                 CtrlReq::MoveWindow { src, dst, detach, kill, renumber, after, before, resp } => {
-                    // tmux cmd-move-window.c.
+                    // tmux cmd-move-window.c. Both outcomes mark the state
+                    // dirty: an attached client renders its window list from
+                    // the frame the server pushes, and with neither flag set
+                    // the status bar kept the pre-move list until some
+                    // UNRELATED command happened to dirty the state (#601).
                     let outcome = move_window_request(
                         &mut app, src.as_deref(), dst.as_deref(),
                         detach, kill, renumber, after, before);
                     match outcome {
                         Ok(()) => {
                             resize_all_panes(&mut app);
+                            state_dirty = true;
+                            meta_dirty = true;
                             let _ = resp.send(Ok(()));
                         }
                         Err(msg) => {
                             // Persistent (TUI) clients have no reply stream for
                             // this path; surface the error in the status bar
-                            // like kill-window does.
+                            // like kill-window does. That message is only ever
+                            // drawn if the frame is pushed, so it needs the
+                            // dirty flag as much as the success path does.
                             app.status_message = Some((format!("move-window: {}", msg), Instant::now(), None));
+                            state_dirty = true;
                             let _ = resp.send(Err(msg));
                         }
                     }
@@ -4367,6 +4376,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     match resolved {
                         Err(msg) => {
                             app.status_message = Some((format!("swap-window: {}", msg), Instant::now(), None));
+                            state_dirty = true;
                             let _ = resp.send(Err(msg));
                         }
                         Ok((spos, tpos)) => {
@@ -4384,6 +4394,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                                 resize_all_panes(&mut app);
                             }
+                            // The window LIST changed even though no pane
+                            // content did, so the dump-state fast path would
+                            // answer "NC" and the attached client would keep
+                            // rendering the old order (#601).
+                            state_dirty = true;
+                            meta_dirty = true;
                             let _ = resp.send(Ok(()));
                         }
                     }
