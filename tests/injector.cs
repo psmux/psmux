@@ -33,7 +33,19 @@ class Injector
     const uint SHIFT_PRESSED = 0x0010;
     const uint LEFT_ALT_PRESSED = 0x0002;
 
-    [StructLayout(LayoutKind.Sequential)]
+    // CharSet.Unicode is LOAD BEARING on both of these structs, and its absence
+    // was a silent injector bug found while testing issue #616.
+    //
+    // StructLayout defaults to CharSet.Ansi, which makes the marshaller convert
+    // `char UnicodeChar` to a SINGLE ANSI byte in the console's input code page
+    // (437 here). ASCII survived that by accident: the ANSI byte lands at the
+    // low half of the WCHAR field and the padding byte above it is zero, so the
+    // native side reads the right character. Everything outside the code page
+    // was converted to '?' before WriteConsoleInputW ever saw it, so {U:044B}
+    // injected a literal question mark and every non-ASCII injection test was
+    // passing on a character it never actually sent. Verified with a
+    // ReadConsoleInputW probe: 'ы' in, U+003F out.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct KEY_EVENT_RECORD
     {
         public int bKeyDown;
@@ -44,7 +56,7 @@ class Injector
         public uint dwControlKeyState;
     }
 
-    [StructLayout(LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
     struct INPUT_RECORD
     {
         [FieldOffset(0)] public ushort EventType;

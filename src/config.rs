@@ -2518,3 +2518,7 @@ mod tests_issue536_config_quoted_whitespace;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue606_repeat_time.rs"]
 mod tests_issue606_repeat_time;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue616_unicode_bind.rs"]
+mod tests_issue616_unicode_bind;

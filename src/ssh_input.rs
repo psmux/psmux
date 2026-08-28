@@ -2245,6 +2245,10 @@ mod tests;
 mod tests_issue457_ssh_mouse_build_gate;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue616_vt_unicode_key.rs"]
+mod tests_issue616_vt_unicode_key;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue573_mouse_force_override.rs"]
 mod tests_issue573_mouse_force_override;
 
