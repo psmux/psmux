@@ -33,12 +33,28 @@
 # (`file:///C:/Windows/Temp` came back as the literal `/C:/Windows/Temp`),
 # never handled OSC 9;9 at all, and #{pane_current_path} never consulted it.
 #
-# The fix: translate an OSC 7/9;9 payload into a native Windows path
-# (/mnt/c/Users -> C:\Users, /home/gj -> \\wsl.localhost\Ubuntu\home\gj,
-# file:///C:/x -> C:\x, percent decoding), accept OSC 9;9, and let
-# #{pane_current_path} take whichever of the OSC report and the Win32 cwd
-# changed most recently.  Panes that never emit OSC keep the Win32 cwd exactly
-# as before.
+# The fix: accept OSC 9;9, translate an OSC 7/9;9 payload into a native Windows
+# path (/mnt/c/Users -> C:\Users, /home/gj -> \\wsl.localhost\Ubuntu\home\gj,
+# file:///C:/x -> C:\x, percent decoding), and gate which of the two readings
+# #{pane_current_path} trusts on WHETHER A VT BRIDGE IS IN THE PANE'S PROCESS
+# TREE (wsl.exe / wslhost.exe / a distro launcher / ssh.exe):
+#
+#   bridge present -> the Win32 cwd is known to be frozen, so an announcement,
+#                     if the pane made one, wins.  No announcement means the
+#                     Win32 reading is still used and the pane simply keeps the
+#                     last directory that was observable, which is what tmux
+#                     does when osdep_get_cwd returns NULL.
+#   no bridge      -> the Win32 cwd moves on every `cd` and stays authoritative.
+#                     An announcement is recorded in #{pane_path} but does NOT
+#                     move #{pane_current_path}.
+#
+# It is deliberately NOT "whichever changed most recently".  A native shell that
+# announces once and then stops (a file manager such as yazi or lf emits OSC 7
+# for the directory it is browsing) would otherwise pin the pane to a stale
+# directory for as long as the shell lived.  The bridge gate cannot do that: it
+# only ever overrides a reading that is already known to be frozen.  Parts A, B,
+# C and D below exist to pin exactly that, so a pane with no shell integration
+# behaves bit for bit as it did before this change.
 #
 # Layers: real detached sessions driven over the CLI, real pwsh / wsl / cygwin
 # bash / git bash children, the PEB probe as the ground truth for the Win32
