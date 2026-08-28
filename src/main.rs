@@ -36,6 +36,7 @@ mod proxy_pane;
 mod cross_session;
 mod cross_session_server;
 mod paths;
+mod wsl_path;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;

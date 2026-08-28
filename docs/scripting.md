@@ -346,8 +346,8 @@ not part of it. Capture again after any split you want to keep.
 | `#{pane_active}` | `1` if this pane is the active pane |
 | `#{pane_last}` | `1` if this was the previously active pane |
 | `#{pane_current_command}` | Foreground process name |
-| `#{pane_current_path}` | Current working directory of the pane |
-| `#{pane_path}` | Path reported by the pane itself, empty if none |
+| `#{pane_current_path}` | Current working directory of the pane. Under `wsl` or `ssh` this needs shell integration, see [the FAQ](faq.md) |
+| `#{pane_path}` | Path the pane announced over `OSC 7` or `OSC 9;9`, untranslated, empty if none |
 | `#{pane_start_command}` | Command the pane was started with |
 | `#{pane_pid}` | PID of the pane's shell |
 | `#{pane_tty}` | Pseudo terminal name, for example `/dev/pty1` |

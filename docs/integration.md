@@ -400,7 +400,8 @@ row per object. The full catalogue, including the human facing status bar variab
 | `#{pane_pid}` | `32944` | PID of the pane's shell, for process tree work |
 | `#{pane_tty}` | `/dev/pty1` | Pseudo terminal name |
 | `#{pane_current_command}` | `pwsh` | Foreground process name |
-| `#{pane_current_path}` | `C:\Projects\app` | Working directory, in native Windows form |
+| `#{pane_current_path}` | `C:\Projects\app` | Working directory, in native Windows form. Read from the foreground process. Inside `wsl` or `ssh` there is no Windows process that knows the answer, so it uses the directory the shell announced over `OSC 7` or `OSC 9;9` and keeps the last observed one when the shell announces nothing. See the WSL entry in [the FAQ](faq.md) |
+| `#{pane_path}` | `/mnt/c/Users` | Exactly what the shell announced over `OSC 7` or `OSC 9;9`, untranslated, or empty when it announced nothing |
 | `#{pane_dead}` | `0` | `1` when the process exited and `remain-on-exit` kept the pane |
 | `#{pane_in_mode}` | `0` | `1` when the pane is in copy mode or another mode |
 | `#{pane_mode}` | `copy-mode` | Name of the current mode, empty when in none |

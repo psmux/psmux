@@ -1363,17 +1363,57 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
         "pane_current_path" => {
             if let Some(p) = target_pane() {
-                // Layer 1: PEB walk (authoritative for local processes)
+                // What the shell last said about itself over OSC 7 / OSC 9;9,
+                // if anything.  Read once: the PEB walk below must not hold the
+                // parser lock.
+                let announced = p
+                    .term
+                    .lock()
+                    .ok()
+                    .and_then(|t| t.screen().path().map(str::to_owned));
+
+                // Layer 0 (issue #615): a pane running `wsl` or `ssh` has no
+                // Win32 process that knows where the shell is.  wsl.exe keeps
+                // the working directory it was created with forever, so the PEB
+                // walk below succeeds and confidently returns the directory the
+                // user was in BEFORE typing `wsl` -- which is exactly what made
+                // `split-window -c "#{pane_current_path}"` open the wrong
+                // folder.  When a bridge is in the tree, an announcement from
+                // the shell is the only real information available, so it wins.
+                //
+                // The bridge walk is deliberately behind `announced`: a pane
+                // with no shell integration never pays for it, and its
+                // behaviour is bit-for-bit what it was before.
+                if let Some(raw) = announced.as_deref() {
+                    if let Some(pid) = p.child_pid {
+                        if crate::platform::process_info::tree_has_vt_bridge_cached(pid) {
+                            if let Some(win) = crate::wsl_path::osc_cwd_to_windows(
+                                raw,
+                                crate::wsl_path::default_distro(),
+                            ) {
+                                return win;
+                            }
+                        }
+                    }
+                }
+
+                // Layer 1: PEB walk (authoritative for local processes -- pwsh,
+                // cmd, cygwin bash and git bash all move it on `cd`).
                 if let Some(pid) = p.child_pid {
                     if let Some(cwd) = crate::platform::process_info::get_foreground_cwd(pid) {
                         return cwd;
                     }
                 }
-                // Layer 2: OSC 7 path (works over SSH/WSL where PEB fails)
-                if let Ok(parser) = p.term.lock() {
-                    if let Some(osc_path) = parser.screen().path() {
-                        return osc_path.to_string();
+                // Layer 2: the announced path, translated to a native Windows
+                // path when it is a POSIX one (works where the PEB fails).
+                if let Some(raw) = announced.as_deref() {
+                    if let Some(win) = crate::wsl_path::osc_cwd_to_windows(
+                        raw,
+                        crate::wsl_path::default_distro(),
+                    ) {
+                        return win;
                     }
+                    return raw.to_string();
                 }
                 // Layer 3: fallback to server CWD
                 std::env::current_dir()

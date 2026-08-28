@@ -78,6 +78,29 @@ A: Use the `-p` flag with a percentage: `split-window -v -p 30` gives the new pa
 **Q: How do I open a new pane in the same directory?**
 A: Use `split-window -c "#{pane_current_path}"`. You can bind this in your config for convenience: `bind-key '"' split-window -v -c "#{pane_current_path}"`.
 
+**Q: `#{pane_current_path}` does not follow `cd` inside `wsl`. Why?**
+A: psmux answers `#{pane_current_path}` the way tmux does, by asking the operating system for the working directory of the pane's foreground process. That works for PowerShell, `cmd`, Cygwin bash and Git Bash, because their `cd` also moves the Win32 working directory. It cannot work for WSL: the shell you are typing at is a Linux process inside the WSL VM, and the only Windows processes in the pane are `wsl.exe` and `wslhost.exe`, whose working directory is fixed when they start and never moves. Nothing on the Windows side can see where the Linux shell went.
+
+The fix is shell integration: have the Linux shell announce its directory. Add this one line to `~/.bashrc` in the distro:
+
+```bash
+PROMPT_COMMAND='printf "\033]7;file://%s%s\033\\" "$HOSTNAME" "$PWD"'
+```
+
+or for zsh, in `~/.zshrc`:
+
+```zsh
+precmd() { printf '\033]7;file://%s%s\033\\' "$HOST" "$PWD"; }
+```
+
+psmux translates what it receives into a native Windows path, so `/mnt/c/Users` becomes `C:\Users` and a Linux only directory such as `/home/you` becomes `\\wsl.localhost/<distro>/home/you` (written with backslashes), which `split-window -c` can actually open. ConEmu's `OSC 9;9` form is accepted too, if you already emit that:
+
+```bash
+PROMPT_COMMAND='printf "\033]9;9;%s\033\\" "$PWD"'
+```
+
+This is optional. Without it nothing breaks: `#{pane_current_path}` simply keeps the last directory it could observe, which is where you were before you typed `wsl`. Note that Windows Terminal needs the same shell integration for its own "duplicate tab in the same directory", so many WSL users already have it.
+
 **Q: How do I prevent psmux from nesting inside itself?**
 A: psmux automatically detects when it is already running inside a psmux session and prevents accidental nesting. If you try to start `psmux` inside an existing session, it will warn you instead of creating a nested instance. To explicitly create a new session from within psmux, use the command prompt (`Prefix + :`) and type `new-session`.
 

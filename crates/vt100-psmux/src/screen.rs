@@ -828,6 +828,23 @@ impl Screen {
         }
     }
 
+    /// Store a path announced via ConEmu's `OSC 9 ; 9 ; <cwd>` (issue #615).
+    ///
+    /// Unlike OSC 7 this payload is a plain filesystem path, not a URL, so it
+    /// must NOT be percent-decoded: `%` is a legal Windows filename character
+    /// and `C:\tmp\100%20` is a directory name, not an escape.  ConEmu wraps
+    /// the value in double quotes and Windows Terminal does not, so both are
+    /// accepted.  Shares the OSC 7 slot: both answer the same question, and
+    /// the most recent announcement wins.
+    pub fn set_path_literal(&mut self, raw: &[u8]) {
+        if let Ok(s) = std::str::from_utf8(raw) {
+            let path = s.trim().trim_matches('"');
+            if !path.is_empty() {
+                self.osc7_path = Some(path.to_string());
+            }
+        }
+    }
+
     /// Returns the most recent OSC 9;4 progress indicator state, if any.
     /// `Some((state, value))` once an OSC 9;4 has been received, even when
     /// state==0 (hide); `None` when none has ever been received. Consumers

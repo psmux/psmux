@@ -238,6 +238,22 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 self.screen.set_progress(s, v);
                 self.callbacks.set_progress(&mut self.screen, s, v);
             }
+            [b"9", b"9", cwd_rest @ ..] if !cwd_rest.is_empty() => {
+                // OSC 9;9;<cwd> — ConEmu's "set working directory", the form
+                // Windows Terminal documents for shell integration and the one
+                // a WSL shell can emit to tell psmux where it really is
+                // (issue #615).  A Windows path may contain ';' (rare but
+                // legal), which the OSC splitter turned into extra params, so
+                // rejoin them.
+                let mut cwd = Vec::new();
+                for (i, part) in cwd_rest.iter().enumerate() {
+                    if i > 0 {
+                        cwd.push(b';');
+                    }
+                    cwd.extend_from_slice(part);
+                }
+                self.screen.set_path_literal(&cwd);
+            }
             [b"9999", ..] => {
                 self.screen.squelch_cleared = true;
             }

@@ -3295,6 +3295,43 @@ pub mod process_info {
         leaf
     }
 
+    /// Is a VT bridge (`wsl.exe`, `wslhost.exe`, `ssh.exe`, a distro launcher)
+    /// alive anywhere in the pane's process tree?  Issue #615.
+    ///
+    /// When one is, no Win32 process in the pane can answer "where is the
+    /// shell": `wsl.exe` keeps the working directory it was created with for
+    /// its whole life while the real shell moves around inside the distro (or
+    /// on another machine).  `#{pane_current_path}` uses this to decide that a
+    /// directory the shell announced over OSC 7 / OSC 9;9 outranks the PEB
+    /// reading it would otherwise trust.
+    ///
+    /// This is the render-path twin of `has_vt_bridge_descendant`: identical
+    /// walk, but off the shared cached snapshot, because it runs behind every
+    /// status-line repaint that mentions `#{pane_current_path}`.  It is only
+    /// ever reached for a pane that actually announced a directory, so a pane
+    /// without shell integration pays nothing.
+    pub fn tree_has_vt_bridge_cached(root_pid: u32) -> bool {
+        let entries = match process_table(RENDER_PATH_TTL) {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut queue: Vec<u32> = vec![root_pid];
+        let mut head = 0;
+        while head < queue.len() {
+            let parent = queue[head];
+            head += 1;
+            for (pid, ppid, name) in entries.iter() {
+                if *ppid == parent && *pid != root_pid && !queue.contains(pid) {
+                    if is_vt_bridge_exe(name) {
+                        return true;
+                    }
+                    queue.push(*pid);
+                }
+            }
+        }
+        false
+    }
+
     /// Get the CWD of the foreground process in the pane.
     pub fn get_foreground_cwd(pid: u32) -> Option<String> {
         if let Some(target) = find_foreground_child_pid(pid) {
@@ -3843,6 +3880,7 @@ pub mod process_info {
     pub fn get_deepest_foreground_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
+    pub fn tree_has_vt_bridge_cached(_root_pid: u32) -> bool { false }
     pub fn foreground_is_shell(_root_pid: u32) -> Option<bool> { None }
     pub fn foreground_is_vt_bridge(_root_pid: u32) -> bool { false }
     pub fn foreground_leaf_pid(_root_pid: u32) -> Option<u32> { None }
