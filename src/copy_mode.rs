@@ -719,46 +719,162 @@ pub fn save_latest_buffer(app: &mut AppState, file: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Search the active pane's screen content for a query string.
-/// Populates `app.copy_search_matches` with (row, col_start, col_end) tuples.
-/// If forward is true, sorts matches top-to-bottom; otherwise bottom-to-top.
+/// Geometry of the active pane's whole grid, as copy mode search needs it.
+/// `history` is the number of lines currently held in the scrollback buffer,
+/// `rows`/`cols` the size of the visible screen and `scrollback` the current
+/// scroll offset. An absolute line index `abs` runs 0..history+rows and maps
+/// to the visible row `abs - (history - scrollback)` whenever that is on
+/// screen. This mirrors tmux's `gd->hsize` / `gd->sy` / `data->oy` triple.
+struct GridGeometry {
+    history: usize,
+    rows: u16,
+    cols: u16,
+    scrollback: usize,
+}
+
+fn grid_geometry(app: &mut AppState) -> Option<GridGeometry> {
+    let win = app.windows.get_mut(app.active_idx)?;
+    let p = active_pane_mut(&mut win.root, &win.active_path)?;
+    let parser = p.term.lock().ok()?;
+    let screen = parser.screen();
+    Some(GridGeometry {
+        history: screen.scrollback_filled(),
+        rows: p.last_rows,
+        cols: p.last_cols,
+        scrollback: screen.scrollback(),
+    })
+}
+
+/// Read every line of the pane, scrollback first and then the visible screen,
+/// as one vector indexed by absolute line number.
+///
+/// The vt100 screen only ever exposes the rows currently framed by the scroll
+/// offset, so the whole buffer is walked one screenful at a time by moving the
+/// offset and restoring it afterwards. `Screen::rows` walks its iterator once
+/// per screenful, which keeps this linear in the size of the buffer.
+fn read_all_lines(app: &mut AppState) -> Option<(Vec<String>, GridGeometry)> {
+    let geom = grid_geometry(app)?;
+    let total = geom.history + geom.rows as usize;
+    let win = app.windows.get_mut(app.active_idx)?;
+    let p = active_pane_mut(&mut win.root, &win.active_path)?;
+    let mut parser = p.term.lock().ok()?;
+    let mut lines: Vec<String> = vec![String::new(); total];
+    let step = geom.rows.max(1) as usize;
+    let mut sb = geom.history;
+    loop {
+        parser.screen_mut().set_scrollback(sb);
+        let actual = parser.screen().scrollback();
+        // top absolute line currently framed by the viewport
+        let top = geom.history - actual;
+        for (r, text) in parser.screen().rows(0, geom.cols).enumerate() {
+            let abs = top + r;
+            if abs < total { lines[abs] = text; }
+        }
+        if actual == 0 { break; }
+        sb = actual.saturating_sub(step);
+    }
+    parser.screen_mut().set_scrollback(geom.scrollback);
+    Some((lines, geom))
+}
+
+/// Bring absolute line `abs` into view and park the copy cursor on it.
+///
+/// Ported from tmux `window_copy_scroll_to` (window-copy.c): a line already on
+/// screen never moves the viewport, otherwise the match is placed a quarter of
+/// a screen up from the bottom.
+pub fn scroll_to_abs_line(app: &mut AppState, abs: usize, col: u16) {
+    let geom = match grid_geometry(app) { Some(g) => g, None => return };
+    let rows = geom.rows.max(1) as usize;
+    let hist = geom.history;
+    let top = hist - geom.scrollback.min(hist);
+
+    let (new_scrollback, cy) = if abs >= top && abs < top + rows {
+        // Already visible: leave the viewport alone.
+        (geom.scrollback, abs - top)
+    } else {
+        let gap = rows / 4;
+        let offset = if abs < rows {
+            0
+        } else if abs + gap > hist + rows {
+            hist
+        } else {
+            (abs + gap).saturating_sub(rows)
+        };
+        (hist - offset.min(hist), abs.saturating_sub(offset))
+    };
+
+    let win = match app.windows.get_mut(app.active_idx) { Some(w) => w, None => return };
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
+    if let Ok(mut parser) = p.term.lock() {
+        parser.screen_mut().set_scrollback(new_scrollback);
+        app.copy_scroll_offset = parser.screen().scrollback();
+    }
+    app.copy_pos = Some((cy.min(rows - 1) as u16, col));
+}
+
+/// The copy cursor as an absolute line index plus a column.
+fn copy_cursor_abs(app: &mut AppState) -> (usize, u16) {
+    let geom = match grid_geometry(app) { Some(g) => g, None => return (0, 0) };
+    let (r, c) = get_copy_pos(app).unwrap_or((0, 0));
+    let top = geom.history - geom.scrollback.min(geom.history);
+    (top + r as usize, c)
+}
+
+/// Search the active pane for a query string across the WHOLE buffer, the
+/// scrollback history included, exactly as tmux `window_copy_search_jump`
+/// walks lines 0..gd->hsize + gd->sy - 1 (window-copy.c).
+///
+/// Populates `app.copy_search_matches` with (absolute_line, col_start,
+/// col_end) tuples ordered along the search direction, starting from the
+/// match nearest to the cursor, so `copy_search_matches[0]` is the hit a user
+/// pressing Enter expects and `n` walks on from there.
 pub fn search_copy_mode(app: &mut AppState, query: &str, forward: bool) {
     app.copy_search_matches.clear();
     app.copy_search_idx = 0;
     if query.is_empty() { return; }
 
-    let win = &mut app.windows[app.active_idx];
-    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
-    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return };
-    let screen = parser.screen();
-    let query_lower = query.to_lowercase();
-    let qlen = query_lower.len() as u16;
+    let (cur_abs, cur_col) = copy_cursor_abs(app);
+    let (lines, _geom) = match read_all_lines(app) { Some(v) => v, None => return };
 
-    // Scan all visible rows
-    for r in 0..p.last_rows {
-        // Build the row text
-        let mut row_text = String::with_capacity(p.last_cols as usize);
-        for c in 0..p.last_cols {
-            if let Some(cell) = screen.cell(r, c) {
-                let t = cell.contents();
-                if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
-            } else {
-                row_text.push(' ');
-            }
-        }
-        // Case-insensitive search
-        let row_lower = row_text.to_lowercase();
-        let mut start = 0;
-        while let Some(pos) = row_lower[start..].find(&query_lower) {
-            let col_start = (start + pos) as u16;
-            let col_end = col_start + qlen;
-            app.copy_search_matches.push((r, col_start, col_end));
-            start += pos + 1;
+    let query_lower = query.to_lowercase();
+    let qlen = query_lower.chars().count() as u16;
+
+    // Ascending absolute order first; the direction ordering is applied below.
+    let mut ascending: Vec<(usize, u16, u16)> = Vec::new();
+    for (abs, line) in lines.iter().enumerate() {
+        let lower = line.to_lowercase();
+        let mut start = 0usize;
+        while let Some(pos) = lower[start..].find(&query_lower) {
+            let byte_at = start + pos;
+            let col_start = lower[..byte_at].chars().count() as u16;
+            ascending.push((abs, col_start, col_start + qlen));
+            start = byte_at + 1;
+            if start >= lower.len() { break; }
         }
     }
+    if ascending.is_empty() { return; }
 
-    if !forward {
-        app.copy_search_matches.reverse();
+    // tmux starts the scan from the cursor and only then wraps, so order the
+    // list the same way: nearest hit in the search direction first.
+    if forward {
+        let after = |m: &(usize, u16, u16)| m.0 > cur_abs || (m.0 == cur_abs && m.1 > cur_col);
+        let split = ascending.iter().position(after).unwrap_or(ascending.len());
+        app.copy_search_matches.extend_from_slice(&ascending[split..]);
+        app.copy_search_matches.extend_from_slice(&ascending[..split]);
+    } else {
+        let before = |m: &(usize, u16, u16)| m.0 < cur_abs || (m.0 == cur_abs && m.1 < cur_col);
+        let count = ascending.iter().filter(|m| before(m)).count();
+        let mut descending = ascending;
+        descending.reverse();
+        // `descending` is bottom-to-top; the first `len - count` entries sit at
+        // or after the cursor, so rotate them to the back.
+        let split = descending.len() - count;
+        app.copy_search_matches.extend_from_slice(&descending[split..]);
+        app.copy_search_matches.extend_from_slice(&descending[..split]);
+    }
+
+    if let Some(&(abs, col, _)) = app.copy_search_matches.first() {
+        scroll_to_abs_line(app, abs, col);
     }
 }
 
@@ -773,8 +889,8 @@ pub fn search_next(app: &mut AppState) {
     } else {
         app.copy_search_idx = next;
     }
-    let (r, c, _) = app.copy_search_matches[app.copy_search_idx];
-    app.copy_pos = Some((r, c));
+    let (abs, c, _) = app.copy_search_matches[app.copy_search_idx];
+    scroll_to_abs_line(app, abs, c);
 }
 
 /// Move by WORD (whitespace-delimited) forward — W key
@@ -1034,8 +1150,8 @@ pub fn search_prev(app: &mut AppState) {
     } else {
         app.copy_search_idx -= 1;
     }
-    let (r, c, _) = app.copy_search_matches[app.copy_search_idx];
-    app.copy_pos = Some((r, c));
+    let (abs, c, _) = app.copy_search_matches[app.copy_search_idx];
+    scroll_to_abs_line(app, abs, c);
 }
 
 /// Compute the (start, end) row range for capture-pane given optional -S/-E
@@ -1782,3 +1898,7 @@ mod tests_capture_pane_fidelity;
 #[cfg(test)]
 #[path = "../tests-rs/test_copy_cancel_stale_state.rs"]
 mod tests_copy_cancel_stale_state;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue612_copy_search_scrollback.rs"]
+mod tests_issue612_copy_search_scrollback;

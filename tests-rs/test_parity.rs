@@ -471,7 +471,11 @@ fn search_next_wraps_by_default() {
     crate::copy_mode::search_next(&mut app);
     // Should wrap to index 0
     assert_eq!(app.copy_search_idx, 0);
-    assert_eq!(app.copy_pos, Some((0, 5)));
+    // Where the cursor lands is no longer a plain copy of the match tuple: the
+    // match carries an ABSOLUTE line number and copy_mode::scroll_to_abs_line
+    // maps it back onto the viewport, scrolling if the line is off screen
+    // (#612). That needs a real grid, so it is pinned in
+    // tests-rs/test_issue612_copy_search_scrollback.rs instead.
 }
 
 #[test]
@@ -492,7 +496,6 @@ fn search_next_advances_normally() {
     app.copy_search_idx = 0;
     crate::copy_mode::search_next(&mut app);
     assert_eq!(app.copy_search_idx, 1);
-    assert_eq!(app.copy_pos, Some((1, 10)));
 }
 
 #[test]
@@ -503,7 +506,6 @@ fn search_prev_wraps_by_default() {
     crate::copy_mode::search_prev(&mut app);
     // Should wrap to last index
     assert_eq!(app.copy_search_idx, 2);
-    assert_eq!(app.copy_pos, Some((2, 0)));
 }
 
 #[test]
@@ -524,7 +526,6 @@ fn search_prev_retreats_normally() {
     app.copy_search_idx = 2;
     crate::copy_mode::search_prev(&mut app);
     assert_eq!(app.copy_search_idx, 1);
-    assert_eq!(app.copy_pos, Some((1, 10)));
 }
 
 #[test]
@@ -555,7 +556,6 @@ fn search_next_single_match_wraps_to_self() {
     crate::copy_mode::search_next(&mut app);
     // Only one match, wraps to itself
     assert_eq!(app.copy_search_idx, 0);
-    assert_eq!(app.copy_pos, Some((5, 10)));
 }
 
 #[test]
@@ -566,7 +566,6 @@ fn search_prev_single_match_wraps_to_self() {
     crate::copy_mode::search_prev(&mut app);
     // Only one match, wraps to itself (last index = 0)
     assert_eq!(app.copy_search_idx, 0);
-    assert_eq!(app.copy_pos, Some((5, 10)));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -1230,10 +1230,13 @@ bind-key -T copy-mode-vi C-v send-keys -X rectangle-toggle
 
 | Name | Description |
 |------|-------------|
-| `search-forward` | Search forward. `search-forward-incremental` is an accepted synonym |
-| `search-backward` | Search backward. `search-backward-incremental` is an accepted synonym |
+| `search-forward [term]` | Search forward. With a term the search runs straight away, without one the prompt opens. `search-forward-incremental` is an accepted synonym |
+| `search-backward [term]` | Search backward. With a term the search runs straight away, without one the prompt opens. `search-backward-incremental` is an accepted synonym |
 | `search-again` | Repeat the last search in the same direction |
 | `search-reverse` | Repeat the last search in the opposite direction |
+
+Searching covers the whole pane buffer, the scrollback history included, and the
+viewport scrolls to bring an off screen match into view.
 
 ### Mode control
 

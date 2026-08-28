@@ -1057,12 +1057,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         let fwd = forward;
                         app.copy_search_query = query.clone();
                         app.copy_search_forward = fwd;
+                        // search_copy_mode already parks the cursor on the
+                        // first match, scrolling the viewport when that match
+                        // sits in the scrollback history (#612).
                         search_copy_mode(app, &query, fwd);
-                        // Jump to first match
-                        if !app.copy_search_matches.is_empty() {
-                            let (r, c, _) = app.copy_search_matches[0];
-                            app.copy_pos = Some((r, c));
-                        }
                     }
                     app.mode = Mode::CopyMode;
                     app.status_message = None;
@@ -2948,11 +2946,9 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     let fwd = forward;
                     app.copy_search_query = query.clone();
                     app.copy_search_forward = fwd;
+                    // search_copy_mode parks the cursor on the first match and
+                    // scrolls the viewport to it when it is in history (#612).
                     search_copy_mode(app, &query, fwd);
-                    if !app.copy_search_matches.is_empty() {
-                        let (r, c, _) = app.copy_search_matches[0];
-                        app.copy_pos = Some((r, c));
-                    }
                 }
                 app.mode = Mode::CopyMode;
                 app.status_message = None;

@@ -2919,15 +2919,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "scroll-up" => { scroll_copy_up(&mut app, 1); }
                         "scroll-down" => { scroll_copy_down(&mut app, 1); }
                         "scroll-middle" => { crate::copy_mode::scroll_middle(&mut app); }
-                        "search-forward" | "search-forward-incremental" => {
-                            app.mode = Mode::CopySearch { input: String::new(), forward: true };
-                            let prompt = "(search down) ".to_string();
-                            app.status_message = Some((prompt, std::time::Instant::now(), Some(0)));
-                        }
-                        "search-backward" | "search-backward-incremental" => {
-                            app.mode = Mode::CopySearch { input: String::new(), forward: false };
-                            let prompt = "(search up) ".to_string();
-                            app.status_message = Some((prompt, std::time::Instant::now(), Some(0)));
+                        // tmux takes an optional search term argument on all
+                        // four verbs (cmd-queue "send-keys -X search-backward
+                        // foo"). Without the argument the interactive prompt
+                        // opens, exactly as pressing `/` or `?` does.
+                        s if s == "search-forward" || s == "search-backward"
+                            || s == "search-forward-incremental"
+                            || s == "search-backward-incremental"
+                            || s.starts_with("search-forward ")
+                            || s.starts_with("search-backward ")
+                            || s.starts_with("search-forward-incremental ")
+                            || s.starts_with("search-backward-incremental ") =>
+                        {
+                            let fwd = s.starts_with("search-forward");
+                            let term = match s.find(' ') {
+                                Some(i) => s[i + 1..].trim().to_string(),
+                                None => String::new(),
+                            };
+                            if term.is_empty() {
+                                app.mode = Mode::CopySearch { input: String::new(), forward: fwd };
+                                let prompt = if fwd { "(search down) " } else { "(search up) " };
+                                app.status_message = Some((prompt.to_string(), std::time::Instant::now(), Some(0)));
+                            } else {
+                                app.copy_search_query = term.clone();
+                                app.copy_search_forward = fwd;
+                                crate::copy_mode::search_copy_mode(&mut app, &term, fwd);
+                                app.mode = Mode::CopyMode;
+                            }
                         }
                         "search-again" => { crate::copy_mode::search_next(&mut app); }
                         "search-reverse" => { crate::copy_mode::search_prev(&mut app); }

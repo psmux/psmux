@@ -471,7 +471,7 @@ pub struct CopyModeState {
     pub selection_mode: SelectionMode,
     pub search_query: String,
     pub count: Option<usize>,
-    pub search_matches: Vec<(u16, u16, u16)>,
+    pub search_matches: Vec<(usize, u16, u16)>,
     pub search_idx: usize,
     pub search_forward: bool,
     pub find_char_pending: Option<u8>,
@@ -603,8 +603,11 @@ pub struct AppState {
     pub copy_selection_mode: SelectionMode,
     /// Copy-mode search query
     pub copy_search_query: String,    /// Numeric prefix count for copy-mode motions (vi-style)
-    pub copy_count: Option<usize>,    /// Copy-mode search matches: (row, col_start, col_end) in screen coords
-    pub copy_search_matches: Vec<(u16, u16, u16)>,
+    pub copy_count: Option<usize>,    /// Copy-mode search matches: (absolute_line, col_start, col_end).
+    /// The line is an index into the whole pane buffer, scrollback history
+    /// first and then the visible screen, so a match above the viewport is
+    /// addressable (#612).
+    pub copy_search_matches: Vec<(usize, u16, u16)>,
     /// Current match index in copy_search_matches
     pub copy_search_idx: usize,
     /// Search direction: true = forward (/), false = backward (?)
