@@ -470,6 +470,13 @@ fn bind_key_name_arg(cmd_args: &[&String]) -> Option<String> {
 /// indistinguishable from success. Validate before the command goes on the wire.
 fn reject_unknown_key_name(cmd_args: &[&String], _verb: &str) {
     let Some(key) = bind_key_name_arg(cmd_args) else { return };
+    // Names tmux accepts and psmux does not model (WheelUpPane and the rest of
+    // the mouse family) are NOT typos: those lines are normal in a ported
+    // config and psmux has always taken them without complaint. Failing them
+    // here would be a regression, not parity.
+    if crate::config::is_unmodelled_tmux_key_name(&key) {
+        return;
+    }
     // Either parser accepting the name is enough: the config route uses
     // parse_key_name and the server route uses parse_key_string, and they
     // recognise slightly different spellings.

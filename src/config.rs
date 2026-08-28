@@ -1589,8 +1589,13 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
         // Silence is what made issue #616 so hard to see: a key name the parser
         // did not understand vanished with no boot warning, nothing in
         // list-keys and no clue in config-warnings.log. tmux reports
-        // `unknown key: <name>` (cmd-bind-key.c), so say the same thing.
-        warn_config(app, format!("unknown key: {}", key_str));
+        // `unknown key: <name>` (cmd-bind-key.c), so say the same thing --
+        // except for the names tmux knows and psmux simply does not model
+        // (mouse events and friends), which have always been accepted quietly
+        // and must not start warning in every ported config.
+        if !is_unmodelled_tmux_key_name(key_str) {
+            warn_config(app, format!("unknown key: {}", key_str));
+        }
     }
 }
 
@@ -1642,8 +1647,11 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
             }
         } else {
             // Same reasoning as parse_bind_key: tmux's cmd-unbind-key.c reports
-            // `unknown key: <name>` rather than quietly doing nothing.
-            warn_config(app, format!("unknown key: {}", parts[i]));
+            // `unknown key: <name>` rather than quietly doing nothing, and the
+            // names psmux does not model are excused the same way.
+            if !is_unmodelled_tmux_key_name(parts[i]) {
+                warn_config(app, format!("unknown key: {}", parts[i]));
+            }
         }
     }
 }
@@ -1867,6 +1875,75 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     }
 
     None
+}
+
+/// True when `name` is a key name tmux's `key_string_lookup_string` accepts but
+/// psmux has no KeyCode for: the mouse event family, the terminal-report
+/// pseudo keys and `UserN`.
+///
+/// These are NOT parse errors. `bind -n WheelUpPane ...` is a normal line in a
+/// ported tmux config (psmux's own FAQ quotes tmux's default binding), and
+/// psmux has always accepted the command and simply not acted on it. The
+/// unknown-key diagnostic added for issue #616 must catch typos, not start
+/// failing every config that carries a mouse binding, so those names are
+/// excused here and stay silent exactly as before.
+///
+/// tmux builds the mouse names from KEYC_MOUSE_STRING in tmux.h: an event name
+/// (MouseDown1, MouseDragEnd3, WheelUp, DoubleClick1 ...) followed by a
+/// location suffix (Pane, Status, StatusLeft, Border, ScrollbarSlider ...).
+pub fn is_unmodelled_tmux_key_name(name: &str) -> bool {
+    // Strip the same modifier prefixes tmux strips before its table lookup.
+    let mut rest = name;
+    loop {
+        let lower_two: String = rest.chars().take(2).collect::<String>().to_lowercase();
+        if matches!(lower_two.as_str(), "c-" | "m-" | "s-") {
+            rest = &rest[2..];
+        } else {
+            break;
+        }
+    }
+
+    const SPECIAL: &[&str] = &[
+        "any", "none", "mouse", "dragging", "focusin", "focusout",
+        "pastestart", "pasteend", "reportdarktheme", "reportlighttheme",
+        "mousemovepane", "mousemovestatus", "mousemovestatusleft",
+        "mousemovestatusright", "mousemoveborder",
+    ];
+    let lower = rest.to_lowercase();
+    if SPECIAL.contains(&lower.as_str()) {
+        return true;
+    }
+    // UserN
+    if let Some(n) = lower.strip_prefix("user") {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+
+    const LOCATIONS: &[&str] = &[
+        "pane", "status", "statusleft", "statusright", "statusdefault",
+        "scrollbarup", "scrollbarslider", "scrollbardown", "empty", "border",
+    ];
+    let Some(head) = LOCATIONS
+        .iter()
+        .filter_map(|loc| lower.strip_suffix(loc))
+        .max_by_key(|h| h.len())
+    else {
+        return false;
+    };
+    // The event name: a prefix plus an optional button number.
+    const EVENTS: &[&str] = &[
+        "mousedown", "mouseup", "mousedrag", "mousedragend",
+        "secondclick", "doubleclick", "tripleclick",
+    ];
+    if head == "wheelup" || head == "wheeldown" {
+        return true;
+    }
+    EVENTS.iter().any(|e| {
+        head.strip_prefix(e)
+            .map(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false)
+    })
 }
 
 /// Unicode aware single character case mapping for the modifier forms of a key

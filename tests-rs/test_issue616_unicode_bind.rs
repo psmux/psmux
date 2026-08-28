@@ -256,6 +256,52 @@ fn issue616_valid_unicode_key_warns_about_nothing() {
 }
 
 #[test]
+fn issue616_mouse_key_names_are_not_typos() {
+    // The new diagnostic must not fire on the names tmux accepts and psmux
+    // simply does not model. `bind -n WheelUpPane ...` is ordinary in a ported
+    // config (psmux's own FAQ quotes tmux's default binding for it) and has
+    // always been taken quietly; turning that into a warning at boot and a
+    // non-zero exit from the CLI would be a regression, not tmux parity.
+    for name in [
+        "WheelUpPane", "WheelDownPane", "MouseDown1Pane", "MouseUp1Status",
+        "MouseDrag1Border", "MouseDragEnd1Pane", "DoubleClick1Pane",
+        "TripleClick1StatusLeft", "SecondClick1Pane", "MouseDown3ScrollbarSlider",
+        "MouseDown1StatusDefault", "MouseDown1Empty",
+        "C-WheelUpPane", "M-MouseDown1Pane",
+        "Any", "None", "FocusIn", "FocusOut", "PasteStart", "MouseMovePane",
+        "User0", "User12",
+    ] {
+        assert!(
+            is_unmodelled_tmux_key_name(name),
+            "{} is a real tmux key name and must not be reported as unknown",
+            name
+        );
+    }
+    // ... while a genuine typo is still caught, including near misses.
+    for name in [
+        "NotARealKeyName", "WheelUpPain", "MouseDownPane", "MouseDown1Panel",
+        "Wheel", "User", "Userx", "ab",
+    ] {
+        assert!(
+            !is_unmodelled_tmux_key_name(name),
+            "{} is not a tmux key name and must still be diagnosed",
+            name
+        );
+    }
+}
+
+#[test]
+fn issue616_mouse_binding_in_a_config_stays_silent() {
+    let mut a = app();
+    crate::config::parse_config_content(&mut a, "bind -n WheelUpPane select-pane\n");
+    assert!(
+        !a.config_warnings.iter().any(|w| w.contains("unknown key")),
+        "a mouse binding must not warn: {:?}",
+        a.config_warnings
+    );
+}
+
+#[test]
 fn issue616_unbind_of_an_unparseable_key_warns() {
     let mut a = app();
     crate::config::parse_config_content(&mut a, "unbind NotARealKeyName\n");
