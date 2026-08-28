@@ -14,8 +14,11 @@
 #         Neovim end-to-end routing, Win32 TUI verification.
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA Stop).Source }
+# Honour PSMUX_DATA_DIR: the control-connection section reads $SESSION.port and
+# $SESSION.key out of the data root, and hardcoding the profile made that section
+# fail for anything running against a sandboxed root rather than the user's own.
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $SESSION = "test_i570"
 $script:TestsPassed = 0
 $script:TestsFailed = 0

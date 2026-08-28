@@ -1201,13 +1201,27 @@ pub mod mouse_inject {
     /// child reads input as text (ReadConsole/ReadFile) and expects VT
     /// mouse sequences delivered as KEY_EVENT records (nvim, vim).
     pub fn query_mouse_input_enabled(child_pid: u32) -> Option<bool> {
+        query_console_input_mode(child_pid).map(|mode| (mode & ENABLE_MOUSE_INPUT) != 0)
+    }
+
+    /// The child console's whole input mode word (issue #613).
+    ///
+    /// `query_mouse_input_enabled` only ever needed one bit, but the shape of
+    /// the WHOLE word is what tells a considered change apart from a wholesale
+    /// overwrite.  libuv's `uv_tty_set_mode(UV_TTY_MODE_RAW)` assigns
+    /// `ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT` over the entire
+    /// word rather than clearing individual bits, so a pane whose mode reads
+    /// exactly `0x0208` has been raw-moded by a node process, not narrowed by
+    /// an application that decided it no longer wants the mouse.  See
+    /// `window_ops::console_mode_is_libuv_raw`.
+    pub fn query_console_input_mode(child_pid: u32) -> Option<u32> {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
             FreeConsole();
 
             if AttachConsole(child_pid) == 0 {
-                debug_log(&format!("query_mouse_input_enabled: AttachConsole({}) FAILED", child_pid));
+                debug_log(&format!("query_console_input_mode: AttachConsole({}) FAILED", child_pid));
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return None;
             }
@@ -1227,7 +1241,7 @@ pub mod mouse_inject {
             );
 
             if handle == INVALID_HANDLE || handle == 0 {
-                debug_log("query_mouse_input_enabled: CreateFileW(CONIN$) FAILED");
+                debug_log("query_console_input_mode: CreateFileW(CONIN$) FAILED");
                 FreeConsole();
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return None;
@@ -1245,13 +1259,13 @@ pub mod mouse_inject {
             if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
 
             if ok == 0 {
-                debug_log("query_mouse_input_enabled: GetConsoleMode FAILED");
+                debug_log("query_console_input_mode: GetConsoleMode FAILED");
                 return None;
             }
 
-            let mouse_input = (mode & ENABLE_MOUSE_INPUT) != 0;
-            debug_log(&format!("query_mouse_input_enabled: pid={} mode=0x{:04X} ENABLE_MOUSE_INPUT={}", child_pid, mode, mouse_input));
-            Some(mouse_input)
+            debug_log(&format!("query_console_input_mode: pid={} mode=0x{:04X} ENABLE_MOUSE_INPUT={}",
+                child_pid, mode, (mode & ENABLE_MOUSE_INPUT) != 0));
+            Some(mode)
         }
     }
 
@@ -2379,6 +2393,7 @@ pub mod mouse_inject {
     pub fn send_ctrl_c_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn send_ctrl_break_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
+    pub fn query_console_input_mode(_pid: u32) -> Option<u32> { None }
     pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
     pub fn send_vt_response(_pid: u32, _text: &str) -> bool { false }
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
@@ -3547,6 +3562,52 @@ pub mod process_info {
         }
     }
 
+    /// The PID of the pane's deepest foreground leaf (issue #613).
+    ///
+    /// `foreground_is_shell` throws the pid away and keeps only the
+    /// classification.  The wheel authorization latch needs the identity: the
+    /// thing it anchors to is "the process that asked for the mouse", and a
+    /// name cannot be checked for liveness.  Returns `None` when the snapshot
+    /// fails or the root has no foreground leaf distinct from itself, in which
+    /// case the caller falls back to the pane's root child pid.
+    pub fn foreground_leaf_pid(root_pid: u32) -> Option<u32> {
+        let entries = process_table(std::time::Duration::ZERO)?;
+        deepest_descendant(&entries, root_pid).map(|(pid, _)| pid)
+    }
+
+    /// Is `pid` the pane root itself or one of its descendants (issue #613)?
+    ///
+    /// Guards the wheel latch against PID reuse: an owner pid that has died and
+    /// been recycled by an unrelated process elsewhere on the machine is not
+    /// this pane's application, and the latch must not survive on its liveness.
+    pub fn pid_in_pane_tree(root_pid: u32, pid: u32) -> bool {
+        if pid == root_pid {
+            return process_table(std::time::Duration::from_millis(250))
+                .is_some_and(|t| t.iter().any(|(p, _, _)| *p == pid));
+        }
+        let Some(entries) = process_table(std::time::Duration::from_millis(250)) else {
+            return false;
+        };
+        let mut cur = pid;
+        // Same iteration guard as `deepest_descendant`: a snapshot taken across
+        // PID reuse can contain a parent cycle, and this must terminate.
+        for _ in 0..64 {
+            match entries.iter().find(|(p, _, _)| *p == cur) {
+                Some((_, ppid, _)) => {
+                    if *ppid == root_pid {
+                        return true;
+                    }
+                    if *ppid == 0 || *ppid == cur {
+                        return false;
+                    }
+                    cur = *ppid;
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// True when the pane's deepest foreground process is a VT bridge
     /// (wsl.exe, ssh.exe, ...).  Used by the Ctrl+C router (issue #491):
     /// bridges read raw bytes from their console and forward 0x03 into the
@@ -3784,6 +3845,8 @@ pub mod process_info {
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
     pub fn foreground_is_shell(_root_pid: u32) -> Option<bool> { None }
     pub fn foreground_is_vt_bridge(_root_pid: u32) -> bool { false }
+    pub fn foreground_leaf_pid(_root_pid: u32) -> Option<u32> { None }
+    pub fn pid_in_pane_tree(_root_pid: u32, _pid: u32) -> bool { false }
 }
 
 // ─── UTF-16 Console Writer (Windows) ────────────────────────────────────

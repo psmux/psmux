@@ -82,7 +82,7 @@ fn make_pane(term: Arc<Mutex<vt100::Parser>>, rows: u16, cols: u16) -> crate::ty
         vt_bridge_cache: None,
         vti_mode_cache: None,
         mouse_input_cache: None,
-        scroll_fg_cache: None, mouse_proto_owner: None,
+        scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None,
         cursor_shape: Arc::new(AtomicU8::new(0)),
         bell_pending: Arc::new(AtomicBool::new(false)),
         cpr_pending: Arc::new(AtomicBool::new(false)),

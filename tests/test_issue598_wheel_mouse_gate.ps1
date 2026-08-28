@@ -27,8 +27,8 @@
 #         copy-mode state verification, Win32 TUI verification.
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA Stop).Source }
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $SESSION = "test_i598"
 $script:TestsPassed = 0
 $script:TestsFailed = 0

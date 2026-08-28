@@ -3982,11 +3982,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     format!("ERROR: set-option -p remain-on-exit: bad value '{}' (want on, off or failed)", value)
                                 }
                             }
+                            // #613: authorize the wheel for THIS pane even when
+                            // its application asked through neither signal the
+                            // #598 gate accepts.  Pane scoped on purpose: the
+                            // damage the gate prevents (htop typing the report
+                            // into its search prompt) is decided per pane, so
+                            // the escape hatch is too.
+                            "@mouse-force" => {
+                                if value.is_empty() {
+                                    p.pane_options.remove("@mouse-force");
+                                    String::new()
+                                } else if matches!(value.as_str(), "on" | "off" | "1" | "0" | "true" | "false" | "yes" | "no") {
+                                    p.pane_options.insert("@mouse-force".to_string(), value.clone());
+                                    String::new()
+                                } else {
+                                    format!("ERROR: set-option -p @mouse-force: bad value '{}' (want on or off)", value)
+                                }
+                            }
                             // Loud refusal, never a silent stored no-op: the
                             // Claude Code teammate backend checked nothing but
                             // exit codes and a swallowed pane option looked
                             // exactly like success (#580).
-                            other => format!("ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit)", other),
+                            other => format!("ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit, @mouse-force)", other),
                         },
                     };
                     let _ = resp.send(reply);

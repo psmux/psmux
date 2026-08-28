@@ -184,7 +184,7 @@ pub fn create_popup_pane(
         vt_bridge_cache: None,
         vti_mode_cache: None,
         mouse_input_cache: None,
-        scroll_fg_cache: None, mouse_proto_owner: None,
+        scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None,
         cursor_shape,
         bell_pending,
         // cpr_pending is now driven by the shared spawn_reader_thread above, so
@@ -255,7 +255,7 @@ pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
         vt_bridge_cache: None,
         vti_mode_cache: None,
         mouse_input_cache: None,
-        scroll_fg_cache: None, mouse_proto_owner: None,
+        scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None,
         cursor_shape: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::pane::CURSOR_SHAPE_UNSET)),
         bell_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cpr_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

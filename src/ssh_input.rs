@@ -456,6 +456,45 @@ pub fn conpty_needs_mouse_record_bypass() -> bool {
     windows_build_number().map_or(false, |b| b < CONPTY_MOUSE_MIN_BUILD)
 }
 
+/// Server-wide last-resort override for the #598 wheel gate (issue #613,
+/// the shape proposed by PR #614).
+///
+/// The durable half of #613 is `window_ops::wheel_auth`: a pane that ever
+/// satisfied a mouse signal keeps its authorization for as long as the process
+/// that earned it lives, so a child's `SetConsoleMode` can no longer revoke
+/// it.  This env var is for the residue the latch cannot reach — a pane whose
+/// application asked through NEITHER signal at any point in its life, which is
+/// reachable when conhost swallows an app's DECSET before psmux ever parses it
+/// and the app is in libuv raw mode so the console bit is off as well.
+///
+/// The narrower and preferred spelling is the pane option
+/// `set-option -p -t %N @mouse-force on`, which is the scope the #598 damage is
+/// decided at.  This one is kept because a user with many such panes should not
+/// have to set it on each, and because it is what the reporter of #613 built
+/// and tested on the affected machine.
+///
+/// Because it is server wide it re-exposes the #598 damage for panes that
+/// genuinely do not read the mouse: htop reads the raw report as keystrokes and
+/// fills its search prompt with the digits.  It stays opt-in and off by default
+/// for exactly that reason.
+///
+/// Deliberately NOT routed through [`forced_mouse_setting`], for the same
+/// reason [`conpty_needs_mouse_record_bypass`] is not: `PSMUX_FORCE_MOUSE` is
+/// the CLIENT to terminal direction (may psmux write mouse DECSET out), while
+/// this is whether a report psmux ALREADY holds may be delivered into a pane.
+pub const FORCE_WHEEL_ENV: &str = "PSMUX_FORCE_WHEEL";
+
+/// Whether [`FORCE_WHEEL_ENV`] authorizes the wheel past the #598 gate.
+///
+/// Accepts the same spellings as [`forced_mouse_setting`], but collapses to a
+/// plain `bool`: there is no third state to express, since "keep the gate" is
+/// already what every non-affirmative value means.
+pub fn wheel_gate_forced() -> bool {
+    std::env::var(FORCE_WHEEL_ENV).map_or(false, |raw| {
+        matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes")
+    })
+}
+
 /// Whether the local-console keep-alive may re-assert `ENABLE_MOUSE_INPUT`
 /// on this host (issue #597).
 ///

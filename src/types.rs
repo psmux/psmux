@@ -124,6 +124,26 @@ pub struct ClientInfo {
     pub last_session: Option<String>,
 }
 
+/// A pane's standing authorization to receive wheel reports (issue #613).
+///
+/// tmux keeps this on `struct screen` as `s->mode & ALL_MOUSE_MODES`: it is set
+/// by the application's own DECSET (input.c:2053), cleared by its DECRST
+/// (input.c:1959) or by `screen_reinit` when the pane respawns (screen.c:115),
+/// and there is no third party who could revoke it because there is no console.
+///
+/// psmux has a console in the way, so it records WHO earned the authorization
+/// and keeps it for as long as that process is alive inside the pane.  A child
+/// rewriting the console mode word cannot revoke what it never granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelAuth {
+    /// The pane's foreground leaf pid at the moment a mouse signal was first
+    /// observed.  Liveness of THIS pid is what keeps the latch.
+    pub owner_pid: u32,
+    /// `(checked_at, still_alive)`, same 2 second TTL as the other
+    /// mouse-inject detectors, so a wheel burst costs one process walk.
+    pub alive_cache: Option<(Instant, bool)>,
+}
+
 pub struct Pane {
     pub master: Box<dyn MasterPty>,
     pub writer: Box<dyn std::io::Write + Send>,
@@ -198,6 +218,23 @@ pub struct Pane {
     /// is forwarded — tmux `mouse_any_flag` parity).  Updated by
     /// `window_ops::update_mouse_proto_owner` on the server data tick.
     pub mouse_proto_owner: Option<(vt100::MouseProtocolMode, bool)>,
+    /// Pane-owned wheel authorization latch (issue #613).
+    ///
+    /// Both #598 signals — `mouse_proto_owner` and the live
+    /// `ENABLE_MOUSE_INPUT` probe — resolve to the same console input mode
+    /// word, and that word belongs to the CONSOLE, not to the application.
+    /// Any descendant that enters raw mode assigns it wholesale (libuv writes
+    /// `ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT` and restores
+    /// nothing), conhost reports the loss upstream as `ESC[?1003;1006l`, and
+    /// the pane's wheel goes silent for good even though its application never
+    /// changed its mind.
+    ///
+    /// This latch is psmux's stand-in for tmux's `s->mode & ALL_MOUSE_MODES`,
+    /// which lives on the pane's own screen and no other process can reach.
+    /// It is earned by a confirmed non-shell foreground, anchored to that
+    /// process's pid, and dropped when it exits.  See
+    /// `window_ops::latch_wheel_auth`.
+    pub wheel_auth: Option<WheelAuth>,
     /// Last cursor shape requested by the child process via DECSCUSR (`\x1b[N q`).
     /// 0 = no override (use PSMUX_CURSOR_STYLE default), 1-6 = DECSCUSR values.
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,
