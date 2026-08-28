@@ -4579,57 +4579,67 @@ pub mod caret {
     pub fn destroy() {}
 }
 
-/// On Windows ConPTY, Shift+Enter is misreported by crossterm:
+/// Last-resort modifier recovery for Enter on terminals that cannot encode one.
 ///
-/// VS Code's xterm.js sends `\x1b\r` (ESC + CR) for Shift+Enter.
-/// ConPTY interprets the ESC prefix as Alt, so crossterm reports
-/// `KeyModifiers::ALT` instead of `KeyModifiers::SHIFT`.
+/// VT has no encoding for a modified Return, so a terminal that has nothing
+/// better to say sends a bare `\r` and the modifier is simply gone by the time
+/// psmux sees the key.  #121 papered over that by polling `GetAsyncKeyState`.
 ///
-/// This function polls the physical keyboard state to detect the real
-/// modifiers and remaps accordingly.
+/// A poll reads the keyboard **now**, not at the time the key event was
+/// generated, so it loses the race whenever event processing lags the
+/// keystroke: the user has already let Shift go and Shift+Enter silently
+/// becomes Enter, which in a node TUI means "submit" instead of "newline".
+/// That is issue #611, and it gets worse the busier the host is.
+///
+/// The information is normally right there in the event.  Measured on Windows
+/// 11 26200 with crossterm 0.29:
+///
+/// ```text
+///   real Shift+Enter typed into Windows Terminal, seen by the ConPTY child:
+///     REC DOWN vk=0x0D scan=0x1C uChar=0x000D ctrl=0x0010 [SHIFT]
+///   which crossterm reports as:
+///     KEY code=Enter mods=KeyModifiers(SHIFT) kind=Press
+///
+///   the bytes 1b 0d (VS Code / the Windows Terminal sendInput workaround),
+///   written into a pseudoconsole in ONE write:
+///     REC DOWN vk=0x0D scan=0x1C uChar=0x000D ctrl=0x0002 [LALT]
+/// ```
+///
+/// So whenever the event carries **any** modifier it already answers the
+/// question, and the poll can only corrupt it with stale hardware state (the
+/// old code stripped a genuine ALT off the `1b 0d` form whenever the physical
+/// Shift happened to still be down).  The poll is therefore consulted only for
+/// a completely unmodified Enter, where nothing else is left to consult.
 #[cfg(windows)]
 pub fn augment_enter_shift(key: &mut crossterm::event::KeyEvent) {
+    augment_enter_shift_with(key, || {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetAsyncKeyState(vKey: i32) -> i16;
+        }
+        const VK_SHIFT: i32 = 0x10;
+        unsafe { GetAsyncKeyState(VK_SHIFT) < 0 }
+    })
+}
+
+/// [`augment_enter_shift`] with the hardware poll injected, so the "the event
+/// wins over the poll" rule can be tested without a keyboard.
+#[cfg(windows)]
+pub fn augment_enter_shift_with<F: FnOnce() -> bool>(
+    key: &mut crossterm::event::KeyEvent,
+    shift_is_down: F,
+) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     if !matches!(key.code, KeyCode::Enter) {
         return;
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
+    // The event already recorded what was held AT EVENT TIME.  Trust it.
+    if !key.modifiers.is_empty() {
         return;
     }
-
-    #[link(name = "user32")]
-    extern "system" {
-        fn GetAsyncKeyState(vKey: i32) -> i16;
-    }
-
-    const VK_SHIFT: i32 = 0x10;
-    const VK_CONTROL: i32 = 0x11;
-    const VK_MENU: i32 = 0x12; // Alt
-
-    unsafe {
-        let shift_down = GetAsyncKeyState(VK_SHIFT) < 0;
-        let ctrl_down = GetAsyncKeyState(VK_CONTROL) < 0;
-        let alt_down = GetAsyncKeyState(VK_MENU) < 0;
-
-        if shift_down {
-            key.modifiers.insert(KeyModifiers::SHIFT);
-            // Windows Terminal + crossterm sometimes reports a phantom CONTROL
-            // modifier on the Press event for Shift+Enter while the physical
-            // Ctrl key is not held.  Remove it.
-            if !ctrl_down && key.modifiers.contains(KeyModifiers::CONTROL) {
-                key.modifiers.remove(KeyModifiers::CONTROL);
-            }
-            if !alt_down && key.modifiers.contains(KeyModifiers::ALT) {
-                key.modifiers.remove(KeyModifiers::ALT);
-            }
-        } else if !shift_down && !ctrl_down && !alt_down {
-            // No physical modifiers held; ConPTY may have injected a phantom
-            // ALT from ESC+CR.  Already handled by the early return for SHIFT
-            // above, but guard plain Enter too.
-        } else if !shift_down && alt_down {
-            // Physical Alt is held, leave as is.
-        }
+    if shift_is_down() {
+        key.modifiers.insert(KeyModifiers::SHIFT);
     }
 }
 

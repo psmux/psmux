@@ -274,14 +274,34 @@ fn alt_enter_produces_correct_encoding() {
 
 // ── parse_modified_special_key tests (PR #115) ──
 
+// `send-keys S-Enter` has to put the same bytes in the pane as a real
+// Shift+Enter keystroke does, and on Windows the CSI form puts NOTHING there:
+// feeding a real pseudoconsole ESC [ 13;2 ~ and ESC [ 13;3 ~ produced zero
+// input records, while 1b 0d produced VK_RETURN with LEFT_ALT_PRESSED
+// (issue #611).  So these mirror `encode_key_event` exactly.
 #[test]
 fn parse_shift_enter() {
+    #[cfg(windows)]
+    assert_eq!(parse_modified_special_key("S-Enter"), Some("\x1b\r".to_string()));
+    #[cfg(not(windows))]
     assert_eq!(parse_modified_special_key("S-Enter"), Some("\x1b[13;2~".to_string()));
 }
 
 #[test]
 fn parse_ctrl_enter() {
+    // #409: plain Ctrl+Enter is LF on Windows, CSI 13;5~ elsewhere.
+    #[cfg(windows)]
+    assert_eq!(parse_modified_special_key("C-Enter"), Some("\n".to_string()));
+    #[cfg(not(windows))]
     assert_eq!(parse_modified_special_key("C-Enter"), Some("\x1b[13;5~".to_string()));
+}
+
+#[test]
+fn parse_alt_enter() {
+    #[cfg(windows)]
+    assert_eq!(parse_modified_special_key("M-Enter"), Some("\x1b\r".to_string()));
+    #[cfg(not(windows))]
+    assert_eq!(parse_modified_special_key("M-Enter"), Some("\x1b[13;3~".to_string()));
 }
 
 #[test]

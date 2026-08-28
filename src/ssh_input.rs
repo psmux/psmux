@@ -48,8 +48,10 @@
 //! Set `PSMUX_SSH_DEBUG=1` to write a detailed trace of every INPUT_RECORD
 //! and emitted event to `~/.psmux/ssh_input.log`.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -497,9 +499,150 @@ pub fn keepalive_reasserts_mouse_input() -> bool {
 ///     }
 /// }
 /// ```
+/// How long a bare Escape is held back waiting for the key a terminal sent
+/// along with it.
+///
+/// This is the local-path twin of the SSH reader's `ESC_TIMEOUT_MS`, and it is
+/// the same idea as tmux's `escape-time`: `tty-keys.c` treats a lone `\033`
+/// with nothing behind it as a *partial* key and arms a timer, delivering a
+/// plain Escape only when that timer fires.  50 ms matches what the SSH path
+/// has used since #397.
+pub(crate) const ESC_COALESCE_MS: u64 = 50;
+
+/// Folds a bare Escape that is immediately followed by Enter into one
+/// `Alt+Enter` event (issue #611).
+///
+/// Windows Terminal, VS Code's xterm.js and the `sendInput` keybinding that
+/// Claude Code's `/terminal-setup` installs all encode Shift+Enter as the two
+/// bytes `1b 0d`.  ConPTY's input parser normally hands those over as a single
+/// `VK_RETURN` record carrying `LEFT_ALT_PRESSED`, but when the pair lands in
+/// two separate reads (which is exactly what a loaded host produces) it emits
+/// an Escape record and an Enter record instead.  Forwarding those two as
+/// independent keys makes a readline style child see a lone ESC (cancel)
+/// followed by CR (submit) rather than a newline.
+///
+/// tmux solves the same problem in `tty_keys_next`: `\033` followed by another
+/// byte becomes that key with `KEYC_META` (one key, two bytes consumed), and
+/// `input_key_write` then emits the `\033` prefix and the key's own bytes back
+/// to back.  `encode_key_event` already turns `Alt+Enter` into a single
+/// `\x1b\r`, so producing one merged event is all that is needed here.
+pub struct EscCoalesce {
+    /// When the held Escape arrived.  `None` when nothing is held.
+    pending: Option<Instant>,
+    /// Events that have to be handed out before more are read, used when a
+    /// held Escape has to be released in front of the key that ended its
+    /// window.
+    queue: VecDeque<Event>,
+    /// Off on Unix: crossterm's own VT parser already folds `\x1b\r` into
+    /// Alt+Enter there, so holding Escape back would only add latency.
+    enabled: bool,
+    /// Length of the hold window.
+    window: Duration,
+}
+
+impl EscCoalesce {
+    pub fn new(enabled: bool) -> Self {
+        EscCoalesce {
+            pending: None,
+            queue: VecDeque::new(),
+            enabled,
+            window: Duration::from_millis(ESC_COALESCE_MS),
+        }
+    }
+
+    fn escape_event() -> Event {
+        make_key(KeyCode::Esc, KeyModifiers::empty())
+    }
+
+    /// Feed one event straight from the terminal.
+    ///
+    /// Returns the event the client should see, or `None` when the event was
+    /// absorbed: either a bare Escape that is now being held, or the key
+    /// release belonging to one.
+    pub fn feed(&mut self, ev: Event, now: Instant) -> Option<Event> {
+        if !self.enabled {
+            return Some(ev);
+        }
+        if self.pending.is_some() {
+            match ev {
+                // ESC then Enter: the pair every terminal that cannot encode a
+                // modified Enter falls back to.  Merge into one Alt+Enter, the
+                // way tmux merges `\033` + byte into a META key.  Ctrl+Enter is
+                // left alone because it has its own byte (0x0a) and must not
+                // gain a spurious Alt.
+                Event::Key(k)
+                    if matches!(k.code, KeyCode::Enter)
+                        && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        && !k.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.pending = None;
+                    let mut merged = k;
+                    merged.modifiers.insert(KeyModifiers::ALT);
+                    merged.kind = KeyEventKind::Press;
+                    Some(Event::Key(merged))
+                }
+                // The release of the very Escape being held is not "another
+                // key" and must not close the window.
+                Event::Key(k)
+                    if k.kind == KeyEventKind::Release && matches!(k.code, KeyCode::Esc) =>
+                {
+                    None
+                }
+                other => {
+                    self.pending = None;
+                    self.queue.push_back(other);
+                    Some(Self::escape_event())
+                }
+            }
+        } else {
+            match ev {
+                Event::Key(k)
+                    if matches!(k.code, KeyCode::Esc)
+                        && k.modifiers.is_empty()
+                        && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    self.pending = Some(now);
+                    None
+                }
+                other => Some(other),
+            }
+        }
+    }
+
+    /// Milliseconds left on the held Escape, `None` when nothing is held.
+    pub fn deadline_ms(&self, now: Instant) -> Option<u64> {
+        self.pending.map(|t| {
+            self.window
+                .saturating_sub(now.saturating_duration_since(t))
+                .as_millis() as u64
+        })
+    }
+
+    /// Release a held Escape whose window has run out.
+    pub fn expire(&mut self, now: Instant) -> Option<Event> {
+        match self.pending {
+            Some(t) if now.saturating_duration_since(t) >= self.window => {
+                self.pending = None;
+                Some(Self::escape_event())
+            }
+            _ => None,
+        }
+    }
+
+    /// Take the next already-decided event, if any.
+    pub fn pop(&mut self) -> Option<Event> {
+        self.queue.pop_front()
+    }
+}
+
 pub enum InputSource {
     /// Local terminal — delegates to `crossterm::event`.
-    Crossterm,
+    Crossterm {
+        /// Holds a bare Escape for `ESC_COALESCE_MS` so an ESC+CR pair split
+        /// across two console reads still reaches the pane as one `\x1b\r`
+        /// (issue #611).
+        esc: RefCell<EscCoalesce>,
+    },
     /// SSH session on Windows — reads via a background thread + VT parser.
     #[cfg(windows)]
     Ssh {
@@ -508,6 +651,13 @@ pub enum InputSource {
 }
 
 impl InputSource {
+    /// A local crossterm source with the Escape coalescer armed on Windows.
+    pub fn crossterm() -> Self {
+        InputSource::Crossterm {
+            esc: RefCell::new(EscCoalesce::new(cfg!(windows))),
+        }
+    }
+
     /// Create a new input source.
     ///
     /// When `ssh == true` **and** running on Windows, spawns the SSH VT reader
@@ -515,7 +665,7 @@ impl InputSource {
     /// with zero overhead.
     pub fn new(ssh: bool) -> io::Result<Self> {
         if !ssh {
-            return Ok(InputSource::Crossterm);
+            return Ok(InputSource::crossterm());
         }
 
         #[cfg(windows)]
@@ -525,7 +675,7 @@ impl InputSource {
                 Err(e) => {
                     // Log to file instead of stderr (raw mode garbles eprintln).
                     ssh_debug_log(&format!("SSH VT input init failed: {}; falling back to crossterm", e));
-                    Ok(InputSource::Crossterm)
+                    Ok(InputSource::crossterm())
                 }
             }
         }
@@ -534,7 +684,7 @@ impl InputSource {
         {
             // On Unix, crossterm already reads raw VT bytes and handles mouse.
             let _ = ssh;
-            Ok(InputSource::Crossterm)
+            Ok(InputSource::crossterm())
         }
     }
 
@@ -542,11 +692,35 @@ impl InputSource {
     #[inline]
     pub fn read_timeout(&self, timeout: Duration) -> io::Result<Option<Event>> {
         match self {
-            InputSource::Crossterm => {
-                if crossterm::event::poll(timeout)? {
-                    Ok(Some(crossterm::event::read()?))
-                } else {
-                    Ok(None)
+            InputSource::Crossterm { esc } => {
+                let mut esc = esc.borrow_mut();
+                if let Some(ev) = esc.pop() {
+                    return Ok(Some(ev));
+                }
+                let mut left = timeout;
+                loop {
+                    // Never wait past the held Escape's deadline, otherwise a
+                    // lone Escape would sit in the coalescer for a whole idle
+                    // poll interval instead of its 50 ms window.
+                    let now = Instant::now();
+                    let wait = match esc.deadline_ms(now) {
+                        Some(ms) => left.min(Duration::from_millis(ms)),
+                        None => left,
+                    };
+                    let started = Instant::now();
+                    if crossterm::event::poll(wait)? {
+                        let ev = crossterm::event::read()?;
+                        if let Some(out) = esc.feed(ev, Instant::now()) {
+                            return Ok(Some(out));
+                        }
+                    }
+                    if let Some(ev) = esc.expire(Instant::now()) {
+                        return Ok(Some(ev));
+                    }
+                    left = left.saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        return Ok(None);
+                    }
                 }
             }
             #[cfg(windows)]
@@ -570,11 +744,20 @@ impl InputSource {
     #[inline]
     pub fn try_read(&self) -> io::Result<Option<Event>> {
         match self {
-            InputSource::Crossterm => {
-                if crossterm::event::poll(Duration::ZERO)? {
-                    Ok(Some(crossterm::event::read()?))
-                } else {
-                    Ok(None)
+            InputSource::Crossterm { esc } => {
+                let mut esc = esc.borrow_mut();
+                if let Some(ev) = esc.pop() {
+                    return Ok(Some(ev));
+                }
+                loop {
+                    if crossterm::event::poll(Duration::ZERO)? {
+                        let ev = crossterm::event::read()?;
+                        if let Some(out) = esc.feed(ev, Instant::now()) {
+                            return Ok(Some(out));
+                        }
+                        continue;
+                    }
+                    return Ok(esc.expire(Instant::now()));
                 }
             }
             #[cfg(windows)]
@@ -2043,6 +2226,10 @@ mod tests_pr468_wezterm_vt_input;
 #[path = "../tests-rs/test_issue508_wezterm_vt_cspace.rs"]
 mod tests_issue508_wezterm_vt_cspace;
 
+#[cfg(test)]
+#[path = "../tests-rs/test_issue611_shift_enter_event_modifiers.rs"]
+mod tests_issue611_shift_enter_event_modifiers;
+
 // ─── Raw VT pipe client input — issue #474 / Windows 10 SSH ────────────────
 //
 // Under mintty (Git Bash, MSYS2) the client's stdin is a Cygwin pty: a named
@@ -2317,13 +2504,13 @@ impl InputSource {
                 Ok(rx) => Ok(InputSource::Ssh { rx }),
                 Err(e) => {
                     ssh_debug_log(&format!("pipe VT input init failed: {}; falling back to crossterm", e));
-                    Ok(InputSource::Crossterm)
+                    Ok(InputSource::crossterm())
                 }
             }
         }
         #[cfg(not(windows))]
         {
-            Ok(InputSource::Crossterm)
+            Ok(InputSource::crossterm())
         }
     }
 }

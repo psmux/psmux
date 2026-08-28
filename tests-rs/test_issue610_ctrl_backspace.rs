@@ -91,6 +91,11 @@ fn other_modified_special_keys_are_unchanged() {
     assert_eq!(parse_modified_special_key("C-Left"), Some("\u{1b}[1;5D".to_string()));
     assert_eq!(parse_modified_special_key("S-Right"), Some("\u{1b}[1;2C".to_string()));
     assert_eq!(parse_modified_special_key("C-Delete"), Some("\u{1b}[3;5~".to_string()));
+    // Ctrl+Enter is LF on Windows (#409) and CSI 13;5~ elsewhere; either way
+    // the Backspace arm must not touch it.
+    #[cfg(windows)]
+    assert_eq!(parse_modified_special_key("C-Enter"), Some("\n".to_string()));
+    #[cfg(not(windows))]
     assert_eq!(parse_modified_special_key("C-Enter"), Some("\u{1b}[13;5~".to_string()));
 }
 
