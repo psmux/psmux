@@ -1585,6 +1585,12 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
         let table = app.key_tables.entry(_key_table).or_default();
         table.retain(|b| b.key != key);
         table.push(Bind { key, action, repeat: _repeatable });
+    } else {
+        // Silence is what made issue #616 so hard to see: a key name the parser
+        // did not understand vanished with no boot warning, nothing in
+        // list-keys and no clue in config-warnings.log. tmux reports
+        // `unknown key: <name>` (cmd-bind-key.c), so say the same thing.
+        warn_config(app, format!("unknown key: {}", key_str));
     }
 }
 
@@ -1634,6 +1640,10 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
             if let Some(binds) = app.key_tables.get_mut(&target) {
                 binds.retain(|b| b.key != key);
             }
+        } else {
+            // Same reasoning as parse_bind_key: tmux's cmd-unbind-key.c reports
+            // `unknown key: <name>` rather than quietly doing nothing.
+            warn_config(app, format!("unknown key: {}", parts[i]));
         }
     }
 }
@@ -1799,12 +1809,18 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
         if let Some(kc) = named_key(rest) {
             return Some((kc, mods));
         }
-        if rest.len() == 1 {
+        // A key is one CHARACTER, not one BYTE. `M-<U+0444>` leaves two bytes
+        // of UTF-8 in `rest`, so the old byte-length gate failed and every
+        // non-ASCII modifier binding was dropped without a word (issue #616).
+        // tmux takes the same shape in key-string.c: the ASCII fast path is
+        // `string[1] == '\0' && string[0] <= 127`, and anything else is decoded
+        // as UTF-8 and OR'd with the modifiers.
+        if rest.chars().count() == 1 {
             if let Some(c) = rest.chars().next() {
                 if mods.contains(KeyModifiers::SHIFT) {
-                    return Some((KeyCode::Char(c.to_ascii_uppercase()), mods.difference(KeyModifiers::SHIFT)));
+                    return Some((KeyCode::Char(map_key_case(c, true)), mods.difference(KeyModifiers::SHIFT)));
                 }
-                return Some((KeyCode::Char(c.to_ascii_lowercase()), mods));
+                return Some((KeyCode::Char(map_key_case(c, false)), mods));
             }
         }
         // Unrecognized key after modifiers — fall through
@@ -1842,13 +1858,35 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
         _ => {}
     }
     
-    if name.len() == 1 {
+    // One character, not one byte (issue #616): `bind <U+044B>` is a 2 byte
+    // key name and used to fall straight through to None.
+    if name.chars().count() == 1 {
         if let Some(c) = name.chars().next() {
             return Some((KeyCode::Char(c), KeyModifiers::NONE));
         }
     }
-    
+
     None
+}
+
+/// Unicode aware single character case mapping for the modifier forms of a key
+/// name: `S-x` names the SHIFTED character and `C-A` normalises to `C-a`, which
+/// is what psmux has always done for ASCII via `to_ascii_uppercase` /
+/// `to_ascii_lowercase`. Those are no-ops outside ASCII, so a Cyrillic `S-` form
+/// would have silently collapsed onto the unshifted key once #616 let it parse
+/// at all, and `normalize_key_for_binding` drops SHIFT from every Char, so the
+/// two bindings would have overwritten each other.
+///
+/// Falls back to the original character when the mapping is not one to one
+/// (U+00DF uppercases to "SS", U+0130 lowercases to two scalars) so a key name
+/// stays exactly one character in every case.
+fn map_key_case(c: char, upper: bool) -> char {
+    let mut mapped: Vec<char> = if upper {
+        c.to_uppercase().collect()
+    } else {
+        c.to_lowercase().collect()
+    };
+    if mapped.len() == 1 { mapped.remove(0) } else { c }
 }
 
 thread_local! {
@@ -1977,7 +2015,11 @@ pub fn parse_key_string(key: &str) -> Option<(KeyCode, KeyModifiers)> {
     let mut mods = KeyModifiers::empty();
     let mut key_part = key;
     
-    while key_part.len() > 2 {
+    // Characters, not bytes (issue #616). `M-<U+0444>` is 3 characters but 4
+    // bytes; more importantly the single-character arm below used byte length,
+    // so the CLI / server route dropped every non-ASCII key exactly the way the
+    // config route did.
+    while key_part.chars().count() > 2 {
         if key_part.starts_with("C-") || key_part.starts_with("c-") {
             mods |= KeyModifiers::CONTROL;
             key_part = &key_part[2..];
@@ -1995,7 +2037,7 @@ pub fn parse_key_string(key: &str) -> Option<(KeyCode, KeyModifiers)> {
     let keycode = match key_part.to_lowercase().as_str() {
         // Single character keys: preserve the ORIGINAL case from key_part, not the lowercased version.
         // This is critical for case-sensitive bind-key (issue #157): bind-key T != bind-key t.
-        _ if key_part.len() == 1 => {
+        _ if key_part.chars().count() == 1 => {
             KeyCode::Char(key_part.chars().next().unwrap())
         }
         "space" => KeyCode::Char(' '),

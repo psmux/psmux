@@ -444,6 +444,43 @@ fn probe_session_alive_inner(session_name: &str, connect_failure_means_alive: bo
     }
 }
 
+/// Pick the key-name positional out of a `bind-key` / `unbind-key` argument
+/// list, skipping the subcommand itself and the flags that take a value.
+/// Returns None when there is no positional yet (the caller then leaves the
+/// usage complaint to the server, as before).
+fn bind_key_name_arg(cmd_args: &[&String]) -> Option<String> {
+    let mut i = 1; // cmd_args[0] is the subcommand
+    while i < cmd_args.len() {
+        let a = cmd_args[i].as_str();
+        match a {
+            // Flags that consume the next argument.
+            "-T" | "-N" | "-t" => { i += 2; continue; }
+            // A bare "-" is a legal key name, not a flag.
+            _ if a.starts_with('-') && a.chars().count() > 1 => { i += 1; continue; }
+            _ => return Some(cmd_args[i].to_string()),
+        }
+    }
+    None
+}
+
+/// tmux refuses a key name it cannot parse: cmd-bind-key.c and cmd-unbind-key.c
+/// both call `cmdq_error(item, "unknown key: %s", ...)` and exit non-zero.
+/// psmux used to forward anything at all to the server, which dropped it in
+/// silence -- so a Cyrillic key name (issue #616) and an outright typo were
+/// indistinguishable from success. Validate before the command goes on the wire.
+fn reject_unknown_key_name(cmd_args: &[&String], _verb: &str) {
+    let Some(key) = bind_key_name_arg(cmd_args) else { return };
+    // Either parser accepting the name is enough: the config route uses
+    // parse_key_name and the server route uses parse_key_string, and they
+    // recognise slightly different spellings.
+    if crate::config::parse_key_name(&key).is_none()
+        && crate::config::parse_key_string(&key).is_none()
+    {
+        eprintln!("unknown key: {}", key);
+        std::process::exit(1);
+    }
+}
+
 fn build_send_paste_control(cmd_args: &[&str]) -> io::Result<String> {
     let mut payload: Option<&str> = None;
     let mut i = 1;
@@ -3424,6 +3461,7 @@ fn run_main() -> io::Result<()> {
             }
             // bind-key - Bind a key to a command
             "bind-key" | "bind" => {
+                reject_unknown_key_name(&cmd_args, "bind-key");
                 let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
                 match send_control(format!("{}\n", cmd_str)) {
                     Ok(()) => {},
@@ -3436,6 +3474,7 @@ fn run_main() -> io::Result<()> {
             }
             // unbind-key - Unbind a key
             "unbind-key" | "unbind" => {
+                reject_unknown_key_name(&cmd_args, "unbind-key");
                 let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
                 match send_control(format!("{}\n", cmd_str)) {
                     Ok(()) => {},
