@@ -1,28 +1,13 @@
-# Issue #451: window-status / status style options had no effect.
-#
-# Regression from the app.rs -> client.rs modularization: the server render-state
-# JSON only shipped ws_style/wsc_style, so these five options never reached the
-# client renderer and were dead (window-status-activity-style was additionally
-# hard-coded to black/white/bold):
-#   - window-status-activity-style
-#   - window-status-bell-style
-#   - window-status-last-style
-#   - status-left-style
-#   - status-right-style
-#
-# This test PROVES each one now renders by hosting psmux under a REAL pseudoconsole
-# (exactly how Windows Terminal hosts it), driving genuine state via CLI, and
-# grepping the raw status-bar VT stream for a distinctive colour (colour201 ->
-# SGR 38;5;201) assigned to each style. A positive control (current/status style)
-# renders the same colour, proving the capture method is valid.
+# End-to-end VT checks for live status and global pane-content style rendering.
 
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $HOSTEXE = "$env:TEMP\conpty_style_host.exe"
 $BIN = "$env:TEMP\conpty_out.bin"
 $CTRL = "$env:TEMP\conpty_ctrl.txt"
-$SESSION = "test_issue451"
+$SESSION = "live_client_styles"
 $NEEDLE = "38;5;201"
+$REAPPLIED_NEEDLE = "38;5;202"
 $COLOR = "fg=colour201,bg=colour21"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -37,10 +22,14 @@ if (-not (Test-Path $HOSTEXE)) {
 if (-not (Test-Path $HOSTEXE)) { Write-Fail "could not compile conpty host"; exit 1 }
 
 function Kill-Session { & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null; Start-Sleep -Milliseconds 400; Remove-Item "$env:USERPROFILE\.psmux\$SESSION.*" -Force -EA SilentlyContinue }
-function Read-BinEscaped {
+function Read-BinEscaped([long]$Start = 0) {
     if (-not (Test-Path $BIN)) { return "" }
     $fs = [System.IO.File]::Open($BIN, 'Open', 'Read', 'ReadWrite')
-    $len = $fs.Length; $buf = New-Object byte[] $len; [void]$fs.Read($buf, 0, $len); $fs.Close()
+    $len = [Math]::Max(0, $fs.Length - $Start)
+    [void]$fs.Seek($Start, [System.IO.SeekOrigin]::Begin)
+    $buf = New-Object byte[] $len
+    [void]$fs.Read($buf, 0, $len)
+    $fs.Close()
     $sb = New-Object System.Text.StringBuilder
     foreach ($b in $buf) {
         if ($b -eq 0x1b) { [void]$sb.Append("<ESC>") }
@@ -52,11 +41,15 @@ function Read-BinEscaped {
 function Start-Host { Remove-Item $BIN,$CTRL -Force -EA SilentlyContinue; Kill-Session
     $p = Start-Process -FilePath $HOSTEXE -ArgumentList "`"$PSMUX`" new-session -s $SESSION" -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds 5; return $p }
-function Stop-Host($p) { Set-Content -Path $CTRL -Value "QUIT`n" -NoNewline; Start-Sleep -Milliseconds 400; try { Stop-Process -Id $p.Id -Force -EA SilentlyContinue } catch {}; Kill-Session }
+function Start-Attach { Remove-Item $BIN,$CTRL -Force -EA SilentlyContinue
+    $p = Start-Process -FilePath $HOSTEXE -ArgumentList "`"$PSMUX`" attach-session -t $SESSION" -PassThru -WindowStyle Hidden
+    Start-Sleep -Seconds 5; return $p }
+function Stop-Client($p) { Set-Content -Path $CTRL -Value "QUIT`n" -NoNewline; Start-Sleep -Milliseconds 400; try { Stop-Process -Id $p.Id -Force -EA SilentlyContinue } catch {} }
+function Stop-Host($p) { Stop-Client $p; Kill-Session }
 
-Write-Host "`n=== Issue #451: status style rendering (raw pseudoconsole proof) ===" -ForegroundColor Cyan
+Write-Host "`n=== Live style rendering (raw pseudoconsole proof) ===" -ForegroundColor Cyan
 
-# Runs a scenario, returns whether NEEDLE colour appears in the raw status stream.
+# Runs a scenario and checks whether NEEDLE appears anywhere in the raw pseudoconsole stream.
 function Test-Style($name, [scriptblock]$setup, [bool]$expectApplied = $true) {
     Write-Host "`n[$name]" -ForegroundColor Yellow
     $p = Start-Host
@@ -78,6 +71,58 @@ function Test-Style($name, [scriptblock]$setup, [bool]$expectApplied = $true) {
 Test-Style "CONTROL window-status-current-style" {
     & $PSMUX set-option -g window-status-current-style $COLOR 2>&1 | Out-Null
     & $PSMUX new-window -t $SESSION 2>&1 | Out-Null
+}
+
+# Global pane-content styles must render through the attached client.
+Test-Style "window-active-style" {
+    & $PSMUX set-option -g status off 2>&1 | Out-Null
+    & $PSMUX set-option -g window-active-style $COLOR 2>&1 | Out-Null
+}
+
+Test-Style "window-active-style append" {
+    & $PSMUX set-option -g status off 2>&1 | Out-Null
+    & $PSMUX set-option -g window-active-style "bg=black" 2>&1 | Out-Null
+    & $PSMUX set-option -ga window-active-style ",$COLOR" 2>&1 | Out-Null
+}
+
+Write-Host "`n[window-active-style unset clears the style]" -ForegroundColor Yellow
+$p = Start-Host
+& $PSMUX set-option -g status off 2>&1 | Out-Null
+& $PSMUX send-keys -t $SESSION "Write-Host STYLEMARK" Enter 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+& $PSMUX set-option -g window-active-style $COLOR 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+$beforeUnset = Read-BinEscaped
+$offset = (Get-Item $BIN).Length
+& $PSMUX set-option -gu window-active-style 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+$existingClientAfterUnset = Read-BinEscaped -Start $offset
+$null = Stop-Client $p
+$p = Start-Attach
+$afterUnset = Read-BinEscaped
+$null = Stop-Client $p
+& $PSMUX set-option -go window-active-style "fg=colour202" 2>&1 | Out-Null
+$p = Start-Attach
+$afterOnlyIfUnset = Read-BinEscaped
+Stop-Host $p
+if (
+    $beforeUnset -match $NEEDLE -and
+    $existingClientAfterUnset -match 'STYLEMARK' -and
+    $existingClientAfterUnset -notmatch $NEEDLE -and
+    $afterUnset -match '<ESC>\[' -and
+    $afterUnset -notmatch $NEEDLE -and
+    $afterOnlyIfUnset -match $REAPPLIED_NEEDLE -and
+    $afterOnlyIfUnset -notmatch $NEEDLE
+) {
+    Write-Pass "window-active-style clears on unset and -o can apply a new value"
+} else {
+    Write-Fail "window-active-style reset evidence wrong (before=$($beforeUnset -match $NEEDLE) existingRepaint=$($existingClientAfterUnset -match 'STYLEMARK') existingCleared=$($existingClientAfterUnset -notmatch $NEEDLE) freshCleared=$($afterUnset -notmatch $NEEDLE) reapplied=$($afterOnlyIfUnset -match $REAPPLIED_NEEDLE))"
+}
+
+Test-Style "window-style on inactive pane" {
+    & $PSMUX set-option -g status off 2>&1 | Out-Null
+    & $PSMUX set-option -g window-style $COLOR 2>&1 | Out-Null
+    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
 }
 
 # window-status-last-style
@@ -122,7 +167,7 @@ Test-Style "status-right-style" {
 
 # ── Layer 2: Win32 TUI visual verification (visible window, CLI-driven) ──
 Write-Host "`n[Layer 2] Win32 TUI visual verification" -ForegroundColor Yellow
-$TUI = "test_issue451_tui"
+$TUI = "live_client_styles_tui"
 & $PSMUX kill-session -t $TUI 2>&1 | Out-Null; Start-Sleep -Milliseconds 300
 $proc = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$TUI -PassThru
 Start-Sleep -Seconds 4

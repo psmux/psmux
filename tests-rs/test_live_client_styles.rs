@@ -1,17 +1,12 @@
-// Issue #451: status-bar style options broke in the app.rs -> client.rs
-// modularization. The server render-state JSON only ever shipped
-// ws_style/wsc_style, so status-left-style, status-right-style and
-// window-status-{activity,bell,last}-style never reached the client renderer
-// and had no effect. These tests guard the exact server-side mechanism:
-//   1. append_extra_style_json() must emit all five style fields (expanded).
+// Live-client style options must share one server-side render-state contract:
+//   1. append_extra_style_json() emits status and pane-content style fields.
 //   2. list_windows_json_with_tabs() must carry per-window bell/last/activity
 //      flags so the client can pick the right style.
-// If either regresses (a field dropped again), these fail deterministically.
 
 use super::*;
 
 fn mk_app() -> AppState {
-    let mut app = AppState::new("issue451".to_string());
+    let mut app = AppState::new("live_client_styles".to_string());
     app.window_base_index = 0;
     app.pane_base_index = 0;
     app
@@ -40,9 +35,9 @@ fn mk_window(name: &str, id: usize) -> crate::types::Window {
     }
 }
 
-// ── 1. The render-state JSON must include every style that was dropped ──
+// ── 1. The render-state JSON carries live-client status styles ──
 #[test]
-fn append_extra_style_json_emits_all_five_dropped_styles() {
+fn append_extra_style_json_emits_status_styles() {
     let mut app = mk_app();
     app.status_left_style = "fg=colour201".to_string();
     app.status_right_style = "bg=colour21".to_string();
@@ -53,7 +48,6 @@ fn append_extra_style_json_emits_all_five_dropped_styles() {
     let mut buf = String::from("{\"status_style\":\"x\"}");
     append_extra_style_json(&mut buf, &app);
 
-    // Every dropped option is now present with its configured value.
     assert!(buf.contains("\"status_left_style\":\"fg=colour201\""), "status-left-style missing: {buf}");
     assert!(buf.contains("\"status_right_style\":\"bg=colour21\""), "status-right-style missing: {buf}");
     assert!(buf.contains("\"wsa_style\":\"reverse\""), "activity-style missing: {buf}");
@@ -65,6 +59,37 @@ fn append_extra_style_json_emits_all_five_dropped_styles() {
     let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
     assert_eq!(parsed["wsa_style"], "reverse");
     assert_eq!(parsed["status_left_style"], "fg=colour201");
+}
+
+#[test]
+fn append_extra_style_json_emits_global_window_content_styles() {
+    let mut app = mk_app();
+    app.user_options.insert(
+        "window-style".to_string(),
+        "fg=colour245,bg=colour236".to_string(),
+    );
+    app.user_options.insert(
+        "window-active-style".to_string(),
+        "fg=colour250,bg=black".to_string(),
+    );
+
+    let mut buf = String::from("{\"layout\":{}}");
+    append_extra_style_json(&mut buf, &app);
+
+    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
+    assert_eq!(parsed["window_style"], "fg=colour245,bg=colour236");
+    assert_eq!(parsed["window_active_style"], "fg=colour250,bg=black");
+}
+
+#[test]
+fn append_extra_style_json_emits_empty_global_window_content_styles_when_unset() {
+    let app = mk_app();
+    let mut buf = String::from("{\"layout\":{}}");
+    append_extra_style_json(&mut buf, &app);
+
+    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
+    assert_eq!(parsed["window_style"], "");
+    assert_eq!(parsed["window_active_style"], "");
 }
 
 // Guard the injection contract: never touch a buffer that is not a closed object.

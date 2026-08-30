@@ -95,6 +95,7 @@ fn fix_border_intersections_leaves_pane_content_table_untouched() {
             total,
             bchars,
             None,
+            crate::client::WindowContentStyles::default(),
         );
 
         // Inject the fake table into the buffer as pane content would appear.
@@ -207,6 +208,7 @@ fn fix_border_intersections_leaves_zoomed_pane_content_untouched() {
             total_panes,
             bchars,
             None,
+            crate::client::WindowContentStyles::default(),
         );
 
         let buf = f.buffer_mut();

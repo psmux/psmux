@@ -1157,6 +1157,18 @@ fn config_file_window_active_style() {
 }
 
 #[test]
+fn config_only_if_unset_sets_window_style_after_unset() {
+    let mut app = mock_app();
+    parse_config_content(
+        &mut app,
+        "set -g window-style 'bg=black'\n\
+         set -gu window-style\n\
+         set -go window-style 'bg=colour235'\n",
+    );
+    assert_eq!(app.user_options.get("window-style").unwrap(), "bg=colour235");
+}
+
+#[test]
 fn config_file_wrap_search() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g wrap-search on\n");

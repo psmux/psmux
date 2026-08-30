@@ -5,7 +5,9 @@
 // glyphs land at the float's position and the pane content is drawn inside.
 // Ground truth for a client-rendered overlay (capture-pane cannot see it).
 
-use crate::client::{FloatJson, render_float_overlays};
+use crate::client::{
+    FloatJson, WindowContentStyles, render_float_overlays,
+};
 use crate::layout::{RowRunsJson, CellRunJson};
 
 fn row_of(ch: char, n: usize) -> RowRunsJson {
@@ -17,16 +19,30 @@ fn row_of(ch: char, n: usize) -> RowRunsJson {
     }
 }
 
-fn render(fl: &FloatJson, cw: u16, ch: u16) -> ratatui::buffer::Buffer {
+fn render_with_styles(
+    fl: &FloatJson,
+    cw: u16,
+    ch: u16,
+    styles: WindowContentStyles,
+) -> ratatui::buffer::Buffer {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
     let backend = TestBackend::new(cw, ch);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| {
-        render_float_overlays(f, Rect::new(0, 0, cw, ch), std::slice::from_ref(fl));
+        render_float_overlays(
+            f,
+            Rect::new(0, 0, cw, ch),
+            std::slice::from_ref(fl),
+            styles,
+        );
     }).unwrap();
     term.backend().buffer().clone()
+}
+
+fn render(fl: &FloatJson, cw: u16, ch: u16) -> ratatui::buffer::Buffer {
+    render_with_styles(fl, cw, ch, WindowContentStyles::default())
 }
 
 fn cell_char(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> char {
@@ -82,4 +98,128 @@ fn none_border_draws_content_without_box() {
         let found = buf.content.iter().any(|c| c.symbol().chars().next() == Some(bad));
         assert!(!found, "none border must draw no box glyph {:?}", bad);
     }
+}
+
+#[test]
+fn floating_panes_apply_active_and_inactive_window_colors() {
+    use ratatui::style::{Color, Style};
+
+    let window_styles = WindowContentStyles {
+        inactive: Some(
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::DarkGray),
+        ),
+        active: Some(
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Blue),
+        ),
+    };
+    let active = make_float(1, 1, 8, 5, "single");
+    let active_buffer = render_with_styles(&active, 20, 10, window_styles);
+    assert_eq!(
+        active_buffer[(2, 2)].style().fg,
+        Some(Color::Yellow),
+    );
+    assert_eq!(
+        active_buffer[(2, 2)].style().bg,
+        Some(Color::Blue),
+    );
+
+    let mut inactive = active;
+    inactive.focused = false;
+    inactive.rows[0].runs[0].bg = "magenta".to_string();
+    let inactive_buffer = render_with_styles(&inactive, 20, 10, window_styles);
+    assert_eq!(
+        inactive_buffer[(2, 2)].style().bg,
+        Some(Color::Magenta),
+    );
+    assert_eq!(
+        inactive_buffer[(3, 2)].style().fg,
+        Some(Color::Cyan),
+    );
+    assert_eq!(
+        inactive_buffer[(3, 2)].style().bg,
+        Some(Color::DarkGray),
+    );
+}
+
+#[test]
+fn focused_float_leaves_tiled_content_with_inactive_window_style() {
+    use crate::client::{
+        compute_active_rect_json, render_layout_json,
+    };
+    use crate::layout::LayoutJson;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Style};
+    use ratatui::Terminal;
+
+    let layout = LayoutJson::Leaf {
+        id: 0,
+        rows: 1,
+        cols: 12,
+        cursor_row: 0,
+        cursor_col: 0,
+        alternate_screen: false,
+        wants_mouse: false,
+        hide_cursor: true,
+        cursor_shape: 0,
+        active: true,
+        copy_mode: false,
+        scroll_offset: 0,
+        view_offset: 0,
+        sel_start_row: None,
+        sel_start_col: None,
+        sel_end_row: None,
+        sel_end_col: None,
+        sel_mode: None,
+        copy_cursor_row: None,
+        copy_cursor_col: None,
+        content: Vec::new(),
+        rows_v2: Vec::new(),
+        title: None,
+    };
+    let window_styles = WindowContentStyles {
+        inactive: Some(Style::default().bg(Color::DarkGray)),
+        active: Some(Style::default().bg(Color::Blue)),
+    };
+    let floating = make_float(2, 1, 6, 4, "single");
+    let backend = TestBackend::new(12, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 12, 6);
+            render_layout_json(
+                frame,
+                &layout,
+                area,
+                false,
+                Color::DarkGray,
+                Color::Green,
+                false,
+                Color::Reset,
+                compute_active_rect_json(&layout, area),
+                "",
+                false,
+                "off",
+                "",
+                1,
+                crate::border_lines::border_chars("single"),
+                None,
+                window_styles.for_tiled_panes(true),
+            );
+            render_float_overlays(
+                frame,
+                area,
+                std::slice::from_ref(&floating),
+                window_styles,
+            );
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(0, 0)].style().bg, Some(Color::DarkGray));
+    assert_eq!(buffer[(3, 2)].style().bg, Some(Color::Blue));
 }

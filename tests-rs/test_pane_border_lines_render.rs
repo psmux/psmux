@@ -70,6 +70,7 @@ fn render_counts(kind: &str, style: &str, w: u16, h: u16) -> std::collections::H
             total,
             bchars,
             None,
+            crate::client::WindowContentStyles::default(),
         );
         let border_mask = crate::client::border_mask_from_layout(&layout, area, f.buffer_mut().area, false);
         crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
@@ -159,6 +160,7 @@ fn nested_split_produces_double_junction() {
             f, &layout, area, false, Color::DarkGray, Color::Green,
             false, Color::Reset, active_rect, "", false, "off", "", total, bchars,
             None,
+            crate::client::WindowContentStyles::default(),
         );
         let border_mask = crate::client::border_mask_from_layout(&layout, area, f.buffer_mut().area, false);
         crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &border_mask);

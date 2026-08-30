@@ -191,14 +191,7 @@ pub(crate) fn expand_status_formats(app: &AppState, status_style: &str) -> Statu
     }
 }
 
-/// Inject the status-bar style options that were dropped when the monolithic
-/// `app.rs` renderer was split into the modular client (regression from the
-/// modularization refactor, issue #451). The client only ever received
-/// `ws_style`/`wsc_style`, so `status-left-style`, `status-right-style`, and
-/// `window-status-{activity,bell,last}-style` never reached the renderer and had
-/// no effect. These are appended to the already-built render-state JSON object
-/// the same way `clock_colour` and the pane-border extras are (pop the trailing
-/// `}`, add fields, re-close), so the giant format-string arg list is untouched.
+/// Append live-client style fields shared by both render-state producers.
 pub(crate) fn append_extra_style_json(buf: &mut String, app: &AppState) {
     if !buf.ends_with('}') { return; }
     // Guard lives HERE, not at the call site. This runs on the per-repaint
@@ -209,12 +202,19 @@ pub(crate) fn append_extra_style_json(buf: &mut String, app: &AppState) {
     // which is exactly how the auto-push path lost it.
     let _async_fmt = crate::format::AsyncFormatGuard::new();
     buf.pop();
+    let window_style = app.user_options.get("window-style").map(String::as_str).unwrap_or("");
+    let window_active_style = app.user_options
+        .get("window-active-style")
+        .map(String::as_str)
+        .unwrap_or("");
     for (key, raw) in [
-        ("status_left_style", &app.status_left_style),
-        ("status_right_style", &app.status_right_style),
-        ("wsa_style", &app.window_status_activity_style),
-        ("wsb_style", &app.window_status_bell_style),
-        ("wsl_style", &app.window_status_last_style),
+        ("status_left_style", app.status_left_style.as_str()),
+        ("status_right_style", app.status_right_style.as_str()),
+        ("wsa_style", app.window_status_activity_style.as_str()),
+        ("wsb_style", app.window_status_bell_style.as_str()),
+        ("wsl_style", app.window_status_last_style.as_str()),
+        ("window_style", window_style),
+        ("window_active_style", window_active_style),
     ] {
         buf.push_str(",\"");
         buf.push_str(key);
@@ -832,8 +832,8 @@ pub(crate) const TMUX_COMMANDS: &[&str] = &[
 ];
 
 #[cfg(test)]
-#[path = "../../tests-rs/test_issue451_status_styles.rs"]
-mod tests_issue451_status_styles;
+#[path = "../../tests-rs/test_live_client_styles.rs"]
+mod tests_live_client_styles;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_render_path_async_format.rs"]

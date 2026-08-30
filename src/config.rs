@@ -958,7 +958,12 @@ fn parse_set_option(app: &mut AppState, line: &str) {
 
     // Handle -u (unset): reset option to empty
     if unset_mode {
-        parse_option_value(app, key, "", is_global);
+        if matches!(key, "window-style" | "window-active-style") {
+            app.user_options.remove(key);
+            app.user_set_options.remove(key);
+        } else {
+            parse_option_value(app, key, "", is_global);
+        }
         return;
     }
 

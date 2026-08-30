@@ -52,6 +52,7 @@ fn render_gutters(leaf: &LayoutJson, mode: CopyLnMode, hsize: usize, w: u16, h: 
             f, leaf, area, false, Color::DarkGray, Color::Green,
             false, Color::Reset, active_rect, "", false, "off", "", 1,
             crate::border_lines::border_chars("single"), copy_ln,
+            crate::client::WindowContentStyles::default(),
         );
     }).unwrap();
     let buf = term.backend().buffer().clone();
@@ -118,6 +119,7 @@ fn off_draws_no_gutter_and_keeps_content() {
             f, &leaf, area, false, Color::DarkGray, Color::Green,
             false, Color::Reset, active_rect, "", false, "off", "", 1,
             crate::border_lines::border_chars("single"), None,
+            crate::client::WindowContentStyles::default(),
         );
     }).unwrap();
     let buf = term.backend().buffer().clone();
@@ -151,6 +153,7 @@ fn gutter_shifts_content_right() {
                 f, &leaf, area, false, Color::DarkGray, Color::Green,
                 false, Color::Reset, active_rect, "", false, "off", "", 1,
                 crate::border_lines::border_chars("single"), copy_ln,
+                crate::client::WindowContentStyles::default(),
             );
         }).unwrap();
         let buf = term.backend().buffer().clone();

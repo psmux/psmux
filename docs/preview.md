@@ -54,7 +54,7 @@ Inside the chooser, `p` always toggles the preview for the current session regar
 
 The preview pane is fed by the same renderer that draws the main viewport. Each open chooser fetches a JSON dump of the target window using the internal `window-dump` TCP command. The dump includes per-cell text, foreground and background colours, and style flags (bold, underline, italic, reversed, etc.) for every visible row of every pane in that window.
 
-That dump is then drawn into the preview area using `render_layout_json`, the same function that draws the live psmux viewport. As a result, a preview is a true miniature of what you would see if you switched to that target right now, including:
+That dump is then drawn into the preview area using `render_layout_json`, the same function that draws the live psmux viewport. The result is a styled miniature of the serialized pane content, including:
 
 * Pane borders, including their colours and the active pane highlight.
 * Pane title bars and status indicators.
@@ -87,7 +87,7 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 * `choose-session` and `choose-tree` both have a preview pane.
 * `p` toggles the preview while a chooser is open.
 * The preview is a live mirror of the target, not a frozen snapshot.
-* Pane borders, colours, and styles are preserved.
+* Serialized cell colours and styles, plus pane-border geometry, are preserved.
 * Wide characters are handled correctly.
 * The preview width is roughly half the popup width, with the picker list on the left.
 * The preview never modifies the target session in any way (it is read only).
@@ -104,7 +104,7 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 
 * The option name `choose-tree-preview` is psmux specific. tmux does not recognise it. Adding it to a shared configuration file is safe because tmux's set-option command will warn but not fail; if you want to be strict, guard the line with `if-shell` or split your config.
 * The option key in `show-options` output and in the JSON sent to the client uses kebab-case (`choose-tree-preview`) and snake_case (`choose_tree_preview`) respectively, matching the existing psmux convention.
-* The preview pane respects all your style options (`pane-border-style`, `pane-active-border-style`, `mode-style`, etc.) because it goes through the same renderer.
+* The preview uses the target's serialized cell styles and the chooser's pane-border styles. The `window-dump` response does not include target `window-style` or `window-active-style` options.
 
 ## Performance
 
