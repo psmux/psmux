@@ -141,7 +141,40 @@ fn a_value_glued_to_its_flag_satisfies_it() {
 fn double_dash_ends_the_flags() {
     let spec = parse_command_prompt_args("-- -N");
     assert_eq!(spec.template.as_deref(), Some("-N"));
-    assert_eq!(spec.label, None);
+}
+
+// ---------------------------------------------------------------------------
+// The heading: with no -p, tmux names the command the prompt will run
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_prompt_names_the_command_it_will_run() {
+    assert_eq!(spec_of(TMUX_DOT).label.as_deref(), Some("(move-window)"));
+}
+
+#[test]
+fn an_explicit_prompt_wins_over_the_derived_one() {
+    let spec = parse_command_prompt_args("-p index \"move-window -t '%%'\"");
+    assert_eq!(spec.label.as_deref(), Some("index"));
+}
+
+#[test]
+fn the_heading_stops_at_a_space_or_a_comma() {
+    // tmux: strcspn(template, " ,").
+    assert_eq!(
+        parse_command_prompt_args("'rename-window \"%%\"'").label.as_deref(),
+        Some("(rename-window)"),
+    );
+    assert_eq!(
+        parse_command_prompt_args("'new-window,split-window'").label.as_deref(),
+        Some("(new-window)"),
+    );
+}
+
+#[test]
+fn a_bare_command_prompt_has_no_heading() {
+    // prefix + `:` has no template, so there is no command to name.
+    assert_eq!(parse_command_prompt_args("").label, None);
 }
 
 #[test]

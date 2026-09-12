@@ -239,7 +239,18 @@ fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
         i += 1;
     }
     if i < tokens.len() {
-        spec.template = Some(tokens[i..].join(" "));
+        let template = tokens[i..].join(" ");
+        if spec.label.is_none() {
+            // With no -p, tmux's prompt names the command it is about to run
+            // (cmd-command-prompt.c):
+            //     tmp = xstrndup(cdata->template, strcspn(cdata->template, " ,"));
+            //     xasprintf(&new_prompt, "(%s) ", tmp);
+            let head = template.split(|c| c == ' ' || c == ',').next().unwrap_or("");
+            if !head.is_empty() {
+                spec.label = Some(format!("({})", head));
+            }
+        }
+        spec.template = Some(template);
     }
     spec
 }
@@ -3836,6 +3847,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     command_cursor = 0;
                                     command_history_idx = command_history.len();
                                     command_template = Some("move-window -t '%%'".into());
+                                    command_prompt_label = Some("(move-window)".into());
                                 }
                                 KeyCode::Char('w') => { do_choose_tree = true; }
                                 KeyCode::Char('s') => { do_choose_session = true; }
