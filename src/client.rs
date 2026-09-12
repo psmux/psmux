@@ -199,29 +199,27 @@ struct CommandPromptSpec {
 /// case that needs it: skipping the flag but not its value left `target` as the
 /// first word of the template, so Enter ran `target move-window -t '3'`.
 ///
-/// A value glued to its flag (`-pindex`) satisfies the flag on its own, the way
-/// tmux's `args_parse_flags` treats a template letter it finds a character
-/// after. `--` ends the flags, as it does there.
+/// Three more shapes follow tmux's `args_parse_flags`: the flags end at the
+/// first token that is not one (so a `-t` inside an unquoted template stays in
+/// the template), `--` ends them explicitly, and a value glued to its flag
+/// (`-pindex`) satisfies it on its own.
 fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
     let tokens = crate::config::shell_words(args);
     let mut spec = CommandPromptSpec::default();
-    let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let token = tokens[i].clone();
         if token == "--" {
-            positional.extend(tokens[i + 1..].iter().cloned());
+            i += 1;
             break;
         }
-        // A bare `-`, and anything not starting with `-`, is a positional.
-        let flag = token.strip_prefix('-').and_then(|rest| {
+        // A bare `-`, and anything not starting with `-`, ends the flags: what
+        // is left is the template.
+        let Some((flag, glued)) = token.strip_prefix('-').and_then(|rest| {
             let mut chars = rest.chars();
             chars.next().map(|f| (f, chars.as_str().to_string()))
-        });
-        let Some((flag, glued)) = flag else {
-            positional.push(token);
-            i += 1;
-            continue;
+        }) else {
+            break;
         };
         let value = if !crate::cli::flag_takes_value("command-prompt", flag) {
             None
@@ -240,8 +238,8 @@ fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
         }
         i += 1;
     }
-    if !positional.is_empty() {
-        spec.template = Some(positional.join(" "));
+    if i < tokens.len() {
+        spec.template = Some(tokens[i..].join(" "));
     }
     spec
 }
@@ -3558,6 +3556,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             } else {
                                 command_input = false;
                                 command_cursor = 0;
+                                command_template = None;
+                                command_prompt_label = None;
                                 renaming = false;
                                 pane_renaming = false;
                                 tree_chooser = false;
@@ -3827,6 +3827,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('#') => { cmd_batch.push("list-buffers\n".into()); }
                                 KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
+                                // Same command as the PREFIX_DEFAULTS entry for
+                                // `.`, so the key is not dead for the moment
+                                // before the first state sync arrives.
+                                KeyCode::Char('.') => {
+                                    command_input = true;
+                                    command_buf.clear();
+                                    command_cursor = 0;
+                                    command_history_idx = command_history.len();
+                                    command_template = Some("move-window -t '%%'".into());
+                                }
                                 KeyCode::Char('w') => { do_choose_tree = true; }
                                 KeyCode::Char('s') => { do_choose_session = true; }
                                 KeyCode::Char('q') => { cmd_batch.push("display-panes\n".into()); }
@@ -4727,11 +4737,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     }
                                     command_input = false;
                                     command_cursor = 0;
+                                    command_template = None;
+                                    command_prompt_label = None;
                                 }
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
                                 KeyCode::Esc if pane_renaming => { pane_renaming = false; }
                                 KeyCode::Esc if window_idx_input => { window_idx_input = false; }
-                                KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; }
+                                KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; command_template = None; command_prompt_label = None; }
 
                                 // Command prompt: cursor movement, history, and editing keys
                                 KeyCode::Left if command_input => {
@@ -8086,3 +8098,7 @@ mod test_issue640_sticky_key_table;
 #[cfg(test)]
 #[path = "../tests-rs/test_switch_client_target_routing.rs"]
 mod test_switch_client_target_routing;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_prefix_dot_move_window.rs"]
+mod test_prefix_dot_move_window;

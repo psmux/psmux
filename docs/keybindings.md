@@ -88,6 +88,7 @@ rebind the prefix, the new key is bound to `send-prefix` for you.
 | `Prefix + &` | Kill current window (with confirmation) |
 | `Prefix + ,` | Rename current window |
 | `Prefix + '` | Prompt for window index (jump to any window) |
+| `Prefix + .` | Prompt for an index and move the current window there (`move-window`) |
 | `Prefix + 0-9` | Select window by number |
 
 **Gotcha: `select-window-index` is not a real command.** `Prefix + '` is bound to
