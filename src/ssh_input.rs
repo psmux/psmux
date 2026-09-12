@@ -548,6 +548,11 @@ pub fn keepalive_reasserts_mouse_input() -> bool {
 /// has used since #397.
 pub(crate) const ESC_COALESCE_MS: u64 = 50;
 
+/// Ceiling on the parameter bytes collected for one `CSI` sequence.  A real
+/// key sequence is a handful of bytes; anything longer is a stream that merely
+/// starts like one, and must not keep the held Escape alive indefinitely.
+pub(crate) const CSI_MAX_PARAM_LEN: usize = 32;
+
 /// Folds a bare Escape that is immediately followed by Enter into one
 /// `Alt+Enter` event (issue #611).
 ///
@@ -565,6 +570,47 @@ pub(crate) const ESC_COALESCE_MS: u64 = 50;
 /// `input_key_write` then emits the `\033` prefix and the key's own bytes back
 /// to back.  `encode_key_event` already turns `Alt+Enter` into a single
 /// `\x1b\r`, so producing one merged event is all that is needed here.
+///
+/// It is also where an EXTENDED KEY is put back together, for a related but
+/// distinct reason.  A terminal that encodes Shift+Enter as `CSI 13;2u` — the
+/// modifyOtherKeys / fixterms "CSI u" form, which is what `set -s
+/// extended-keys` asks a terminal for and what a Windows Terminal `sendInput`
+/// keybinding writes — hands psmux nothing but literal characters: conhost's
+/// input parser does not know `CSI u`, so it flushes the unrecognised sequence
+/// into the console input buffer one `KEY_EVENT` per byte.  Measured under
+/// Windows Terminal on Windows 11 26200 with `examples/csi_u_diag.rs`, which
+/// reads the records straight from the console, one press of Shift+Enter
+/// delivers seven of them in a single `ReadConsoleInputW`:
+///
+/// ```text
+///   DOWN vk=0x00 scan=0x00 uChar=0x001b        <- ESC
+///   DOWN vk=0x00 scan=0x00 uChar=0x005b  '['
+///   DOWN vk=0x00 scan=0x00 uChar=0x0031  '1'
+///   DOWN vk=0x00 scan=0x00 uChar=0x0033  '3'
+///   DOWN vk=0x00 scan=0x00 uChar=0x003b  ';'
+///   DOWN vk=0x00 scan=0x00 uChar=0x0032  '2'
+///   DOWN vk=0x00 scan=0x00 uChar=0x0075  'u'
+/// ```
+///
+/// and the ESC does not survive the trip: with no virtual key code to name it
+/// and a `uChar` inside the control range, crossterm sends that record to
+/// `ToUnicodeEx`, which answers nothing for a synthesised record, and the event
+/// is discarded (`event/sys/windows/parse.rs`).  So psmux is handed six bare
+/// characters, its paste heuristic sees three or more ASCII characters inside
+/// 20 ms and bundles them into a bracketed paste, and the child application
+/// receives the TEXT `[13;2u` instead of a newline.
+///
+/// The `[` is therefore the only introducer left to work with, and the batch is
+/// what makes that safe: every byte of the sequence is ALREADY in the queue
+/// when the `[` is handed over, so [`recover_csi_u`] pulls without ever
+/// waiting.  A `[` a person typed has nothing behind it, the pull comes back
+/// empty on the first try, and the character goes straight through — no hold,
+/// no added latency on a character that is ordinary in every editor.
+///
+/// tmux never has this problem, because it reads its client tty as bytes and
+/// parses the sequence itself in `tty-keys.c`.  Reassembly is unconditional
+/// there and here: `extended-keys` governs what tmux WRITES to a pane, never
+/// what it accepts from the terminal.
 pub struct EscCoalesce {
     /// When the held Escape arrived.  `None` when nothing is held.
     pending: Option<Instant>,
@@ -593,57 +639,110 @@ impl EscCoalesce {
         make_key(KeyCode::Esc, KeyModifiers::empty())
     }
 
-    /// Feed one event straight from the terminal.
+    /// Feed one event straight from the terminal, with no way to look ahead.
+    ///
+    /// Extended keys cannot be recovered through this entry point — see
+    /// [`EscCoalesce::feed_with`], which is what the live input source calls.
+    pub fn feed(&mut self, ev: Event, now: Instant) -> Option<Event> {
+        self.feed_with(ev, now, || None)
+    }
+
+    /// Feed one event, with `pull` offering whatever the terminal has ALREADY
+    /// delivered.
+    ///
+    /// `pull` must never wait: it returns the next event if one is queued and
+    /// `None` the moment nothing is, which is what lets a `[` that opens an
+    /// extended key be told apart from a `[` a person typed without holding
+    /// either of them back.
     ///
     /// Returns the event the client should see, or `None` when the event was
-    /// absorbed: either a bare Escape that is now being held, or the key
-    /// release belonging to one.
-    pub fn feed(&mut self, ev: Event, now: Instant) -> Option<Event> {
+    /// absorbed: a bare Escape now being held, the key release belonging to
+    /// one, or a whole sequence that resolved to nothing.
+    pub fn feed_with<F>(&mut self, ev: Event, now: Instant, pull: F) -> Option<Event>
+    where
+        F: FnMut() -> Option<Event>,
+    {
         if !self.enabled {
             return Some(ev);
         }
+        // The release of the very Escape being held is not "another key" and
+        // must not close the window.
         if self.pending.is_some() {
-            match ev {
-                // ESC then Enter: the pair every terminal that cannot encode a
-                // modified Enter falls back to.  Merge into one Alt+Enter, the
-                // way tmux merges `\033` + byte into a META key.  Ctrl+Enter is
-                // left alone because it has its own byte (0x0a) and must not
-                // gain a spurious Alt.
-                Event::Key(k)
-                    if matches!(k.code, KeyCode::Enter)
-                        && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                        && !k.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    self.pending = None;
-                    let mut merged = k;
-                    merged.modifiers.insert(KeyModifiers::ALT);
-                    merged.kind = KeyEventKind::Press;
-                    Some(Event::Key(merged))
-                }
-                // The release of the very Escape being held is not "another
-                // key" and must not close the window.
-                Event::Key(k)
-                    if k.kind == KeyEventKind::Release && matches!(k.code, KeyCode::Esc) =>
-                {
-                    None
-                }
-                other => {
-                    self.pending = None;
-                    self.queue.push_back(other);
-                    Some(Self::escape_event())
+            if let Event::Key(k) = &ev {
+                if k.kind == KeyEventKind::Release && matches!(k.code, KeyCode::Esc) {
+                    return None;
                 }
             }
-        } else {
-            match ev {
-                Event::Key(k)
-                    if matches!(k.code, KeyCode::Esc)
-                        && k.modifiers.is_empty()
-                        && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-                {
-                    self.pending = Some(now);
-                    None
+        }
+        match ev {
+            // `[` may be the second byte of an extended key whose ESC the
+            // console dropped.  Everything else of the sequence is already in
+            // the queue, so this decides itself immediately.
+            Event::Key(k)
+                if matches!(k.code, KeyCode::Char('['))
+                    && !k
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                match recover_csi_u(pull) {
+                    // The sequence was real, so a held Escape was its
+                    // introducer and goes with it.
+                    Recovered::Key(out) => {
+                        self.pending = None;
+                        Some(out)
+                    }
+                    Recovered::Consumed => {
+                        self.pending = None;
+                        None
+                    }
+                    // Not a sequence.  Hand back the `[`, everything pulled
+                    // behind it and any held Escape, in arrival order.
+                    Recovered::Raw(rest) => {
+                        let had_escape = self.pending.take().is_some();
+                        self.queue.push_back(Event::Key(k));
+                        self.queue.extend(rest);
+                        if had_escape {
+                            Some(Self::escape_event())
+                        } else {
+                            self.queue.pop_front()
+                        }
+                    }
                 }
-                other => Some(other),
+            }
+            // ESC then Enter: the pair every terminal that cannot encode a
+            // modified Enter falls back to.  Merge into one Alt+Enter, the
+            // way tmux merges `\033` + byte into a META key.  Ctrl+Enter is
+            // left alone because it has its own byte (0x0a) and must not
+            // gain a spurious Alt.
+            Event::Key(k)
+                if self.pending.is_some()
+                    && matches!(k.code, KeyCode::Enter)
+                    && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && !k.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.pending = None;
+                let mut merged = k;
+                merged.modifiers.insert(KeyModifiers::ALT);
+                merged.kind = KeyEventKind::Press;
+                Some(Event::Key(merged))
+            }
+            Event::Key(k)
+                if self.pending.is_none()
+                    && matches!(k.code, KeyCode::Esc)
+                    && k.modifiers.is_empty()
+                    && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                self.pending = Some(now);
+                None
+            }
+            other => {
+                if self.pending.take().is_some() {
+                    self.queue.push_back(other);
+                    Some(Self::escape_event())
+                } else {
+                    Some(other)
+                }
             }
         }
     }
@@ -916,7 +1015,7 @@ impl InputSource {
                     };
                     if ready {
                         let ev = crossterm::event::read()?;
-                        if let Some(out) = esc.feed(ev, Instant::now()) {
+                        if let Some(out) = esc.feed_with(ev, Instant::now(), pull_queued) {
                             return Ok(Some(out));
                         }
                     }
@@ -958,7 +1057,7 @@ impl InputSource {
                 loop {
                     if crossterm::event::poll(Duration::ZERO)? {
                         let ev = crossterm::event::read()?;
-                        if let Some(out) = esc.feed(ev, Instant::now()) {
+                        if let Some(out) = esc.feed_with(ev, Instant::now(), pull_queued) {
                             return Ok(Some(out));
                         }
                         continue;
@@ -976,6 +1075,19 @@ impl InputSource {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// The look-ahead [`EscCoalesce::feed_with`] runs on: one event if the terminal
+/// has already delivered it, `None` the instant it has not.
+///
+/// A read error is reported as "nothing queued" rather than swallowed for good:
+/// the very next `poll`/`read` in the loop above hits the same broken stdin and
+/// surfaces it as the `io::Error` the caller expects.
+fn pull_queued() -> Option<Event> {
+    match crossterm::event::poll(Duration::ZERO) {
+        Ok(true) => crossterm::event::read().ok(),
+        _ => None,
+    }
+}
 
 /// Construct a press `Event::Key` with the given code and modifiers.
 #[inline(always)]
@@ -1003,6 +1115,169 @@ fn decode_modifiers(n: u16) -> KeyModifiers {
         mods |= KeyModifiers::CONTROL;
     }
     mods
+}
+
+/// What the characters behind a `[` turned out to be.
+pub(crate) enum Recovered {
+    /// A complete extended key.  Everything pulled belonged to it.
+    Key(Event),
+    /// A complete key report that carries nothing for the client (a Kitty
+    /// protocol RELEASE).  Everything pulled belonged to it and none of it is
+    /// forwarded.
+    Consumed,
+    /// No sequence.  These are the events pulled, in arrival order; the caller
+    /// owes every one of them to the client, behind the `[` itself.
+    Raw(Vec<Event>),
+}
+
+/// Pull the characters sitting behind a `[` and decide whether they are an
+/// extended key.
+///
+/// `pull` returns only what the terminal has ALREADY delivered and `None` the
+/// instant it has nothing, so a `[` a person typed costs exactly one empty pull
+/// and is handed straight back — no hold, no guess about typing speed.  A `[`
+/// that opens a sequence the console could not parse is a different case
+/// entirely: conhost flushes the whole thing in one `ReadConsoleInputW`, so
+/// every remaining byte is already queued and the pulls all succeed.
+///
+/// Nothing pulled is ever dropped on the way out: [`Recovered::Raw`] carries
+/// the events back in the order they arrived, releases included, because the
+/// caller cannot re-read what this function has consumed.
+pub(crate) fn recover_csi_u<F>(mut pull: F) -> Recovered
+where
+    F: FnMut() -> Option<Event>,
+{
+    let mut pulled: Vec<Event> = Vec::new();
+    let mut params = String::new();
+    loop {
+        let Some(ev) = pull() else {
+            return Recovered::Raw(pulled);
+        };
+        pulled.push(ev.clone());
+        let Event::Key(k) = ev else {
+            return Recovered::Raw(pulled);
+        };
+        // Releases are not sequence content.  A console that reports them
+        // interleaved with the presses must not break the sequence apart.
+        if k.kind == KeyEventKind::Release {
+            continue;
+        }
+        if k.modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return Recovered::Raw(pulled);
+        }
+        let KeyCode::Char(c) = k.code else {
+            return Recovered::Raw(pulled);
+        };
+        match c as u32 {
+            // Parameter and intermediate bytes.
+            0x20..=0x3f if params.len() < CSI_MAX_PARAM_LEN => params.push(c),
+            // Final byte: the sequence is complete, for better or worse.
+            0x40..=0x7e => {
+                return match csi_key(&params, c) {
+                    CsiKey::Key(out) => Recovered::Key(out),
+                    CsiKey::Absorbed => Recovered::Consumed,
+                    CsiKey::NotAKey => Recovered::Raw(pulled),
+                }
+            }
+            _ => return Recovered::Raw(pulled),
+        }
+    }
+}
+
+/// What a reassembled `CSI … <final>` turned out to be.
+pub(crate) enum CsiKey {
+    /// A key the client should see.
+    Key(Event),
+    /// A well formed key report that carries nothing for the client: a key
+    /// RELEASE from a terminal running the Kitty protocol.  Dropping it is not
+    /// a loss — psmux never asks for release reporting — and it must not be
+    /// forwarded, because a release of Enter is exactly what the client's
+    /// WezTerm workaround promotes back into a press.
+    Absorbed,
+    /// Not a key sequence; the caller hands the raw bytes back.
+    NotAKey,
+}
+
+/// Decode a `CSI <code> ; <modifiers> u` key sequence — the modifyOtherKeys /
+/// fixterms encoding, which xterm, Kitty, WezTerm, Windows Terminal and tmux's
+/// own `extended-keys` all speak, and the only reason a terminal can report
+/// Shift+Enter at all (legacy VT has no encoding for it: CR is CR whether or
+/// not Shift is down).
+///
+/// `<code>` is the unicode code point of the unmodified key, so Shift+Enter is
+/// `CSI 13;2u`.  Kitty's extra sub-parameters are tolerated: `code:shifted:base`
+/// keeps only the first, and `modifiers:event` uses the event type to tell a
+/// press from a release.
+///
+/// Every other final byte returns [`CsiKey::NotAKey`], including the ones the
+/// console DOES understand (`A`-`D`, `~`, …).  Those never arrive here as loose
+/// characters — conhost translates them into virtual-key records long before
+/// psmux sees them — so recognising them would add a second, divergent decoder
+/// for sequences that cannot reach it.
+pub(crate) fn csi_key(params: &str, final_byte: char) -> CsiKey {
+    if final_byte != 'u' {
+        return CsiKey::NotAKey;
+    }
+    // `CSI ? … u`, `CSI > … u` and friends are terminal queries and replies,
+    // never keys.
+    if params.starts_with(['?', '<', '=', '>']) {
+        return CsiKey::NotAKey;
+    }
+    let mut fields = params.split(';');
+    let Some(code) = fields
+        .next()
+        .and_then(|f| f.split(':').next())
+        .and_then(|f| f.parse::<u32>().ok())
+    else {
+        return CsiKey::NotAKey;
+    };
+    let mut modifier_field = fields.next().unwrap_or("1").split(':');
+    let mods = match modifier_field.next() {
+        // `CSI 13u` and `CSI 13;u` both mean "no modifiers".
+        None | Some("") => KeyModifiers::empty(),
+        Some(f) => match f.parse::<u16>() {
+            Ok(n) => decode_modifiers(n),
+            Err(_) => return CsiKey::NotAKey,
+        },
+    };
+    // Kitty event types: 1 press, 2 repeat, 3 release.
+    let kind = match modifier_field.next() {
+        Some("3") => return CsiKey::Absorbed,
+        Some("2") => KeyEventKind::Repeat,
+        _ => KeyEventKind::Press,
+    };
+    let Some(code) = csi_u_key_code(code) else {
+        return CsiKey::NotAKey;
+    };
+    CsiKey::Key(Event::Key(KeyEvent {
+        code,
+        modifiers: mods,
+        kind,
+        state: crossterm::event::KeyEventState::empty(),
+    }))
+}
+
+/// Map the code point in a `CSI u` sequence onto the key it names.
+///
+/// The named keys are spelled out because `KeyCode::Char('\r')` is not the
+/// Enter key to anything downstream: the client's key tables, its paste
+/// heuristic and `encode_key_event` all match on `KeyCode::Enter`.
+fn csi_u_key_code(code: u32) -> Option<KeyCode> {
+    Some(match code {
+        8 | 127 => KeyCode::Backspace,
+        9 => KeyCode::Tab,
+        13 => KeyCode::Enter,
+        27 => KeyCode::Esc,
+        c => {
+            let ch = char::from_u32(c)?;
+            if ch.is_control() {
+                return None;
+            }
+            KeyCode::Char(ch)
+        }
+    })
 }
 
 /// Decode a UTF-16 code unit, combining surrogate pairs.
@@ -1512,6 +1787,18 @@ impl VtParser {
                 let cols = self.params[2];
                 if rows > 0 && cols > 0 {
                     emit(Event::Resize(cols, rows));
+                }
+            }
+            // `CSI <code> ; <modifiers> u` — the modifyOtherKeys / fixterms
+            // extended key.  This parser reads real bytes, so unlike the
+            // console path it has the whole sequence in hand; without an arm
+            // here it fell through to the discard below and the key vanished
+            // outright, which is how a terminal-side Shift+Enter binding
+            // silently did nothing over SSH.  See [`csi_u_key_code`] for why
+            // the code point becomes a named `KeyCode`.
+            'u' => {
+                if let Some(code) = csi_u_key_code(self.params[0] as u32) {
+                    emit(make_key(code, mods));
                 }
             }
             '~' => self.dispatch_tilde(mods, emit),
@@ -2469,6 +2756,10 @@ mod tests_issue508_wezterm_vt_cspace;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue611_shift_enter_event_modifiers.rs"]
 mod tests_issue611_shift_enter_event_modifiers;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_extended_keys_csi_u.rs"]
+mod tests_extended_keys_csi_u;
 
 // ─── Raw VT pipe client input — issue #474 / Windows 10 SSH ────────────────
 //
