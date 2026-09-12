@@ -316,6 +316,23 @@ pub fn validate_command_line_flags<S: AsRef<str>>(tokens: &[S]) -> Result<(), St
     validate_flag_arguments(command.as_ref(), &tokens[1..])
 }
 
+/// True when `-<flag>` takes a value for `command`, per [`ARGS_TEMPLATES`].
+///
+/// Same classification [`validate_flag_arguments`] applies, exposed so a parser
+/// that has to step OVER a flag's value cannot drift from the one flag table.
+/// Without it a hand-written parser has to keep its own list of value-taking
+/// flags, and the flag it forgets turns its value into a positional argument.
+pub fn flag_takes_value(command: &str, flag: char) -> bool {
+    let Some(template) = args_template(command) else {
+        return false;
+    };
+    let kind = match flag_value_kind(template, flag) {
+        FlagValue::None => flag_value_kind(psmux_extra_flags(command), flag),
+        kind => kind,
+    };
+    kind != FlagValue::None
+}
+
 /// Normalize `-x=VALUE` short-flag forms into `["-x", "VALUE"]`.
 ///
 /// tmux accepts both `-t VALUE` (space) and `-t=VALUE` (equals) for
