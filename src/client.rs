@@ -179,6 +179,82 @@ fn extract_confirm_command(args: &str) -> String {
     args.to_string()
 }
 
+/// What a `command-prompt` binding's flags asked the client to do: the text the
+/// prompt opens with (`-I`), the overlay heading (`-p`), and the command to run
+/// with `%%` replaced by whatever the user typed. A bare `command-prompt`
+/// leaves all three empty and the typed line is itself the command.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CommandPromptSpec {
+    initial: String,
+    label: Option<String>,
+    template: Option<String>,
+}
+
+/// Parse the arguments of a `command-prompt` binding — everything after the
+/// command name.
+///
+/// A value-taking flag consumes the token after it, classified through the one
+/// flag table in cli.rs (`cli::flag_takes_value`) rather than a list kept here.
+/// tmux's own `bind . command-prompt -T target "move-window -t '%%'"` is the
+/// case that needs it: skipping the flag but not its value left `target` as the
+/// first word of the template, so Enter ran `target move-window -t '3'`.
+///
+/// Three more shapes follow tmux's `args_parse_flags`: the flags end at the
+/// first token that is not one (so a `-t` inside an unquoted template stays in
+/// the template), `--` ends them explicitly, and a value glued to its flag
+/// (`-pindex`) satisfies it on its own.
+fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
+    let tokens = crate::config::shell_words(args);
+    let mut spec = CommandPromptSpec::default();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i].clone();
+        if token == "--" {
+            i += 1;
+            break;
+        }
+        // A bare `-`, and anything not starting with `-`, ends the flags: what
+        // is left is the template.
+        let Some((flag, glued)) = token.strip_prefix('-').and_then(|rest| {
+            let mut chars = rest.chars();
+            chars.next().map(|f| (f, chars.as_str().to_string()))
+        }) else {
+            break;
+        };
+        let value = if !crate::cli::flag_takes_value("command-prompt", flag) {
+            None
+        } else if !glued.is_empty() {
+            Some(glued)
+        } else {
+            i += 1;
+            tokens.get(i).cloned()
+        };
+        match flag {
+            'I' => spec.initial = value.unwrap_or_default(),
+            'p' => spec.label = value,
+            // -t (target) and -T (prompt type) are consumed and dropped: psmux
+            // has no per-client prompt routing and no prompt-type completion.
+            _ => {}
+        }
+        i += 1;
+    }
+    if i < tokens.len() {
+        let template = tokens[i..].join(" ");
+        if spec.label.is_none() {
+            // With no -p, tmux's prompt names the command it is about to run
+            // (cmd-command-prompt.c):
+            //     tmp = xstrndup(cdata->template, strcspn(cdata->template, " ,"));
+            //     xasprintf(&new_prompt, "(%s) ", tmp);
+            let head = template.split(|c| c == ' ' || c == ',').next().unwrap_or("");
+            if !head.is_empty() {
+                spec.label = Some(format!("({})", head));
+            }
+        }
+        spec.template = Some(template);
+    }
+    spec
+}
+
 /// One row of the choose-tree model: `(is_win, win_id, pane_id, label, session)`.
 /// A session header is `is_win == true` with `win_id == usize::MAX`.
 pub(crate) type TreeRow = (bool, usize, usize, String, String);
@@ -3491,6 +3567,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             } else {
                                 command_input = false;
                                 command_cursor = 0;
+                                command_template = None;
+                                command_prompt_label = None;
                                 renaming = false;
                                 pane_renaming = false;
                                 tree_chooser = false;
@@ -3639,52 +3717,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     renaming = true; rename_buf.clear(); session_renaming = true;
                                 } else if cmd == "command-prompt" || cmd.starts_with("command-prompt ") {
                                     command_input = true;
-                                    command_cursor = 0;
                                     command_history_idx = command_history.len();
-                                    command_template = None;
-                                    command_prompt_label = None;
-                                    if cmd.starts_with("command-prompt ") {
-                                        // Parse -I initial_text, -p prompt, and template argument
-                                        let cp_args = &cmd["command-prompt ".len()..];
-                                        let tokens = crate::config::shell_words(cp_args);
-                                        let mut initial = String::new();
-                                        let mut prompt_text: Option<String> = None;
-                                        let mut positional: Vec<String> = Vec::new();
-                                        let mut i = 0;
-                                        while i < tokens.len() {
-                                            if tokens[i] == "-I" && i + 1 < tokens.len() {
-                                                initial = tokens[i + 1].clone();
-                                                i += 2;
-                                            } else if tokens[i] == "-p" && i + 1 < tokens.len() {
-                                                prompt_text = Some(tokens[i + 1].clone());
-                                                i += 2;
-                                            } else if tokens[i] == "-1" || tokens[i] == "-N" || tokens[i] == "-W" {
-                                                i += 1; // skip flags
-                                            } else if tokens[i].starts_with('-') {
-                                                i += 1; // skip unknown flags
-                                            } else {
-                                                positional.push(tokens[i].clone());
-                                                i += 1;
-                                            }
-                                        }
-                                        // Expand format variables in initial text
-                                        let initial = initial
-                                            .replace("#W", &active_window_name)
-                                            .replace("#{window_name}", &active_window_name)
-                                            .replace("#S", &current_session)
-                                            .replace("#{session_name}", &current_session);
-                                        command_buf = initial.clone();
-                                        command_cursor = command_buf.len();
-                                        // Join all positional args to form the template
-                                        // e.g. 'rename-window "%%"' → single arg, or
-                                        //       rename-window %%    → two args joined
-                                        if !positional.is_empty() {
-                                            command_template = Some(positional.join(" "));
-                                        }
-                                        command_prompt_label = prompt_text;
-                                    } else {
-                                        command_buf.clear();
-                                    }
+                                    let spec = parse_command_prompt_args(
+                                        cmd.strip_prefix("command-prompt")
+                                            .unwrap_or("")
+                                            .trim_start(),
+                                    );
+                                    // Expand format variables in initial text
+                                    command_buf = spec
+                                        .initial
+                                        .replace("#W", &active_window_name)
+                                        .replace("#{window_name}", &active_window_name)
+                                        .replace("#S", &current_session)
+                                        .replace("#{session_name}", &current_session);
+                                    command_cursor = command_buf.len();
+                                    command_template = spec.template;
+                                    command_prompt_label = spec.label;
                                 } else if cmd == "list-keys" {
                                     keys_viewer_scroll = 0;
                                     let user_binds: Vec<(bool, String, String, String)> = synced_bindings
@@ -3790,6 +3838,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('#') => { cmd_batch.push("list-buffers\n".into()); }
                                 KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
+                                // Same command as the PREFIX_DEFAULTS entry for
+                                // `.`, so the key is not dead for the moment
+                                // before the first state sync arrives.
+                                KeyCode::Char('.') => {
+                                    command_input = true;
+                                    command_buf.clear();
+                                    command_cursor = 0;
+                                    command_history_idx = command_history.len();
+                                    command_template = Some("move-window -t '%%'".into());
+                                    command_prompt_label = Some("(move-window)".into());
+                                }
                                 KeyCode::Char('w') => { do_choose_tree = true; }
                                 KeyCode::Char('s') => { do_choose_session = true; }
                                 KeyCode::Char('q') => { cmd_batch.push("display-panes\n".into()); }
@@ -4690,11 +4749,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     }
                                     command_input = false;
                                     command_cursor = 0;
+                                    command_template = None;
+                                    command_prompt_label = None;
                                 }
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
                                 KeyCode::Esc if pane_renaming => { pane_renaming = false; }
                                 KeyCode::Esc if window_idx_input => { window_idx_input = false; }
-                                KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; }
+                                KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; command_template = None; command_prompt_label = None; }
 
                                 // Command prompt: cursor movement, history, and editing keys
                                 KeyCode::Left if command_input => {
@@ -8049,3 +8110,7 @@ mod test_issue640_sticky_key_table;
 #[cfg(test)]
 #[path = "../tests-rs/test_switch_client_target_routing.rs"]
 mod test_switch_client_target_routing;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_prefix_dot_move_window.rs"]
+mod test_prefix_dot_move_window;
