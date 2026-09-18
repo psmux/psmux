@@ -328,3 +328,42 @@ pub fn session_log_enabled() -> bool {
     SESSION_LOG.lock().ok().map_or(false, |g| g.is_some())
 }
 
+// ─── Client reconnect trace ─────────────────────────────────────────────────
+
+/// Reconnect trace, gated by `PSMUX_RECONNECT_TRACE=1`.
+///
+/// Covers the whole "the server dropped me, get back in" path: the socket EOF
+/// or error the reader thread saw, every reconnect attempt with its outcome and
+/// duration, and the server side of the same story (the writer teardown that
+/// started it, and the moment the re-registration lands). Client and server are
+/// different processes, so every line carries the pid and the log **appends**
+/// rather than truncates: the point is to read both halves of one
+/// teardown/reconnect pair in a single ordered file.
+static RECONNECT_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+    if !env_enabled("PSMUX_RECONNECT_TRACE") { return Mutex::new(None); }
+    let dir = psmux_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{}/reconnect_trace.log", dir))
+        .ok();
+    Mutex::new(f)
+});
+
+static RECONNECT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+const RECONNECT_LOG_CAP: u32 = 20000;
+
+/// Log a reconnect-path message. No-op unless `PSMUX_RECONNECT_TRACE=1`.
+pub fn reconnect_log(component: &str, msg: &str) {
+    if RECONNECT_LOG_COUNT.fetch_add(1, Ordering::Relaxed) >= RECONNECT_LOG_CAP { return; }
+    if let Ok(mut guard) = RECONNECT_LOG.lock() {
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{}][pid {}][{}] {}",
+                chrono::Local::now().format("%H:%M:%S%.3f"),
+                std::process::id(), component, msg);
+            let _ = f.flush();
+        }
+    }
+}
+

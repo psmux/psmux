@@ -555,6 +555,8 @@ if line.trim() == "PERSISTENT" {
         struct Guard { client_id: u64, shutdown: std::net::TcpStream, tx: mpsc::Sender<CtrlReq> }
         impl Drop for Guard {
             fn drop(&mut self) {
+                crate::debug_log::reconnect_log("server", &format!(
+                    "writer teardown: client_id={} (shutdown + ClientDetach)", self.client_id));
                 let _ = self.shutdown.shutdown(std::net::Shutdown::Both);
                 crate::types::deregister_frame_channel(self.client_id);
                 crate::types::remove_directive_channel(self.client_id);
@@ -622,8 +624,16 @@ if line.trim() == "PERSISTENT" {
             // 2. Take the latest pushed frame from the slot.
             let frame = frame_slot.lock().ok().and_then(|mut slot| slot.take());
             if let Some(text) = frame {
-                if write!(ws_bg, "{}\n", text).is_err() { return; }
-                if ws_bg.flush().is_err() { return; }
+                if let Err(e) = write!(ws_bg, "{}\n", text) {
+                    crate::debug_log::reconnect_log("server", &format!(
+                        "writer frame write failed: client_id={} {:?}", client_id, e.kind()));
+                    return;
+                }
+                if let Err(e) = ws_bg.flush() {
+                    crate::debug_log::reconnect_log("server", &format!(
+                        "writer frame flush failed: client_id={} {:?}", client_id, e.kind()));
+                    return;
+                }
                 crate::pty_trace::mark_plain("t", text.len());
             }
         }
@@ -2534,6 +2544,8 @@ match cmd {
     }
     "client-attach" => {
         if !attached_sent {
+            crate::debug_log::reconnect_log("server", &format!(
+                "client-attach read: client_id={} -> ClientAttach queued", client_id));
             let _ = tx.send(CtrlReq::ClientAttach(client_id));
             attached_sent = true;
         }

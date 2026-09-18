@@ -2389,6 +2389,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Registration and the attached counter are one idempotent
                     // operation. A duplicate attach for the same connection
                     // must not leave the session permanently ghost-attached.
+                    crate::debug_log::reconnect_log("server", &format!(
+                        "ClientAttach dequeued: cid={} attached_before={}", cid, app.attached_clients));
                     if app.register_client(cid, false) {
                         hook_event = Some("client-attached");
                         // update-environment: refresh env vars from the attaching client's environment
@@ -2411,6 +2413,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // "has seen a full frame" bookkeeping so a future
                     // reconnect (new TCP connection, same or different
                     // client_id namespace) never wrongly inherits it.
+                    crate::debug_log::reconnect_log("server", &format!(
+                        "ClientDetach dequeued: cid={} attached_before={}", cid, app.attached_clients));
                     dump_state_seen_full.remove(&cid);
                     // Route through the idempotent reaper so a duplicate detach
                     // for one `cid` (e.g. reader-EOF and writer-teardown both

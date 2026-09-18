@@ -2055,7 +2055,10 @@ fn establish_connection_with_timeout(
     // report (and lets try_reconnect back off promptly instead of stalling).
     let sockaddr: std::net::SocketAddr = addr.parse()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, format!("bad server address: {addr}")))?;
+    let t_connect = Instant::now();
     let stream = std::net::TcpStream::connect_timeout(&sockaddr, connect_timeout)?;
+    crate::debug_log::reconnect_log("client",
+        &format!("tcp connect to {} took {}ms", addr, t_connect.elapsed().as_millis()));
     stream.set_nodelay(true)?;
     let mut writer = stream.try_clone()?;
     writer.set_nodelay(true)?;
@@ -2069,7 +2072,10 @@ fn establish_connection_with_timeout(
     let _ = writer.write_all(format!("AUTH {}\n", key).as_bytes());
     let _ = writer.flush();
     let mut auth_line = String::new();
+    let t_auth = Instant::now();
     let read_res = reader.read_line(&mut auth_line);
+    crate::debug_log::reconnect_log("client", &format!(
+        "auth reply after {}ms: {:?}", t_auth.elapsed().as_millis(), auth_line.trim()));
     if std::env::var("PSMUX_AUTH_DEBUG").map(|v| v == "1").unwrap_or(false) {
         eprintln!(
             "[auth-debug pid={}] establish_connection addr={} key={} read_res={:?} got_line={:?}",
@@ -2104,6 +2110,7 @@ fn establish_connection_with_timeout(
         let _ = writer.write_all(format!("host-colors {}\n", spec).as_bytes());
     }
     let _ = writer.flush();
+    crate::debug_log::reconnect_log("client", "client-attach sent");
 
     // 2-second read timeout keeps the thread from blocking forever on process exit.
     let _ = reader.get_ref().set_read_timeout(Some(Duration::from_secs(2)));
@@ -2115,7 +2122,10 @@ fn establish_connection_with_timeout(
             buf.clear();
             loop {
                 match reader.read_line(&mut buf) {
-                    Ok(0) => return,
+                    Ok(0) => {
+                        crate::debug_log::reconnect_log("client", "reader: socket EOF");
+                        return;
+                    }
                     Ok(_) => break,
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
                         || e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2125,7 +2135,11 @@ fn establish_connection_with_timeout(
                         // would break the framing and corrupt the next message.
                         continue;
                     }
-                    Err(_) => return,
+                    Err(ref e) => {
+                        crate::debug_log::reconnect_log(
+                            "client", &format!("reader: socket error {:?}", e.kind()));
+                        return;
+                    }
                 }
             }
             let line = std::mem::take(&mut buf);
@@ -2170,14 +2184,29 @@ type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
 /// Retry connecting up to 5 times: one immediate attempt, then up to 4 more
 /// with increasing backoff (500ms, 1s, 1.5s, 2s). Returns None if all fail.
 fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
+    let started = Instant::now();
     for attempt in 0..5u64 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(attempt * 500));
         }
-        if let Ok(result) = establish_connection(addr, key) {
-            return Some(result);
+        let t0 = Instant::now();
+        match establish_connection(addr, key) {
+            Ok(result) => {
+                crate::debug_log::reconnect_log("client", &format!(
+                    "reconnect attempt {} OK after {}ms (total {}ms)",
+                    attempt, t0.elapsed().as_millis(), started.elapsed().as_millis()));
+                return Some(result);
+            }
+            Err(e) => {
+                crate::debug_log::reconnect_log("client", &format!(
+                    "reconnect attempt {} FAILED after {}ms: {:?} {} (total {}ms)",
+                    attempt, t0.elapsed().as_millis(), e.kind(), e,
+                    started.elapsed().as_millis()));
+            }
         }
     }
+    crate::debug_log::reconnect_log("client", &format!(
+        "reconnect GAVE UP after {}ms", started.elapsed().as_millis()));
     None
 }
 
@@ -2276,6 +2305,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Kept as None in normal operation. When the channel yields Some(result),
     // the result replaces writer/frame_rx; if it yields None all attempts failed.
     let mut reconnect_pending: Option<std::sync::mpsc::Receiver<Option<Connection>>> = None;
+    // When the current reconnect was started, for the PSMUX_RECONNECT_TRACE
+    // timeline: it measures socket-drop -> usable-connection end to end.
+    let mut reconnect_started: Option<Instant> = None;
 
     let mut quit = false;
     // detach-client -P: server sets this via DETACH-KILL-PARENT directive.
@@ -2938,6 +2970,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if let Some(ref rx) = reconnect_pending {
             if let Ok(result) = rx.try_recv() {
                 reconnect_pending = None;
+                crate::debug_log::reconnect_log("client", &format!(
+                    "reconnect result applied: ok={} {}ms after the drop",
+                    result.is_some(),
+                    reconnect_started.map(|t| t.elapsed().as_millis()).unwrap_or(0)));
+                reconnect_started = None;
                 if let Some((new_writer, new_rx)) = result {
                     if !quit {
                         // Normal reconnect: apply fresh writer + frame channel.
@@ -3037,8 +3074,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // shutdown_persistent_streams), treat the disconnect as intentional
                     // and quit immediately instead of burning 5 s of reconnect backoff.
                     if !quit && !std::path::Path::new(&path).exists() {
+                        crate::debug_log::reconnect_log("client",
+                            "disconnect: port file gone, treating as intentional detach");
                         quit = true;
                     } else if reconnect_pending.is_none() && !quit {
+                        crate::debug_log::reconnect_log("client",
+                            "disconnect: spawning reconnect");
+                        reconnect_started = Some(Instant::now());
                         let addr_c = addr.clone();
                         let key_c = session_key.clone();
                         let (rtx, rrx) = std::sync::mpsc::channel();
