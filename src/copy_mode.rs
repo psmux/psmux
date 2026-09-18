@@ -92,7 +92,19 @@ pub fn exit_copy_mode(app: &mut AppState) {
 /// change `app.mode` or move focus; a missed restore would leave a pane frozen
 /// on an old screen, and a missed snapshot would put copy mode back on the live
 /// grid.  This is the idempotent reconciliation, safe to call per frame:
-/// exactly the active pane holds a snapshot, exactly while copy mode is up.
+/// every pane in copy mode holds a snapshot, exactly while it is in copy mode.
+///
+/// Copy mode is a property of a pane, not of the server, and psmux lets several
+/// panes be in it at once (#607).  `app.mode` only ever describes the pane that
+/// currently has focus, so it cannot be the whole test: reconciling by it alone
+/// meant a pane put into copy mode with `copy-mode -t` and then left in the
+/// background had its snapshot torn down on the very next frame, after which its
+/// own program's output pushed the view it was anchored to (#673).  A pane's own
+/// `copy_state` is the per-pane record — the same field `#{pane_in_mode}` and
+/// the layout renderer read for a pane that is not the active one — so that is
+/// what decides here.  The active pane is additionally covered by `app.mode`,
+/// which is authoritative for it during the window between entering copy mode
+/// and `save_copy_state_to_pane` recording it.
 pub fn sync_copy_snapshot(app: &mut AppState) {
     let want = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     let active_id = app
@@ -104,7 +116,11 @@ pub fn sync_copy_snapshot(app: &mut AppState) {
     for (idx, win) in app.windows.iter_mut().enumerate() {
         let is_active_window = idx == active_idx;
         crate::tree::for_each_pane_mut(&mut win.root, &mut |p: &mut crate::types::Pane| {
-            if want && is_active_window && Some(p.id) == active_id {
+            let is_focused = is_active_window && Some(p.id) == active_id;
+            // The focused pane follows the live mode; every other pane follows
+            // its own parked copy state.
+            let in_copy_mode = if is_focused { want } else { p.copy_state.is_some() };
+            if in_copy_mode {
                 p.enter_copy_snapshot();
             } else {
                 p.leave_copy_snapshot();
