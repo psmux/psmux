@@ -2399,6 +2399,29 @@ pub enum WindowDumpFormat {
     PreviewState,
 }
 
+/// Everything a `claim-session` hands the server loop (#674).
+///
+/// This was five positional fields on [`CtrlReq::ClaimSession`] and grew one
+/// per issue. Naming them is what lets the handler read like the cold spawn it
+/// has to agree with, and stops a sixth `Option<String>` from being passed in
+/// the wrong slot.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ClaimSessionReq {
+    /// The session name the claiming client asked for.
+    pub name: String,
+    /// The claiming client's working directory, when it had one.
+    pub client_cwd: Option<String>,
+    /// The scheduling class the claiming client resolved (#608).
+    pub priority: Option<String>,
+    /// File holding the claiming client's environment block (#659).
+    pub env_file: Option<String>,
+    /// `new-session -n NAME`: the initial window's name (#674). Applied by
+    /// the claim handler itself, before the claim is answered, so it lands
+    /// exactly where the cold path applies it and nothing can observe the
+    /// session under the standby's pool name.
+    pub window_name: Option<String>,
+}
+
 pub enum CtrlReq {
     /// A pane parser thread published new screen state.
     ///
@@ -2596,8 +2619,6 @@ pub enum CtrlReq {
     HasSession(mpsc::Sender<bool>),
     RenameSession(String),
     /// Claim a warm server: rename session + send response so CLI knows it's done.
-    /// Fields: session name, optional client CWD, optional client priority,
-    /// optional path to the client's environment block, response sender.
     ///
     /// The priority rides along for the same reason the CWD does (#608): a warm
     /// standby was spawned ahead of time, in an environment that predates the
@@ -2607,7 +2628,11 @@ pub enum CtrlReq {
     /// The environment file is the general case of that same problem (#659):
     /// a cold spawned server inherits the client's whole environment block, so
     /// a claimed standby has to be handed it too or it stays poisoned for life.
-    ClaimSession(String, Option<String>, Option<String>, Option<String>, mpsc::Sender<String>),
+    ///
+    /// The window name is the same problem once more (#674): every part of
+    /// `new-session` that a cold spawn puts in the server's argv has to reach
+    /// a standby through the claim, or the two paths do not agree.
+    ClaimSession(ClaimSessionReq, mpsc::Sender<String>),
     SwapPane(String),
     /// swap-pane -t <target>: swap the active pane with the pane identified by
     /// (target, pane_is_id).  When `pane_is_id` is true the value is a pane id

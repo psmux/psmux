@@ -1984,19 +1984,28 @@ match cmd {
     }
     "claim-session" => {
         // Warm-server claim: rename + synchronous response so CLI knows it's done.
-        // Usage: claim-session <name> [<client-cwd>] [-p <priority>] [-e <env-file>]
+        // Usage:
+        //   claim-session <name> [<client-cwd>] [-p <priority>] [-e <env-file>] [-n <window-name>]
         //
         // Positionals and flags are split by crate::util::parse_claim_args_full
         // so the wire contract has one implementation and one set of tests.
         // `-e` names a file holding the claiming client's environment block,
         // which the standby adopts so it stops carrying the environment of
-        // whatever spawned it (#659).
+        // whatever spawned it (#659). `-n` is `new-session -n NAME`: the claim
+        // applies it itself, so the name is part of becoming this session
+        // rather than a second request that may never arrive (#674).
         let parsed = crate::util::parse_claim_args_full(&args);
         let (non_flag, client_priority) = (parsed.positionals, parsed.priority);
         if let Some(name) = non_flag.first().cloned() {
             let client_cwd = non_flag.get(1).cloned();
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ClaimSession(name, client_cwd, client_priority, parsed.env_file, rtx));
+            let _ = tx.send(CtrlReq::ClaimSession(crate::types::ClaimSessionReq {
+                name,
+                client_cwd,
+                priority: client_priority,
+                env_file: parsed.env_file,
+                window_name: parsed.window_name,
+            }, rtx));
             if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
                 let _ = write!(write_stream, "{}", resp);
                 let _ = write_stream.flush();
