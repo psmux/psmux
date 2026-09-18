@@ -896,6 +896,63 @@ pub fn disable_vti_on_stdin() {
     // No-op on non-Windows platforms
 }
 
+/// Drop an "ignore Ctrl+C" state inherited from whatever launched psmux
+/// (issue #668).
+///
+/// `RTL_USER_PROCESS_PARAMETERS.ConsoleFlags` bit 0 is the process's "Ctrl+C is
+/// disabled" state.  `SetConsoleCtrlHandler(NULL, TRUE)` sets it, so does
+/// `CreateProcess` with `CREATE_NEW_PROCESS_GROUP`, and — this is the part that
+/// makes it a psmux problem — it is INHERITED by every child, including across
+/// `CREATE_NEW_CONSOLE` (measured: a child created with
+/// `CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP` from a clean parent reads
+/// clear, and the same child from a parent holding the bit reads set).  Windows
+/// offers no API to read it back.
+///
+/// So when anything above psmux holds that bit — a launcher that backgrounds a
+/// shell with `CREATE_NEW_PROCESS_GROUP` (Node's `spawn({detached:true})` does
+/// exactly this), a build/CI harness, a wrapper that called
+/// `SetConsoleCtrlHandler(NULL, TRUE)` and did not restore it — the psmux CLI
+/// inherits it, `spawn_server_hidden` hands it to the server, and the server
+/// hands it to every ConPTY pane shell and thereby to every program the user
+/// runs in a pane.  `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` then still
+/// returns success, the pane child is still on the console it was broadcast to,
+/// and conhost still skips it: `send-keys C-c` becomes a silent no-op for the
+/// whole session, for its whole life, with nothing anywhere to say so.
+///
+/// tmux has the same hazard on Unix and answers it the same way: pane children
+/// get default signal dispositions (`proc_clear_signals`), so a tmux started
+/// with SIGINT ignored still gives its panes a working interrupt.  A pane's
+/// interrupt belongs to the pane, not to whatever shell happened to start the
+/// server, so the bit is cleared once at server startup — before any pane, warm
+/// spare or child server is spawned, so all of them are born able to hear it.
+///
+/// The server's own protection against the broadcasts it relays does not depend
+/// on this bit: `install_console_ctrl_handler` returns TRUE for CTRL_C_EVENT,
+/// and `send_ctrl_c_event` re-raises the bit for the duration of each broadcast
+/// and clears it again afterwards.
+#[cfg(windows)]
+pub fn clear_inherited_ctrl_c_ignore() {
+    type HandlerRoutine = unsafe extern "system" fn(u32) -> i32;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<HandlerRoutine>, add: i32) -> i32;
+    }
+
+    // Passing a NULL routine with add=0 clears ConsoleFlags bit 0.  It is a
+    // plain write to this process's parameter block: it works with no console
+    // attached (measured: ok=1 with the process detached), and it does not
+    // touch any real handler this process has installed.
+    unsafe {
+        SetConsoleCtrlHandler(None, 0);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn clear_inherited_ctrl_c_ignore() {
+    // No-op on non-Windows platforms: tmux's own proc_clear_signals covers it.
+}
+
 /// Install a console control handler on Windows to prevent termination on client detach.
 #[cfg(windows)]
 pub fn install_console_ctrl_handler() {
