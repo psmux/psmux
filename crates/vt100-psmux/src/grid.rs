@@ -10,7 +10,23 @@ pub struct Grid {
     scroll_bottom: u16,
     origin_mode: bool,
     saved_origin_mode: bool,
-    scrollback: std::collections::VecDeque<crate::row::Row>,
+    /// History rows, shared rather than owned.
+    ///
+    /// A row becomes history at the moment it leaves the visible grid and is
+    /// never mutated again: the only things that ever happen to it afterwards
+    /// are being trimmed off the old end (`set_scrollback_len`, the cap in
+    /// `scroll_up`) or dropped with the whole history (`clear_scrollback`).
+    /// `set_size` deliberately resizes only `rows`, never these, so a history
+    /// row keeps the width it was compacted to.
+    ///
+    /// That immutability is what lets a *clone* of this grid share the rows
+    /// instead of copying them.  Copy mode takes such a clone of the pane's
+    /// screen every time it is entered (psmux issue #671, tmux's
+    /// `window_copy_init`), and cloning 50,000 history rows cost as much as
+    /// the history itself (issue #673).  Behind an `Arc` the clone copies one
+    /// pointer per row, so entering copy mode costs the visible screen plus
+    /// whatever changes afterwards.
+    scrollback: std::collections::VecDeque<std::sync::Arc<crate::row::Row>>,
     scrollback_len: usize,
     scrollback_offset: usize,
     /// Copy-mode freeze (psmux issue #494): when set, the visible region is
@@ -143,6 +159,7 @@ impl Grid {
         let rows_len = self.rows.len();
         self.scrollback
             .iter()
+            .map(std::sync::Arc::as_ref)
             .skip(scrollback_len - self.scrollback_offset)
             // when scrollback_offset > rows_len (e.g. rows = 3,
             // scrollback_len = 10, offset = 9) the skip(10 - 9)
@@ -234,6 +251,20 @@ impl Grid {
             .sum()
     }
 
+    /// How many history rows this grid shares with another grid, i.e. how many
+    /// are pointed at by more than one `Arc`.
+    ///
+    /// This is the observable form of the sharing that makes copy mode cheap
+    /// (issue #673): right after a clone every history row is shared, and a row
+    /// only stops being shared when one of the two grids trims or clears it.
+    #[must_use]
+    pub fn shared_scrollback_rows(&self) -> usize {
+        self.scrollback
+            .iter()
+            .filter(|r| std::sync::Arc::strong_count(r) > 1)
+            .count()
+    }
+
     /// Updates the scrollback buffer's maximum size.  When `new_len` is
     /// smaller than the current fill, the oldest rows are trimmed away.
     pub fn set_scrollback_len(&mut self, new_len: usize) {
@@ -258,7 +289,7 @@ impl Grid {
         // padding before it becomes resident for the life of the history
         // (issue #641).
         row.compact();
-        self.scrollback.push_back(row);
+        self.scrollback.push_back(std::sync::Arc::new(row));
         while self.scrollback.len() > self.scrollback_len {
             self.scrollback.pop_front();
         }
@@ -643,7 +674,7 @@ impl Grid {
                 // to the allocator.  tmux does the same in
                 // `grid_scroll_history` (grid.c:508).
                 removed.compact();
-                self.scrollback.push_back(removed);
+                self.scrollback.push_back(std::sync::Arc::new(removed));
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
                 }

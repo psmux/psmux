@@ -285,6 +285,14 @@ impl Screen {
         self.grid.history_bytes()
     }
 
+    /// How many of the main grid's history rows are shared with another grid
+    /// (a copy-mode snapshot, say) rather than owned outright.  See
+    /// [`crate::grid::Grid::shared_scrollback_rows`].
+    #[must_use]
+    pub fn shared_scrollback_rows(&self) -> usize {
+        self.grid.shared_scrollback_rows()
+    }
+
     /// Updates the maximum scrollback buffer size for the main grid.  Rows
     /// in excess of the new limit are trimmed from the oldest end.  The
     /// alternate grid is intentionally left at zero scrollback (apps like
