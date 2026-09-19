@@ -804,6 +804,116 @@ fn active_pane_in_copy_mode(layout: &LayoutJson) -> bool {
     }
 }
 
+/// The selection endpoint of the active pane while it is in copy mode, in
+/// pane-content cells: the endpoint of the last frame this client painted.
+///
+/// The server's endpoint and the screen can disagree, because a motion can
+/// reach the server, be written into a frame, and still never be drawn — the
+/// release is handled before that frame gets its turn.  Only the client knows
+/// which cell the user was actually shown, so a copy-mode release re-reports
+/// this value (see [`copy_release_repin`]).
+fn active_copy_sel_end(layout: &LayoutJson) -> Option<(u16, u16)> {
+    match layout {
+        LayoutJson::Leaf { active, copy_mode, sel_end_row, sel_end_col, .. } => {
+            if *active && *copy_mode {
+                (*sel_end_row).zip(*sel_end_col)
+            } else {
+                None
+            }
+        }
+        LayoutJson::Split { children, .. } => children.iter().find_map(active_copy_sel_end),
+    }
+}
+
+/// The extra drag a copy-mode release sends before it reports the button up:
+/// the endpoint this client last painted.
+///
+/// The server treats the newest drag as the copy endpoint and the release as a
+/// no-op, so re-reporting the painted cell makes the yank match the highlight
+/// even when the final motion only ever reached the server — the reported bug
+/// was a highlight ending on `.` and a buffer ending on the `9` after it.
+///
+/// `None` for a gesture whose endpoint never made it to the screen (a flick the
+/// frames did not catch up with): the newest drag cell stands, as it does in
+/// tmux, and the flick is copied.
+fn copy_release_repin(pane_id: usize, painted: Option<(u16, u16)>) -> Option<String> {
+    painted.map(|(row, col)| format!("pane-mouse {} 32 {} {} M\n", pane_id, col, row))
+}
+
+/// The commands a copy-mode drag release sends, in order: the re-pin of the
+/// painted endpoint (only when the gesture ever painted one), then the release
+/// itself.
+///
+/// Split out of the event loop so the ORDER can be pinned by a test: the re-pin
+/// has to be the last drag the server sees before the release, or the endpoint
+/// it yanks is the motion that never reached the screen.
+fn copy_release_commands(
+    pane_id: usize,
+    dragged: bool,
+    painted: Option<(u16, u16)>,
+    release: (i16, i16),
+) -> Vec<String> {
+    let mut cmds = Vec::new();
+    if dragged {
+        if let Some(repin) = copy_release_repin(pane_id, painted) {
+            cmds.push(repin);
+        }
+    }
+    cmds.push(format!("pane-mouse {} 0 {} {} m\n", pane_id, release.0, release.1));
+    cmds
+}
+
+#[cfg(test)]
+mod copy_release_repin_tests {
+    use super::{copy_release_commands, copy_release_repin};
+
+    #[test]
+    fn the_repin_reports_the_painted_cell_as_a_drag() {
+        assert_eq!(
+            copy_release_repin(7, Some((3, 14))).expect("a painted cell must be re-reported"),
+            "pane-mouse 7 32 14 3 M\n",
+            "col 14, row 3: the same order the drag itself uses"
+        );
+    }
+
+    #[test]
+    fn a_gesture_with_nothing_painted_sends_no_repin() {
+        assert!(copy_release_repin(7, None).is_none());
+    }
+
+    /// The reported bug, at the client end: the drag reached cell 15 and only
+    /// cell 14 was ever painted, so the release on 15 must be preceded by a
+    /// drag back to 14 — and the release itself is untouched.
+    #[test]
+    fn a_drag_release_repins_the_painted_cell_before_reporting_up() {
+        assert_eq!(
+            copy_release_commands(7, true, Some((3, 14)), (15, 3)),
+            vec![
+                "pane-mouse 7 32 14 3 M\n".to_string(),
+                "pane-mouse 7 0 15 3 m\n".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_release_with_nothing_painted_sends_only_the_release() {
+        assert_eq!(
+            copy_release_commands(7, true, None, (15, 3)),
+            vec!["pane-mouse 7 0 15 3 m\n".to_string()]
+        );
+    }
+
+    /// A plain click never repins: the release has to position the copy cursor
+    /// by itself (#669), and a click has no painted endpoint to report.
+    #[test]
+    fn a_click_never_repins() {
+        assert_eq!(
+            copy_release_commands(7, false, Some((3, 14)), (14, 3)),
+            vec!["pane-mouse 7 0 14 3 m\n".to_string()]
+        );
+    }
+}
+
 /// Collect each leaf's live scrollback offset (`view_offset`) by pane id.
 /// Nonzero outside copy mode means the pane is direct-scrolled
 /// (scroll-enter-copy-mode off, #193) — i.e. there is content below the view.
@@ -3071,6 +3181,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut rsel_pane_rect: Option<Rect> = None;    // clip bounds of the originating pane
     let mut rsel_pane_id: Option<usize> = None;     // pane the selection started in
     let mut rsel_dragged = false;
+    // The copy-mode selection endpoint this client last PAINTED (content
+    // row/col), so a release can re-report it instead of letting the server
+    // yank a motion that never reached the screen.  Cleared when a gesture
+    // starts and when copy mode ends, so it can never carry into the next one.
+    let mut client_drawn_sel: Option<(u16, u16)> = None;
     // Server-side copy-mode drag tracking.  The pane the drag started in is
     // remembered so drag/release events keep reaching the server after the
     // pointer leaves the pane rect (out-of-range rows drive edge
@@ -5541,6 +5656,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
                                             if client_copy_mode {
                                                 deferred_left_click = None;
+                                                client_drawn_sel = None; // a new gesture: nothing painted yet
                                                 cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
                                                     pane_id, rel_col, rel_row));
                                                 // Remember the pane so a drag that leaves its
@@ -5581,6 +5697,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     deferred_left_click = Some((pane_id, rel_col, rel_row));
                                                 } else {
                                                     deferred_left_click = None;
+                                                    client_drawn_sel = None; // a new gesture: nothing painted yet
                                                     cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
                                                         pane_id, rel_col, rel_row));
                                                 }
@@ -5798,6 +5915,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             // the button went down, like tmux's
                                             // MouseDragStart -> copy-mode -M.
                                             cmd_batch.push("copy-enter\n".into());
+                                            client_drawn_sel = None; // a new gesture: nothing painted yet
                                             cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", pending_id, pending_col, pending_row));
                                             copy_drag_pane = Some((pending_id, pending_rect));
                                         }
@@ -6019,8 +6137,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         if let Some((pane_id, pane_rect)) = target {
                                             let rel_col = me.column as i16 - pane_rect.x as i16;
                                             let rel_row = me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16;
-                                            cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n",
-                                                pane_id, rel_col, rel_row));
+                                            // The final motion may have been applied by the
+                                            // server (and written into a frame) without ever
+                                            // being drawn: re-report the endpoint that is
+                                            // actually on screen before reporting the button
+                                            // up, or the yank adds a character the user never
+                                            // saw highlighted (`copy_release_commands`).
+                                            if client_log_enabled() {
+                                                client_log("repin", &format!(
+                                                    "pane={} painted={:?} release=({},{}) dragged={}",
+                                                    pane_id, client_drawn_sel, rel_col, rel_row, copy_drag_last.is_some()
+                                                ));
+                                            }
+                                            for cmd in copy_release_commands(
+                                                pane_id, copy_drag_last.is_some(), client_drawn_sel, (rel_col, rel_row),
+                                            ) {
+                                                cmd_batch.push(cmd);
+                                            }
                                         }
                                     } else {
                                         cmd_batch.push(format!("mouse-up {} {}\n", me.column, me.row));
@@ -6043,8 +6176,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 if copy_drag_pane.is_some() {
                                     if client_copy_mode {
                                         if let (Some((pane_id, _)), Some((rc, rr))) = (copy_drag_pane, copy_drag_last) {
-                                            cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n",
-                                                pane_id, rc, rr));
+                                            // Same re-pin as the normal release: the
+                                            // synthetic release must not finalize a cell
+                                            // that was never painted either.
+                                            for cmd in copy_release_commands(pane_id, true, client_drawn_sel, (rc, rr)) {
+                                                cmd_batch.push(cmd);
+                                            }
                                         }
                                     }
                                     copy_drag_pane = None;
@@ -6424,6 +6561,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         last_tree = state.tree;
         let base_index = state.base_index;
         client_copy_mode = active_pane_in_copy_mode(&root);
+        if !client_copy_mode {
+            // The painted selection went away with copy mode.
+            client_drawn_sel = None;
+        }
         client_pwsh_selection = state.pwsh_mouse_selection;
         client_mouse_selection = state.mouse_selection;
         client_mouse_selection_force = state.mouse_selection_force;
@@ -6682,7 +6823,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
         // Reset OSC 8 hyperlink runs collected during this frame's render (#361).
         frame_hyperlinks_clear();
+        // What this draw is about to put on screen.  No input is handled until
+        // this closure returns, so once it has run this is exactly what the
+        // user saw — the value a release must re-report.
+        let drawn_copy_sel = active_copy_sel_end(&root);
         terminal.draw(|f| {
+            client_drawn_sel = drawn_copy_sel;
             let area = f.area();
             let constraints = if status_at_top {
                 vec![Constraint::Length(status_lines as u16), Constraint::Min(1)]

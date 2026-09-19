@@ -65,6 +65,7 @@ pub fn exit_copy_mode(app: &mut AppState) {
     app.copy_anchor = None;
     app.copy_pos = None;
     app.copy_mouse_down_cell = None;
+    app.copy_pos_published = None;
     app.copy_scroll_offset = 0;
     // Clear the search prompt if it was lingering from CopySearch (#335).
     app.status_message = None;

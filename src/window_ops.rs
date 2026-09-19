@@ -1109,6 +1109,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
 
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         app.copy_anchor = None;
+        app.copy_pos_published = None;
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(label.content(area), x, y);
             app.copy_pos = Some((row, col));
@@ -1290,6 +1291,15 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
                 app.copy_pos = Some((dr, dc)); // snap to the original click position
                 return;
             }
+        }
+        // Raw clients (mouse-down/drag/up) forward the terminal's reports
+        // verbatim and cannot re-report what they painted, so a slip reported
+        // together with the release — a phone's coarse last report, coalesced
+        // motion — is dropped here by falling back to the endpoint of the last
+        // frame: no frame carried that cell, so it was never highlighted.  The
+        // release cell itself never extends the selection either way.
+        if let Some(published) = app.copy_pos_published {
+            app.copy_pos = Some(published);
         }
         // Auto-yank if a real selection exists, else clear the stale anchor.
         // Compare CONTENT positions (screen row minus the scroll offset it
@@ -1580,6 +1590,10 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             app.copy_anchor = None;
             app.copy_pos = Some((r, c));
             app.copy_mouse_down_cell = Some((r, c));
+            // A new gesture starts with nothing published; a frame that carries
+            // this selection publishes its endpoint for the raw mouse release
+            // to fall back on (see `sync_copy_freeze`).
+            app.copy_pos_published = None;
         } else if button == 32 {
             // Left drag: extend selection, but ignore same-cell micro-jitter
             // (#199) — only while the RAW coordinates are still inside the
@@ -1647,6 +1661,13 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                     return;
                 }
             }
+            // The endpoint is the newest drag the client reported, and it is
+            // not second-guessed here: only the client knows which cell it
+            // painted, and a client whose last motion never made it to the
+            // screen re-reports the cell it did paint immediately before this
+            // release (`copy_release_repin`, client.rs).  The release itself
+            // never moves the endpoint.
+            //
             // Auto-yank if a real selection exists.  Compare CONTENT
             // positions (screen row minus the scroll offset it was recorded
             // at, as yank_selection does), not screen cells: edge
@@ -1760,6 +1781,9 @@ pub fn copy_drag_begin(app: &mut AppState, pane_id: usize, anchor_col: i16, anch
     // A drag is in progress, not a click: the release must yank, never
     // snap back through the #199 click guard.
     app.copy_mouse_down_cell = None;
+    // This gesture's selection has not been published to the client yet; the
+    // next frame that carries it publishes the endpoint the release yanks to.
+    app.copy_pos_published = None;
     // The handoff fires with the pointer at/past an edge — start scrolling
     // immediately so the selection keeps growing (the bottom edge only
     // moves when the view was scrolled back; at offset 0 it is a no-op).
@@ -2540,6 +2564,81 @@ mod window_ops_tests {
             yank_up_at(10),
             yank_up_at(9),
             "a release past the last drag must not add a character"
+        );
+    }
+
+    /// The client re-reports the endpoint it painted just before a release
+    /// (`copy_release_repin`, client.rs).  A motion can reach the server — and
+    /// be written into a frame — and still never reach the screen, because the
+    /// release is handled before that frame is drawn: the highlight ends on
+    /// the previous cell while the server's frame says otherwise.  Only the
+    /// client can tell the two apart, so its re-pin is what the yank follows.
+    ///
+    /// This is the reported bug: highlight ends on `.` (col 4 here), the
+    /// buffer ends on the `9` after it (col 5).
+    #[test]
+    fn a_release_after_a_client_repin_yanks_the_painted_cell() {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 0, 2, true); // press at col 0
+        super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true); // drag to col 4
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame"); // painted: cols 0..=4
+        super::handle_pane_mouse(&mut app, 41, 32, 5, 2, true); // the slip
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame"); // written, never drawn
+        super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true); // re-pin: what the client painted
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false); // release
+        assert_eq!(
+            app.paste_buffers.first().map(String::as_str),
+            Some("histo"),
+            "the copy must match the highlight, not the cell the frame carried"
+        );
+    }
+
+    /// Control for the test above: with no re-pin the newest drag stands, even
+    /// when no frame carried it — which is exactly why the client has to send
+    /// one.  Pinned so the reason for `copy_release_repin` cannot be dropped
+    /// silently on this side.
+    #[test]
+    fn a_release_without_a_repin_follows_the_last_drag() {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 0, 2, true);
+        super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true);
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
+        super::handle_pane_mouse(&mut app, 41, 32, 5, 2, true);
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false);
+        assert_eq!(
+            app.paste_buffers.first().map(String::as_str),
+            Some("histor"),
+            "without a re-pin the newest drag stands"
+        );
+    }
+
+    /// The raw protocol has no client that can say what it painted, so the
+    /// same-batch slip is dropped against the published endpoint there.
+    #[test]
+    fn a_legacy_mouse_up_slip_no_frame_carried_must_not_widen_the_yank() {
+        fn yank_after(slip_frame: bool) -> String {
+            let mut app = make_scrollback_app(true);
+            crate::copy_mode::enter_copy_mode(&mut app);
+            super::remote_mouse_down(&mut app, 5, 2);
+            super::remote_mouse_drag(&mut app, 9, 2);
+            let _ = crate::layout::dump_layout_json(&mut app).expect("a frame"); // col 9 published
+            super::remote_mouse_drag(&mut app, 10, 2); // the slip
+            if slip_frame {
+                let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
+            }
+            super::remote_mouse_up(&mut app, 10, 2);
+            app.paste_buffers
+                .first()
+                .cloned()
+                .expect("a real drag must yank on release")
+        }
+        assert_ne!(
+            yank_after(false),
+            yank_after(true),
+            "a slip no frame carried must not add a character on the raw protocol"
         );
     }
 

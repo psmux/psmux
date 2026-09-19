@@ -1262,6 +1262,20 @@ pub struct AppState {
     pub copy_pos: Option<(u16,u16)>,
     /// Cell where mouse was pressed down in copy mode (for click vs drag detection, #199)
     pub copy_mouse_down_cell: Option<(u16,u16)>,
+    /// The copy-mode endpoint of the last frame this server sent, i.e. the
+    /// last cell it told a client to paint the selection at.
+    ///
+    /// Only the RAW mouse protocol reads this (`remote_mouse_up`): a client
+    /// that forwards the terminal's reports verbatim cannot say what it
+    /// painted, so a final motion that arrives together with the release — a
+    /// slip while the button comes up, a phone's coarse last report, coalesced
+    /// motion — is dropped by yanking to this instead of to `copy_pos`.  The
+    /// semantic protocol (`pane-mouse`) does not need it: there the client
+    /// re-reports the endpoint it actually painted just before the release
+    /// (`copy_release_repin` in client.rs), which is the cell the user saw.
+    /// `None` means no frame carried this gesture's selection, so the release
+    /// falls back to `copy_pos`.
+    pub copy_pos_published: Option<(u16,u16)>,
     pub copy_scroll_offset: usize,
     /// Selection mode: Char (default), Line (V), Rect (C-v)
     pub copy_selection_mode: SelectionMode,
@@ -2169,6 +2183,7 @@ impl AppState {
             copy_anchor_scroll_offset: 0,
             copy_pos: None,
             copy_mouse_down_cell: None,
+            copy_pos_published: None,
             copy_scroll_offset: 0,
             copy_selection_mode: SelectionMode::Char,
             copy_count: None,

@@ -257,6 +257,16 @@ fn serialize_layout(layout: &LayoutJson) -> io::Result<String> {
 /// `app.copy_scroll_offset` the (possibly auto-bumped) parser offset so
 /// selection math and the client-side scroll indicator stay consistent.
 fn sync_copy_freeze(app: &mut AppState, in_copy_mode: bool) {
+    // Remember the endpoint of this frame for the RAW mouse release, which has
+    // no client that can say what it painted: a motion reported together with
+    // the release — a slip as the button comes up, a phone's coarse last
+    // report — never reaches the screen, and copying it put a character in the
+    // buffer the user never saw (see `remote_mouse_up`).  The semantic
+    // `pane-mouse` path does not read this: its client re-reports the cell it
+    // painted (`copy_release_repin` in client.rs).  A frame without a selection
+    // publishes `None`, so a stale endpoint cannot be picked up by the next
+    // gesture.
+    app.copy_pos_published = if in_copy_mode { app.copy_anchor.and(app.copy_pos) } else { None };
     // `r` (refresh-from-pane, #498) releases the anchor so the pane tracks
     // live output while copy mode stays open.
     let in_copy_mode = in_copy_mode && !app.copy_refresh_live;
