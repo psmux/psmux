@@ -636,11 +636,14 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         scroll_offset: usize,
         copy_anchor: Option<(u16, u16)>,
         copy_pos: Option<(u16, u16)>,
+        anchor_scroll: usize,
+        pos_scroll: usize,
     ) {
         match node {
             LayoutJson::Leaf {
                 active,
                 copy_mode,
+                rows: pane_rows,
                 scroll_offset: so,
                 sel_start_row,
                 sel_start_col,
@@ -664,10 +667,28 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             *copy_cursor_col = None;
                         }
                         if let (Some((ar, ac)), Some((pr, pc))) = (copy_anchor, copy_pos) {
-                            *sel_start_row = Some(ar.min(pr));
-                            *sel_start_col = Some(ac.min(pc));
-                            *sel_end_row = Some(ar.max(pr));
-                            *sel_end_col = Some(ac.max(pc));
+                            // Pair each column with its own row in CONTENT space
+                            // (tmux: the selection runs from the anchor cell to
+                            // the endpoint cell), then express the rows in the
+                            // CURRENT view, so what gets painted is what the
+                            // release will yank.  Independent min/max on rows
+                            // and columns disagrees with the yank whenever a
+                            // drag's row and column directions differ, and
+                            // reading a row without its own end's scroll offset
+                            // breaks after an edge auto-scroll moved the view.
+                            let a_abs = ar as i64 - anchor_scroll as i64;
+                            let p_abs = pr as i64 - pos_scroll as i64;
+                            let (top_abs, top_col, bot_abs, bot_col) = if a_abs <= p_abs {
+                                (a_abs, ac, p_abs, pc)
+                            } else {
+                                (p_abs, pc, a_abs, ac)
+                            };
+                            let last = pane_rows.saturating_sub(1) as i64;
+                            let cur = scroll_offset as i64;
+                            *sel_start_row = Some((top_abs + cur).clamp(0, last) as u16);
+                            *sel_start_col = Some(top_col);
+                            *sel_end_row = Some((bot_abs + cur).clamp(0, last) as u16);
+                            *sel_end_col = Some(bot_col);
                         } else {
                             *sel_start_row = None;
                             *sel_start_col = None;
@@ -687,7 +708,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
             LayoutJson::Split { children, .. } => {
                 if idx < path.len() {
                     if let Some(child) = children.get_mut(path[idx]) {
-                        mark_active(child, path, idx + 1, in_copy_mode, scroll_offset, copy_anchor, copy_pos);
+                        mark_active(child, path, idx + 1, in_copy_mode, scroll_offset, copy_anchor, copy_pos, anchor_scroll, pos_scroll);
                     }
                 }
             }
@@ -701,6 +722,8 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         scroll_offset,
         if win_id_override.is_none() { app.copy_anchor } else { None },
         if win_id_override.is_none() { app.copy_pos } else { None },
+        if win_id_override.is_none() { app.copy_anchor_scroll_offset } else { 0 },
+        if win_id_override.is_none() { app.copy_pos_scroll_offset } else { 0 },
     );
     Ok(root)
 }

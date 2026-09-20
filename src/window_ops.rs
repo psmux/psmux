@@ -1113,6 +1113,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(label.content(area), x, y);
             app.copy_pos = Some((row, col));
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             app.copy_mouse_down_cell = Some((row, col));
         }
         return;
@@ -1218,6 +1219,11 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
                 app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
             app.copy_pos = Some((row, col));
+            // The endpoint's own offset, recorded before the edge scroll below
+            // moves the view: it is what makes this screen row mean a content
+            // line.  Without it a drag that hit an edge copied a different
+            // range than the one that was painted.
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             // tmux parity (#62): dragging on/past the pane's first or last
             // row scrolls the view so the selection continues into scrollback.
             if y <= area.y {
@@ -1289,6 +1295,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
             if row_diff <= 1 && col_diff <= 1 {
                 app.copy_anchor = None;
                 app.copy_pos = Some((dr, dc)); // snap to the original click position
+                app.copy_pos_scroll_offset = app.copy_scroll_offset;
                 return;
             }
         }
@@ -1300,6 +1307,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         // release cell itself never extends the selection either way.
         if let Some(published) = app.copy_pos_published {
             app.copy_pos = Some(published);
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
         }
         // Auto-yank if a real selection exists, else clear the stale anchor.
         // Compare CONTENT positions (screen row minus the scroll offset it
@@ -1308,7 +1316,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         // while the selection spans many scrolled lines.
         if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
             let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
-            let p_abs = p.0 as i64 - app.copy_scroll_offset as i64;
+            let p_abs = p.0 as i64 - app.copy_pos_scroll_offset as i64;
             if (a_abs, a.1) != (p_abs, p.1) {
                 let _ = yank_selection(app);
             }
@@ -1589,6 +1597,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // Left press: position cursor, clear selection
             app.copy_anchor = None;
             app.copy_pos = Some((r, c));
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             app.copy_mouse_down_cell = Some((r, c));
             // A new gesture starts with nothing published; a frame that carries
             // this selection publishes its endpoint for the raw mouse release
@@ -1611,6 +1620,10 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
             app.copy_pos = Some((r, c));
+            // Recorded BEFORE the edge auto-scroll below: the endpoint's own
+            // view offset is what makes its screen row mean a content line
+            // (see `copy_pos_scroll_offset`).
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             // tmux parity (#62): dragging on/past the pane's first or last
             // row scrolls the view so the selection keeps growing into
             // scrollback; speed rises with distance past the edge.  The
@@ -1651,6 +1664,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // opened, #669) may still position the cursor.
             if app.copy_anchor.is_none() {
                 app.copy_pos = Some((r, c));
+                app.copy_pos_scroll_offset = app.copy_scroll_offset;
             }
             if let Some((dr, dc)) = app.copy_mouse_down_cell.take() {
                 if (dr as i32 - r as i32).unsigned_abs() <= 1
@@ -1658,6 +1672,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 {
                     app.copy_anchor = None;
                     app.copy_pos = Some((dr, dc));
+                    app.copy_pos_scroll_offset = app.copy_scroll_offset;
                     return;
                 }
             }
@@ -1675,7 +1690,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // while the selection spans many scrolled lines.
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                 let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
-                let p_abs = p.0 as i64 - app.copy_scroll_offset as i64;
+                let p_abs = p.0 as i64 - app.copy_pos_scroll_offset as i64;
                 if (a_abs, a.1) != (p_abs, p.1) {
                     let _ = yank_selection(app);
                 }
@@ -1778,6 +1793,7 @@ pub fn copy_drag_begin(app: &mut AppState, pane_id: usize, anchor_col: i16, anch
         crate::types::SelectionMode::Char
     };
     app.copy_pos = Some((row.clamp(0, max_r) as u16, col.clamp(0, max_c) as u16));
+    app.copy_pos_scroll_offset = app.copy_scroll_offset;
     // A drag is in progress, not a click: the release must yank, never
     // snap back through the #199 click guard.
     app.copy_mouse_down_cell = None;
@@ -2747,16 +2763,61 @@ mod window_ops_tests {
         super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false);
         assert!(!app.paste_buffers.is_empty(), "release must yank the selection");
         // Char-mode selection from the press cell (row 2, col 5)@offset 3 to
-        // the last DRAG cell (row 0, col 5)@offset 4: content rows -4..-1,
-        // i.e. the three scrollback lines history-69/70/71 and the live row
-        // history-72, sliced at col 5 on both ends.  The release cell (row 2
-        // @offset 4, content row -2) is not the endpoint, so it neither
-        // extends nor shortens this.
-        assert_eq!(app.paste_buffers[0], "ry-69\nhistory-70\nhistory-71\nhistor",
+        // the last DRAG cell (row 0, col 5)@offset 3 — the drag's OWN offset,
+        // recorded before its edge scroll moved the view to offset 4.  Content
+        // rows -3..-1: history-70/71 and the live row history-72, sliced at
+        // col 5 on both ends.  The release cell is not the endpoint, so it
+        // neither extends nor shortens this.  This is also exactly the range
+        // the frame paints (see `a_direction_mismatched_drag_paints_and_yanks_
+        // the_same_range` for the pairing half of that invariant).
+        assert_eq!(app.paste_buffers[0], "ry-70\nhistory-71\nhistor",
             "yank must span from the anchor to the last drag cell");
         // A mouse yank cancels copy mode and returns to live view (#62).
         assert!(matches!(app.mode, Mode::Passthrough), "mouse yank must exit copy mode");
         assert_eq!(app.copy_scroll_offset, 0);
+    }
+
+    /// A drag whose row and column directions differ must paint and yank the
+    /// SAME range.  The frame pairs each column with its own row (tmux: the
+    /// selection runs from the anchor cell to the endpoint cell); independent
+    /// min/max on rows and columns used to paint one range and copy another,
+    /// which is the reported "sometimes the selection and the copy disagree"
+    /// — it happened in every drag direction, on any selection whose endpoint
+    /// sat on a different row.
+    #[test]
+    fn a_direction_mismatched_drag_paints_and_yanks_the_same_range() {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 6, 4, true);  // press: row 4, col 6
+        super::handle_pane_mouse(&mut app, 41, 32, 2, 1, true); // drag : row 1, col 2
+
+        // What the client is told to paint: the top row keeps the ENDPOINT's
+        // column (2) and the bottom row the anchor's (6).
+        let frame = crate::layout::dump_layout_json(&mut app).expect("a frame");
+        let num = |key: &str| -> i64 {
+            let pat = format!("\"{key}\"");
+            let at = frame.find(&pat).unwrap_or_else(|| panic!("{key} in {frame}"));
+            let rest = &frame[at + pat.len()..];
+            let colon = rest.find(':').expect("colon");
+            rest[colon + 1..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .expect("a number")
+        };
+        assert_eq!(num("sel_start_row"), 1, "painted selection starts on the drag row");
+        assert_eq!(num("sel_start_col"), 2, "...with the DRAG's column");
+        assert_eq!(num("sel_end_row"), 4, "painted selection ends on the press row");
+        assert_eq!(num("sel_end_col"), 6, "...with the PRESS's column");
+
+        super::handle_pane_mouse(&mut app, 41, 0, 2, 1, false); // release on the drag cell
+        assert_eq!(
+            app.paste_buffers.first().map(String::as_str),
+            Some("story-74\nhistory-75\nhistory-76\nhistory"),
+            "the copy must be the range the frame above points at (the frame's\n             rows are client-relative, the yank's are parser-relative, so this\n             pins the text)"
+        );
     }
 
     #[test]

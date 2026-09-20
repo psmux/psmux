@@ -1259,6 +1259,18 @@ pub struct AppState {
     pub copy_anchor: Option<(u16,u16)>,
     /// Scroll offset when copy_anchor was set (for viewport-relative adjustment)
     pub copy_anchor_scroll_offset: usize,
+    /// Scroll offset `copy_pos` was recorded at, i.e. the view position that
+    /// makes `copy_pos`'s screen row mean a specific CONTENT line.
+    ///
+    /// Both ends of a selection need their own offset, not just the anchor:
+    /// dragging on/past the pane's first or last row auto-scrolls the view
+    /// (`scroll_copy_up`/`scroll_copy_down`) between the anchor and the
+    /// endpoint.  Reading the endpoint against the CURRENT offset then puts it
+    /// on the wrong content line, so the release yanked a different range than
+    /// the one the client had painted — a selection that hit an edge copied
+    /// something else (reported as "sometimes the selection and the copy
+    /// disagree", in every drag direction).
+    pub copy_pos_scroll_offset: usize,
     pub copy_pos: Option<(u16,u16)>,
     /// Cell where mouse was pressed down in copy mode (for click vs drag detection, #199)
     pub copy_mouse_down_cell: Option<(u16,u16)>,
@@ -2181,6 +2193,7 @@ impl AppState {
             window_indices: Vec::new(),
             copy_anchor: None,
             copy_anchor_scroll_offset: 0,
+            copy_pos_scroll_offset: 0,
             copy_pos: None,
             copy_mouse_down_cell: None,
             copy_pos_published: None,

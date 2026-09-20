@@ -725,8 +725,14 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
     // Compute absolute line positions (relative to an arbitrary reference).
     // abs = screen_row - scrollback_at_that_time
     // Higher abs = further down in the terminal buffer (more recent).
+    //
+    // Each end carries its OWN scrollback, not the current one: an edge
+    // auto-scroll (`scroll_copy_up`/`scroll_copy_down`) moves the view between
+    // the anchor and the endpoint, so reading the endpoint against the current
+    // offset puts it on the wrong content line and the yank no longer covers
+    // what the client painted.
     let anchor_abs = anchor.0 as i64 - anchor_scroll as i64;
-    let cursor_abs = pos.0 as i64 - current_scroll as i64;
+    let cursor_abs = pos.0 as i64 - app.copy_pos_scroll_offset as i64;
     let sel_top_abs = anchor_abs.min(cursor_abs);
     let sel_bot_abs = anchor_abs.max(cursor_abs);
     let total_lines = (sel_bot_abs - sel_top_abs + 1) as usize;
@@ -737,6 +743,7 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
     } else {
         (pos.1, anchor.1)
     };
+
 
     // Read all selected rows by adjusting scrollback as needed.
     // At scrollback S, row R shows absolute line (R - S).
