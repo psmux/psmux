@@ -834,3 +834,63 @@ fn the_interrupt_flush_records_on_the_gesture() {
     assert!(gesture.blocks("恭喜通关"),
         "the delivered CJK burst must be remembered so the read-back is dropped");
 }
+
+// ── copy-mode cursor vs. the selection it sits on ────────────────────────
+// Regression: the copy cursor cell used to be drawn REVERSED even when it was
+// one of the selected cells.  A reversed selected cell renders as "text colour
+// on the default background", so the last selected cell *looks* unselected and
+// the copy is reported as one cell longer than the highlight.
+
+#[cfg(windows)]
+#[test]
+fn a_cursor_on_a_selected_cell_must_not_be_reversed() {
+    // single line, cols 4..=24 selected (the reported case: a path in the
+    // middle of the line, cursor on the last cell)
+    let start = Some((0u16, 4u16));
+    let end = Some((0u16, 24u16));
+    assert!(copy_cursor_in_selection(0, 4, start, end, "char"));
+    assert!(copy_cursor_in_selection(0, 12, start, end, "char"));
+    assert!(copy_cursor_in_selection(0, 24, start, end, "char"));
+    // one past either end is outside
+    assert!(!copy_cursor_in_selection(0, 3, start, end, "char"));
+    assert!(!copy_cursor_in_selection(0, 25, start, end, "char"));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_multi_row_cursor_follows_the_same_pairing_as_the_highlight() {
+    // anchor (row 1, col 6) -> endpoint (row 4, col 2), the up/left drag
+    let start = Some((1u16, 6u16));
+    let end = Some((4u16, 2u16));
+    assert!(copy_cursor_in_selection(1, 6, start, end, "char"));
+    assert!(copy_cursor_in_selection(1, 30, start, end, "char")); // first row: to the right edge
+    assert!(!copy_cursor_in_selection(1, 5, start, end, "char"));
+    assert!(copy_cursor_in_selection(2, 0, start, end, "char")); // middle rows: full width
+    assert!(copy_cursor_in_selection(4, 2, start, end, "char")); // last row: up to the endpoint
+    assert!(!copy_cursor_in_selection(4, 3, start, end, "char"));
+    assert!(!copy_cursor_in_selection(5, 0, start, end, "char"));
+}
+
+#[cfg(windows)]
+#[test]
+fn rectangle_and_line_modes_have_their_own_shape() {
+    let start = Some((1u16, 10u16));
+    let end = Some((3u16, 20u16));
+    assert!(copy_cursor_in_selection(2, 15, start, end, "rect"));
+    assert!(!copy_cursor_in_selection(2, 9, start, end, "rect"));
+    assert!(!copy_cursor_in_selection(2, 21, start, end, "rect"));
+    // line mode selects whole rows, whatever the columns are
+    assert!(copy_cursor_in_selection(2, 0, start, end, "line"));
+    assert!(copy_cursor_in_selection(3, 200, start, end, "line"));
+    assert!(!copy_cursor_in_selection(0, 15, start, end, "line"));
+}
+
+#[cfg(windows)]
+#[test]
+fn no_selection_means_the_cursor_is_still_drawn() {
+    // keyboard copy mode: nothing selected, so the cursor keeps its REVERSED
+    // cell and the host cursor stays where the user is working
+    assert!(!copy_cursor_in_selection(3, 3, None, None, "char"));
+    assert!(!copy_cursor_in_selection(3, 3, Some((1, 1)), None, "char"));
+    assert!(!copy_cursor_in_selection(3, 3, None, Some((5, 5)), "char"));
+}

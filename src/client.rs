@@ -1656,8 +1656,7 @@ pub(crate) fn recolor_border_junctions(
     }
 }
 
-fn border_cell_touches_rect(x: u16, y: u16, rect: Rect) -> bool {
-    let right = rect.x.saturating_add(rect.width);
+fn border_cell_touches_rect(x: u16, y: u16, rect: Rect) -> bool {    let right = rect.x.saturating_add(rect.width);
     let bottom = rect.y.saturating_add(rect.height);
     let left_of_rect = x.checked_add(1) == Some(rect.x);
     let above_rect = y.checked_add(1) == Some(rect.y);
@@ -1712,6 +1711,42 @@ pub(crate) fn draw_pane_border_arrows(
     draw(right, side_y, "←", true);
     draw(side_x, y - 1, "↓", false);
     draw(side_x, bottom, "↑", false);
+}
+
+/// Is the copy-mode cursor cell inside the selection that is on screen?
+///
+/// The renderer draws the copy cursor as a REVERSED cell and parks the host
+/// terminal's cursor on it.  When the cursor sits on a selection endpoint that
+/// turns the last selected cell into "text colour on the default background",
+/// which reads as if it were not selected at all -- the copy then looks one
+/// cell longer than the highlight even though the selection is correct.  The
+/// selection style already marks the cell, so the caller skips both when this
+/// returns true.
+pub(crate) fn copy_cursor_in_selection(
+    cr: u16,
+    cc: u16,
+    sel_start: Option<(u16, u16)>,
+    sel_end: Option<(u16, u16)>,
+    mode: &str,
+) -> bool {
+    let (Some((sr, sc)), Some((er, ec))) = (sel_start, sel_end) else {
+        return false;
+    };
+    match mode {
+        "rect" => cr >= sr && cr <= er && cc >= sc.min(ec) && cc <= sc.max(ec),
+        "line" => cr >= sr && cr <= er,
+        _ => {
+            if sr == er {
+                cr == sr && cc >= sc.min(ec) && cc <= sc.max(ec)
+            } else if cr == sr {
+                cc >= sc
+            } else if cr == er {
+                cc <= ec
+            } else {
+                cr > sr && cr < er
+            }
+        }
+    }
 }
 
 pub fn render_layout_json(
@@ -2016,17 +2051,36 @@ pub fn render_layout_json(
                     let cc = (*cc).min(inner.width.saturating_sub(1).saturating_sub(gutter_w));
                     let cy = inner.y + cr;
                     let cx = inner.x + gutter_w + cc;
-                    f.set_cursor_position((cx, cy));
-                    let buf = f.buffer_mut();
-                    let buf_area = buf.area;
-                    if cy >= buf_area.y && cy < buf_area.y + buf_area.height
-                        && cx >= buf_area.x && cx < buf_area.x + buf_area.width
-                    {
-                        let idx = (cy - buf_area.y) as usize * buf_area.width as usize
-                            + (cx - buf_area.x) as usize;
-                        if idx < buf.content.len() {
-                            let cell = &mut buf.content[idx];
-                            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                    // While a selection is on screen the copy cursor sits on one
+                    // of its endpoints.  Reversing that cell (and parking the
+                    // host terminal's cursor on it) turns a selected cell into
+                    // "text colour on the default background", which reads as if
+                    // the last selected cell were *not* selected: users then
+                    // report the copy as one cell longer than the highlight,
+                    // even though the selection itself is right.  The selection
+                    // style already marks the cell, so leave it alone and keep
+                    // the host cursor off it (skipping set_cursor_position also
+                    // keeps ratatui's ?25l, i.e. hides it for this frame).
+                    let cursor_in_selection = copy_cursor_in_selection(
+                        cr,
+                        cc,
+                        (*sel_start_row).zip(*sel_start_col),
+                        (*sel_end_row).zip(*sel_end_col),
+                        sel_mode.as_deref().unwrap_or("char"),
+                    );
+                    if !cursor_in_selection {
+                        f.set_cursor_position((cx, cy));
+                        let buf = f.buffer_mut();
+                        let buf_area = buf.area;
+                        if cy >= buf_area.y && cy < buf_area.y + buf_area.height
+                            && cx >= buf_area.x && cx < buf_area.x + buf_area.width
+                        {
+                            let idx = (cy - buf_area.y) as usize * buf_area.width as usize
+                                + (cx - buf_area.x) as usize;
+                            if idx < buf.content.len() {
+                                let cell = &mut buf.content[idx];
+                                cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                            }
                         }
                     }
                 }
