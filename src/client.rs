@@ -812,11 +812,19 @@ fn active_pane_in_copy_mode(layout: &LayoutJson) -> bool {
 /// release is handled before that frame gets its turn.  Only the client knows
 /// which cell the user was actually shown, so a copy-mode release re-reports
 /// this value (see [`copy_release_repin`]).
+///
+/// It is the COPY CURSOR, not `sel_end_*`.  `sel_start_*`/`sel_end_*` are the
+/// painted rectangle's top and bottom, ordered by row, so on a drag that moved
+/// UP the bottom end is the anchor and re-reporting it would collapse the
+/// selection onto the press cell and yank nothing at all.  `copy_cursor_*` is
+/// `copy_pos` itself, which is the end the drag is moving.
 fn active_copy_sel_end(layout: &LayoutJson) -> Option<(u16, u16)> {
     match layout {
-        LayoutJson::Leaf { active, copy_mode, sel_end_row, sel_end_col, .. } => {
-            if *active && *copy_mode {
-                (*sel_end_row).zip(*sel_end_col)
+        LayoutJson::Leaf { active, copy_mode, sel_end_row, copy_cursor_row, copy_cursor_col, .. } => {
+            // `sel_end_row` only tells us a selection is on screen at all; a
+            // copy cursor without one is keyboard copy mode, which never repins.
+            if *active && *copy_mode && sel_end_row.is_some() {
+                (*copy_cursor_row).zip(*copy_cursor_col)
             } else {
                 None
             }
@@ -901,6 +909,46 @@ mod copy_release_repin_tests {
             copy_release_commands(7, true, None, (15, 3)),
             vec!["pane-mouse 7 0 15 3 m\n".to_string()]
         );
+    }
+
+    /// The re-pin must report the COPY CURSOR, not `sel_end_*`.
+    ///
+    /// `sel_start_*`/`sel_end_*` are the painted rectangle's top and bottom,
+    /// ordered by row, so on a drag that moved UP the bottom end is the
+    /// ANCHOR.  Re-reporting it collapses the selection onto the press cell
+    /// and the release yanks nothing at all: a real client dragging up over
+    /// three rows came back with an empty paste buffer.
+    #[test]
+    fn the_repin_follows_the_copy_cursor_not_the_bottom_of_the_selection() {
+        // anchor (row 4, col 9), dragged UP to (row 2, col 3): the frame
+        // publishes top=(2,3) and bottom=(4,9), and the copy cursor is the
+        // end that moved.
+        let leaf: super::LayoutJson = serde_json::from_str(
+            r#"{"type":"leaf","id":1,"rows":29,"cols":120,"cursor_row":0,"cursor_col":0,
+                "active":true,"copy_mode":true,"scroll_offset":0,
+                "sel_start_row":2,"sel_start_col":3,"sel_end_row":4,"sel_end_col":9,
+                "copy_cursor_row":2,"copy_cursor_col":3}"#,
+        )
+        .expect("a leaf");
+        assert_eq!(
+            super::active_copy_sel_end(&leaf),
+            Some((2, 3)),
+            "an upward drag must re-pin its endpoint, not the anchor below it"
+        );
+    }
+
+    /// Keyboard copy mode has a cursor but no selection, and must not repin.
+    #[test]
+    fn a_pane_with_no_selection_has_no_painted_endpoint() {
+        let leaf: super::LayoutJson = serde_json::from_str(
+            r#"{"type":"leaf","id":1,"rows":29,"cols":120,"cursor_row":0,"cursor_col":0,
+                "active":true,"copy_mode":true,"scroll_offset":0,
+                "sel_start_row":null,"sel_start_col":null,
+                "sel_end_row":null,"sel_end_col":null,
+                "copy_cursor_row":7,"copy_cursor_col":11}"#,
+        )
+        .expect("a leaf");
+        assert_eq!(super::active_copy_sel_end(&leaf), None);
     }
 
     /// A plain click never repins: the release has to position the copy cursor
