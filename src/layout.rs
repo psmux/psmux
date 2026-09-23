@@ -667,7 +667,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         copy_anchor: Option<(u16, u16)>,
         copy_pos: Option<(u16, u16)>,
         anchor_scroll: usize,
-        pos_scroll: usize,
+        pos_scroll: Option<usize>,
     ) {
         match node {
             LayoutJson::Leaf {
@@ -707,7 +707,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             // reading a row without its own end's scroll offset
                             // breaks after an edge auto-scroll moved the view.
                             let a_abs = ar as i64 - anchor_scroll as i64;
-                            let p_abs = pr as i64 - pos_scroll as i64;
+                            let p_abs = pr as i64 - pos_scroll.unwrap_or(scroll_offset) as i64;
                             let (top_abs, top_col, bot_abs, bot_col) = if a_abs <= p_abs {
                                 (a_abs, ac, p_abs, pc)
                             } else {
@@ -753,7 +753,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         if win_id_override.is_none() { app.copy_anchor } else { None },
         if win_id_override.is_none() { app.copy_pos } else { None },
         if win_id_override.is_none() { app.copy_anchor_scroll_offset } else { 0 },
-        if win_id_override.is_none() { app.copy_pos_scroll_offset } else { 0 },
+        if win_id_override.is_none() { app.copy_pos_scroll_offset } else { None },
     );
     Ok(root)
 }
@@ -769,6 +769,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     let anchor = app.copy_anchor;
     let anchor_scroll = app.copy_anchor_scroll_offset;
     let cpos = app.copy_pos;
+    let pos_scroll = app.copy_pos_scroll_offset;
     let sel_mode = app.copy_selection_mode;
 
     // ── tiny helpers (no captures needed, so plain `fn` items) ───────
@@ -846,6 +847,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         anchor: Option<(u16, u16)>,
         anchor_scroll: usize,
         cpos: Option<(u16, u16)>,
+        pos_scroll: Option<usize>,
         sel_mode: crate::types::SelectionMode,
         out: &mut String,
     ) {
@@ -865,7 +867,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 for (i, c) in children.iter_mut().enumerate() {
                     if i > 0 { out.push(','); }
                     cur_path.push(i);
-                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, sel_mode, out);
+                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, out);
                     cur_path.pop();
                 }
                 out.push_str("]}");
@@ -1115,12 +1117,24 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 // selection bounds + copy cursor position
                 if is_active && in_copy {
                     if let (Some((ar, ac)), Some((pr, pc))) = (anchor, cpos) {
-                        // Compute display position of anchor accounting for
-                        // scrollback changes since the anchor was set.  Clamp
+                        // Compute the display position of each end accounting
+                        // for scrollback changes since it was recorded.  Clamp
                         // to the visible row range [0, last_rows-1].
-                        let display_ar = (ar as i32 + scroll_off as i32 - anchor_scroll as i32)
-                            .max(0)
-                            .min(p.last_rows as i32 - 1) as u16;
+                        //
+                        // The endpoint needs this as much as the anchor does,
+                        // and for the same reason: a drag that reaches a pane
+                        // edge scrolls the view after recording the endpoint,
+                        // so its row belongs to the view it was measured in.
+                        // `yank_selection` resolves both ends this way, and a
+                        // frame that resolved only one of them painted a range
+                        // the yank did not copy.
+                        let display_row = |row: u16, rec: usize| -> u16 {
+                            (row as i32 + scroll_off as i32 - rec as i32)
+                                .max(0)
+                                .min(p.last_rows as i32 - 1) as u16
+                        };
+                        let display_ar = display_row(ar, anchor_scroll);
+                        let pr = display_row(pr, pos_scroll.unwrap_or(scroll_off));
                         // For char mode: send directional start/end so the
                         // client can render flow selection (first line from
                         // start_col to EOL, middle full, last line to end_col).
@@ -1242,7 +1256,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     let mut out = String::with_capacity(32768);
     write_node(
         &mut win.root, &mut path, &active_path,
-        in_copy, scroll_off, anchor, anchor_scroll, cpos, sel_mode, &mut out,
+        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, &mut out,
     );
     Ok(out)
 }

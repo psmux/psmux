@@ -1277,18 +1277,29 @@ pub struct AppState {
     pub copy_anchor: Option<(u16,u16)>,
     /// Scroll offset when copy_anchor was set (for viewport-relative adjustment)
     pub copy_anchor_scroll_offset: usize,
-    /// Scroll offset `copy_pos` was recorded at, i.e. the view position that
-    /// makes `copy_pos`'s screen row mean a specific CONTENT line.
+    /// The view position that makes `copy_pos`'s screen row mean a specific
+    /// CONTENT line, when that is not the position the view is parked on now.
     ///
-    /// Both ends of a selection need their own offset, not just the anchor:
-    /// dragging on/past the pane's first or last row auto-scrolls the view
-    /// (`scroll_copy_up`/`scroll_copy_down`) between the anchor and the
-    /// endpoint.  Reading the endpoint against the CURRENT offset then puts it
-    /// on the wrong content line, so the release yanked a different range than
-    /// the one the client had painted — a selection that hit an edge copied
-    /// something else (reported as "sometimes the selection and the copy
-    /// disagree", in every drag direction).
-    pub copy_pos_scroll_offset: usize,
+    /// `None` is the ordinary case and it means "read this endpoint against the
+    /// current offset".  Every route that moves the endpoint leaves it there,
+    /// because it puts the endpoint on a row of the view the user is looking
+    /// at: a cursor motion, `v` / `V` / `o`, a `send-keys -X` verb, a scroll.
+    ///
+    /// A mouse drag is the one exception, so it is the only thing that sets
+    /// this.  Dragging on or past the pane's first or last row records the
+    /// endpoint and THEN auto-scrolls the view (`scroll_copy_up` /
+    /// `scroll_copy_down`), so for the rest of that gesture the endpoint's row
+    /// belongs to the view it was measured in, not to the one now on screen.
+    /// Reading it against the current offset put it on the wrong content line
+    /// and the release yanked a different range than the client had painted.
+    ///
+    /// It used to be a plain `usize` that every endpoint write had to keep up
+    /// to date.  Nine mouse handlers did and roughly ninety other call sites
+    /// did not, so a keyboard selection made after scrolling resolved its
+    /// endpoint against the live bottom of the buffer and copied a range
+    /// displaced by the scroll offset.  `None` makes the common case correct
+    /// by default and leaves the pin to the one gesture that needs it.
+    pub copy_pos_scroll_offset: Option<usize>,
     pub copy_pos: Option<(u16,u16)>,
     /// Cell where mouse was pressed down in copy mode (for click vs drag detection, #199)
     pub copy_mouse_down_cell: Option<(u16,u16)>,
@@ -2211,7 +2222,7 @@ impl AppState {
             window_indices: Vec::new(),
             copy_anchor: None,
             copy_anchor_scroll_offset: 0,
-            copy_pos_scroll_offset: 0,
+            copy_pos_scroll_offset: None,
             copy_pos: None,
             copy_mouse_down_cell: None,
             copy_pos_published: None,

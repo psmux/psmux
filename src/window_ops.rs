@@ -1160,7 +1160,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(label.content(area), x, y);
             app.copy_pos = Some((row, col));
-            app.copy_pos_scroll_offset = app.copy_scroll_offset;
+            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
             app.copy_mouse_down_cell = Some((row, col));
         }
         return;
@@ -1270,7 +1270,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
             // moves the view: it is what makes this screen row mean a content
             // line.  Without it a drag that hit an edge copied a different
             // range than the one that was painted.
-            app.copy_pos_scroll_offset = app.copy_scroll_offset;
+            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
             // tmux parity (#62): dragging on/past the pane's first or last
             // row scrolls the view so the selection continues into scrollback.
             if y <= area.y {
@@ -1342,7 +1342,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
             if row_diff <= 1 && col_diff <= 1 {
                 app.copy_anchor = None;
                 app.copy_pos = Some((dr, dc)); // snap to the original click position
-                app.copy_pos_scroll_offset = app.copy_scroll_offset;
+                app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
                 return;
             }
         }
@@ -1354,7 +1354,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         // release cell itself never extends the selection either way.
         if let Some(published) = app.copy_pos_published {
             app.copy_pos = Some(published);
-            app.copy_pos_scroll_offset = app.copy_scroll_offset;
+            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
         }
         // Auto-yank if a real selection exists, else clear the stale anchor.
         // Compare CONTENT positions (screen row minus the scroll offset it
@@ -1363,7 +1363,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         // while the selection spans many scrolled lines.
         if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
             let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
-            let p_abs = p.0 as i64 - app.copy_pos_scroll_offset as i64;
+            let p_abs = p.0 as i64 - app.copy_pos_scroll_offset.unwrap_or(app.copy_scroll_offset) as i64;
             if (a_abs, a.1) != (p_abs, p.1) {
                 let _ = yank_selection(app);
             }
@@ -1644,7 +1644,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // Left press: position cursor, clear selection
             app.copy_anchor = None;
             app.copy_pos = Some((r, c));
-            app.copy_pos_scroll_offset = app.copy_scroll_offset;
+            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
             app.copy_mouse_down_cell = Some((r, c));
             // A new gesture starts with nothing published; a frame that carries
             // this selection publishes its endpoint for the raw mouse release
@@ -1670,7 +1670,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // Recorded BEFORE the edge auto-scroll below: the endpoint's own
             // view offset is what makes its screen row mean a content line
             // (see `copy_pos_scroll_offset`).
-            app.copy_pos_scroll_offset = app.copy_scroll_offset;
+            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
             // tmux parity (#62): dragging on/past the pane's first or last
             // row scrolls the view so the selection keeps growing into
             // scrollback; speed rises with distance past the edge.  The
@@ -1711,7 +1711,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // opened, #669) may still position the cursor.
             if app.copy_anchor.is_none() {
                 app.copy_pos = Some((r, c));
-                app.copy_pos_scroll_offset = app.copy_scroll_offset;
+                app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
             }
             if let Some((dr, dc)) = app.copy_mouse_down_cell.take() {
                 if (dr as i32 - r as i32).unsigned_abs() <= 1
@@ -1719,7 +1719,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 {
                     app.copy_anchor = None;
                     app.copy_pos = Some((dr, dc));
-                    app.copy_pos_scroll_offset = app.copy_scroll_offset;
+                    app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
                     return;
                 }
             }
@@ -1737,7 +1737,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // while the selection spans many scrolled lines.
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                 let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
-                let p_abs = p.0 as i64 - app.copy_pos_scroll_offset as i64;
+                let p_abs = p.0 as i64 - app.copy_pos_scroll_offset.unwrap_or(app.copy_scroll_offset) as i64;
                 if (a_abs, a.1) != (p_abs, p.1) {
                     let _ = yank_selection(app);
                 }
@@ -1840,7 +1840,7 @@ pub fn copy_drag_begin(app: &mut AppState, pane_id: usize, anchor_col: i16, anch
         crate::types::SelectionMode::Char
     };
     app.copy_pos = Some((row.clamp(0, max_r) as u16, col.clamp(0, max_c) as u16));
-    app.copy_pos_scroll_offset = app.copy_scroll_offset;
+    app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
     // A drag is in progress, not a click: the release must yank, never
     // snap back through the #199 click guard.
     app.copy_mouse_down_cell = None;

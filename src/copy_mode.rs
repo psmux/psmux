@@ -41,6 +41,10 @@ pub fn enter_copy_mode(app: &mut AppState) {
     };
     app.copy_selection_mode = crate::types::SelectionMode::Char;
     app.copy_anchor = None;
+    // Nothing has pinned the endpoint to an older view, and a pin left by an
+    // earlier session must not survive into this one: `CopyModeState` does not
+    // carry it across a pane switch either.
+    app.copy_pos_scroll_offset = None;
     // Initialize copy_pos from the terminal cursor so the cursor is
     // visible immediately on entering copy mode (fixes #25).
     app.copy_pos = current_prompt_pos(app);
@@ -66,6 +70,7 @@ pub fn exit_copy_mode(app: &mut AppState) {
     app.copy_pos = None;
     app.copy_mouse_down_cell = None;
     app.copy_pos_published = None;
+    app.copy_pos_scroll_offset = None;
     app.copy_scroll_offset = 0;
     // Clear the search prompt if it was lingering from CopySearch (#335).
     app.status_message = None;
@@ -732,7 +737,7 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
     // offset puts it on the wrong content line and the yank no longer covers
     // what the client painted.
     let anchor_abs = anchor.0 as i64 - anchor_scroll as i64;
-    let cursor_abs = pos.0 as i64 - app.copy_pos_scroll_offset as i64;
+    let cursor_abs = pos.0 as i64 - app.copy_pos_scroll_offset.unwrap_or(current_scroll) as i64;
     let sel_top_abs = anchor_abs.min(cursor_abs);
     let sel_bot_abs = anchor_abs.max(cursor_abs);
     let total_lines = (sel_bot_abs - sel_top_abs + 1) as usize;
@@ -2161,3 +2166,7 @@ mod tests_issue612_copy_search_scrollback;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue673_copy_snapshot_per_pane.rs"]
 mod test_issue673_copy_snapshot_per_pane;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue687_copy_mode_keyboard_selection.rs"]
+mod test_issue687_copy_mode_keyboard_selection;
