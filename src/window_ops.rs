@@ -1160,7 +1160,11 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(label.content(area), x, y);
             app.copy_pos = Some((row, col));
-            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
+            // A press is not a drag: this cell is in the view on screen now, so
+            // leave the endpoint unpinned.  Pinning here survived the press as
+            // a stale offset, and every later keyboard selection in the same
+            // copy mode was resolved against the view the press happened in.
+            app.copy_pos_scroll_offset = None;
             app.copy_mouse_down_cell = Some((row, col));
         }
         return;
@@ -1342,7 +1346,9 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
             if row_diff <= 1 && col_diff <= 1 {
                 app.copy_anchor = None;
                 app.copy_pos = Some((dr, dc)); // snap to the original click position
-                app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
+                // A click leaves copy mode open, so an offset pinned here is
+                // read by every keyboard selection that follows it.
+                app.copy_pos_scroll_offset = None;
                 return;
             }
         }
@@ -1354,7 +1360,9 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         // release cell itself never extends the selection either way.
         if let Some(published) = app.copy_pos_published {
             app.copy_pos = Some(published);
-            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
+            // The published cell is a row of the frame on screen now, which is
+            // what `None` means.
+            app.copy_pos_scroll_offset = None;
         }
         // Auto-yank if a real selection exists, else clear the stale anchor.
         // Compare CONTENT positions (screen row minus the scroll offset it
@@ -1644,7 +1652,11 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // Left press: position cursor, clear selection
             app.copy_anchor = None;
             app.copy_pos = Some((r, c));
-            app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
+            // A press is not a drag: the cell is in the view on screen now, and
+            // only a drag update, which records the endpoint and THEN edge
+            // scrolls, needs the pin.  Pinning on the press left the offset
+            // behind for every keyboard selection that followed the click.
+            app.copy_pos_scroll_offset = None;
             app.copy_mouse_down_cell = Some((r, c));
             // A new gesture starts with nothing published; a frame that carries
             // this selection publishes its endpoint for the raw mouse release
@@ -1711,7 +1723,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // opened, #669) may still position the cursor.
             if app.copy_anchor.is_none() {
                 app.copy_pos = Some((r, c));
-                app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
+                app.copy_pos_scroll_offset = None;
             }
             if let Some((dr, dc)) = app.copy_mouse_down_cell.take() {
                 if (dr as i32 - r as i32).unsigned_abs() <= 1
@@ -1719,7 +1731,9 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 {
                     app.copy_anchor = None;
                     app.copy_pos = Some((dr, dc));
-                    app.copy_pos_scroll_offset = Some(app.copy_scroll_offset);
+                    // A click leaves copy mode open, so a pin set here is read
+                    // by every keyboard selection made after it.
+                    app.copy_pos_scroll_offset = None;
                     return;
                 }
             }
