@@ -164,13 +164,16 @@ impl CounterLock {
     const STALE_AFTER: Duration = Duration::from_secs(5);
 
     fn acquire(path: String) -> Self {
+        let mut made_dir = false;
         for _ in 0..2000 {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut f) => {
                     let _ = write!(f, "{}", std::process::id());
                     return CounterLock { path };
                 }
-                Err(_) => {
+                // Another process holds it. This is the one failure waiting can
+                // resolve, so it is the only one that sleeps.
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                     // Take over a stale lock left behind by a crashed holder.
                     let stale = std::fs::metadata(&path)
                         .and_then(|m| m.modified())
@@ -182,10 +185,27 @@ impl CounterLock {
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }
+                // The data directory is not there yet, which is what a first run
+                // on a machine looks like. Create it once and try again: no
+                // amount of waiting makes a missing directory appear, and the
+                // counter file this lock guards cannot be written without it
+                // either.
+                Err(e) if e.kind() == ErrorKind::NotFound && !made_dir => {
+                    made_dir = true;
+                    match std::path::Path::new(&path).parent() {
+                        Some(parent) if std::fs::create_dir_all(parent).is_ok() => {}
+                        _ => return CounterLock { path },
+                    }
+                }
+                // Anything else, a denied directory for instance, is a state
+                // this loop cannot change. Proceed rather than spend the whole
+                // budget discovering that.
+                Err(_) => return CounterLock { path },
             }
         }
-        // Never observed in practice (the critical section is microseconds);
-        // proceed rather than hang session creation indefinitely.
+        // Only reachable under real contention now, and never observed there:
+        // the critical section is microseconds. Proceed rather than hang
+        // session creation indefinitely.
         CounterLock { path }
     }
 }
@@ -2774,3 +2794,7 @@ mod tests_picker_namespace_filter;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue650_cross_session_process_name.rs"]
 mod tests_issue650_cross_session_process_name;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue698_counter_lock_missing_dir.rs"]
+mod tests_issue698_counter_lock_missing_dir;
