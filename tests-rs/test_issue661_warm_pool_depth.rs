@@ -28,7 +28,6 @@ use crate::types::{WarmPool, WARM_POOL_SURGE_MAX};
 
 #[test]
 fn issue661_a_claim_that_takes_the_last_ready_spare_surges() {
-    let _dummies = DummyGuard661;
     // The leading edge. This claim was served, so the old rule saw nothing
     // wrong; but the pool it leaves behind has no ready spare, so the NEXT
     // creation of this run is certain to miss, and a spare needs ~400ms to
@@ -54,7 +53,6 @@ fn issue661_a_claim_that_takes_the_last_ready_spare_surges() {
 
 #[test]
 fn issue661_a_lone_claim_that_empties_the_pool_does_not_surge() {
-    let _dummies = DummyGuard661;
     // The regression this must not cause: a cold `new-session` claims its only
     // spare, leaving the pool empty and unready. Surging there fires eight
     // shell spawns beside the session's own starting shell, measured at ~100ms
@@ -71,7 +69,6 @@ fn issue661_a_lone_claim_that_empties_the_pool_does_not_surge() {
 
 #[test]
 fn issue661_a_run_the_surge_is_serving_holds_the_window_open() {
-    let _dummies = DummyGuard661;
     // The defect itself. Two claims open the surge; the pool fills to eight and
     // every later claim in the run is served from it, so under the old rule
     // nothing ever wrote `surge_until` again and the window expired under a run
@@ -100,7 +97,6 @@ fn issue661_a_run_the_surge_is_serving_holds_the_window_open() {
 
 #[test]
 fn issue661_a_gap_longer_than_the_burst_window_stops_renewing() {
-    let _dummies = DummyGuard661;
     // The other half of the contract: renewal is driven by the run continuing,
     // so a creation that is NOT part of a run renews nothing and the surplus is
     // on its way back. Without this the window would be held open by any
@@ -126,7 +122,6 @@ fn issue661_a_gap_longer_than_the_burst_window_stops_renewing() {
 
 #[test]
 fn issue661_surplus_still_comes_back_once_the_run_stops() {
-    let _dummies = DummyGuard661;
     // Holding the depth for the length of the run must not turn into holding it
     // for ever: eight idle shells for a user who configured two is the leak the
     // trim exists to prevent.
@@ -145,7 +140,6 @@ fn issue661_surplus_still_comes_back_once_the_run_stops() {
 
 #[test]
 fn issue661_a_standby_never_deepens_however_long_the_run() {
-    let _dummies = DummyGuard661;
     // A `__warm__` helper creates no windows of its own and can sit around for
     // days. Whatever the renewal rule does, its cap stays at one spare.
     let mut pool = WarmPool::new(4);
@@ -158,7 +152,6 @@ fn issue661_a_standby_never_deepens_however_long_the_run() {
 
 #[test]
 fn issue661_a_disabled_pool_never_surges_however_long_the_run() {
-    let _dummies = DummyGuard661;
     let mut pool = WarmPool::new(0);
     for _ in 0..6 {
         pool.note_claim(true);
@@ -168,51 +161,19 @@ fn issue661_a_disabled_pool_never_surges_however_long_the_run() {
     }
 }
 
-// ── dummy lifetime guard ───────────────────────────────────────────
-//
-// Same rule as test_warm_pool_depth.rs: the stand in spares are `cmd /c pause`
-// children under a pseudoconsole, they do not reliably exit when the master
-// drops, and an orphan surfaces as a Windows Terminal tab waiting at "Press any
-// key". Every pid is recorded at spawn and ended BY PID when the guard drops,
-// including on the panic path. Never by image name.
-thread_local! {
-    static DUMMY_PIDS_661: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-struct DummyGuard661;
-
-impl Drop for DummyGuard661 {
-    fn drop(&mut self) {
-        DUMMY_PIDS_661.with(|pids| {
-            for pid in pids.borrow_mut().drain(..) {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/pid", &pid.to_string(), "/t", "/f"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-        });
-    }
-}
-
 /// A spare with no shell behind it. The pool only inspects `pane_id`,
 /// `spawned_at`, `ready` and the child's liveness.
 fn fake_spare661(pane_id: usize) -> crate::types::WarmPane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("pause");
-    let child = crate::util::spawn_pty_child(&*pair.slave, cmd).expect("spawn dummy");
-    if let Some(pid) = child.process_id() {
-        DUMMY_PIDS_661.with(|pids| pids.borrow_mut().push(pid));
-    }
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize {
+        rows: 40,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    let child = crate::util::StubChild::running();
     let now = std::time::Instant::now();
     crate::types::WarmPane {
-        master: pair.master,
+        master,
         writer,
         child,
         term: std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 100))),

@@ -20,6 +20,106 @@ pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The pty a pane fixture needs when no process is ever going to use it.
+///
+/// A fixture that only has to hand `Pane` a master, a writer and a child used
+/// to open a real pseudo console and spawn `cmd /c exit` into it. Measured over
+/// one full run of the suite, that is 464 pseudo consoles and 464 processes,
+/// plus the console host Windows starts behind each one, for tests whose
+/// subject is a struct field. Every one of them is also a chance to hit the
+/// spawn-then-close race #695 reports.
+///
+/// `resize` answers Ok because the warm pool probes a spare's liveness with it
+/// (`pane.rs`), reads yield nothing, and writes are discarded: no test in the
+/// suite reads back what was written to a pane's master.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StubMasterPty {
+    size: std::sync::Mutex<portable_pty::PtySize>,
+}
+
+#[cfg(test)]
+impl portable_pty::MasterPty for StubMasterPty {
+    fn resize(&self, size: portable_pty::PtySize) -> Result<(), anyhow::Error> {
+        *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
+        Ok(())
+    }
+    fn get_size(&self) -> Result<portable_pty::PtySize, anyhow::Error> {
+        Ok(*self.size.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    fn try_clone_reader(&self) -> Result<Box<dyn io::Read + Send>, anyhow::Error> {
+        Ok(Box::new(io::empty()))
+    }
+    fn take_writer(&self) -> Result<Box<dyn io::Write + Send>, anyhow::Error> {
+        Ok(Box::new(io::sink()))
+    }
+}
+
+/// The master and the writer for a pane fixture, without a pseudo console.
+#[cfg(test)]
+pub(crate) fn stub_pane_pty(
+    size: portable_pty::PtySize,
+) -> (Box<dyn portable_pty::MasterPty>, Box<dyn io::Write + Send>) {
+    (Box::new(StubMasterPty { size: std::sync::Mutex::new(size) }), Box::new(io::sink()))
+}
+
+/// The child a pane fixture names when no process is ever going to run.
+///
+/// `exited` is what `cmd /c exit` had already become by the time the test body
+/// ran, and `running` is what `cmd /c pause` was: the pools reap a spare whose
+/// child has exited (#450), so a fixture holding a spare has to say running.
+/// There is no pid to report, which is the state those fixtures already
+/// documented as "no live child, so every process probe fails"; the difference
+/// is that it is now true every time rather than most of the time.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StubChild {
+    running: bool,
+}
+
+#[cfg(test)]
+impl StubChild {
+    pub(crate) fn exited() -> Box<dyn portable_pty::Child + Send + Sync> {
+        Box::new(Self { running: false })
+    }
+
+    pub(crate) fn running() -> Box<dyn portable_pty::Child + Send + Sync> {
+        Box::new(Self { running: true })
+    }
+}
+
+#[cfg(test)]
+impl portable_pty::ChildKiller for StubChild {
+    fn kill(&mut self) -> io::Result<()> {
+        self.running = false;
+        Ok(())
+    }
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(Self { running: self.running })
+    }
+}
+
+#[cfg(test)]
+impl portable_pty::Child for StubChild {
+    fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+        if self.running {
+            Ok(None)
+        } else {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+    }
+    fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+        self.running = false;
+        Ok(portable_pty::ExitStatus::with_exit_code(0))
+    }
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        None
+    }
+}
+
 /// How long a test pty child is given to get out of its own loader.
 ///
 /// Measured on Windows 11 with pwsh behind a ConPTY: a child whose pty is
