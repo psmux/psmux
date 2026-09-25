@@ -391,6 +391,8 @@ fn linkw_alias_accepted() {
     let mut app = mock_app_with_window();
     // linkw alias is also accepted without error
     execute_command_string(&mut app, "linkw").unwrap();
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -984,5 +986,7 @@ fn every_command_does_not_panic_embedded_mode() {
         app.paste_buffers.push("buffer_data".to_string());
         let result = execute_command_string(&mut app, cmd);
         assert!(result.is_ok(), "command '{}' panicked or returned error: {:?}", cmd, result);
+        // Some of these start a real shell; end it before the state drops.
+        crate::util::kill_app_shells(&mut app);
     }
 }

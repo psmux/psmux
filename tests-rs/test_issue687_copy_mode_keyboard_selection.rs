@@ -75,7 +75,7 @@ fn open_pane_pty(
         let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
         cmd.arg("/c");
         cmd.arg("exit");
-        let child = match pair.slave.spawn_command(cmd) {
+        let child = match crate::util::spawn_pty_child(&*pair.slave, cmd) {
             Ok(c) => c,
             Err(e) => { last_err = format!("spawn dummy: {e:?}"); continue; }
         };

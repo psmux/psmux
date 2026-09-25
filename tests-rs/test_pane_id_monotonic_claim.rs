@@ -51,7 +51,7 @@ fn spare(pane_id: usize) -> crate::types::WarmPane {
     let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
     cmd.arg("/c");
     cmd.arg("pause");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
+    let child = crate::util::spawn_pty_child(&*pair.slave, cmd).expect("spawn dummy");
     if let Some(pid) = child.process_id() {
         DUMMY_PIDS_MONO.with(|pids| pids.borrow_mut().push(pid));
     }

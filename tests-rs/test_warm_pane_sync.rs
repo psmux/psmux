@@ -115,7 +115,7 @@ fn resize_to_same_size_is_noop() {
     let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
     cmd.arg("/c");
     cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
+    let child = crate::util::spawn_pty_child(&*pair.slave, cmd).expect("spawn dummy");
     let writer = pair.master.take_writer().expect("writer");
     let now = std::time::Instant::now();
     app.warm_pane.push(crate::types::WarmPane {
@@ -168,7 +168,7 @@ fn push_spare_with_palette(app: &mut AppState, planted: Option<crate::types::Hos
     let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
     cmd.arg("/c");
     cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
+    let child = crate::util::spawn_pty_child(&*pair.slave, cmd).expect("spawn dummy");
     let writer = pair.master.take_writer().expect("writer");
     let now = std::time::Instant::now();
     app.warm_pane.push(crate::types::WarmPane {

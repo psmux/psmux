@@ -59,7 +59,7 @@ fn make_pane(term: Arc<Mutex<vt100::Parser>>, rows: u16, cols: u16) -> crate::ty
     let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
     cmd.arg("/c");
     cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
+    let child = crate::util::spawn_pty_child(&*pair.slave, cmd).expect("spawn dummy");
     let writer = pair.master.take_writer().expect("writer");
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {

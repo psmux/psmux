@@ -918,6 +918,8 @@ fn split_window_flag_Z_zoom() {
     execute_command_string(&mut app, "split-window -Z").unwrap();
     assert!(app.windows[0].zoom_saved.is_some(), "-Z should zoom the active pane after splitting");
     assert_eq!(app.windows[0].active_path, vec![1], "-Z should leave the new pane active");
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 
 #[test]
@@ -1283,12 +1285,16 @@ fn display_popup_flag_w_percent() {
 fn link_window_flag_s_source() {
     let mut app = mock_app_with_windows(&["w0", "w1"]);
     execute_command_string(&mut app, "link-window -s 0").unwrap();
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 
 #[test]
 fn link_window_flag_t_target() {
     let mut app = mock_app_with_windows(&["w0", "w1"]);
     execute_command_string(&mut app, "link-window -s 0 -t 2").unwrap();
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1956,6 +1962,8 @@ fn alias_swapw() {
 fn alias_linkw() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "linkw -s 0").unwrap();
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 
 #[test]
