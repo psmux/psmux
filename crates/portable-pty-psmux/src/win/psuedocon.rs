@@ -62,12 +62,20 @@ pub enum ConPtySource {
 /// The library handle behind the pointers is deliberately never freed: this
 /// lives in a `lazy_static` for the life of the process and panes hold HPCONs
 /// created by it.
+/// The three entry points as the loader hands them out.  Named so the
+/// transmutes below can say what they turn into (clippy 1.98's
+/// `missing_transmute_annotations` refuses an unannotated one under
+/// `-D warnings`).
+pub type CreatePseudoConsoleFn =
+    unsafe extern "system" fn(COORD, HANDLE, HANDLE, DWORD, *mut HPCON) -> HRESULT;
+pub type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
+pub type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
+
 #[allow(non_snake_case)]
 pub struct ConPtyApi {
-    pub CreatePseudoConsole:
-        unsafe extern "system" fn(COORD, HANDLE, HANDLE, DWORD, *mut HPCON) -> HRESULT,
-    pub ResizePseudoConsole: unsafe extern "system" fn(HPCON, COORD) -> HRESULT,
-    pub ClosePseudoConsole: unsafe extern "system" fn(HPCON),
+    pub CreatePseudoConsole: CreatePseudoConsoleFn,
+    pub ResizePseudoConsole: ResizePseudoConsoleFn,
+    pub ClosePseudoConsole: ClosePseudoConsoleFn,
     /// Holds the kernel32 `DynamicLibrary` guard alive on the default path.
     _guard: Option<ConPtyFuncs>,
     pub source: ConPtySource,
@@ -103,9 +111,17 @@ fn load_conpty_kernel32() -> ConPtyApi {
     // ABI as `extern "system"` on the x86_64 Windows target psmux ships.
     unsafe {
         ConPtyApi {
-            CreatePseudoConsole: mem::transmute(funcs.CreatePseudoConsole),
-            ResizePseudoConsole: mem::transmute(funcs.ResizePseudoConsole),
-            ClosePseudoConsole: mem::transmute(funcs.ClosePseudoConsole),
+            CreatePseudoConsole: mem::transmute::<
+                unsafe extern "C" fn(COORD, HANDLE, HANDLE, DWORD, *mut HPCON) -> HRESULT,
+                CreatePseudoConsoleFn,
+            >(funcs.CreatePseudoConsole),
+            ResizePseudoConsole: mem::transmute::<
+                unsafe extern "C" fn(HPCON, COORD) -> HRESULT,
+                ResizePseudoConsoleFn,
+            >(funcs.ResizePseudoConsole),
+            ClosePseudoConsole: mem::transmute::<unsafe extern "C" fn(HPCON), ClosePseudoConsoleFn>(
+                funcs.ClosePseudoConsole,
+            ),
             _guard: Some(funcs),
             source: ConPtySource::Kernel32,
         }
@@ -165,9 +181,9 @@ fn load_conpty_from_dir(dir: &Path) -> Result<ConPtyApi, String> {
     // The module handle is intentionally leaked: see ConPtyApi's doc comment.
     Ok(unsafe {
         ConPtyApi {
-            CreatePseudoConsole: mem::transmute(create),
-            ResizePseudoConsole: mem::transmute(resize),
-            ClosePseudoConsole: mem::transmute(close),
+            CreatePseudoConsole: mem::transmute::<*mut (), CreatePseudoConsoleFn>(create),
+            ResizePseudoConsole: mem::transmute::<*mut (), ResizePseudoConsoleFn>(resize),
+            ClosePseudoConsole: mem::transmute::<*mut (), ClosePseudoConsoleFn>(close),
             _guard: None,
             source: ConPtySource::Directory,
         }
