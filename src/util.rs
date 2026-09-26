@@ -185,13 +185,6 @@ pub(crate) fn spawn_pty_child(
     }
 }
 
-/// End a test pty child and wait for it, so the pty outlives the process using
-/// it.
-///
-/// Killing without waiting is the same race from the other side: `kill` only
-/// asks, and a pty dropped before the ask lands leaves the child to die in its
-/// loader instead.
-#[cfg(test)]
 /// End every real shell an `AppState` is holding, before the state drops.
 ///
 /// Only two test modules reach the production spawn, and both of them do it
@@ -224,6 +217,13 @@ pub(crate) fn kill_app_shells(app: &mut AppState) {
     }
 }
 
+/// End a test pty child and wait for it, so the pty outlives the process using
+/// it.
+///
+/// Killing without waiting is the same race from the other side: `kill` only
+/// asks, and a pty dropped before the ask lands leaves the child to die in its
+/// loader instead.
+///
 /// Takes the child by reference rather than by box so that both shapes in
 /// the suite fit: a pane's child carries `Send + Sync`, a warm pane's does
 /// not.
