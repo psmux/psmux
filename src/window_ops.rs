@@ -598,6 +598,33 @@ pub(crate) fn detect_record_reader(pane: &mut Pane) -> bool {
     console_input_mode(pane).map_or(false, mode_is_deliberate_record_reader)
 }
 
+/// Does this pane's child take its KEYS as console records, so that a key
+/// whose VT form drops a modifier (Ctrl + digit, issue #623) must be delivered
+/// as a win32 input record instead?
+///
+/// Deliberately wider than [`detect_record_reader`], which also demands
+/// `ENABLE_MOUSE_INPUT` because it answers a MOUSE question (may psmux flip
+/// VTI for the wheel).  Far Manager with its mouse support switched off
+/// (Options, Interface settings, Mouse; `-set:Interface.Mouse=false`) runs in
+/// `0x01E8`: no mouse bit, so the narrower gate said "not a record reader",
+/// Ctrl+1 in the drives menu went out as tmux's bare `1`, and Far opened the
+/// Temporary panel whose hotkey that is.  Measured 3 of 3 in psmux against 3
+/// of 3 correct in a native console, where the same Ctrl+1 hid the disk type.
+///
+/// A child that is neither cooked nor reading VT is reading keys as records,
+/// mouse or not, and a real keyboard would have given it exactly this record.
+/// A cooked shell keeps tmux's `standard_map` byte, and a VT reader (nvim,
+/// node) keeps the VT form.
+#[cfg(windows)]
+pub(crate) fn detect_key_record_reader(pane: &mut Pane) -> bool {
+    console_input_mode(pane).map_or(false, mode_reads_key_records)
+}
+
+/// The pure classification behind [`detect_key_record_reader`].
+pub(crate) fn mode_reads_key_records(mode: u32) -> bool {
+    mode & COOKED_INPUT_MODE == 0 && mode & ENABLE_VIRTUAL_TERMINAL_INPUT == 0
+}
+
 /// Does this pane's child read its input as a VT byte stream (issue #684)?
 ///
 /// The paste route gate asks this before it may deliver `ESC[200~` as

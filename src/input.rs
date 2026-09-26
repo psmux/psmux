@@ -2216,16 +2216,18 @@ pub(crate) fn ctrl_key_win32_seq(c: char, shift: bool) -> Option<String> {
 /// Returns true when the key was written here, so the caller skips the legacy
 /// byte.  Writing both would deliver the key twice (issue #363).
 ///
-/// The gate is deliberately [`crate::window_ops::detect_record_reader`], the
-/// same classifier the rest of issue #623 uses: a pane that reads the VT bytes
-/// itself (nvim, opencode) would see a win32 sequence as literal garbage, and a
-/// shell keeps tmux's `standard_map` byte, so nothing but a record reader
-/// changes behaviour.
+/// The gate is [`crate::window_ops::detect_key_record_reader`]: a pane that
+/// reads the VT bytes itself (nvim, opencode) would see a win32 sequence as
+/// literal garbage, and a cooked shell keeps tmux's `standard_map` byte, so
+/// nothing but a record reader changes behaviour.  It used to be
+/// [`crate::window_ops::detect_record_reader`], which also demands
+/// `ENABLE_MOUSE_INPUT` and so missed Far Manager with its mouse support off
+/// (`0x01E8`): Ctrl+1 reached it as a bare `1` and opened the Temporary panel.
 #[cfg(windows)]
 pub(crate) fn write_ctrl_key_as_record(p: &mut crate::types::Pane, c: char, shift: bool) -> bool {
     use std::io::Write as _;
     let Some(seq) = ctrl_key_win32_seq(c, shift) else { return false };
-    if !crate::window_ops::detect_record_reader(p) {
+    if !crate::window_ops::detect_key_record_reader(p) {
         return false;
     }
     let _ = p.writer.write_all(seq.as_bytes());
@@ -2314,6 +2316,7 @@ pub fn mark_win32_input_latched(app: &mut AppState) {
 }
 
 /// Does the pane that `send_text_to_active` would write to read `INPUT_RECORD`s?
+/// Same classifier as [`write_ctrl_key_as_record`].
 ///
 /// Routing mirrors [`mark_win32_input_latched`]: a focused FLOATING pane takes
 /// the key instead of the tiled active pane.  Used by the scriptable
@@ -2324,13 +2327,13 @@ pub fn active_pane_is_record_reader(app: &mut AppState) -> bool {
         let win = &mut app.windows[app.active_idx];
         if let Some(fi) = win.floating_focus {
             if let Some(fp) = win.floating.get_mut(fi) {
-                return crate::window_ops::detect_record_reader(&mut fp.pane);
+                return crate::window_ops::detect_key_record_reader(&mut fp.pane);
             }
         }
     }
     let win = &mut app.windows[app.active_idx];
     match active_pane_mut(&mut win.root, &win.active_path) {
-        Some(p) => crate::window_ops::detect_record_reader(p),
+        Some(p) => crate::window_ops::detect_key_record_reader(p),
         None => false,
     }
 }
