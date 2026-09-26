@@ -641,6 +641,35 @@ pub(crate) fn pane_reads_vt_bytes(pane: &mut Pane) -> bool {
     console_input_mode(pane).map_or(false, |m| m & ENABLE_VIRTUAL_TERMINAL_INPUT != 0)
 }
 
+/// May psmux inject a VT REPLY (an OSC colour answer, the XTVERSION DCS) into a
+/// console whose input mode word is `mode` (issue #623, the F10 report)?
+///
+/// A reply injected with `WriteConsoleInputW` is nothing but key records whose
+/// characters spell the sequence.  It is only a reply to a reader that parses
+/// its input as a VT byte stream, which is what `ENABLE_VIRTUAL_TERMINAL_INPUT`
+/// declares.  Any other reader dispatches each record as a keypress.
+///
+/// Measured on 26200.  Far Manager 3.0.6364 reads its palette with a DA1
+/// bracketed query (`CSI 0c`, `OSC 4;0;?;...;255;? ST`, `CSI 0c`, one write)
+/// and turns VT input on only for that read.  ConPTY answers both DA1s itself
+/// while processing the write, before psmux has seen the OSC, so Far's read is
+/// over and the console is back in `0x01B8` when psmux's reply lands.  Far then
+/// takes the reply as typing: every ESC clears its command line, and the last
+/// ST leaves a `\` there that opens the autocompletion list, which is what ate
+/// the reporter's first F10.  yazi (`0x0098`) did the same with the XTVERSION
+/// reply: its cursor moved and a `1` appeared, 3 runs out of 3.  node
+/// (`0x0208`) and the query probe (`0x02xx`) keep VT input on and are
+/// unaffected.  A terminal on the same inbox ConPTY never gets this far: the
+/// reply it writes to the input pipe is consumed by conhost's input parser.
+///
+/// The mode is a sample, so one gap is left: a reply that lands after an app's
+/// read has ended but before it switches VT input off again is still typed.
+/// Far's native code closes that gap in microseconds; psmux found Far's
+/// console already in `0x01B8` at every reply in 10 of 10 launches.
+pub(crate) fn mode_reads_vt_replies(mode: u32) -> bool {
+    mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0
+}
+
 /// The pure classification behind [`detect_record_reader`], split out so it can
 /// be pinned by unit tests against the modes measured from real applications.
 pub(crate) fn mode_is_deliberate_record_reader(mode: u32) -> bool {

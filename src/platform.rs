@@ -1865,6 +1865,25 @@ pub mod mouse_inject {
     /// "paste" in front of every injected reply in the debug log, which sent a
     /// reporter looking at the paste path for a mouse and XTVERSION problem.
     pub fn send_vt_response(child_pid: u32, text: &str) -> bool {
+        inject_vt_text(child_pid, text, false)
+    }
+
+    /// Deliver a REPLY to a pane's own terminal query (OSC 4/10/11, the
+    /// `?997` scheme answer, XTVERSION) the way [`send_vt_response`] does, but
+    /// only while the child's console is reading VT input.
+    ///
+    /// The mode is read on the same attached `CONIN$` handle, under the same
+    /// console lock, immediately before the write, so it is the mode the
+    /// records land in.  A child that is not reading VT would take the reply
+    /// as keystrokes (issue #623: Far Manager's command line got a `\` and its
+    /// autocompletion list ate the next F10), so the reply is withheld and
+    /// false is returned; callers log it as lost.  See
+    /// [`crate::window_ops::mode_reads_vt_replies`] for the measurements.
+    pub fn send_vt_reply(child_pid: u32, text: &str) -> bool {
+        inject_vt_text(child_pid, text, true)
+    }
+
+    fn inject_vt_text(child_pid: u32, text: &str, reply: bool) -> bool {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
@@ -1893,6 +1912,28 @@ pub mod mouse_inject {
                 FreeConsole();
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
+            }
+
+            if reply {
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn GetConsoleMode(hConsoleHandle: *mut c_void, lpMode: *mut u32) -> i32;
+                }
+                let mut mode: u32 = 0;
+                // A mode that cannot be read is no evidence either way, so
+                // the reply goes out as it always did.
+                if GetConsoleMode(handle as *mut c_void, &mut mode) != 0
+                    && !crate::window_ops::mode_reads_vt_replies(mode)
+                {
+                    debug_log(&format!(
+                        "send_vt_reply: pid={} mode=0x{:04X} is not reading VT input, reply of {} bytes withheld (#623)",
+                        child_pid, mode, text.len()
+                    ));
+                    CloseHandle(handle);
+                    FreeConsole();
+                    if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                    return false;
+                }
             }
 
             const KEY_EVENT: u16 = 0x0001;
@@ -2869,6 +2910,7 @@ pub mod mouse_inject {
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn query_console_input_mode(_pid: u32) -> Option<u32> { None }
     pub fn send_vt_response(_pid: u32, _text: &str) -> bool { false }
+    pub fn send_vt_reply(_pid: u32, _text: &str) -> bool { false }
     pub fn log_lost_reply(_pid: Option<u32>, _kind: &str, _len: usize) {}
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
     pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }

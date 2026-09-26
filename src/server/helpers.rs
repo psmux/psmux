@@ -850,7 +850,7 @@ pub(crate) fn answer_color_queries_for_pane(
     if osc.is_empty() { return; }
     let mut delivered = false;
     if let Some(pid) = child_pid {
-        delivered = crate::platform::mouse_inject::send_vt_response(pid, &osc);
+        delivered = crate::platform::mouse_inject::send_vt_reply(pid, &osc);
     }
     if delivered { return; }
     match osc_delivery_fallback(child_pid.is_some()) {
@@ -960,7 +960,7 @@ pub(crate) fn answer_color_queries_sync(
     let combined = format!("{}{}", scheme.as_deref().unwrap_or(""), osc);
     if combined.is_empty() { return true; }
     match child_pid {
-        Some(pid) => crate::platform::mouse_inject::send_vt_response(pid, &combined),
+        Some(pid) => crate::platform::mouse_inject::send_vt_reply(pid, &combined),
         None => false,
     }
 }
