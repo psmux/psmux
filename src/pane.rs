@@ -3670,7 +3670,7 @@ pub fn spawn_reader_thread(
                     if xtversion_scanner.scan(&local[..n]) {
                         let reply = xtversion_reply();
                         let delivered = match child_pid {
-                            Some(pid) => crate::platform::mouse_inject::send_vt_response(
+                            Some(pid) => crate::platform::mouse_inject::send_vt_reply(
                                 pid, &reply,
                             ),
                             None => false,

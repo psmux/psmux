@@ -2127,6 +2127,30 @@ pub(crate) fn write_key_seq(p: &mut crate::types::Pane, seq: &[u8]) {
     }
 }
 
+/// The bytes an unmodified F1..F12 is written to a pane as, tmux's
+/// `input_key_defaults` (input-keys.c: `\033OP` .. `\033[24~`).  Empty for
+/// anything else.  Every press of the same key writes the same bytes: the
+/// first F10 that Far Manager 3.0.6364 appeared to swallow (issue #623) was
+/// byte identical to the second, and was eaten by the autocompletion list that
+/// a stray colour reply had opened.
+pub(crate) fn function_key_seq(n: u8) -> &'static str {
+    match n {
+        1 => "\x1bOP",
+        2 => "\x1bOQ",
+        3 => "\x1bOR",
+        4 => "\x1bOS",
+        5 => "\x1b[15~",
+        6 => "\x1b[17~",
+        7 => "\x1b[18~",
+        8 => "\x1b[19~",
+        9 => "\x1b[20~",
+        10 => "\x1b[21~",
+        11 => "\x1b[23~",
+        12 => "\x1b[24~",
+        _ => "",
+    }
+}
+
 /// One key press + release in WIN32 INPUT MODE, the exact wire form Windows
 /// Terminal sends and conhost's input state machine parses:
 /// `ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, with `Kd` 1 for the press and 0 for
@@ -2216,16 +2240,18 @@ pub(crate) fn ctrl_key_win32_seq(c: char, shift: bool) -> Option<String> {
 /// Returns true when the key was written here, so the caller skips the legacy
 /// byte.  Writing both would deliver the key twice (issue #363).
 ///
-/// The gate is deliberately [`crate::window_ops::detect_record_reader`], the
-/// same classifier the rest of issue #623 uses: a pane that reads the VT bytes
-/// itself (nvim, opencode) would see a win32 sequence as literal garbage, and a
-/// shell keeps tmux's `standard_map` byte, so nothing but a record reader
-/// changes behaviour.
+/// The gate is [`crate::window_ops::detect_key_record_reader`]: a pane that
+/// reads the VT bytes itself (nvim, opencode) would see a win32 sequence as
+/// literal garbage, and a cooked shell keeps tmux's `standard_map` byte, so
+/// nothing but a record reader changes behaviour.  It used to be
+/// [`crate::window_ops::detect_record_reader`], which also demands
+/// `ENABLE_MOUSE_INPUT` and so missed Far Manager with its mouse support off
+/// (`0x01E8`): Ctrl+1 reached it as a bare `1` and opened the Temporary panel.
 #[cfg(windows)]
 pub(crate) fn write_ctrl_key_as_record(p: &mut crate::types::Pane, c: char, shift: bool) -> bool {
     use std::io::Write as _;
     let Some(seq) = ctrl_key_win32_seq(c, shift) else { return false };
-    if !crate::window_ops::detect_record_reader(p) {
+    if !crate::window_ops::detect_key_record_reader(p) {
         return false;
     }
     let _ = p.writer.write_all(seq.as_bytes());
@@ -2314,6 +2340,7 @@ pub fn mark_win32_input_latched(app: &mut AppState) {
 }
 
 /// Does the pane that `send_text_to_active` would write to read `INPUT_RECORD`s?
+/// Same classifier as [`write_ctrl_key_as_record`].
 ///
 /// Routing mirrors [`mark_win32_input_latched`]: a focused FLOATING pane takes
 /// the key instead of the tiled active pane.  Used by the scriptable
@@ -2324,13 +2351,13 @@ pub fn active_pane_is_record_reader(app: &mut AppState) -> bool {
         let win = &mut app.windows[app.active_idx];
         if let Some(fi) = win.floating_focus {
             if let Some(fp) = win.floating.get_mut(fi) {
-                return crate::window_ops::detect_record_reader(&mut fp.pane);
+                return crate::window_ops::detect_key_record_reader(&mut fp.pane);
             }
         }
     }
     let win = &mut app.windows[app.active_idx];
     match active_pane_mut(&mut win.root, &win.active_path) {
-        Some(p) => crate::window_ops::detect_record_reader(p),
+        Some(p) => crate::window_ops::detect_key_record_reader(p),
         None => false,
     }
 }
@@ -3576,21 +3603,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             "space" => write_key_seq(p, b" "),
             s if s.starts_with("f") && s.len() >= 2 && s.len() <= 3 => {
                 if let Ok(n) = s[1..].parse::<u8>() {
-                    let seq = match n {
-                        1 => "\x1bOP",
-                        2 => "\x1bOQ",
-                        3 => "\x1bOR",
-                        4 => "\x1bOS",
-                        5 => "\x1b[15~",
-                        6 => "\x1b[17~",
-                        7 => "\x1b[18~",
-                        8 => "\x1b[19~",
-                        9 => "\x1b[20~",
-                        10 => "\x1b[21~",
-                        11 => "\x1b[23~",
-                        12 => "\x1b[24~",
-                        _ => "",
-                    };
+                    let seq = function_key_seq(n);
                     if !seq.is_empty() { let _ = write!(p.writer, "{}", seq); }
                 }
             }
@@ -3902,3 +3915,7 @@ mod tests_issue684_paste_route;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue623_ctrl_digit.rs"]
 mod tests_issue623_ctrl_digit;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue623_far_fkeys.rs"]
+mod tests_issue623_far_fkeys;
