@@ -5986,20 +5986,194 @@ fn write_underline_color<W: std::io::Write>(
 /// no-ConPTY SSH channel renders at the real terminal size even though the
 /// console size APIs cannot see that terminal. Outside pipe mode the override
 /// is never set and every call delegates.
-pub struct PsmuxBackend {
-    inner: ratatui::backend::CrosstermBackend<PsmuxWriter>,
+///
+/// It also owns the host cursor for the length of a frame (#697), see
+/// [`HostCursor`].
+pub struct PsmuxBackend<W: std::io::Write = PsmuxWriter> {
+    inner: ratatui::backend::CrosstermBackend<W>,
+    cursor: HostCursor,
 }
 
-impl PsmuxBackend {
-    pub fn new(writer: PsmuxWriter) -> Self {
-        Self { inner: ratatui::backend::CrosstermBackend::new(writer) }
+impl<W: std::io::Write> PsmuxBackend<W> {
+    pub fn new(writer: W) -> Self {
+        Self { inner: ratatui::backend::CrosstermBackend::new(writer), cursor: HostCursor::default() }
+    }
+
+    /// Start a frame: from here until [`Self::end_frame`] cursor requests are
+    /// recorded instead of written, and ratatui's own end of draw flush is
+    /// held back, so the frame reaches the host as ONE write.
+    pub fn begin_frame(&mut self) {
+        self.cursor.begin_frame();
+    }
+
+    /// Ask for the cursor to be shown at `pos` (0-based) when the frame ends.
+    /// `None` leaves whatever ratatui asked for during the draw.
+    pub fn request_cursor(&mut self, pos: Option<(u16, u16)>) {
+        if let Some(p) = pos {
+            self.cursor.request(Some(p));
+        }
+    }
+
+    /// Bytes that must follow the frame content inside the same write but do
+    /// not move the cursor on their own (DECSCUSR).
+    pub fn queue_raw(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(&mut self.inner, bytes)
+    }
+
+    /// Bytes that DO move the cursor (the OSC 8 overlay): hidden first like a
+    /// cell draw.
+    pub fn queue_drawing(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let mut pre = Vec::new();
+        self.cursor.before_draw(&mut pre);
+        self.queue_raw(&pre)?;
+        self.queue_raw(bytes)
+    }
+
+    /// Finish the frame: settle the cursor with the fewest bytes and flush
+    /// everything in one write.
+    pub fn end_frame(&mut self) -> std::io::Result<()> {
+        let mut out = Vec::new();
+        self.cursor.end_frame(&mut out);
+        self.queue_raw(&out)?;
+        std::io::Write::flush(&mut self.inner)
+    }
+}
+
+/// What the host terminal's cursor is doing, and what the current frame wants
+/// it to do (#697).
+///
+/// ratatui writes the cell diff first and hides the cursor after it
+/// (`apply_buffer_with_cursor`), and psmux then showed the cursor again with a
+/// separate write.  Every frame therefore drew its cells with the host cursor
+/// still VISIBLE, so the host showed the cursor running to each changed cell
+/// (a spinner in fzf's prompt line is 80 columns away) and back: the flicker
+/// in fzf-lua's live_grep.  tmux hides the cursor BEFORE it draws
+/// (`screen-redraw.c` `screen_redraw_screen`: `tty_update_mode(tty, tty->mode
+/// & ~CURSOR_MODES, NULL)` ahead of the lines, restored by
+/// `server_client_reset_state`), and `tty_update_mode` only writes cnorm or
+/// civis when the mode actually changes.  This does the same:
+///
+/// * a frame that draws cells hides a visible cursor before the first cell,
+/// * a frame that draws nothing writes nothing unless the cursor moved or
+///   changed visibility,
+/// * the cursor is shown again only after it has been put where it belongs.
+#[derive(Debug, Clone)]
+pub struct HostCursor {
+    /// The host terminal shows the cursor (the last visibility write was ?25h).
+    shown: bool,
+    /// Where the host cursor sits, when psmux knows it.  `None` after cells
+    /// were drawn (the cursor ends wherever the last cell left it).
+    at: Option<(u16, u16)>,
+    /// Inside begin_frame .. end_frame.
+    in_frame: bool,
+    /// What the frame wants when it ends: `None` hidden, `Some` shown there.
+    want: Option<(u16, u16)>,
+    /// ratatui asked for show_cursor without a position yet.
+    want_show_here: bool,
+}
+
+impl Default for HostCursor {
+    fn default() -> Self {
+        // Unknown host state: assume visible and unplaced so the first frame
+        // hides before drawing and positions explicitly.
+        Self { shown: true, at: None, in_frame: false, want: None, want_show_here: false }
+    }
+}
+
+impl HostCursor {
+    pub fn begin_frame(&mut self) {
+        self.in_frame = true;
+        self.want = None;
+        self.want_show_here = false;
+    }
+
+    pub fn in_frame(&self) -> bool {
+        self.in_frame
+    }
+
+    /// Called before any byte that moves the cursor is written.
+    pub fn before_draw(&mut self, out: &mut Vec<u8>) {
+        if self.shown {
+            out.extend_from_slice(b"\x1b[?25l");
+            self.shown = false;
+        }
+        self.at = None;
+    }
+
+    /// The cursor was moved behind psmux's back (clear, append_lines).
+    pub fn forget_position(&mut self) {
+        self.at = None;
+    }
+
+    pub fn request(&mut self, want: Option<(u16, u16)>) {
+        self.want = want;
+        self.want_show_here = false;
+    }
+
+    /// ratatui's show_cursor inside a frame: shown, position to follow.
+    pub fn request_show(&mut self) {
+        self.want_show_here = true;
+    }
+
+    /// ratatui's set_cursor_position inside a frame.
+    pub fn request_position(&mut self, pos: (u16, u16)) {
+        if self.want_show_here || self.want.is_some() {
+            self.want = Some(pos);
+            self.want_show_here = false;
+        } else {
+            // A position without show: move while hidden.
+            self.want = None;
+            self.at = None;
+        }
+    }
+
+    /// Settle the host cursor to what the frame asked for.
+    pub fn end_frame(&mut self, out: &mut Vec<u8>) {
+        self.in_frame = false;
+        match self.want {
+            Some((x, y)) => {
+                if self.at != Some((x, y)) {
+                    // Moving a visible cursor across the screen is itself a
+                    // visible jump only when it goes somewhere new; hiding
+                    // for that would blink it instead, so only CUP here.
+                    use std::io::Write as _;
+                    let _ = write!(out, "\x1b[{};{}H", y + 1, x + 1);
+                    self.at = Some((x, y));
+                }
+                if !self.shown {
+                    out.extend_from_slice(b"\x1b[?25h");
+                    self.shown = true;
+                }
+            }
+            None => {
+                if self.want_show_here {
+                    if !self.shown {
+                        out.extend_from_slice(b"\x1b[?25h");
+                        self.shown = true;
+                    }
+                } else if self.shown {
+                    out.extend_from_slice(b"\x1b[?25l");
+                    self.shown = false;
+                }
+            }
+        }
+        self.want_show_here = false;
+    }
+
+    /// Outside a frame: an immediate visibility write (shutdown, startup).
+    pub fn set_shown(&mut self, shown: bool) {
+        self.shown = shown;
+    }
+
+    pub fn set_at(&mut self, pos: Option<(u16, u16)>) {
+        self.at = pos;
     }
 }
 
 // The client's shutdown path drives the backend directly as an `io::Write`
 // (crossterm `execute!` for SGR/cursor resets) — delegate to the inner
 // CrosstermBackend, which forwards to the writer.
-impl std::io::Write for PsmuxBackend {
+impl<W: std::io::Write> std::io::Write for PsmuxBackend<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         std::io::Write::write(&mut self.inner, buf)
     }
@@ -6008,7 +6182,7 @@ impl std::io::Write for PsmuxBackend {
     }
 }
 
-impl ratatui::backend::Backend for PsmuxBackend {
+impl<W: std::io::Write> ratatui::backend::Backend for PsmuxBackend<W> {
     type Error = std::io::Error;
 
     /// Same cell loop as `CrosstermBackend::draw`, with one addition: psmux
@@ -6023,14 +6197,33 @@ impl ratatui::backend::Backend for PsmuxBackend {
     where
         I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
     {
+        // Hide a visible cursor before the first cell, never after (#697).
+        // A frame with no changed cell writes nothing at all.
+        let mut content = content.peekable();
+        if content.peek().is_none() {
+            return Ok(());
+        }
+        let mut pre = Vec::new();
+        self.cursor.before_draw(&mut pre);
+        self.queue_raw(&pre)?;
         draw_cells(&mut self.inner, content)
     }
 
     fn hide_cursor(&mut self) -> std::io::Result<()> {
+        if self.cursor.in_frame() {
+            self.cursor.request(None);
+            return Ok(());
+        }
+        self.cursor.set_shown(false);
         ratatui::backend::Backend::hide_cursor(&mut self.inner)
     }
 
     fn show_cursor(&mut self) -> std::io::Result<()> {
+        if self.cursor.in_frame() {
+            self.cursor.request_show();
+            return Ok(());
+        }
+        self.cursor.set_shown(true);
         ratatui::backend::Backend::show_cursor(&mut self.inner)
     }
 
@@ -6039,18 +6232,27 @@ impl ratatui::backend::Backend for PsmuxBackend {
     }
 
     fn set_cursor_position<P: Into<ratatui::layout::Position>>(&mut self, position: P) -> std::io::Result<()> {
-        ratatui::backend::Backend::set_cursor_position(&mut self.inner, position)
+        let p: ratatui::layout::Position = position.into();
+        if self.cursor.in_frame() {
+            self.cursor.request_position((p.x, p.y));
+            return Ok(());
+        }
+        self.cursor.set_at(Some((p.x, p.y)));
+        ratatui::backend::Backend::set_cursor_position(&mut self.inner, p)
     }
 
     fn clear(&mut self) -> std::io::Result<()> {
+        self.cursor.forget_position();
         ratatui::backend::Backend::clear(&mut self.inner)
     }
 
     fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> std::io::Result<()> {
+        self.cursor.forget_position();
         ratatui::backend::Backend::clear_region(&mut self.inner, clear_type)
     }
 
     fn append_lines(&mut self, n: u16) -> std::io::Result<()> {
+        self.cursor.forget_position();
         ratatui::backend::Backend::append_lines(&mut self.inner, n)
     }
 
@@ -6072,9 +6274,18 @@ impl ratatui::backend::Backend for PsmuxBackend {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        // ratatui flushes at the end of every draw; inside a frame the flush
+        // belongs to end_frame so content and cursor leave as ONE write.
+        if self.cursor.in_frame() {
+            return Ok(());
+        }
         ratatui::backend::Backend::flush(&mut self.inner)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue697_cursor_flicker.rs"]
+mod tests_issue697_cursor_flicker;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue589_undercurl.rs"]
