@@ -7003,6 +7003,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // this closure returns, so once it has run this is exactly what the
         // user saw — the value a release must re-report.
         let drawn_copy_sel = active_copy_sel_end(&root);
+        // Hold the frame's output until the cursor is settled (#697).
+        terminal.backend_mut().begin_frame();
         terminal.draw(|f| {
             client_drawn_sel = drawn_copy_sel;
             let area = f.area();
@@ -8309,10 +8311,86 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         {
             let runs = frame_hyperlinks_take();
             if !runs.is_empty() {
+                // Part of the frame (#697): queued behind the cells, with the
+                // cursor hidden, and written in the frame's single write.
                 let overlay = build_osc8_overlay(&runs);
-                let mut out = std::io::stdout().lock();
-                let _ = std::io::Write::write_all(&mut out, overlay.as_bytes());
-                let _ = std::io::Write::flush(&mut out);
+                let _ = terminal.backend_mut().queue_drawing(overlay.as_bytes());
+            }
+        }
+
+        // ── Post-draw: atomic cursor write ──────────────────────────
+        // The frame's cells, the OSC 8 overlay, the cursor visibility,
+        // position and style all leave in ONE write (end_frame below).
+        // Separate console writes create intermediate states visible to WT
+        // between vsync frames, causing rapid cursor flicker (#697: the
+        // cells used to go out with the cursor still visible).
+        {
+            fn find_active_cursor_shape(node: &LayoutJson) -> Option<u8> {
+                match node {
+                    LayoutJson::Leaf { active, cursor_shape, .. } => {
+                        if *active && *cursor_shape >= 1 && *cursor_shape <= 6 { Some(*cursor_shape) } else { None }
+                    }
+                    LayoutJson::Split { children, .. } => {
+                        children.iter().find_map(find_active_cursor_shape)
+                    }
+                }
+            }
+            let effective = find_active_cursor_shape(&root)
+                .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
+            let content_chunk = {
+                let sz = terminal.size().unwrap_or_default();
+                let constraints = if status_at_top {
+                    vec![Constraint::Length(status_lines as u16), Constraint::Min(1)]
+                } else {
+                    vec![Constraint::Min(1), Constraint::Length(status_lines as u16)]
+                };
+                let chunks = Layout::default().direction(Direction::Vertical)
+                    .constraints(constraints).split(sz.into());
+                if status_at_top { chunks[1] } else { chunks[0] }
+            };
+            let active_pane_area: Option<Rect> =
+                compute_active_rect_json_zoom_aware(&root, content_chunk, client_zoomed);
+            // Compute screen-global cursor position from pane-local coords.
+            //
+            // A PTY popup is modal and takes the keystrokes, so while it is up
+            // the cursor belongs to the process inside it, not to the pane
+            // underneath (tmux does the same in server_client_reset_state by
+            // taking both the cursor and the cursor mode from the overlay).
+            // Leaving it on the pane underneath is what made the popup look
+            // like it had no cursor at all (#507).
+            let cursor_visible = if srv_popup_active && srv_popup_has_pty {
+                srv_popup_cursor.and_then(|c| {
+                    popup_cursor_screen_pos(content_chunk, srv_popup_width, srv_popup_height, srv_popup_scroll, c)
+                })
+            } else if let (Some((cc, cr)), Some(outer)) = (post_draw_cursor, active_pane_area) {
+                // Content lives inside the border-label reservation; use the render's inner rect.
+                let inner = pane_content_inner(outer, &client_border_status, &client_border_format);
+                let cy = inner.y + cr.min(inner.height.saturating_sub(1));
+                let cx = inner.x + cc.min(inner.width.saturating_sub(1));
+                Some((cx, cy))
+            } else {
+                None
+            };
+            // The backend settles the cursor for this frame (#697): the cells
+            // were drawn with the cursor hidden, and the cursor is shown only
+            // once it is back where it belongs.  An unchanged frame writes
+            // nothing, so the host never sees a ?25l/?25h pair it did not need.
+            terminal.backend_mut().request_cursor(cursor_visible);
+            // DECSCUSR only when style actually changes (avoids blink
+            // timer resets in WT).
+            if effective != last_cursor_style {
+                last_cursor_style = effective;
+                let _ = terminal.backend_mut().queue_raw(format!("\x1b[{} q", effective).as_bytes());
+            }
+            let _ = terminal.backend_mut().end_frame();
+
+            // Update Win32 system caret for accessibility / speech-to-text
+            // tools (e.g. Wispr Flow).  Skip for SSH sessions — no local
+            // console window.
+            if !is_ssh_mode {
+                if let Some((cx, cy)) = cursor_visible {
+                    crate::platform::caret::update(cx, cy);
+                }
             }
         }
 
@@ -8397,93 +8475,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         {
             crate::ssh_input::request_pipe_terminal_size();
             last_pipe_size_query = Instant::now();
-        }
-
-        // ── Post-draw: atomic cursor write ──────────────────────────
-        // Write cursor visibility + position + style as ONE batch to
-        // avoid the separate execute!() flushes that ratatui's normal
-        // show_cursor()/set_cursor_position() would produce.  Multiple
-        // separate console writes create intermediate states visible
-        // to WT between vsync frames, causing rapid cursor flicker.
-        {
-            use std::io::Write;
-            fn find_active_cursor_shape(node: &LayoutJson) -> Option<u8> {
-                match node {
-                    LayoutJson::Leaf { active, cursor_shape, .. } => {
-                        if *active && *cursor_shape >= 1 && *cursor_shape <= 6 { Some(*cursor_shape) } else { None }
-                    }
-                    LayoutJson::Split { children, .. } => {
-                        children.iter().find_map(find_active_cursor_shape)
-                    }
-                }
-            }
-            let effective = find_active_cursor_shape(&root)
-                .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
-            let content_chunk = {
-                let sz = terminal.size().unwrap_or_default();
-                let constraints = if status_at_top {
-                    vec![Constraint::Length(status_lines as u16), Constraint::Min(1)]
-                } else {
-                    vec![Constraint::Min(1), Constraint::Length(status_lines as u16)]
-                };
-                let chunks = Layout::default().direction(Direction::Vertical)
-                    .constraints(constraints).split(sz.into());
-                if status_at_top { chunks[1] } else { chunks[0] }
-            };
-            let active_pane_area: Option<Rect> =
-                compute_active_rect_json_zoom_aware(&root, content_chunk, client_zoomed);
-            // Compute screen-global cursor position from pane-local coords.
-            //
-            // A PTY popup is modal and takes the keystrokes, so while it is up
-            // the cursor belongs to the process inside it, not to the pane
-            // underneath (tmux does the same in server_client_reset_state by
-            // taking both the cursor and the cursor mode from the overlay).
-            // Leaving it on the pane underneath is what made the popup look
-            // like it had no cursor at all (#507).
-            let cursor_visible = if srv_popup_active && srv_popup_has_pty {
-                srv_popup_cursor.and_then(|c| {
-                    popup_cursor_screen_pos(content_chunk, srv_popup_width, srv_popup_height, srv_popup_scroll, c)
-                })
-            } else if let (Some((cc, cr)), Some(outer)) = (post_draw_cursor, active_pane_area) {
-                // Content lives inside the border-label reservation; use the render's inner rect.
-                let inner = pane_content_inner(outer, &client_border_status, &client_border_format);
-                let cy = inner.y + cr.min(inner.height.saturating_sub(1));
-                let cx = inner.x + cc.min(inner.width.saturating_sub(1));
-                Some((cx, cy))
-            } else {
-                None
-            };
-            // Build a single VT string with: ?25h + CUP + DECSCUSR
-            // ratatui's draw() always emits ?25l (since we never call
-            // f.set_cursor_position), so we must re-emit ?25h + CUP
-            // every frame when the cursor should be visible.
-            let mut buf = String::with_capacity(32);
-            if let Some((cx, cy)) = cursor_visible {
-                buf.push_str("\x1b[?25h");
-                use std::fmt::Write as FmtWrite;
-                let _ = write!(buf, "\x1b[{};{}H", cy + 1, cx + 1);
-            }
-            // DECSCUSR only when style actually changes (avoids blink
-            // timer resets in WT).
-            if effective != last_cursor_style {
-                last_cursor_style = effective;
-                use std::fmt::Write as FmtWrite;
-                let _ = write!(buf, "\x1b[{} q", effective);
-            }
-            if !buf.is_empty() {
-                let mut out = std::io::stdout().lock();
-                let _ = out.write_all(buf.as_bytes());
-                let _ = out.flush();
-            }
-
-            // Update Win32 system caret for accessibility / speech-to-text
-            // tools (e.g. Wispr Flow).  Skip for SSH sessions — no local
-            // console window.
-            if !is_ssh_mode {
-                if let Some((cx, cy)) = cursor_visible {
-                    crate::platform::caret::update(cx, cy);
-                }
-            }
         }
 
         let _render_us = _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128);
