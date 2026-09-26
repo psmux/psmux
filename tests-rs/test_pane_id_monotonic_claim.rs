@@ -22,43 +22,20 @@
 //! its order came out `%2 %3 %4 %6 %11`: gaps are fine, going backwards is not.
 
 use super::*;
-use std::cell::RefCell;
-
-thread_local! {
-    static DUMMY_PIDS_MONO: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Kill every dummy shell this test started, by pid, never by name.
-fn cleanup_dummies() {
-    DUMMY_PIDS_MONO.with(|pids| {
-        for pid in pids.borrow_mut().drain(..) {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F", "/T"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    });
-}
 
 /// A spare with no real shell behind it. The pool only inspects `pane_id`,
 /// `spawned_at`, `ready` and the child's liveness.
 fn spare(pane_id: usize) -> crate::types::WarmPane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("pause");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    if let Some(pid) = child.process_id() {
-        DUMMY_PIDS_MONO.with(|pids| pids.borrow_mut().push(pid));
-    }
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize {
+        rows: 40,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    let child = crate::util::StubChild::running();
     let now = std::time::Instant::now();
     crate::types::WarmPane {
-        master: pair.master,
+        master,
         writer,
         child,
         term: std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 100))),
@@ -109,7 +86,6 @@ fn a_spare_landing_below_an_id_already_handed_out_is_refused() {
         after.is_none(),
         "the next creation must not be handed an id below %11; it cold spawns or waits instead"
     );
-    cleanup_dummies();
 }
 
 /// The ordinary path must be untouched: a sorted pool still hands out every one
@@ -125,7 +101,6 @@ fn an_in_order_pool_still_hands_out_every_spare() {
         got.push(w.pane_id);
     }
     assert_eq!(got, vec![2, 3, 4], "lowest id first, none refused");
-    cleanup_dummies();
 }
 
 /// A spare above the last id handed out is still perfectly good.
@@ -138,7 +113,6 @@ fn a_spare_landing_above_the_last_id_handed_out_is_kept() {
     assert_eq!(p.len(), 1, "12 is ahead of 11, so it is still usable");
     let (next, _) = p.claim();
     assert_eq!(next.map(|w| w.pane_id), Some(12));
-    cleanup_dummies();
 }
 
 /// Claiming must move the floor the same way the cold spawn path does, so the
@@ -155,5 +129,4 @@ fn claiming_raises_the_floor_like_a_cold_spawn_does() {
     assert_eq!(p.issued_floor(), 20);
     let _ = p.claim();
     assert_eq!(p.issued_floor(), 20, "an empty claim cannot lower the floor");
-    cleanup_dummies();
 }

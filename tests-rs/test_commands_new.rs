@@ -1043,12 +1043,16 @@ fn server_forwarded_link_window() {
     app.control_port = None;
     execute_command_string(&mut app, "link-window -s 0 -t 1").unwrap();
     // May or may not add a window depending on PTY availability in test env
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 #[test]
 fn server_forwarded_linkw() {
     let mut app = mock_app_with_window();
     app.control_port = None;
     execute_command_string(&mut app, "linkw -s 0 -t 1").unwrap();
+    // These commands start a real shell; end it before the state drops.
+    crate::util::kill_app_shells(&mut app);
 }
 #[test]
 fn server_forwarded_unlink_window() { assert_server_forward_noop("unlink-window"); }

@@ -128,7 +128,7 @@ fn pty_host_does_not_pin_the_child_start_dir() {
     cmd.args(["/c", "exit"]);
     cmd.cwd(&dir);
 
-    let mut child = match pair.slave.spawn_command(cmd) {
+    let mut child = match crate::util::spawn_pty_child(&*pair.slave, cmd) {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&dir);

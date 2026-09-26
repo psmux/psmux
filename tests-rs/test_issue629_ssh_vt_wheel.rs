@@ -60,18 +60,11 @@ fn parser_with(bytes: &[u8]) -> Arc<Mutex<vt100::Parser>> {
 /// A pane with no live child, so every process/console probe fails.  The gate
 /// must reach its verdict from pane-owned state alone.
 fn make_pane(term: Arc<Mutex<vt100::Parser>>) -> crate::types::Pane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows: 10, cols: 60, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize { rows: 10, cols: 60, pixel_width: 0, pixel_height: 0 });
+    let child = crate::util::StubChild::exited();
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {
-        master: pair.master,
+        master,
         writer,
         child,
         term,

@@ -20,6 +20,237 @@ pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The pty a pane fixture needs when no process is ever going to use it.
+///
+/// A fixture that only has to hand `Pane` a master, a writer and a child used
+/// to open a real pseudo console and spawn `cmd /c exit` into it. Measured over
+/// one full run of the suite, that is 464 pseudo consoles and 464 processes,
+/// plus the console host Windows starts behind each one, for tests whose
+/// subject is a struct field. Every one of them is also a chance to hit the
+/// spawn-then-close race #695 reports.
+///
+/// `resize` answers Ok because the warm pool probes a spare's liveness with it
+/// (`pane.rs`), reads yield nothing, and writes are discarded: no test in the
+/// suite reads back what was written to a pane's master.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StubMasterPty {
+    size: std::sync::Mutex<portable_pty::PtySize>,
+}
+
+#[cfg(test)]
+impl portable_pty::MasterPty for StubMasterPty {
+    fn resize(&self, size: portable_pty::PtySize) -> Result<(), anyhow::Error> {
+        *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
+        Ok(())
+    }
+    fn get_size(&self) -> Result<portable_pty::PtySize, anyhow::Error> {
+        Ok(*self.size.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    fn try_clone_reader(&self) -> Result<Box<dyn io::Read + Send>, anyhow::Error> {
+        Ok(Box::new(io::empty()))
+    }
+    fn take_writer(&self) -> Result<Box<dyn io::Write + Send>, anyhow::Error> {
+        Ok(Box::new(io::sink()))
+    }
+}
+
+/// The master and the writer for a pane fixture, without a pseudo console.
+#[cfg(test)]
+pub(crate) fn stub_pane_pty(
+    size: portable_pty::PtySize,
+) -> (Box<dyn portable_pty::MasterPty>, Box<dyn io::Write + Send>) {
+    (Box::new(StubMasterPty { size: std::sync::Mutex::new(size) }), Box::new(io::sink()))
+}
+
+/// The child a pane fixture names when no process is ever going to run.
+///
+/// `exited` is what `cmd /c exit` had already become by the time the test body
+/// ran, and `running` is what `cmd /c pause` was: the pools reap a spare whose
+/// child has exited (#450), so a fixture holding a spare has to say running.
+/// There is no pid to report, which is the state those fixtures already
+/// documented as "no live child, so every process probe fails"; the difference
+/// is that it is now true every time rather than most of the time.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StubChild {
+    running: bool,
+}
+
+#[cfg(test)]
+impl StubChild {
+    pub(crate) fn exited() -> Box<dyn portable_pty::Child + Send + Sync> {
+        Box::new(Self { running: false })
+    }
+
+    pub(crate) fn running() -> Box<dyn portable_pty::Child + Send + Sync> {
+        Box::new(Self { running: true })
+    }
+}
+
+#[cfg(test)]
+impl portable_pty::ChildKiller for StubChild {
+    fn kill(&mut self) -> io::Result<()> {
+        self.running = false;
+        Ok(())
+    }
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(Self { running: self.running })
+    }
+}
+
+#[cfg(test)]
+impl portable_pty::Child for StubChild {
+    fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+        if self.running {
+            Ok(None)
+        } else {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+    }
+    fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+        self.running = false;
+        Ok(portable_pty::ExitStatus::with_exit_code(0))
+    }
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        None
+    }
+}
+
+/// How long a test pty child is given to get out of its own loader.
+///
+/// Measured on Windows 11 with pwsh behind a ConPTY: a child whose pty is
+/// closed 0ms or 1ms after the spawn dies as 0xC0000142 (STATUS_DLL_INIT_FAILED)
+/// every time, one closed at 3ms survives, and from 8ms on it dies as
+/// 0xC000013A (STATUS_CONTROL_C_EXIT) like any console process whose console
+/// went away. The window is a couple of milliseconds wide; this budget is two
+/// orders above it so a loaded machine still clears it.
+#[cfg(test)]
+const PTY_CHILD_LOADER_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Spawn the child that holds a test pty open, and do not hand it back until it
+/// is past the point where closing that pty would kill it in the loader.
+///
+/// A test helper used to spawn and walk away:
+///
+/// ```ignore
+/// let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
+/// ```
+///
+/// `CreateProcessW` has returned success by then, so the spawn looks fine, but
+/// the child is still loading its DLLs. A short test can finish and drop the
+/// pty inside that window, and the child dies as 0xC0000142. Nothing observed
+/// it: the exit code was never read, so the suite stayed green while Windows
+/// put an error dialog on the screen for a failure no test could attribute.
+///
+/// This waits for one of two proofs that the loader is done. A child that exits
+/// on its own, which is what `cmd /c exit` does, has plainly finished, and its
+/// code is checked. A child meant to stay up, which is what `cmd /c pause`
+/// does, proves it by still being alive after the grace period.
+/// It returns a `Result` because several helpers spawn inside a retry loop and
+/// treat a refusal as a reason to try again rather than to fail; an early bad
+/// exit is reported the same way so those loops keep their shape.
+#[cfg(test)]
+pub(crate) fn spawn_pty_child(
+    slave: &dyn portable_pty::SlavePty,
+    cmd: portable_pty::CommandBuilder,
+) -> io::Result<Box<dyn portable_pty::Child + Send + Sync>> {
+    let mut child = slave
+        .spawn_command(cmd)
+        .map_err(|e| io::Error::other(format!("spawn: {e:?}")))?;
+    let deadline = std::time::Instant::now() + PTY_CHILD_LOADER_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let code = status.exit_code();
+                if code != 0 {
+                    return Err(io::Error::other(format!(
+                        "the child exited 0x{code:08X} before the test could use it; \
+                         0xC0000142 means its pty was closed while it was still loading"
+                    )));
+                }
+                return Ok(child);
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(child);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(e) => return Err(io::Error::other(format!("try_wait: {e:?}"))),
+        }
+    }
+}
+
+/// End a test pty child and wait for it, so the pty outlives the process using
+/// it.
+///
+/// Killing without waiting is the same race from the other side: `kill` only
+/// asks, and a pty dropped before the ask lands leaves the child to die in its
+/// loader instead.
+#[cfg(test)]
+/// End every real shell an `AppState` is holding, before the state drops.
+///
+/// Only two test modules reach the production spawn, and both of them do it
+/// with a real shell rather than the dummy the other helpers use. Dropping the
+/// state closes those ptys, and a shell young enough is still in its loader
+/// when that happens, so the test has to end them itself and wait.
+///
+/// Both stores are drained: the windows, whose panes hold a transplanted or
+/// cold spawned shell, and the pool, whose spares were never claimed.
+#[cfg(test)]
+pub(crate) fn kill_app_shells(app: &mut AppState) {
+    fn walk(node: &mut Node) {
+        match node {
+            Node::Leaf(p) => kill_pty_child(&mut *p.child),
+            Node::Split { children, .. } => {
+                for c in children {
+                    walk(c);
+                }
+            }
+        }
+    }
+    for win in &mut app.windows {
+        walk(&mut win.root);
+        for f in &mut win.floating {
+            kill_pty_child(&mut *f.pane.child);
+        }
+    }
+    while let Some(mut spare) = app.warm_pane.take() {
+        kill_pty_child(&mut *spare.child);
+    }
+}
+
+/// Takes the child by reference rather than by box so that both shapes in
+/// the suite fit: a pane's child carries `Send + Sync`, a warm pane's does
+/// not.
+#[cfg(test)]
+pub(crate) fn kill_pty_child(child: &mut dyn portable_pty::Child) {
+    // Look before ending it. A child that is already gone died on its own, and
+    // the code says how: 0xC0000142 means its pty was closed while it was
+    // still loading, which is the failure the suite used to swallow whole.
+    if let Ok(Some(status)) = child.try_wait() {
+        let code = status.exit_code();
+        assert!(
+            code != 0xC000_0142,
+            "a test shell died as 0xC0000142 before its test could end it,              which means its pty was closed while it was still loading"
+        );
+        return;
+    }
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("a test pty child did not report exit within 5s of kill()");
+}
+
 /// Resolve a `-c` start-dir to one a freshly spawned pane shell can actually
 /// enter, falling back to the user's home directory when it cannot.
 ///

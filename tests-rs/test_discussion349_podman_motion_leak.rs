@@ -52,18 +52,11 @@ fn filled_parser_with_decset(rows: u16, cols: u16, decset: &[u8]) -> Arc<Mutex<v
 /// Assemble a Pane around a given parser. Only the fields the mouse gates
 /// read are meaningful; the pty plumbing is a throwaway cmd.exe.
 fn make_pane(term: Arc<Mutex<vt100::Parser>>, rows: u16, cols: u16) -> crate::types::Pane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+    let child = crate::util::StubChild::exited();
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {
-        master: pair.master,
+        master,
         writer,
         child,
         term,

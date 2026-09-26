@@ -17,19 +17,12 @@ use crate::types::{AppState, LayoutKind, Node};
 use ratatui::layout::Rect;
 
 fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+    let child = crate::util::StubChild::exited();
     let term = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {
-        master: pair.master,
+        master,
         writer,
         child,
         term,

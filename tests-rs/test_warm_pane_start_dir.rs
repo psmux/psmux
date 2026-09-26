@@ -106,30 +106,9 @@ fn test_app() -> AppState {
     app
 }
 
-/// Kill the warm pane's child and wait until the OS reports it exited
-/// (TerminateProcess is asynchronous; try_wait flips within milliseconds).
-fn kill_warm_child(wp: &mut crate::types::WarmPane) {
-    wp.child.kill().ok();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if !matches!(wp.child.try_wait(), Ok(None)) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("warm child did not report exit within 5s of kill()");
-}
-
 fn active_pane_of(win: &mut Window) -> &mut Pane {
     let path = win.active_path.clone();
     active_pane_mut(&mut win.root, &path).expect("active pane")
-}
-
-fn cleanup(app: &mut AppState) {
-    for win in app.windows.iter_mut() {
-        crate::tree::kill_all_children(&mut win.root);
-    }
-    app.warm_pane.kill_all();
 }
 
 /// Control / precondition: a live spare consumed WITHOUT `-c` is transplanted
@@ -156,7 +135,7 @@ fn create_window_live_spare_without_start_dir_does_not_rehome() {
         pane.squelch_until.is_none(),
         "no start_dir means no silent_rehome, so squelch_until must be None"
     );
-    cleanup(&mut app);
+    crate::util::kill_app_shells(&mut app);
 }
 
 /// #436 core: a live spare consumed WITH `-c <dir>` is STILL transplanted (warm
@@ -191,7 +170,7 @@ fn create_window_live_spare_with_start_dir_transplants_and_rehomes() {
         matches!(pane.child.try_wait(), Ok(None)),
         "the transplanted shell must be alive"
     );
-    cleanup(&mut app);
+    crate::util::kill_app_shells(&mut app);
 }
 
 /// #450 gate under #436's looser guard: a DEAD spare must not be transplanted
@@ -205,7 +184,7 @@ fn create_window_dead_spare_with_start_dir_cold_spawns() {
     let dir = dir.to_str().expect("temp dir path");
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
     let warm_id = wp.pane_id;
-    kill_warm_child(&mut wp);
+    crate::util::kill_pty_child(&mut *wp.child);
     app.warm_pane.push(wp);
 
     create_window(&*pty, &mut app, None, Some(dir), false).expect("create_window");
@@ -220,7 +199,7 @@ fn create_window_dead_spare_with_start_dir_cold_spawns() {
         matches!(pane.child.try_wait(), Ok(None)),
         "the cold-spawned shell must be alive"
     );
-    cleanup(&mut app);
+    crate::util::kill_app_shells(&mut app);
 }
 
 /// Same gate on the split path: a dead spare must not be transplanted into a
@@ -234,7 +213,7 @@ fn split_dead_spare_with_start_dir_cold_spawns() {
     create_window(&*pty, &mut app, None, None, false).expect("create_window");
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
     let warm_id = wp.pane_id;
-    kill_warm_child(&mut wp);
+    crate::util::kill_pty_child(&mut *wp.child);
     app.warm_pane.push(wp);
 
     split_active_with_command(&mut app, LayoutKind::Vertical, None, Some(&*pty), Some(dir))
@@ -248,5 +227,5 @@ fn split_dead_spare_with_start_dir_cold_spawns() {
         matches!(pane.child.try_wait(), Ok(None)),
         "the split's cold-spawned shell must be alive"
     );
-    cleanup(&mut app);
+    crate::util::kill_app_shells(&mut app);
 }

@@ -70,18 +70,11 @@ fn parser_with(decset: &[u8]) -> Arc<Mutex<vt100::Parser>> {
 /// That is deliberate: it pins what the gate does when it cannot confirm
 /// anything, which must always be the #598 safe side.
 fn make_pane(term: Arc<Mutex<vt100::Parser>>) -> crate::types::Pane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows: 10, cols: 60, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize { rows: 10, cols: 60, pixel_width: 0, pixel_height: 0 });
+    let child = crate::util::StubChild::exited();
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {
-        master: pair.master,
+        master,
         writer,
         child,
         term,

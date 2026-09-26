@@ -43,40 +43,28 @@ const SCROLLBACK: usize = 500;
 /// row pane never reaches the top of the history.
 const FILL: usize = 300;
 
-/// ConPTY creation can fail transiently when the suite churns many short-lived
-/// PTYs in parallel, so retry with backoff and name the stage that broke.
+/// The master, child and writer a pane fixture needs, with no pseudo console
+/// and no process behind any of them. See `util::stub_pane_pty`.
+///
+/// This used to open a real ConPTY and spawn `cmd /c exit` into it, behind five
+/// attempts with backoff, because both steps fail often enough under the full
+/// parallel suite to be worth retrying. Nothing here ever used the console or
+/// the process, so there is nothing left to retry.
 fn open_pane_pty(
     rows: u16,
     cols: u16,
 ) -> (
-    Box<dyn portable_pty::MasterPty + Send>,
+    Box<dyn portable_pty::MasterPty>,
     Box<dyn portable_pty::Child + Send + Sync>,
     Box<dyn std::io::Write + Send>,
 ) {
-    let mut last_err = String::new();
-    for attempt in 0u64..5 {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_millis(100 * attempt));
-        }
-        let pty = portable_pty::native_pty_system();
-        let pair = match pty.openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
-            Ok(p) => p,
-            Err(e) => { last_err = format!("openpty: {e:?}"); continue; }
-        };
-        let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-        cmd.arg("/c");
-        cmd.arg("exit");
-        let child = match pair.slave.spawn_command(cmd) {
-            Ok(c) => c,
-            Err(e) => { last_err = format!("spawn dummy: {e:?}"); continue; }
-        };
-        let writer = match pair.master.take_writer() {
-            Ok(w) => w,
-            Err(e) => { last_err = format!("take_writer: {e:?}"); continue; }
-        };
-        return (pair.master, child, writer);
-    }
-    panic!("PTY-backed pane creation failed after 5 attempts under parallel load: {last_err}");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    (master, crate::util::StubChild::exited(), writer)
 }
 
 fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {

@@ -106,20 +106,11 @@ fn resize_to_same_size_is_noop() {
     let fake_term = std::sync::Arc::new(std::sync::Mutex::new(
         vt100::Parser::new(40, 120, app.history_limit),
     ));
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize {
-            rows: 40, cols: 120, pixel_width: 0, pixel_height: 0,
-        })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0, });
+    let child = crate::util::StubChild::exited();
     let now = std::time::Instant::now();
     app.warm_pane.push(crate::types::WarmPane {
-        master: pair.master,
+        master,
         writer,
         child,
         term: fake_term,
@@ -161,18 +152,11 @@ fn resize_with_no_warm_pane_returns_respawn() {
 
 /// Push one spare carrying `planted` as the palette its shell was spawned with.
 fn push_spare_with_palette(app: &mut AppState, planted: Option<crate::types::HostColors>) {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 });
+    let child = crate::util::StubChild::exited();
     let now = std::time::Instant::now();
     app.warm_pane.push(crate::types::WarmPane {
-        master: pair.master,
+        master,
         writer,
         child,
         term: std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 100))),
