@@ -560,8 +560,17 @@ word, `Alt+v` pages up, `Alt+w` copies and exits, `Ctrl+s` / `Ctrl+r` search for
 When in copy mode:
 - The pane border turns **yellow**
 - `[copy mode]` appears in the title
-- A scroll position indicator shows in the top-right corner
+- A position indicator shows in the top-right corner
 - Mouse drag-select copies to Windows clipboard on release
+
+The position indicator reads `[position/limit]`. With the line-number gutter off or set to
+`default` that is the scroll offset over the number of rows held in the scrollback, so it counts
+up as you move back through the history. With the gutter set to `absolute`, `relative` or
+`hybrid` it switches to the absolute line at the top of the view over the total number of lines,
+so it agrees with the numbers in the gutter beside it. tmux reads the same pair the same way
+(`window_copy_formats` in `window-copy.c`). psmux has no `copy-mode-position-format` or
+`copy-mode-position-style`, so the text and the colours are fixed, and no `toggle-position`,
+so the indicator cannot be hidden.
 
 ## Mouse Bindings
 

@@ -2,7 +2,7 @@ use std::io;
 
 use crate::format::expand_format_for_window;
 use crate::render_state::ClientRenderOptions;
-use crate::types::{AppState, Node, Window};
+use crate::types::{AppState, Mode, Node, Window};
 use crate::util::WinInfo;
 
 /// Collect all leaf pane paths in tree order (for next/prev pane cycling).
@@ -79,22 +79,41 @@ pub(crate) fn serialize_bindings_json(app: &AppState) -> String {
 
 /// Escape a string for embedding inside a JSON double-quoted value.
 /// Handles backslashes, double-quotes, and control characters.
-/// Append the copy-mode-line-numbers state fields to a JSON object buffer that
-/// currently ends with `}`. Emits nothing when the option is unset or `off`.
-/// Ships the option value, the active pane's scrollback size (for absolute /
-/// hybrid numbering), and the optional gutter styles.
-pub(crate) fn append_copy_ln_json(app: &AppState, buf: &mut String) {
-    let Some(cln) = app.user_options.get("copy-mode-line-numbers") else { return; };
-    if cln == "off" || !buf.ends_with('}') { return; }
+/// Append the active pane's scrollback size to a JSON object buffer that
+/// currently ends with `}`. Emits nothing when the active pane is not in copy
+/// mode, which is the only state that reads it.
+///
+/// The client needs this number for the copy-mode position indicator as well as
+/// for absolute / hybrid line numbers, so it ships whenever copy mode is open
+/// rather than only when the gutter is switched on. It is read from the screen
+/// copy mode is showing, not from the live grid, because tmux measures both
+/// against the copy-mode backing screen (`window_copy_formats` in
+/// `window-copy.c`), which keeps the number still while a frozen snapshot is
+/// being read.
+pub(crate) fn append_copy_hsize_json(app: &AppState, buf: &mut String) {
+    if !matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) { return; }
+    if !buf.ends_with('}') { return; }
     let hsize = app.windows.get(app.active_idx)
         .and_then(|win| crate::tree::active_pane(&win.root, &win.active_path))
         .and_then(|p| p.term.lock().ok().map(|g| g.screen().scrollback_filled()))
         .unwrap_or(0);
     buf.pop();
+    buf.push_str(",\"copy_hsize\":");
+    buf.push_str(&hsize.to_string());
+    buf.push('}');
+}
+
+/// Append the copy-mode-line-numbers state fields to a JSON object buffer that
+/// currently ends with `}`. Emits nothing when the option is unset or `off`.
+/// Ships the option value and the optional gutter styles; the scrollback size
+/// the gutter measures against travels with `append_copy_hsize_json`.
+pub(crate) fn append_copy_ln_json(app: &AppState, buf: &mut String) {
+    let Some(cln) = app.user_options.get("copy-mode-line-numbers") else { return; };
+    if cln == "off" || !buf.ends_with('}') { return; }
+    buf.pop();
     buf.push_str(",\"copy_mode_line_numbers\":\"");
     buf.push_str(&json_escape_string(cln));
-    buf.push_str("\",\"copy_hsize\":");
-    buf.push_str(&hsize.to_string());
+    buf.push('"');
     if let Some(st) = app.user_options.get("copy-mode-line-number-style") {
         buf.push_str(",\"copy_mode_line_number_style\":\"");
         buf.push_str(&json_escape_string(st));

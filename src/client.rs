@@ -1475,7 +1475,10 @@ pub(crate) fn render_float_overlays(
 }
 
 /// Copy-mode line-number rendering config, resolved once per frame from the
-/// `copy-mode-line-numbers` option and the active pane's scrollback size.
+/// `copy-mode-line-numbers` option and the active pane's scrollback size. That
+/// size is what the position indicator measures against too, so this is built
+/// whatever the gutter option says. `None` means the caller has no copy-mode
+/// state at all, which is the case for the layout preview.
 #[derive(Clone, Copy)]
 pub struct CopyLnRender {
     pub mode: crate::copy_line_numbers::CopyLnMode,
@@ -2075,13 +2078,28 @@ pub fn render_layout_json(
                 }
             }
 
-            if *copy_mode && *active && *scroll_offset > 0 {
-                let indicator = format!("[{}/{}]", scroll_offset, scroll_offset);
+            // The position indicator reads the two numbers tmux publishes as
+            // `#{copy_position}` and `#{copy_position_limit}`
+            // (`window_copy_formats` in `window-copy.c`), which is what its
+            // default `copy-mode-position-format` prints. psmux used to print
+            // the scroll offset on both sides of the slash, so the indicator
+            // read `[97/97]` wherever you stood and carried no information.
+            // tmux draws it whenever the pane is in copy mode, including at the
+            // live bottom, so there is no lower bound on the offset here.
+            if *copy_mode && *active && area.height > 1 {
+                let mode = copy_ln.map(|cfg| cfg.mode)
+                    .unwrap_or(crate::copy_line_numbers::CopyLnMode::Off);
+                let hsize = copy_ln.map(|cfg| cfg.hsize).unwrap_or(0);
+                // tmux measures the absolute limit against the backing screen's
+                // own height (`screen_size_y`), which is the pane's row count,
+                // not the area this client happens to draw it in.
+                let (position, limit) = crate::copy_line_numbers::position_pair(
+                    mode, *scroll_offset, hsize, *src_rows as usize);
+                let indicator = format!("[{}/{}]", position, limit);
                 let indicator_width = indicator.len() as u16;
                 if area.width > indicator_width + 2 {
                     let indicator_x = area.x + area.width - indicator_width - 1;
-                    let indicator_y = if *copy_mode { area.y + 1 } else { area.y };
-                    let indicator_area = Rect::new(indicator_x, indicator_y, indicator_width, 1);
+                    let indicator_area = Rect::new(indicator_x, area.y + 1, indicator_width, 1);
                     let indicator_span = Span::styled(indicator, Style::default().fg(Color::Black).bg(Color::Yellow));
                     f.render_widget(Paragraph::new(Line::from(indicator_span)), indicator_area);
                 }
@@ -7047,18 +7065,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             let total_panes = if state.zoomed { 1 } else { root.count_leaves() };
             let bchars = crate::border_lines::border_chars(
                 state.pane_border_lines.as_deref().unwrap_or(crate::border_lines::DEFAULT));
-            // copy-mode-line-numbers: build the gutter render config from the
-            // option value + active pane scrollback size shipped in state.
+            // Copy-mode render config: the gutter settings from
+            // `copy-mode-line-numbers` plus the active pane's scrollback size
+            // shipped in state. Built whatever the gutter option says, because
+            // the position indicator needs the scrollback size even with the
+            // gutter off, and `gutter_width` already returns 0 for `off`.
             let copy_ln = {
                 let mode = crate::copy_line_numbers::CopyLnMode::parse(
                     state.copy_mode_line_numbers.as_deref().unwrap_or(crate::copy_line_numbers::DEFAULT));
-                if mode.is_active() {
-                    let num_style = state.copy_mode_line_number_style.as_deref()
-                        .map(crate::style::parse_tmux_style).unwrap_or_else(|| Style::default().fg(Color::DarkGray));
-                    let cur_style = state.copy_mode_current_line_number_style.as_deref()
-                        .map(crate::style::parse_tmux_style).unwrap_or_else(|| Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-                    Some(CopyLnRender { mode, hsize: state.copy_hsize, num_style, cur_style })
-                } else { None }
+                let num_style = state.copy_mode_line_number_style.as_deref()
+                    .map(crate::style::parse_tmux_style).unwrap_or_else(|| Style::default().fg(Color::DarkGray));
+                let cur_style = state.copy_mode_current_line_number_style.as_deref()
+                    .map(crate::style::parse_tmux_style).unwrap_or_else(|| Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+                Some(CopyLnRender { mode, hsize: state.copy_hsize, num_style, cur_style })
             };
             let window_styles = WindowContentStyles {
                 inactive: state.client_render_options.window_style.as_deref()

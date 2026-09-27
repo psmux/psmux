@@ -3196,6 +3196,10 @@ mod tests_pane_content_box_drawing;
 mod tests_copy_line_numbers_render;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue702_copy_position_indicator.rs"]
+mod tests_issue702_copy_position_indicator;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_floating_render.rs"]
 mod tests_floating_render;
 

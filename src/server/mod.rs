@@ -3082,6 +3082,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 combined_buf.push('}');
                             }
                         }
+                        helpers::append_copy_hsize_json(&app, &mut combined_buf);
                         helpers::append_copy_ln_json(&app, &mut combined_buf);
                         helpers::append_floats_json(&app, &mut combined_buf);
                         // set-titles: when on, ship the expanded set-titles-string
@@ -7818,6 +7819,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         combined_buf.push('}');
                     }
                 }
+                helpers::append_copy_hsize_json(&app, &mut combined_buf);
                 helpers::append_copy_ln_json(&app, &mut combined_buf);
                 helpers::append_floats_json(&app, &mut combined_buf);
                 // set-titles: when on, ship the expanded set-titles-string so the

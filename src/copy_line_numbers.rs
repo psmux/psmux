@@ -1,9 +1,11 @@
 //! Copy-mode line numbers (tmux `copy-mode-line-numbers`).
 //!
-//! Pure logic for the left gutter shown in copy mode. The rendering side
-//! (client.rs) asks this module for the gutter width and the number to print
-//! on each visible row; all the mode arithmetic lives here so it can be unit
-//! tested against tmux's formulas (window-copy.c).
+//! Pure logic for the left gutter shown in copy mode, and for the position
+//! indicator in the top right, which reads the same numbers. The rendering side
+//! (client.rs) asks this module for the gutter width, the number to print on
+//! each visible row, and the indicator's position/limit pair; all the mode
+//! arithmetic lives here so it can be unit tested against tmux's formulas
+//! (window-copy.c).
 //!
 //! Row/offset conventions match tmux `window_copy_write_line`:
 //! - `py`    visible row index, 0 = top of the pane.
@@ -102,9 +104,53 @@ pub fn is_current_row(py: usize, cy: usize) -> bool {
     py == cy
 }
 
+/// tmux `window_copy_line_number_is_absolute`: the modes that count lines from
+/// the top of the history rather than from the scroll offset.
+fn is_absolute(mode: CopyLnMode) -> bool {
+    matches!(mode, CopyLnMode::Absolute | CopyLnMode::Relative | CopyLnMode::Hybrid)
+}
+
+/// The `(position, limit)` pair the copy-mode position indicator prints.
+///
+/// It lives here because the gutter mode decides which of the two readings
+/// tmux uses (`window_copy_formats` in `window-copy.c`). With the gutter off or
+/// in `default` mode the pair is the scroll offset over the scrollback size.
+/// In `absolute`, `relative` and `hybrid` mode it is the 1-based absolute line
+/// under the top of the view over the total number of lines, so the indicator
+/// agrees with the numbers in the gutter beside it.
+pub fn position_pair(mode: CopyLnMode, oy: usize, hsize: usize, height: usize) -> (usize, usize) {
+    if is_absolute(mode) {
+        ((hsize + 1).saturating_sub(oy), hsize + height)
+    } else {
+        (oy, hsize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Measured against tmux 3.7c (`-L postest`, 30-row pane, `seq 1 200`):
+    /// at the live bottom `#{copy_position}/#{copy_position_limit}` read
+    /// `0/173`, after scrolling up `68/173`, and with
+    /// `copy-mode-line-numbers absolute` the same view read `106/203`.
+    #[test]
+    fn position_pair_matches_tmux() {
+        assert_eq!(position_pair(CopyLnMode::Off, 0, 173, 30), (0, 173));
+        assert_eq!(position_pair(CopyLnMode::Off, 68, 173, 30), (68, 173));
+        assert_eq!(position_pair(CopyLnMode::Default, 68, 173, 30), (68, 173));
+        assert_eq!(position_pair(CopyLnMode::Absolute, 68, 173, 30), (106, 203));
+        assert_eq!(position_pair(CopyLnMode::Relative, 68, 173, 30), (106, 203));
+        assert_eq!(position_pair(CopyLnMode::Hybrid, 68, 173, 30), (106, 203));
+    }
+
+    #[test]
+    fn position_pair_survives_an_offset_past_the_history() {
+        // A frame caught mid resize can carry an offset larger than the
+        // history it was measured against. Saturating keeps the position at 0
+        // instead of wrapping to a huge number.
+        assert_eq!(position_pair(CopyLnMode::Absolute, 500, 100, 30), (0, 130));
+    }
 
     #[test]
     fn parse_and_off() {
