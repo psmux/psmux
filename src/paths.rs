@@ -45,11 +45,17 @@ fn windows_profile_dir() -> Option<String> {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentProcess() -> *mut c_void;
+        fn CloseHandle(h: isize) -> i32;
+    }
+    // Advapi32, not kernel32: `OpenProcessToken` is documented under
+    // Advapi32.lib / Advapi32.dll, and it is not in kernel32.lib.
+    // platform.rs:1142 already declares it under advapi32.
+    #[link(name = "advapi32")]
+    extern "system" {
         // isize handles to match the declarations in platform.rs
         // (clashing_extern_declarations, reported on PR 682); cast at the
         // call site.
         fn OpenProcessToken(process: isize, access: u32, token: *mut isize) -> i32;
-        fn CloseHandle(h: isize) -> i32;
     }
     #[link(name = "userenv")]
     extern "system" {

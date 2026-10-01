@@ -2615,7 +2615,10 @@ pub mod mouse_inject {
 
     /// Map a virtual key code to its scan code.
     pub fn vk_to_scan(vk: u16) -> u16 {
-        #[link(name = "kernel32")]
+        // User32, not kernel32: `MapVirtualKeyW` is documented under User32.lib
+        // / User32.dll, and it is not in kernel32.lib. The other declaration of
+        // it in this file, in `caret`, already says user32.
+        #[link(name = "user32")]
         extern "system" {
             fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
         }
@@ -3200,7 +3203,7 @@ pub mod process_kill {
     /// found (extremely unlikely).  Used by `detach-client -P` (issue #275).
     pub fn current_parent_pid() -> Option<u32> {
         unsafe {
-            let cur_pid = GetCurrentProcessIdSafe();
+            let cur_pid = GetCurrentProcessId();
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snap == INVALID_HANDLE || snap == 0 { return None; }
             let mut pe: PROCESSENTRY32W = std::mem::zeroed();
@@ -3223,8 +3226,7 @@ pub mod process_kill {
 
     #[link(name = "kernel32")]
     extern "system" {
-        #[link_name = "GetCurrentProcessId"]
-        fn GetCurrentProcessIdSafe() -> u32;
+        fn GetCurrentProcessId() -> u32;
     }
 
     /// Forcefully terminate the calling process's parent.  Used to implement
