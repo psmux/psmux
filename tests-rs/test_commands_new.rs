@@ -985,13 +985,62 @@ fn customize_mode_shows_options_popup() {
 //  21. Server-forwarded commands: no-crash without port; no state mutation
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Run one server-forwarded command with no control port and assert it left the
+/// state alone.
+///
+/// Every command here runs its REAL implementation, and a real implementation
+/// may reach the data directory whether or not there is a port to forward to.
+/// `kill-server` does exactly that: `commands.rs` calls
+/// `kill_servers_in_scope(paths::psmux_dir(), Namespace(app.socket_name), ..)`,
+/// and `socket_name` is `None` on a mock app, so on a developer's machine this
+/// test ended every server in the default namespace of their live data
+/// directory, taking the session they were sitting in with it. Measured three
+/// times: the suite killed a live session, and the `killed/default-...` marker
+/// the kill writes was there afterwards with the timestamp to prove it.
+///
+/// So the data directory moves for the duration. The lock is the shared one
+/// because `PSMUX_DATA_DIR` is process wide, the same reason
+/// test_session_id_alloc_race and the #698 tests hold it. Isolating here rather
+/// than in the one test that bites means a command added to the lists below
+/// cannot reintroduce this.
 fn assert_server_forward_noop(cmd: &str) {
+    // The restore is a Drop guard, declared after the lock so it runs before
+    // the lock is released, and it runs on a panic inside the command too: a
+    // command that panics instead of returning Err must not leave every later
+    // test in this binary pointed at a deleted temporary directory.
+    struct RestoreDataDir(Option<std::ffi::OsString>, std::path::PathBuf);
+    impl Drop for RestoreDataDir {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("PSMUX_DATA_DIR", v),
+                None => std::env::remove_var("PSMUX_DATA_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let _env = crate::util::lock_test_env();
+    let dir = std::env::temp_dir().join(format!(
+        "psmux_fwd_noop_{}_{}",
+        std::process::id(),
+        cmd.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let restore = RestoreDataDir(std::env::var_os("PSMUX_DATA_DIR"), dir.clone());
+    std::env::set_var("PSMUX_DATA_DIR", &dir);
+
     let mut app = mock_app_with_window();
     app.control_port = None;
     let original_len = app.windows.len();
     let original_name = app.session_name.clone();
     let original_sync = app.sync_input;
-    execute_command_string(&mut app, cmd).unwrap();
+    let result = execute_command_string(&mut app, cmd);
+
+    // Put the directory back before asserting, so the assertions below run
+    // against the caller's data directory again.
+    drop(restore);
+
+    result.unwrap();
     assert_eq!(app.windows.len(), original_len, "'{}' must not add/remove windows", cmd);
     assert_eq!(app.session_name, original_name, "'{}' must not change session name", cmd);
     assert_eq!(app.sync_input, original_sync, "'{}' must not change sync state", cmd);
