@@ -20,6 +20,30 @@ fn allocate_session_id_is_unique_under_concurrency() {
     // Measured: from an empty data dir this failed 19 of 20 runs alongside the
     // #698 tests and 0 of 20 alone.
     let _env = crate::util::lock_test_env();
+    // 16 x 32 allocations land in whatever data directory this process points
+    // at, and on a developer's machine that is the live one: the counter their
+    // own sessions number themselves from advanced by 512 every time the suite
+    // ran. The lock is already held, so the directory can be moved for the
+    // duration and put back, which is the shape test_issue698 uses.
+    //
+    // The restore is a Drop guard so it also runs when a worker thread panics
+    // and `join().expect` unwinds out of this test.
+    struct Restore(Option<std::ffi::OsString>, std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("PSMUX_DATA_DIR", v),
+                None => std::env::remove_var("PSMUX_DATA_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("psmux_sid_race_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let restore = Restore(std::env::var_os("PSMUX_DATA_DIR"), dir.clone());
+    std::env::set_var("PSMUX_DATA_DIR", &dir);
+
     const THREADS: usize = 16;
     const PER_THREAD: usize = 32;
 
@@ -42,6 +66,10 @@ fn allocate_session_id_is_unique_under_concurrency() {
     for h in handles {
         all.extend(h.join().expect("thread panicked"));
     }
+
+    // Put the data directory back before asserting, so a failure here cannot
+    // leak the override into whatever test runs next.
+    drop(restore);
 
     let total = all.len();
     let mut sorted = all.clone();

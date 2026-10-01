@@ -303,6 +303,11 @@ leaving it buried, so in most cases you will see the real cause on screen. The f
 record. Only a log written during the current startup attempt is surfaced. An older one is treated
 as stale and ignored.
 
+Every server sharing the data directory appends to this one file, each report under a header
+`=== session <name> pid <pid> at epoch <seconds> ===`, so two servers that fail together keep both
+reports, and each client echoes the report of the server it started. When the file reaches 512 KB it
+is renamed to `server-startup.log.1` (replacing any older copy) and a fresh file is started.
+
 ### `~/.psmux/config-warnings.log`
 
 Non-fatal config parse problems, such as an unknown option name, a malformed value, or an unknown
@@ -317,7 +322,8 @@ This is the file to check first when a config line appears to have been silently
 
 Written by the server's panic handler: the panic message and a full backtrace. The handler also
 removes that session's `.port` and `.key` files, so a crashed server does not leave stale discovery
-files behind for the next client to trip over.
+files behind for the next client to trip over. Like the startup log it is appended to by every
+server in the data directory, one headed report per panic, and rotated to `crash.log.1` at 512 KB.
 
 If this file exists and its timestamp matches your problem, attach it. It is the single most useful
 artifact in a bug report.

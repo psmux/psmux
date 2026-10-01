@@ -833,6 +833,70 @@ fn drain_plugin_req(
     }
 }
 
+/// Append a server's report to a fixed name file in the data directory, headed
+/// by which server wrote it.
+///
+/// `crash.log` and `server-startup.log` are one name for every server sharing
+/// the data directory, and both used `std::fs::write`, which truncates: two
+/// servers panicking or failing to start left one report between them, and
+/// nothing said whose it was. Appending with a header is the same answer #684
+/// took for `input_debug.log` (`720cbe4`), and for the same reason: a name per
+/// server would put one file per session in the directory with nothing to ever
+/// delete them, since a crash report is wanted precisely when the `.port` that
+/// drives every sweep is already gone.
+fn append_data_dir_report(filename: &str, base: &str, body: &str) {
+    let Some(dir) = crate::paths::psmux_dir_opt() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{}\\{}", dir, filename);
+    append_report_at(&path, base, body, DATA_DIR_REPORT_CAP_BYTES);
+}
+
+/// What starts every report in an appended data directory log. The reader
+/// keys on it, so the two must not drift apart.
+const REPORT_HEADER: &str = "\n=== session ";
+
+/// Size at which an appended report log is rotated to `<name>.1`.
+///
+/// These files are always on, unlike the opt in debug logs whose per process
+/// line cap keeps them small (#684, `input_debug.log`), so a machine that keeps
+/// failing to start a server would otherwise grow them for ever. A startup
+/// report is about 1.2 KB and a crash report with its backtrace a few tens of
+/// KB, so 512 KB holds hundreds of the first and dozens of the second, and with
+/// the one rotated copy the pair never exceeds about 1 MB.
+const DATA_DIR_REPORT_CAP_BYTES: u64 = 512 * 1024;
+
+/// Path injectable core of [`append_data_dir_report`].
+///
+/// The whole report, header and body, goes out in ONE append write. Two
+/// writes (header, then body) let two servers failing at the same moment
+/// interleave as header A, header B, body A, body B, and the reader, which
+/// trusts the header above a body, would then hand A's error to B's client.
+pub(crate) fn append_report_at(path: &str, base: &str, body: &str, cap: u64) {
+    use std::io::Write as _;
+    if std::fs::metadata(path).map(|m| m.len() >= cap).unwrap_or(false) {
+        // Replaces any older `.1`. Two servers rotating at the same instant can
+        // at worst rotate twice and lose the older copy, never this report.
+        let _ = std::fs::rename(path, format!("{}.1", path));
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let when = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let report = format!(
+        "{}{} pid {} at epoch {} ===\n{}\n",
+        REPORT_HEADER,
+        base,
+        std::process::id(),
+        when,
+        body
+    );
+    let _ = f.write_all(report.as_bytes());
+    let _ = f.flush();
+}
+
 /// Persist a server-startup failure to `~/.psmux/server-startup.log`.
 ///
 /// The detached server has no visible stderr — when the initial pane spawn
@@ -854,13 +918,7 @@ fn drain_plugin_req(
 /// (ConPTY `CreateProcessW` errors); the diagnostic it collects
 /// (`encode_wide` environment sizes) is meaningless elsewhere.
 #[cfg(windows)]
-pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
-    let Some(dir) = crate::paths::psmux_dir_opt() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let path = format!("{}\\server-startup.log", dir);
-
+pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display, base: &str) {
     use std::os::windows::ffi::OsStrExt;
     let mut env_count = 0usize;
     let mut env_chars = 0usize;
@@ -930,7 +988,7 @@ pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
         key = env_largest.0,
         sz = env_largest.1,
     );
-    let _ = std::fs::write(&path, body);
+    append_data_dir_report("server-startup.log", base, &body);
 }
 
 /// Absolute path to `~/.psmux/server-startup.log`, or None if no home dir.
@@ -949,17 +1007,54 @@ pub(crate) fn startup_error_log_path() -> Option<String> {
 /// `since_epoch` is the wall-clock second the current startup attempt began;
 /// logs whose `when (epoch s)` predate it are stale (from an earlier run or an
 /// adopted warm server) and are ignored. Returns `(error_text, log_path)`.
-pub(crate) fn read_fresh_startup_error(since_epoch: u64) -> Option<(String, String)> {
+///
+/// `base` is the port file base (`ns__name` under `-L`) of the server this
+/// client started, the same string that server writes into its report header.
+/// Only that server's report is surfaced: the file is shared by every server in
+/// the data directory, and with two failing at nearly the same moment the LAST
+/// report is as likely to be the other one's (measured: 20 of 40 clients
+/// printed the other server's error when only the last report was read).
+pub(crate) fn read_fresh_startup_error(since_epoch: u64, base: &str) -> Option<(String, String)> {
     let path = startup_error_log_path()?;
-    read_fresh_startup_error_at(&path, since_epoch)
+    read_fresh_startup_error_for_at(&path, since_epoch, Some(base))
 }
 
 /// Path-injectable core of [`read_fresh_startup_error`] — kept separate so unit
 /// tests can exercise the freshness/parsing logic against a temp file without
 /// mutating the process-global USERPROFILE/HOME env (which would race the
-/// issue-167 log tests sharing this binary).
+/// issue-167 log tests sharing this binary). Reads the last report, whoever
+/// wrote it.
 fn read_fresh_startup_error_at(path: &str, since_epoch: u64) -> Option<(String, String)> {
-    let content = std::fs::read_to_string(path).ok()?;
+    read_fresh_startup_error_for_at(path, since_epoch, None)
+}
+
+/// The reader, with the server it is asking about as a parameter.
+///
+/// `Some(base)`: the last report whose header names `base`; a file that has
+/// headed reports but none for `base` yields nothing, because every report in
+/// it belongs to some other server. `None`: the last report of any server.
+/// A file with no header at all is one an older psmux wrote by truncating, and
+/// is read whole either way.
+pub(crate) fn read_fresh_startup_error_for_at(
+    path: &str,
+    since_epoch: u64,
+    base: Option<&str>,
+) -> Option<(String, String)> {
+    let whole = std::fs::read_to_string(path).ok()?;
+    let content = if !whole.contains(REPORT_HEADER) {
+        whole.as_str()
+    } else {
+        let at = match base {
+            Some(b) => whole.rfind(&format!("{}{} pid ", REPORT_HEADER, b))?,
+            None => whole.rfind(REPORT_HEADER)?,
+        };
+        // Up to the next report's header, so its body cannot be read as ours.
+        let rest = &whole[at..];
+        match rest[REPORT_HEADER.len()..].find(REPORT_HEADER) {
+            Some(end) => &rest[..REPORT_HEADER.len() + end],
+            None => rest,
+        }
+    };
 
     // Freshness gate: only surface a log written during this attempt.
     let when = content
@@ -1623,15 +1718,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let panic_session_name = session_name.clone();
     let panic_socket_name = socket_name.clone();
     std::panic::set_hook(Box::new(move |info| {
-        let path = crate::paths::psmux_dir_file("crash.log");
-        let bt = std::backtrace::Backtrace::force_capture();
-        let _ = std::fs::write(&path, format!("{info}\n\nBacktrace:\n{bt}"));
         // Remove port/key files to prevent stale entries after a panic
         let base = if let Some(ref sn) = panic_socket_name {
             format!("{}__{}", sn, panic_session_name)
         } else {
             panic_session_name.clone()
         };
+        let bt = std::backtrace::Backtrace::force_capture();
+        append_data_dir_report(
+            "crash.log",
+            &base,
+            &format!("{info}\n\nBacktrace:\n{bt}"),
+        );
         let _ = std::fs::remove_file(crate::paths::port_file(&base));
         let _ = std::fs::remove_file(crate::paths::key_file(&base));
         let _ = std::fs::remove_file(crate::paths::sid_file(&base));
@@ -1687,6 +1785,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     }
     app.socket_name = socket_name;
     app.session_group = group_target;
+    // The session id belongs to a server, so it is allocated here rather than in
+    // `AppState::new`: the counter lives in the data directory, and building a
+    // state object is not a reason to write to it. This is the first point where
+    // `socket_name` above is known, and it is still before the first read of
+    // `session_id`, which is the `.sid` write in `ensure_session_registry_files`.
+    app.session_id = crate::session::allocate_session_id();
     // Server starts detached with a reasonable default window size
     app.attached_clients = 0;
 
@@ -2019,7 +2123,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // ("look in ~/.psmux/server-startup.log") instead of asking them
         // to rerun `psmux server` interactively to see the error.
         #[cfg(windows)]
-        write_startup_error_log(&e);
+        write_startup_error_log(&e, &app.port_file_base());
         // Clean up port and key files so stale entries are not left
         // behind when the pane command fails to spawn (issue #204).
         let _ = std::fs::remove_file(&regpath);

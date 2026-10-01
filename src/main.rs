@@ -2138,7 +2138,7 @@ fn run_main() -> io::Result<()> {
                     // default-shell path) there before exiting; echo it so the
                     // user isn't left guessing why their config "silently" failed.
                     if let Some((reason, log_path)) =
-                        crate::server::read_fresh_startup_error(attempt_start_epoch)
+                        crate::server::read_fresh_startup_error(attempt_start_epoch, &port_file_base)
                     {
                         eprintln!("psmux: {}", reason);
                         eprintln!("psmux: full startup diagnostics in {}", log_path);

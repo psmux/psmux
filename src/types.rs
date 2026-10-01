@@ -2299,7 +2299,14 @@ impl AppState {
             format_job_rx: None,
             format_job_tx: None,
             session_name,
-            session_id: crate::session::allocate_session_id(),
+            // Not allocated here. `allocate_session_id` reads and writes the
+            // `next_session_id` counter in the data directory, so constructing
+            // a state object used to spend a number out of whichever directory
+            // the process was pointed at, including a developer's live one from
+            // a unit test. A server allocates its own id once it knows it is a
+            // server (server/mod.rs), which is also the point where
+            // `socket_name` below is finally known.
+            session_id: 0,
             socket_name: None,
             attached_clients: 0,
             client_sizes: std::collections::HashMap::new(),

@@ -566,10 +566,20 @@ fn session_group_can_be_set() {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn session_id_is_unique() {
+fn building_a_state_object_allocates_no_session_id() {
+    // This used to assert that two `AppState`s differ, which held only because
+    // the constructor spent a number out of the `next_session_id` counter in
+    // whatever data directory the process pointed at. A server allocates its own
+    // id now (server/mod.rs, right after `socket_name` is known), so a state
+    // object built here writes no file and carries the unallocated 0.
+    //
+    // The property the old assertion was reaching for, that no two sessions get
+    // one id, is `allocate_session_id_is_unique_under_concurrency` in
+    // test_session_id_alloc_race.rs, which hammers the allocator from 16 threads.
     let app1 = AppState::new("s1".to_string());
     let app2 = AppState::new("s2".to_string());
-    assert_ne!(app1.session_id, app2.session_id, "each AppState should get a unique session_id");
+    assert_eq!(app1.session_id, 0, "a constructed state object holds no allocated id");
+    assert_eq!(app2.session_id, 0, "a constructed state object holds no allocated id");
 }
 
 #[test]
