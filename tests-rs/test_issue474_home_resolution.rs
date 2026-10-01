@@ -18,7 +18,9 @@ struct EnvSnapshot {
 
 impl EnvSnapshot {
     fn take() -> Self {
-        let names = ["USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH"];
+        // PSMUX_DATA_DIR too: psmux_dir_follows_resolved_home clears it, and the
+        // snapshot is what puts it back.
+        let names = ["USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH", "PSMUX_DATA_DIR"];
         Self {
             vars: names.iter().map(|n| (*n, std::env::var(n).ok())).collect(),
         }
@@ -79,6 +81,10 @@ fn empty_userprofile_treated_as_unset() {
 fn psmux_dir_follows_resolved_home() {
     let _lock = crate::util::lock_test_env();
     let _snap = EnvSnapshot::take();
+    // What the data directory resolves to when nothing overrides it, so the
+    // override is cleared for the duration: the suite is meant to be run with
+    // PSMUX_DATA_DIR pointed at a scratch directory, and this test failed there.
+    std::env::remove_var("PSMUX_DATA_DIR");
     std::env::set_var("USERPROFILE", "C:\\up_test_home");
     assert_eq!(psmux_dir(), "C:\\up_test_home\\.psmux");
 }

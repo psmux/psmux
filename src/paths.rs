@@ -287,6 +287,19 @@ mod tests {
     #[test]
     fn psmux_dir_is_home_relative_dot_psmux() {
         let _lock = crate::util::lock_test_env();
+        // What the data dir resolves to when nothing overrides it, so clear the
+        // override for the duration (restored on drop, panic included): the
+        // suite is meant to run with PSMUX_DATA_DIR at a scratch directory.
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(v) = self.0.take() {
+                    std::env::set_var("PSMUX_DATA_DIR", v);
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("PSMUX_DATA_DIR"));
+        std::env::remove_var("PSMUX_DATA_DIR");
         // The test environment always has a home, so the data dir resolves to
         // {home}\.psmux and the two accessors agree.
         let dir = psmux_dir();
