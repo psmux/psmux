@@ -123,15 +123,201 @@ pub fn has_conpty_passthrough() -> bool {
     })
 }
 
-/// Resolve the DECSCUSR code (0-6) from the PSMUX_CURSOR_STYLE / PSMUX_CURSOR_BLINK
-/// configuration.  Returns 0 ("default") when no explicit style is configured.
+/// The DECSCUSR code this client last asserted on the real terminal, 0 for
+/// "none asserted, the terminal's own shape stands".
+///
+/// tmux keeps the same thing per tty, `tty->cstyle`, and reads it when it
+/// stops the tty: `tty_stop_tty` (tty.c) sends the reset only when the style
+/// it last sent was not SCREEN_CURSOR_DEFAULT. Teardown here asks the same
+/// question, and the two places that write a shape, the attach below and the
+/// client's frame loop, both record it.
+static LAST_CURSOR_CODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// What this client asserted through DEC private mode 12: 0 nothing, 1 on,
+/// 2 off. Mode 12 has no "back to the terminal's default" the way DECSCUSR 0
+/// is for the shape, only the two states, so putting it back needs to know
+/// which one was there first (`HOST_BLINK_BEFORE`).
+static BLINK_ASSERTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// What mode 12 was before this client touched it, as the terminal answered
+/// DECRQM at attach: 0 nobody said, 1 set, 2 reset.
+static HOST_BLINK_BEFORE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// What the cursor's shape was before this client touched it, as the terminal
+/// answered DECRQSS at attach, or 255 when it did not say. 0 is a real answer:
+/// it is the terminal's own default, which is what most terminals report.
+static HOST_SHAPE_BEFORE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
+
+/// Record what the terminal said its cursor shape was before this client
+/// touched it.
+pub fn note_host_shape_before(code: Option<u8>) {
+    HOST_SHAPE_BEFORE.store(code.unwrap_or(255), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The DECSCUSR code teardown should write to put the shape back, `None` when
+/// this client never asserted one.
+///
+/// The terminal is asked at attach what it was drawing, so the usual answer is
+/// that shape. A terminal that will not say leaves 0, the reset to its own
+/// default, which is what tmux settles for: `tty_stop_tty` (tty.c) sends `Se`,
+/// defined as `ESC [ 2 q` by the cstyle feature, or `Ss 0` for a terminal
+/// without it, neither of which is where the user was.
+pub(crate) fn shape_restore() -> Option<u8> {
+    if !SHAPE_EVER_ASSERTED.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let before = HOST_SHAPE_BEFORE.load(std::sync::atomic::Ordering::Relaxed);
+    Some(if before == 255 { 0 } else { before })
+}
+
+/// Whether this client ever asserted a cursor SHAPE, which is a different
+/// question from whether it is holding one now (`LAST_CURSOR_CODE`).
+///
+/// A shape is a DECSCUSR code, and every code says whether it blinks, so
+/// writing one moves the terminal's blinking whether or not that was the
+/// point. The reset that takes the shape back, `ESC [ 0 q`, moves it again: it
+/// returns the terminal to ITS default, which on Windows Terminal blinks, and
+/// a user who had the blinking off is not back where they started. So once a
+/// shape has gone out, the blink has to be put back explicitly, even after the
+/// shape has been let go of again.
+static SHAPE_EVER_ASSERTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record that this client wrote DEC private mode 12.
+pub(crate) fn note_blink_asserted(on: bool) {
+    BLINK_ASSERTED.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Record what the terminal said mode 12 was before this client touched it.
+pub fn note_host_blink_before(state: Option<bool>) {
+    let v = match state { Some(true) => 1, Some(false) => 2, None => 0 };
+    HOST_BLINK_BEFORE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The mode 12 write that puts the terminal's blinking back where this client
+/// found it, `None` when it never moved it.
+///
+/// Two things move it: mode 12 itself, and any DECSCUSR shape, since a shape's
+/// code says whether it blinks and the reset that takes the shape back returns
+/// the terminal to its own default rather than to what the user had. So either
+/// one owes this.
+///
+/// The terminal is asked at attach what mode 12 was, so the usual answer is
+/// the state it had. A terminal that does not answer DECRQM leaves that
+/// unknown: for a blink this client set, the opposite of what it set undoes
+/// it, and for a shape there is nothing honest left to say, so it says
+/// nothing.
+pub(crate) fn blink_restore() -> Option<bool> {
+    let asserted = BLINK_ASSERTED.load(std::sync::atomic::Ordering::Relaxed);
+    let shape = SHAPE_EVER_ASSERTED.load(std::sync::atomic::Ordering::Relaxed);
+    if asserted == 0 && !shape {
+        return None;
+    }
+    match HOST_BLINK_BEFORE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ if asserted != 0 => Some(asserted != 1),
+        _ => None,
+    }
+}
+
+/// The blink `cursor-blink` asks for on its own, for a `cursor-style` that
+/// names no shape, and `None` when the shape carries it or nobody asked.
+///
+/// A shape goes out as a DECSCUSR code that already says whether it blinks.
+/// Without a shape there is no code to carry it, and DEC private mode 12 is
+/// the only thing that can, so an explicit `cursor-blink` is sent that way and
+/// an unset one is sent not at all.
+pub fn blink_only_mode() -> Option<bool> {
+    if configured_cursor_code() != 0 {
+        return None;
+    }
+    cursor_blink_option()
+}
+
+/// Write the blink on its own, as DEC private mode 12. `None` writes nothing.
+pub fn apply_blink_only<W: Write>(out: &mut W, blink: Option<bool>) -> io::Result<()> {
+    let Some(on) = blink else { return Ok(()) };
+    execute!(out, Print(if on { "\x1b[?12h" } else { "\x1b[?12l" }))?;
+    note_blink_asserted(on);
+    Ok(())
+}
+
+/// Record a DECSCUSR code this client just wrote to the terminal.
+pub(crate) fn note_cursor_code(code: u8) {
+    LAST_CURSOR_CODE.store(code, std::sync::atomic::Ordering::Relaxed);
+    if code != 0 {
+        SHAPE_EVER_ASSERTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Forget what this client asserted. Only the tests need it: a client asserts
+/// over one attach and tears down once, while the tests share one process and
+/// one pair of statics.
+#[cfg(test)]
+pub(crate) fn forget_cursor_state_for_test() {
+    LAST_CURSOR_CODE.store(0, std::sync::atomic::Ordering::Relaxed);
+    BLINK_ASSERTED.store(0, std::sync::atomic::Ordering::Relaxed);
+    HOST_BLINK_BEFORE.store(0, std::sync::atomic::Ordering::Relaxed);
+    SHAPE_EVER_ASSERTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    HOST_SHAPE_BEFORE.store(255, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `cursor-blink` is on, or `None` when nobody set it.
+///
+/// `set -g cursor-blink <value>` takes the words the option is documented
+/// with and stores `1` or `0` in `PSMUX_CURSOR_BLINK` (config.rs,
+/// server/options.rs). The variable is read back the way that value was
+/// parsed, so a shell that exports the word rather than the digit,
+/// `PSMUX_CURSOR_BLINK=off`, does not come out meaning the opposite of what it
+/// says. Everything that is not a yes is a no, which is what the option's own
+/// parser does.
+pub(crate) fn cursor_blink_option() -> Option<bool> {
+    env::var("PSMUX_CURSOR_BLINK")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "on" | "true"))
+}
+
+/// Whether an unset `cursor-blink` blinks, mirroring its catalog default.
+///
+/// It is `off`, which is what makes a bare `block`, `underline` or `bar` mean
+/// the steady shape tmux means by those words. Named rather than inlined so
+/// the fallback below reads as two separate reasons, and so a test can hold it
+/// against the catalog.
+pub(crate) const CURSOR_BLINK_DEFAULT_BLINKS: bool = false;
+
+/// Resolve the DECSCUSR code (1-6) from the PSMUX_CURSOR_STYLE /
+/// PSMUX_CURSOR_BLINK configuration, or 0 for "no opinion".
+///
+/// 0 is a state, not a shape: it is what `cursor-style default` means, it is
+/// the default of the option, and it is also what an unset or unrecognised
+/// value resolves to. tmux spells the same state `SCREEN_CURSOR_DEFAULT`
+/// (tmux.h) and treats it as a third value beside block, underline and bar.
 ///
 /// Used as the fallback cursor shape when ConPTY doesn't forward DECSCUSR from
 /// the child process (Windows 10 without passthrough mode).
 pub fn configured_cursor_code() -> u8 {
-    let style = env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string());
-    let blink = env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0";
-    match style.as_str() {
+    let style = env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "default".to_string());
+    // tmux has no `cursor-blink`: it spells the blink into the value, as
+    // `blinking-block`, `blinking-underline` and `blinking-bar`
+    // (options-table.c, tmux.1). psmux has carried the blink as its own
+    // option since its first commit and users have it in their configs, so
+    // both spellings have to work. The prefix names the SHAPE; who decides the
+    // blink depends on whether the option was set at all.
+    let named_blink = style.strip_prefix("blinking-");
+    let shape = named_blink.unwrap_or(style.as_str());
+    let blink = match cursor_blink_option() {
+        // Set: it decides. It is the setting that speaks about nothing but
+        // blinking, so `cursor-style blinking-bar` with `cursor-blink off` is
+        // a steady bar.
+        Some(on) => on,
+        // Not set: a value that names the blink supplies it, and otherwise
+        // `cursor-blink`'s own default stands. With that default off, a bare
+        // `block` is the steady block tmux means by the word, and
+        // `blinking-block` is the blinking one.
+        None => named_blink.is_some() || CURSOR_BLINK_DEFAULT_BLINKS,
+    };
+    match shape {
         "block" => if blink { 1 } else { 2 },
         "underline" => if blink { 3 } else { 4 },
         "bar" | "beam" => if blink { 5 } else { 6 },
@@ -140,9 +326,22 @@ pub fn configured_cursor_code() -> u8 {
     }
 }
 
+/// Assert the configured cursor shape on the real terminal, once, at attach.
+///
+/// Writes nothing when nothing asked for a shape. tmux never sends one of its
+/// own either: `tty_start_tty` (tty.c) sends the alternate screen, the keypad
+/// mode, a clear, `cnorm`, the mouse mode resets and bracketed paste, and no
+/// DECSCUSR at all. A terminal keeps the cursor its user configured because
+/// nothing overwrote it, which cannot be had by sending a reset instead.
 pub fn apply_cursor_style<W: Write>(out: &mut W) -> io::Result<()> {
     let code = configured_cursor_code();
+    if code == 0 {
+        // No shape. An explicit `cursor-blink` still has something to say,
+        // and mode 12 is the only way to say it without naming a shape.
+        return apply_blink_only(out, blink_only_mode());
+    }
     execute!(out, Print(format!("\x1b[{} q", code)))?;
+    note_cursor_code(code);
     Ok(())
 }
 
@@ -274,3 +473,7 @@ pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let final_h = middle.height.min(clamped_h);
     Rect { x, y: middle.y, width, height: final_h }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue735_cursor_style_default.rs"]
+mod test_issue735_cursor_style_default;

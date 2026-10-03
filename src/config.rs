@@ -1411,10 +1411,16 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         }
         "cursor-style" => env::set_var("PSMUX_CURSOR_STYLE", value),
         "cursor-blink" => {
+            // Stored only. The blink reaches the terminal as part of the
+            // DECSCUSR code the shape resolves to (rendering.rs), which is how
+            // tmux carries it too, its `cursor-style` values naming the blink.
+            // This used to also write DEC private mode 12 here, which went
+            // nowhere: config parsing runs in the server, and the server is
+            // started with its own hidden console (platform.rs
+            // `spawn_server_hidden`), so those bytes landed on a screen buffer
+            // no one sees.
             let on = matches!(value, "on"|"true"|"1");
             env::set_var("PSMUX_CURSOR_BLINK", if on { "1" } else { "0" });
-            let _ = std::io::Write::write_all(&mut std::io::stdout(), if on { b"\x1b[?12h" } else { b"\x1b[?12l" });
-            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
         "status" => {
             if let Ok(n) = value.parse::<usize>() {

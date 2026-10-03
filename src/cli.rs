@@ -786,8 +786,19 @@ SET OPTIONS (use with: set -g <option> <value>):
     default-command     Str  Alias for default-shell
     word-separators     Str  Copy-mode word delimiters (default: " -_@")
     prediction-dimming  Bool Dim predictive text (default: on)
-    cursor-style        Str  Cursor shape: block, underline, bar
-    cursor-blink        Bool Cursor blinking (default: off)
+    cursor-style        Str  Cursor shape asked of the terminal. "block",
+                             "underline" and "bar" are steady;
+                             "blinking-block", "blinking-underline" and
+                             "blinking-bar" blink. "default" asks for no
+                             shape, so the cursor you had before starting
+                             psmux is the one you keep, and with neither
+                             option set that is what you get
+                             (default: default)
+    cursor-blink        Bool Adds or removes the blink of the shape above:
+                             "on" makes a steady shape blink, "off" stops a
+                             blinking one. Set on its own, with no shape
+                             named, it asks for the blink alone and leaves
+                             the shape as it was (default: off)
     bell-action         Str  Bell handling: any, none, current, other
     visual-bell         Bool Visual bell indicator (default: off)
 
@@ -892,8 +903,10 @@ COPY MODE KEYS (prefix + [):
 ENVIRONMENT VARIABLES:
     PSMUX_SESSION_NAME       Default session name
     PSMUX_DEFAULT_SESSION    Fallback default session name
-    PSMUX_CURSOR_STYLE       Cursor style (block, underline, bar)
-    PSMUX_CURSOR_BLINK       Cursor blinking (1/0)
+    PSMUX_CURSOR_STYLE       Cursor style (default, block, underline, bar,
+                             blinking-block, blinking-underline, blinking-bar)
+    PSMUX_CURSOR_BLINK       Cursor blinking (1/on/true, else off; unset
+                             is not the same as 0)
     PSMUX_DIM_PREDICTIONS    Prediction dimming (1 to enable)
     TMUX                     Set inside psmux panes (tmux-compatible)
     TMUX_PANE                Current pane ID (e.g. %1)

@@ -58,7 +58,6 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
 use crossterm::{execute};
-use crossterm::cursor::{EnableBlinking, DisableBlinking};
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste};
 
 use crate::platform::enable_virtual_terminal_processing;
@@ -5531,7 +5530,13 @@ fn run_main() -> io::Result<()> {
     // `terminal-overrides` (`*:smcup@:rmcup@` keeps the host terminal on its
     // main screen), and that value arrives with the first frame.
     crate::terminal_overrides::arm_client_screen();
-    execute!(stdout, EnableBlinking, EnableMouseCapture, EnableBracketedPaste)?;
+    // No `EnableBlinking` here. It is DEC private mode 12, `\x1b[?12h`, and it
+    // turned the cursor's blinking on for every attach, whatever the terminal
+    // was set to, which is the opposite of leaving the cursor alone. tmux
+    // sends no such thing: `tty_start_tty` (tty.c) sends `cnorm`, which is
+    // visibility, and the blink rides along with the shape in DECSCUSR when a
+    // shape is asked for at all.
+    execute!(stdout, EnableMouseCapture, EnableBracketedPaste)?;
     apply_cursor_style(&mut stdout)?;
 
     let input = if pipe_vt {
@@ -5631,9 +5636,28 @@ fn run_main() -> io::Result<()> {
     // Without this, the last ratatui frame's foreground color can persist
     // into the main screen, making typed text invisible.
     let _ = execute!(out, crossterm::style::Print("\x1b[0m"));
-    // Reset cursor style to terminal default (\x1b[0 q)
-    let _ = execute!(out, crossterm::style::Print("\x1b[0 q"));
-    let _ = execute!(out, DisableBlinking, DisableMouseCapture, DisableBracketedPaste);
+    // Put the cursor back the way this client found it, and only when it
+    // moved it at all. A session that never asked for a shape or a blink
+    // leaves the terminal the cursor its user configured, on the way out as on
+    // the way in, which is why `DisableBlinking` is gone with its counterpart
+    // at attach.
+    //
+    // The shape first, then the blink, because on Windows Terminal a DECSCUSR
+    // code carries the blink with it: measured, `ESC [ 6 q` turned the
+    // reported mode 12 from set to reset and `ESC [ 0 q` turned it back.
+    //
+    // tmux stops at the equivalent of `ESC [ 0 q` here (`tty_stop_tty`,
+    // tty.c, sends `Se` or `Ss 0`), which is the TERMINAL's default and not
+    // where the user was. psmux asks at attach what the terminal was drawing,
+    // so it can put that back instead, and falls back to tmux's reset for a
+    // terminal that will not say.
+    if let Some(code) = crate::rendering::shape_restore() {
+        let _ = execute!(out, crossterm::style::Print(format!("\x1b[{} q", code)));
+    }
+    if let Some(on) = crate::rendering::blink_restore() {
+        let _ = execute!(out, crossterm::style::Print(if on { "\x1b[?12h" } else { "\x1b[?12l" }));
+    }
+    let _ = execute!(out, DisableMouseCapture, DisableBracketedPaste);
     // Leaves the alternate screen, or with `rmcup@` clears the main one (#700).
     crate::terminal_overrides::client_screen_stop(out);
     let _ = terminal.show_cursor();

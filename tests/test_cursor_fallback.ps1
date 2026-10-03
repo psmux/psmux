@@ -3,8 +3,10 @@
   Test cursor-style fallback behavior on Windows 10
   (where ConPTY doesn't forward DECSCUSR from child apps).
   
-  Verifies that psmux emits the configured cursor-style (default: bar)
-  even when the child process hasn't sent any DECSCUSR sequence.
+  Verifies that psmux emits the configured cursor-style even when the child
+  process hasn't sent any DECSCUSR sequence. The option defaults to `default`,
+  which is the state "no shape asserted": psmux then sends nothing and the
+  terminal keeps the cursor its user configured (tmux parity, #735).
 #>
 $ErrorActionPreference = "Continue"
 $results = @()
@@ -25,7 +27,7 @@ Write-Host "=== Cursor-Style Fallback Test ==="
 & $PSMUX kill-server 2>$null
 Start-Sleep -Seconds 1
 
-# --- Test 1: Default cursor-style is "bar" ---
+# --- Test 1: Default cursor-style is "default" ---
 Write-Host "`n--- Test 1: Default cursor-style value ---"
 $session = "cursor_fb"
 & $PSMUX new-session -d -s $session 2>$null
@@ -33,10 +35,10 @@ Start-Sleep -Seconds 3
 
 $opts = & $PSMUX show-options -g -t $session 2>&1 | Out-String
 $cursorLine = $opts -split "`n" | Where-Object { $_ -match "cursor-style" } | Select-Object -First 1
-if ($cursorLine -match "bar") {
-    Add-Result "Default cursor-style is bar" $true
+if ($cursorLine -match "default") {
+    Add-Result "Default cursor-style is default" $true
 } else {
-    Add-Result "Default cursor-style is bar" $false "Got: $($cursorLine.Trim())"
+    Add-Result "Default cursor-style is default" $false "Got: $($cursorLine.Trim())"
 }
 
 # --- Test 2: cursor-style can be set ---
@@ -61,12 +63,14 @@ if ($cursorLine3 -match "bar") {
     Add-Result "cursor-style set back to bar" $false "Got: $($cursorLine3.Trim())"
 }
 
-# --- Test 4: cursor-blink default is on ---
+# --- Test 4: cursor-blink default is off ---
+# Off, so a bare block/underline/bar is the steady shape tmux means by the
+# word; a blinking-* style blinks without this option (#735).
 $blinkLine = $opts -split "`n" | Where-Object { $_ -match "cursor-blink" } | Select-Object -First 1
-if ($blinkLine -match "on") {
-    Add-Result "Default cursor-blink is on" $true
+if ($blinkLine -match "off") {
+    Add-Result "Default cursor-blink is off" $true
 } else {
-    Add-Result "Default cursor-blink is on" $false "Got: $($blinkLine.Trim())"
+    Add-Result "Default cursor-blink is off" $false "Got: $($blinkLine.Trim())"
 }
 
 # --- Test 5: Pane without DECSCUSR uses fallback ---

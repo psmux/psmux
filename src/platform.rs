@@ -531,6 +531,17 @@ fn query_host_terminal_colors_impl() -> Option<String> {
             queries.push_str(&format!("\x1b]4;{};?\x1b\\", i));
         }
         queries.push_str("\x1b[?996n");
+        // What the cursor's blinking is set to right now, so teardown can put
+        // it back if `cursor-blink` is going to change it. DEC private mode 12
+        // has no "back to the terminal's default", only the two states, so the
+        // state it had has to be read rather than assumed. Measured on Windows
+        // Terminal: `\x1b[?12$p` is answered with `\x1b[?12;1$y`.
+        queries.push_str("\x1b[?12$p");
+        // And what the cursor's shape is, for the same reason: the reset that
+        // takes a shape back, `ESC [ 0 q`, goes to the TERMINAL's default and
+        // not to what the user had. Measured on Windows Terminal:
+        // `ESC P $ q SP q ESC \` is answered with `ESC P 1 $ r 0 SP q ESC \`.
+        queries.push_str("\x1bP$q q\x1b\\");
         queries.push_str("\x1b[c"); // DA1 sentinel: always answered, marks the end
         {
             let mut out = std::io::stdout();
@@ -612,6 +623,8 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         }
         SetConsoleMode(h_in, orig_mode);
 
+        crate::rendering::note_host_blink_before(parse_decrqm_blink(&buf));
+        crate::rendering::note_host_shape_before(parse_decrqss_cursor_style(&buf));
         let hc = parse_host_color_replies(&buf);
         if hc.has_any() || hc.dark.is_some() {
             Some(hc.to_spec())
@@ -619,6 +632,45 @@ fn query_host_terminal_colors_impl() -> Option<String> {
             None
         }
     }
+}
+
+/// What the terminal answered about DEC private mode 12, the cursor's
+/// blinking, in a DECRQM reply: `CSI ? 12 ; Ps $ y`.
+///
+/// `Ps` is 1 set and 3 permanently set, 2 reset and 4 permanently reset, and 0
+/// for a mode the terminal does not recognise. Anything else, or no reply at
+/// all, is `None`: nobody said, and teardown must not pretend otherwise.
+pub(crate) fn parse_decrqm_blink(buf: &[u8]) -> Option<bool> {
+    let needle = b"\x1b[?12;";
+    let at = buf.windows(needle.len()).position(|w| w == needle)?;
+    let rest = &buf[at + needle.len()..];
+    let end = rest.iter().position(|&b| b == b'$')?;
+    if rest.get(end + 1) != Some(&b'y') {
+        return None;
+    }
+    match std::str::from_utf8(&rest[..end]).ok()?.trim() {
+        "1" | "3" => Some(true),
+        "2" | "4" => Some(false),
+        _ => None,
+    }
+}
+
+/// What the terminal answered about its cursor shape in a DECRQSS reply:
+/// `DCS 1 $ r Ps SP q ST`, where `Ps` is the DECSCUSR code it would report for
+/// the cursor it is drawing now, and an empty `Ps` means 0.
+///
+/// A terminal that will not say answers `DCS 0 $ r ST` instead, which is a
+/// refusal and comes back as `None`, the same as no reply at all.
+pub(crate) fn parse_decrqss_cursor_style(buf: &[u8]) -> Option<u8> {
+    let needle = b"\x1bP1$r";
+    let at = buf.windows(needle.len()).position(|w| w == needle)?;
+    let rest = &buf[at + needle.len()..];
+    let end = rest.windows(2).position(|w| w == b" q")?;
+    let digits = std::str::from_utf8(&rest[..end]).ok()?.trim();
+    if digits.is_empty() {
+        return Some(0);
+    }
+    digits.parse::<u8>().ok().filter(|code| *code <= 6)
 }
 
 /// How long the colour drain keeps reading after the DA1 sentinel lands, for a

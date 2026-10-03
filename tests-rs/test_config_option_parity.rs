@@ -86,7 +86,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "warm" => "off",
         "warm-pool-size" => "3",
         "cursor-style" => "block",
-        "cursor-blink" => "off",
+        "cursor-blink" => "on",
         "claude-code-fix-tty" => "off",
         "claude-code-force-interactive" => "off",
         "automatic-rename" => "off",

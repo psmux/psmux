@@ -3561,13 +3561,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let status_justify_escaped = json_escape_string(&app.status_justify);
                     let status_format_json = &sf.status_format_json;
                     let cursor_style_code = crate::rendering::configured_cursor_code();
+                    // The blink on its own, for a `cursor-style` that names no
+                    // shape. A shape carries its blink in the code above.
+                    let cursor_blink_mode = match crate::rendering::blink_only_mode() {
+                        Some(true) => "true",
+                        Some(false) => "false",
+                        None => "null",
+                    };
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"bold_is_bright\":{}}}",
+                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"bold_is_bright\":{}}}",
                         layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                         matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                         mode_style_escaped, message_style_escaped, status_position_escaped, status_justify_escaped,
-                        cursor_style_code, app.status_visible, app.repeat_time_ms,
+                        cursor_style_code, cursor_blink_mode, app.status_visible, app.repeat_time_ms,
                         app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
                         app.defaults_suppressed,
                         app.pwsh_mouse_selection,
@@ -5627,8 +5634,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if app.prediction_dimming { "on" } else { "off" }
                     ));
                     output.push_str(&format!("allow-predictions {}\n", if app.allow_predictions { "on" } else { "off" }));
-                    output.push_str(&format!("cursor-style {}\n", std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string())));
-                    output.push_str(&format!("cursor-blink {}\n", if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on" } else { "off" }));
+                    output.push_str(&format!("cursor-style {}\n", std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "default".to_string())));
+                    output.push_str(&format!("cursor-blink {}\n", if crate::rendering::cursor_blink_option()
+                        .unwrap_or(crate::rendering::CURSOR_BLINK_DEFAULT_BLINKS) { "on" } else { "off" }));
                     {
                         let shell_val = if app.default_shell.is_empty() {
                             crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
@@ -7991,13 +7999,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let status_justify_escaped = json_escape_string(&app.status_justify);
             let status_format_json = &sf.status_format_json;
             let cursor_style_code = crate::rendering::configured_cursor_code();
+            // The blink on its own, for a `cursor-style` that names no shape.
+            let cursor_blink_mode = match crate::rendering::blink_only_mode() {
+                Some(true) => "true",
+                Some(false) => "false",
+                None => "null",
+            };
             let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"bold_is_bright\":{}}}",
+                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"bold_is_bright\":{}}}",
                 layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                 matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                 mode_style_escaped, message_style_escaped, status_position_escaped, status_justify_escaped,
-                cursor_style_code, app.status_visible, app.repeat_time_ms,
+                cursor_style_code, cursor_blink_mode, app.status_visible, app.repeat_time_ms,
                 app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
                 app.pwsh_mouse_selection,
                 app.mouse_selection,

@@ -53,7 +53,7 @@ Write-Host "=== Cursor Style Test ==="
 Write-Host ""
 
 # =====================================================================
-# TEST 1: Default cursor style (bar, blink on)
+# TEST 1: Default cursor style (default, blink on)
 # =====================================================================
 Write-Host "--- Test 1: Default cursor style ---"
 $confDefault = "$env:TEMP\psmux_cursor_default.conf"
@@ -61,7 +61,7 @@ Set-Content -Path $confDefault -Value "# empty config — defaults only" -Encodi
 
 if (Start-SessionWithConfig $confDefault "cdefault") {
     $opt = Get-Opt "cursor-style" "cdefault"
-    Add-Result "Default: cursor-style is bar" ($opt -match 'bar|beam' -or $opt -eq '') "($opt)"
+    Add-Result "Default: cursor-style is default" ($opt -eq 'default') "($opt)"
 
     $blink = Get-Opt "cursor-blink" "cdefault"
     Add-Result "Default: cursor-blink option readable" ($blink -ne '') "($blink)"

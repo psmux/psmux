@@ -661,7 +661,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("set-clipboard",              "on"),
     ("set-titles-string",          "\"\""),
     // psmux extensions
-    ("cursor-style",               "\"\""),
+    ("cursor-style",               "default"),
     ("cursor-blink",               "off"),
     ("prediction-dimming",         "off"),
     ("allow-predictions",          "off"),

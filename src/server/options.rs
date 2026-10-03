@@ -426,8 +426,9 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "priority" => app.priority.clone(),
         "prediction-dimming" => if app.prediction_dimming { "on".into() } else { "off".into() },
         "allow-predictions" => if app.allow_predictions { "on".into() } else { "off".into() },
-        "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string()),
-        "cursor-blink" => if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on".into() } else { "off".into() },
+        "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "default".to_string()),
+        "cursor-blink" => if crate::rendering::cursor_blink_option()
+            .unwrap_or(crate::rendering::CURSOR_BLINK_DEFAULT_BLINKS) { "on".into() } else { "off".into() },
         "default-shell" | "default-command" => {
             if app.default_shell.is_empty() {
                 crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
@@ -983,10 +984,10 @@ pub(crate) fn apply_set_option(
         }
         "cursor-style" => { std::env::set_var("PSMUX_CURSOR_STYLE", value); }
         "cursor-blink" => {
+            // Stored only; see the same arm in config.rs for why the DEC
+            // private mode 12 write that used to live here was removed.
             let on = matches!(value, "on"|"true"|"1");
             std::env::set_var("PSMUX_CURSOR_BLINK", if on { "1" } else { "0" });
-            let _ = std::io::Write::write_all(&mut std::io::stdout(), if on { b"\x1b[?12h" } else { b"\x1b[?12l" });
-            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
         "pane-border-style" => { app.pane_border_style = value.to_string(); }
         "pane-active-border-style" => { app.pane_active_border_style = value.to_string(); }

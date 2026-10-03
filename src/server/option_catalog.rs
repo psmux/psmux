@@ -270,8 +270,8 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "allow-predictions", scope: Session, option_type: Boolean, default: "off", description: "Allow PSReadLine predictions" },
     OptionDef { name: "warm", scope: Session, option_type: Boolean, default: "on", description: "Pre-spawn warm shell for fast window creation" },
     OptionDef { name: "warm-pool-size", scope: Session, option_type: Number(Usize), default: "2", description: "How many spare shells to keep pre-spawned (0 disables, max 8)" },
-    OptionDef { name: "cursor-style", scope: Session, option_type: UNVALIDATED_CHOICE, default: "bar", description: "Cursor style (bar/block/underline)" },
-    OptionDef { name: "cursor-blink", scope: Session, option_type: Boolean, default: "on", description: "Blink the cursor" },
+    OptionDef { name: "cursor-style", scope: Session, option_type: UNVALIDATED_CHOICE, default: "default", description: "Cursor shape asked of the terminal: default (ask for none), block, underline, bar (steady), blinking-block, blinking-underline, blinking-bar" },
+    OptionDef { name: "cursor-blink", scope: Session, option_type: Boolean, default: "off", description: "Add or remove the blink of the cursor-style shape, or ask for the blink alone when no shape is named" },
     OptionDef { name: "claude-code-fix-tty", scope: Session, option_type: Boolean, default: "on", description: "Fix TTY for Claude Code" },
     OptionDef { name: "claude-code-force-interactive", scope: Session, option_type: Boolean, default: "on", description: "Force interactive mode for Claude Code" },
     // ── Window options ──

@@ -3243,6 +3243,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// Used as fallback when no child process has set a cursor shape.
         #[serde(default)]
         cursor_style_code: Option<u8>,
+        /// `cursor-blink` when it was set and `cursor-style` names no shape,
+        /// `null` otherwise. A shape carries its own blink in the DECSCUSR
+        /// code above; this is the blink on its own, which only DEC private
+        /// mode 12 can express.
+        #[serde(default)]
+        cursor_blink_mode: Option<bool>,
         /// One-shot clipboard text (base64-encoded) for OSC 52 delivery.
         #[serde(default)]
         clipboard_osc52: Option<String>,
@@ -3450,7 +3456,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // ── Cursor blink stabilisation ──────────────────────────────────
     // Cache the last-sent DECSCUSR code so we only write it when it
     // actually changes (avoids resetting WT's blink timer every frame).
-    let mut last_cursor_style: u8 = 255;
+    //
+    // It starts at 0, the code for "no shape asserted", because that is the
+    // state the terminal is in before this client writes anything: whatever
+    // cursor its user configured. A frame that also wants 0 therefore writes
+    // nothing, and the reset goes out only to undo a shape this client itself
+    // sent. tmux keeps the same latch and the same rule in
+    // `tty_update_cursor` (tty.c): for `SCREEN_CURSOR_DEFAULT` it sends `Se`,
+    // or `Ss 0`, only `if (tty->cstyle != SCREEN_CURSOR_DEFAULT)`.
+    let mut last_cursor_style: u8 = 0;
+    // The blink this client last asserted on its own, through DEC private mode
+    // 12, for a `cursor-style` that names no shape. `None` is "said nothing",
+    // which is where every client starts and what an unset `cursor-blink`
+    // leaves it at.
+    let mut last_blink_mode: Option<bool> = None;
     // Trap Ctrl+Break (and stray Ctrl+C) console signals so they interrupt the
     // pane's foreground program instead of terminating this client and
     // detaching the still-running session (issue #454).  The signal is drained
@@ -6855,6 +6874,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         clock_active = state.clock_mode;
         clock_colour_str = state.clock_colour;
         let state_cursor_style_code = state.cursor_style_code;
+        let state_cursor_blink_mode = state.cursor_blink_mode;
         // Server-side overlay state (update persistent variables)
         srv_floats = state.floats;
         srv_popup_active = state.popup_active;
@@ -8523,7 +8543,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             // timer resets in WT).
             if effective != last_cursor_style {
                 last_cursor_style = effective;
+                crate::rendering::note_cursor_code(effective);
                 let _ = terminal.backend_mut().queue_raw(format!("\x1b[{} q", effective).as_bytes());
+            }
+            // A shape carries its own blink, so mode 12 is only for the blink
+            // on its own: `cursor-blink` set while `cursor-style` names no
+            // shape. Written when it changes, so `set -g cursor-blink` takes
+            // effect in a running session, and never written for a blink
+            // nobody asked for.
+            let want_blink = if effective == 0 { state_cursor_blink_mode } else { None };
+            if want_blink.is_some() && want_blink != last_blink_mode {
+                last_blink_mode = want_blink;
+                crate::rendering::note_blink_asserted(want_blink == Some(true));
+                let _ = terminal.backend_mut().queue_raw(
+                    if want_blink == Some(true) { b"\x1b[?12h" } else { b"\x1b[?12l" });
             }
             let _ = terminal.backend_mut().end_frame();
 
