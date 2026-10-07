@@ -996,6 +996,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     if warm_eligible {
         app.pool_trickle = false;
         app.warm_pane.note_claim(was_ready);
+        exp_arm_claim_hold(app, claimed.as_ref(), was_ready);
         if !was_ready {
             crate::warm_trace!(
                 "claim(new-window): NO READY SPARE (depth={} got_warming={}) -- surging",
@@ -1330,6 +1331,26 @@ pub fn await_inflight_spare(
         match rx.recv_timeout(left) {
             Ok(slot) => {
                 land_spare(app, slot);
+                if exp_bits() & 2 != 0 {
+                    // Wait briefly for any lower id still in flight to land too.
+                    let lower_until = std::time::Instant::now() + std::time::Duration::from_millis(60);
+                    loop {
+                        let front = app.warm_pane.iter().next().map(|w| w.pane_id);
+                        let lowest = crate::warm_pane_sync::inflight::pending().into_iter().next();
+                        let want_more = matches!((front, lowest), (Some(f), Some(l)) if l < f);
+                        if !want_more {
+                            break;
+                        }
+                        let left = lower_until.min(deadline).saturating_duration_since(std::time::Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        match rx.recv_timeout(left) {
+                            Ok(s) => land_spare(app, s),
+                            Err(_) => break,
+                        }
+                    }
+                }
                 let got = app.warm_pane.claim();
                 if got.0.is_some() {
                     crate::warm_trace!(
@@ -1440,14 +1461,103 @@ pub fn trickle_deficit(trickle: &mut bool, pool: &crate::types::WarmPool, defici
     deficit.min(1usize.saturating_sub(booting))
 }
 
+fn exp_bits() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("PSMUX_EXP_F").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+}
+
+fn exp_arm_claim_hold(app: &mut AppState, claimed: Option<&crate::types::WarmPane>, was_ready: bool) {
+    if exp_bits() & 1 == 0 || was_ready {
+        return;
+    }
+    let Some(wp) = claimed else { return };
+    if app.warm_pane.inflight + app.warm_pane.len() < app.warm_pane.target.max(1) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let hold = app.claim_hold.get_or_insert_with(|| crate::types::BootHold::new(now));
+    hold.watch(wp.pane_id, wp.data_version.clone(), wp.term.clone(), now);
+    crate::warm_trace!("pool: claim hold watching pane={} (inflight={} depth={})", wp.pane_id, app.warm_pane.inflight, app.warm_pane.len());
+}
+
+/// EXPERIMENT: head first spawn ordering.
+static SPAWN_HEAD: std::sync::Mutex<Option<(usize, Option<std::time::Instant>)>> = std::sync::Mutex::new(None);
+
+fn exp_head_hold() -> Option<std::time::Duration> {
+    static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("PSMUX_EXP_HEAD_HOLD_MS").ok().and_then(|v| v.trim().parse().ok()))
+        .map(std::time::Duration::from_millis)
+}
+
+fn wait_for_head(my_id: usize) {
+    let Some(hold) = exp_head_hold() else { return };
+    let start = std::time::Instant::now();
+    let mut logged = false;
+    loop {
+        if crate::warm_pane_sync::inflight::is_tearing_down() || start.elapsed() > std::time::Duration::from_millis(1500) {
+            return;
+        }
+        {
+            let mut g = SPAWN_HEAD.lock().unwrap_or_else(|e| e.into_inner());
+            match *g {
+                None => return,
+                Some((h, _)) if h == my_id => return,
+                Some((h, done)) => {
+                    let done = match done {
+                        Some(t) => Some(t),
+                        None if !crate::warm_pane_sync::inflight::in_create(h) => {
+                            let t = std::time::Instant::now();
+                            *g = Some((h, Some(t)));
+                            Some(t)
+                        }
+                        None => None,
+                    };
+                    if let Some(t) = done {
+                        if t.elapsed() >= hold {
+                            *g = None;
+                            if logged {
+                                crate::warm_trace!("pool: head pane={} cleared, pane={} goes after {:.1}ms", h, my_id, start.elapsed().as_micros() as f64 / 1000.0);
+                            }
+                            return;
+                        }
+                    }
+                    logged = true;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 pub fn schedule_warm_refill(app: &mut AppState) {
     if !app.warm_enabled {
         return;
+    }
+    let head_needed = exp_head_hold().is_some() && app.warm_pane.is_empty();
+    if head_needed {
+        let mut g = SPAWN_HEAD.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            let lowest = crate::warm_pane_sync::inflight::pending().into_iter().next();
+            let id = lowest.unwrap_or(app.next_pane_id);
+            let done = match lowest {
+                Some(l) if !crate::warm_pane_sync::inflight::in_create(l) => Some(std::time::Instant::now()),
+                _ => None,
+            };
+            *g = Some((id, done));
+            crate::warm_trace!("pool: head pane={} (pending={:?})", id, crate::warm_pane_sync::inflight::pending());
+        }
     }
     // A shell somebody is waiting on is still booting (`types::BootHold`):
     // a claim during the hold cold spawns alone and the refill waits for it.
     if app.boot_hold.is_some() {
         return;
+    }
+    if let Some(h) = app.claim_hold.as_mut() {
+        if !h.released(std::time::Instant::now()) {
+            return;
+        }
+        app.claim_hold = None;
+        crate::warm_trace!("pool: claim hold released (depth={} ready={} inflight={})", app.warm_pane.len(), app.warm_pane.ready_len(), app.warm_pane.inflight);
     }
     let Some(tx) = app.warm_refill_tx.clone() else { return };
     let standby = app.is_warm_server();
@@ -1470,6 +1580,7 @@ pub fn schedule_warm_refill(app: &mut AppState) {
         let started = std::thread::Builder::new()
             .name("psmux-warm-spawn".into())
             .spawn(move || {
+                wait_for_head(params.pane_id);
                 let Some(_permit) = warm_spawn_permit() else {
                     // Teardown began before this spawn started: no process was
                     // ever created, so there is nothing for the reaper to kill.
@@ -1863,6 +1974,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     if warm_eligible {
         app.pool_trickle = false;
         app.warm_pane.note_claim(was_ready);
+        exp_arm_claim_hold(app, claimed.as_ref(), was_ready);
         if !was_ready {
             crate::warm_trace!(
                 "claim(split): NO READY SPARE (depth={} got_warming={}) -- surging",
@@ -4019,6 +4131,10 @@ pub fn spawn_reader_thread(
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
                     crate::pty_trace::mark("r", pane_id, &local[..n]);
+                    if crate::warm_trace::enabled() {
+                        let s = String::from_utf8_lossy(&local[..n]);
+                        crate::warm_trace!("EXPREAD pane={} n={} prompt={}", pane_id, n, s.contains("PS "));
+                    }
                     // Push raw bytes into staging (no parser lock involved).
                     let (lock, cv) = &*staging_r;
                     if let Ok(mut buf) = lock.lock() {

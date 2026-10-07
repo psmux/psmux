@@ -458,6 +458,12 @@ pub mod inflight {
         });
     }
 
+    /// True while the spawn for `pane_id` has been issued and has not come
+    /// back from `CreateProcessW` yet (no pid recorded, not released).
+    pub fn in_create(pane_id: usize) -> bool {
+        with(|m| matches!(m.get(&pane_id), Some(None)))
+    }
+
     /// Pane ids still in flight, for diagnostics and tests.
     pub fn pending() -> Vec<usize> {
         let mut v = with(|m| m.keys().copied().collect::<Vec<_>>());

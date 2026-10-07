@@ -1868,6 +1868,7 @@ pub struct AppState {
     /// Startup hold on background shell spawns, see [`BootHold`]. `Some` only
     /// from the first window's creation until its shell has started.
     pub boot_hold: Option<BootHold>,
+    pub claim_hold: Option<BootHold>,
     /// After the boot hold releases, the pool starts one spare at a time
     /// until one is ready or somebody claims. See [`BootHold`].
     pub pool_trickle: bool,
@@ -2835,6 +2836,7 @@ impl AppState {
             allow_alternate_screen: true,
             warm_pane: WarmPool::new(default_warm_pool_size()),
             boot_hold: None,
+            claim_hold: None,
             pool_trickle: false,
             warm_refill_tx: None,
             warm_refill_rx: None,
