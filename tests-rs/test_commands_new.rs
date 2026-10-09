@@ -170,16 +170,19 @@ fn list_keys_shows_bound_keys_with_table_key_command() {
             key: (KeyCode::Char('c'), KeyModifiers::NONE),
             action: Action::NewWindow,
             repeat: false,
+            note: None,
         },
         crate::types::Bind {
             key: (KeyCode::Char('x'), KeyModifiers::CONTROL),
             action: Action::KillPane,
             repeat: false,
+            note: None,
         },
         crate::types::Bind {
             key: (KeyCode::Up, KeyModifiers::NONE),
             action: Action::MoveFocus(FocusDir::Up),
             repeat: false,
+            note: None,
         },
     ];
     app.key_tables.insert("prefix".to_string(), binds);
@@ -201,10 +204,10 @@ fn list_keys_shows_bound_keys_with_table_key_command() {
 fn list_keys_shows_multiple_tables() {
     let mut app = mock_app_with_window();
     app.key_tables.insert("prefix".to_string(), vec![
-        crate::types::Bind { key: (KeyCode::Char('n'), KeyModifiers::NONE), action: Action::NextWindow, repeat: false },
+        crate::types::Bind { key: (KeyCode::Char('n'), KeyModifiers::NONE), action: Action::NextWindow, repeat: false, note: None },
     ]);
     app.key_tables.insert("copy-mode".to_string(), vec![
-        crate::types::Bind { key: (KeyCode::Char('q'), KeyModifiers::NONE), action: Action::Command("cancel".to_string()), repeat: false },
+        crate::types::Bind { key: (KeyCode::Char('q'), KeyModifiers::NONE), action: Action::Command("cancel".to_string()), repeat: false, note: None },
     ]);
     execute_command_string(&mut app, "list-keys").unwrap();
     let (_, out) = extract_popup(&app);
@@ -218,14 +221,14 @@ fn list_keys_shows_multiple_tables() {
 fn lsk_alias_produces_same_output() {
     let mut app1 = mock_app_with_window();
     app1.key_tables.insert("root".to_string(), vec![
-        crate::types::Bind { key: (KeyCode::F(1), KeyModifiers::NONE), action: Action::Command("help".to_string()), repeat: false },
+        crate::types::Bind { key: (KeyCode::F(1), KeyModifiers::NONE), action: Action::Command("help".to_string()), repeat: false, note: None },
     ]);
     execute_command_string(&mut app1, "list-keys").unwrap();
     let out1 = extract_popup(&app1).1.to_string();
 
     let mut app2 = mock_app_with_window();
     app2.key_tables.insert("root".to_string(), vec![
-        crate::types::Bind { key: (KeyCode::F(1), KeyModifiers::NONE), action: Action::Command("help".to_string()), repeat: false },
+        crate::types::Bind { key: (KeyCode::F(1), KeyModifiers::NONE), action: Action::Command("help".to_string()), repeat: false, note: None },
     ]);
     execute_command_string(&mut app2, "lsk").unwrap();
     let out2 = extract_popup(&app2).1.to_string();

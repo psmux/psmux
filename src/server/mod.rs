@@ -614,13 +614,16 @@ fn spawn_warm_server(app: &AppState) {
                         let key = key.trim().to_string();
                         if !key.is_empty() {
                             // Ask the server what its session name is.
-                            // Response is the name followed by a newline.
+                            // `session-info` answers `NAME: N windows ...`
+                            // from the server's own state. Not a format: a
+                            // held standby (#734) expands `#{session_name}`
+                            // empty, as tmux does with no session.
                             // Timeout is capped at 500ms inside send_auth_cmd_response.
                             match crate::session::send_auth_cmd_response(
                                 &addr, &key,
-                                b"display-message -p '#{session_name}'\n",
-                            ) {
-                                Ok(resp) if resp.trim() == "__warm__" => {
+                                b"session-info\n",
+                            ).map(|r| r.split(": ").next().unwrap_or("").trim().to_string()) {
+                                Ok(resp) if resp == "__warm__" => {
                                     warm_debug("early-return: existing warm verified alive");
                                     is_genuine_warm = true;
                                 }
@@ -864,7 +867,7 @@ fn drain_plugin_req(
                 app, index, listing,
             ));
         }
-        CtrlReq::BindKey(table_name, key, command, repeat) => {
+        CtrlReq::BindKey(table_name, key, command, repeat, note) => {
             if let Some(kc) = parse_key_string(&key) {
                 let kc = normalize_key_for_binding(kc);
                 let sub_cmds = crate::config::split_chained_commands_pub(&command);
@@ -876,7 +879,7 @@ fn drain_plugin_req(
                 if let Some(act) = action {
                     let table = app.key_tables.entry(table_name).or_default();
                     table.retain(|b| b.key != kc);
-                    table.push(Bind { key: kc, action: act, repeat });
+                    table.push(Bind { key: kc, action: act, repeat, note });
                 }
             }
         }
@@ -2974,6 +2977,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::SwapWindow { .. } => "SwapWindow",
                         _ => "",
                     };
+                    // A held standby answers as a server with no session
+                    // (#734): its formats must not show `__warm__` or the
+                    // spare window it keeps for the next new-session.
+                    crate::format::set_sessionless(app.is_held_standby());
                     match req {
                 CtrlReq::NewWindow(cmd, name, detached, start_dir, title, empty, env_sets, placement, outcome) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
@@ -4941,6 +4948,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
+                    // It has a session now, so formats run from here on see it.
+                    crate::format::set_sessionless(false);
                     // Move the guard from `__warm__` onto the claimed name (#505).
                     // Releasing the warm name is what frees it for the replacement
                     // warm spawned further below (issue #459).
@@ -5557,7 +5566,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::BindKey(table_name, key, command, repeat) => {
+                CtrlReq::BindKey(table_name, key, command, repeat, note) => {
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
                         // Support `\;` chaining in server-side bind-key
@@ -5570,11 +5579,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(act) = action {
                             let table = app.key_tables.entry(table_name).or_default();
                             table.retain(|b| b.key != kc);
-                            table.push(Bind { key: kc, action: act, repeat });
+                            table.push(Bind { key: kc, action: act, repeat, note });
                         }
                     }
                     meta_dirty = true;
                     state_dirty = true;
+                }
+                CtrlReq::ListKeyNotes(resp, table, all, key) => {
+                    let _ = resp.send(crate::config::list_key_notes(
+                        &app, table.as_deref(), all, key.as_deref(),
+                    ));
                 }
                 CtrlReq::UnbindKey(key, table) => {
                     if let Some(kc) = parse_key_string(&key) {
@@ -7986,6 +8000,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
             }
+            // A claim just made the standby a session: its hooks see it.
+            crate::format::set_sessionless(app.is_held_standby());
             // Log any active_idx change for debugging window-switch issues
             if app.active_idx != _prev_active_idx && crate::debug_log::server_log_enabled() {
                 crate::debug_log::server_log("switch", &format!(
@@ -8101,6 +8117,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
             }
         }
+        // The server's own work below (status, hooks, renames) is not a
+        // client's command: it formats against the real state.
+        crate::format::set_sessionless(false);
         // Drain async run-shell results (non-blocking).
         if let Some(rx) = app.run_shell_rx.as_ref() {
             while let Ok((title, text)) = rx.try_recv() {

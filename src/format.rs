@@ -25,6 +25,39 @@ thread_local! {
     // Set while expanding a format the way tmux's format_expand does (no
     // strftime pass). See `expand_format_untimed`.
     static NO_STRFTIME: Cell<bool> = const { Cell::new(false) };
+    // Set while a held standby answers a client (see `with_sessionless`).
+    static SESSIONLESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `f` with formats expanded as on a server that has no session.
+///
+/// A held standby (`start-server` + `exit-empty off`, issue #734) is the
+/// namespace's empty server, but it carries the window and pane it will hand to
+/// the next `new-session`. tmux has no session there, so a command's format has
+/// no session, window or pane to draw on (CMD_FIND_CANFAIL leaves them unset in
+/// cmd-display-message.c) and `#{session_name}` is empty. Expanding against the
+/// standby's own state printed its internal name `__warm__` and its spare
+/// window. Server scope variables (`#{pid}`, `#{host}`, options) still resolve.
+pub fn with_sessionless<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SESSIONLESS.set(self.0);
+        }
+    }
+    let _restore = Restore(SESSIONLESS.replace(on));
+    f()
+}
+
+/// Set the no session mode for the requests the server loop is about to run
+/// (see `with_sessionless`); returns the previous value.
+pub fn set_sessionless(on: bool) -> bool {
+    SESSIONLESS.replace(on)
+}
+
+/// Whether formats are being expanded for a server with no session.
+pub fn sessionless() -> bool {
+    SESSIONLESS.get()
 }
 
 /// Expand `f` with the `client_*` variables answering for client `cid`.
@@ -227,6 +260,10 @@ fn real_active_idx(app: &AppState) -> usize {
 
 /// Expand tmux format strings for a specific window index.
 pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> String {
+    // No session means no window or pane either: the shorthands below that
+    // describe them are empty, as in tmux (see `no_session_var`).
+    let no_session = sessionless();
+    let shorthand_idx = if no_session { usize::MAX } else { win_idx };
     let mut result = String::with_capacity(fmt.len() * 2);
     let bytes = fmt.as_bytes();
     let len = bytes.len();
@@ -276,7 +313,9 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
             // Shorthand #X
             match bytes[i + 1] {
                 b'S' => {
-                    if has_strftime {
+                    if no_session {
+                        // empty, like #{session_name} with no session
+                    } else if has_strftime {
                         result.push_str(&escape_strftime_percent(&app.session_name));
                     } else {
                         result.push_str(&app.session_name);
@@ -284,12 +323,14 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     i += 2; continue;
                 }
                 b'I' => {
-                    let n = if win_idx < app.windows.len() { app.win_display_index(win_idx) } else { 0 };
-                    result.push_str(&n.to_string());
+                    if !no_session {
+                        let n = if win_idx < app.windows.len() { app.win_display_index(win_idx) } else { 0 };
+                        result.push_str(&n.to_string());
+                    }
                     i += 2; continue;
                 }
                 b'W' => {
-                    if let Some(w) = app.windows.get(win_idx) {
+                    if let Some(w) = app.windows.get(shorthand_idx) {
                         if has_strftime {
                             result.push_str(&escape_strftime_percent(&w.name));
                         } else {
@@ -299,7 +340,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     i += 2; continue;
                 }
                 b'T' => {
-                    if let Some(w) = app.windows.get(win_idx) {
+                    if let Some(w) = app.windows.get(shorthand_idx) {
                         let title = active_pane(&w.root, &w.active_path)
                             .map(|p| &p.title[..])
                             .filter(|t| !t.is_empty())
@@ -314,7 +355,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     i += 2; continue;
                 }
                 b'P' => {
-                    if let Some(w) = app.windows.get(win_idx) {
+                    if let Some(w) = app.windows.get(shorthand_idx) {
                         let active_id = get_active_pane_id(&w.root, &w.active_path).unwrap_or(0);
                         let pos = crate::tree::get_pane_position_in_window(&w.root, active_id).unwrap_or(0);
                         result.push_str(&(pos + app.pane_base_index).to_string());
@@ -322,7 +363,8 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     i += 2; continue;
                 }
                 b'F' => {
-                    if win_idx == real_active_idx(app) { result.push('*'); }
+                    if no_session {}
+                    else if win_idx == real_active_idx(app) { result.push('*'); }
                     else if win_idx == app.last_window_idx { result.push('-'); }
                     i += 2; continue;
                 }
@@ -336,7 +378,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                 }
                 b'D' => {
                     // tmux: #D = unique pane id (like %0, %1)
-                    if let Some(w) = app.windows.get(win_idx) {
+                    if let Some(w) = app.windows.get(shorthand_idx) {
                         let active_id = get_active_pane_id(&w.root, &w.active_path).unwrap_or(0);
                         if has_strftime {
                             // Escape the '%' so chrono doesn't misinterpret %0, %1, etc.
@@ -597,6 +639,11 @@ fn expand_expression(expr: &str, app: &AppState, win_idx: usize) -> String {
 
     // Loop expansion: #{W:format} = iterate windows, #{P:format} = iterate panes, #{S:format} = iterate sessions
     if expr.len() >= 3 && expr.as_bytes()[1] == b':' {
+        // With no session there is nothing to loop over (tmux
+        // format_loop_sessions/windows/panes walk empty lists).
+        if sessionless() && matches!(first, b'W' | b'P' | b'S') {
+            return String::new();
+        }
         match first {
             b'W' => {
                 // #{W:fmt} — expand fmt once per window, join with spaces
@@ -1448,7 +1495,7 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
             let h = format_client(app).map(|ci| ci.height).unwrap_or(app.client_area.height);
             (h + if app.status_visible { 1 } else { 0 }).to_string()
         }
-        "client_session" => app.session_name.clone(),
+        "client_session" => if sessionless() { String::new() } else { app.session_name.clone() },
         // The session this client came from, empty when it has not switched.
         // This was aliased to client_session, so it echoed the CURRENT session
         // and could neither predict what `-l` would do nor verify what it did
@@ -1515,7 +1562,35 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
     if v == UNKNOWN_VAR { String::new() } else { v }
 }
 
+/// Whether `var` describes a session, window or pane, so that a server with
+/// no session (a held standby, see `with_sessionless`) leaves it empty, the
+/// way tmux's format_defaults adds no such keys without a session. Server
+/// scope variables (`pid`, `host`, `socket_path`, `start_time`, `version`,
+/// buffers, options) are not, and keep resolving.
+fn no_session_var(var: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "session_", "window_", "pane_", "alternate_", "copy_cursor_", "cursor_",
+        "keypad_", "scroll_", "search_", "selection_",
+    ];
+    const NAMES: &[&str] = &[
+        "history_bytes", "history_size", "insert_flag", "line", "origin_flag", "wrap_flag",
+        "mouse_all_flag", "mouse_any_flag", "mouse_button_flag", "mouse_standard_flag",
+        "mouse_utf8_flag", "mouse_line", "mouse_word", "mouse_x", "mouse_y",
+    ];
+    PREFIXES.iter().any(|p| var.starts_with(p)) || NAMES.contains(&var)
+}
+
 fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
+    // With no session at all nothing session scoped resolves, and tmux's
+    // server_sessions counts 0.
+    if sessionless() {
+        if var == "server_sessions" {
+            return "0".to_string();
+        }
+        if no_session_var(var) {
+            return String::new();
+        }
+    }
     let win = match app.windows.get(win_idx) {
         Some(w) => w,
         None => {
@@ -2686,3 +2761,7 @@ mod tests_issue724_client_formats;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue767_floating_panes.rs"]
 mod tests_issue767_floating_panes;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue734_side_sessionless.rs"]
+mod tests_issue734_side_sessionless;
