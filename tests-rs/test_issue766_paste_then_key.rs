@@ -87,3 +87,15 @@ fn the_shifted_rule_covers_one_character_only() {
 fn paste_detection_off_never_holds_a_shifted_head() {
     assert!(should_zero_latency_flush_paste_pend("Y", false, false, false, shifted(0)));
 }
+
+#[test]
+fn psmux_vt_input_opts_into_the_exact_paste_route() {
+    use crate::ssh_input::vt_input_forced;
+    for on in ["1", "on", "true", "yes", " ON "] {
+        assert!(vt_input_forced(Some(on)), "{:?} did not opt in", on);
+    }
+    for off in ["", "0", "off", "false", "no", "2"] {
+        assert!(!vt_input_forced(Some(off)), "{:?} opted in", off);
+    }
+    assert!(!vt_input_forced(None));
+}
