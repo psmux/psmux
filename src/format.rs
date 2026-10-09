@@ -1541,7 +1541,9 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
         } else {
             match app.mode {
                 Mode::CopyMode => "copy-mode-vi".into(),
-                _ => "root".into(),
+                // The session's `key-table` (tmux reports c->keytable, which
+                // server_client_set_key_table(c, NULL) points at it).
+                _ => crate::server::helpers::default_key_table(app).to_string(),
             }
         },
         "client_termname" | "client_termtype" => env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()),

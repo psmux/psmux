@@ -3746,7 +3746,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // other one-off top-level fields. The push path below does
                     // the same through the same helper.
                     helpers::append_session_name_json(&app.session_name, &mut combined_buf);
-                    helpers::append_key_table_json(app.current_key_table.as_deref(), &mut combined_buf);
+                    helpers::append_key_table_json(app.current_key_table.as_deref(), &mut combined_buf); helpers::append_default_key_table_json(helpers::default_key_table(&app), &mut combined_buf);
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
                         // Inject clock_colour if set
@@ -5857,6 +5857,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         output.push_str(&format!("default-shell {}\n", shell_val));
                     }
                     output.push_str(&format!("word-separators \"{}\"\n", app.word_separators));
+                    // tmux lists key-table with its root default; the value
+                    // itself lives in user_options, skipped in the loop below.
+                    output.push_str(&format!("key-table {}\n",
+                        crate::util::quote_arg_if_needed(helpers::default_key_table(&app))));
                     if !app.pane_border_style.is_empty() {
                         output.push_str(&format!("pane-border-style \"{}\"\n", app.pane_border_style));
                     }
@@ -5899,6 +5903,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     // Include @user-options (used by plugins)
                     for (key, val) in &app.user_options {
+                        if key == "key-table" { continue; }
                         output.push_str(&format!("{} \"{}\"\n", key, val));
                     }
                     // New options
@@ -8261,7 +8266,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // clients take most frames from this push, so without it their
             // `[#S]` and the rename overlay never saw the live name.
             helpers::append_session_name_json(&app.session_name, &mut combined_buf);
-            helpers::append_key_table_json(app.current_key_table.as_deref(), &mut combined_buf);
+            helpers::append_key_table_json(app.current_key_table.as_deref(), &mut combined_buf); helpers::append_default_key_table_json(helpers::default_key_table(&app), &mut combined_buf);
             // Inject overlay state (popup, menu, confirm, display_panes)
             {
                 // Inject clock_colour if set

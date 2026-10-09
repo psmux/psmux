@@ -227,19 +227,45 @@ pub fn dispatch_binding_commands(binding: &str) -> BindingDispatch {
 /// `switch-client -T`, the drop on the prefix key) are queued, so their echoes,
 /// including a frame that was already in flight when a fast second key landed,
 /// never re-arm a latch the client has just consumed.
+///
+/// It also holds the session's `key-table` option (tmux
+/// `server_client_get_key_table`): the table a client returns to after every
+/// key, root unless set. A latch naming it is no latch at all.
 #[derive(Debug, Default)]
 pub(crate) struct KeyTableSync {
     last_server: Option<String>,
     own_writes: std::collections::VecDeque<Option<String>>,
+    /// The session's `key-table`; empty means root.
+    default: String,
 }
 
 impl KeyTableSync {
+    /// The table keys are looked up in when nothing is latched.
+    pub(crate) fn default_table(&self) -> &str {
+        if self.default.is_empty() { "root" } else { &self.default }
+    }
+
+    /// The server reported the session's `key-table` (absent = root).
+    pub(crate) fn set_default(&mut self, table: Option<&str>) {
+        self.default = match table {
+            Some(t) if t != "root" => t.to_string(),
+            _ => String::new(),
+        };
+    }
+
     /// The server stores the default table as no table at all.
-    fn normalize(table: Option<&str>) -> Option<String> {
+    fn normalize(&self, table: Option<&str>) -> Option<String> {
         match table {
-            None | Some("root") => None,
+            None => None,
+            Some(t) if t == self.default_table() => None,
             Some(t) => Some(t.to_string()),
         }
+    }
+
+    /// The latch a binding's `switch-client -T` leaves: naming the default
+    /// table puts the client on it, which is the unlatched state.
+    pub(crate) fn latch_for(&self, table: Option<String>) -> Option<String> {
+        self.normalize(table.as_deref())
     }
 
     /// The client sent the server a table change of its own.
@@ -247,13 +273,15 @@ impl KeyTableSync {
         if self.own_writes.len() >= 32 {
             self.own_writes.pop_front();
         }
-        self.own_writes.push_back(Self::normalize(table));
+        let v = self.normalize(table);
+        self.own_writes.push_back(v);
     }
 
     /// A state frame reported `server` as the server's table. Returns
-    /// `Some(latch)` when the client must adopt it (`Some(None)` = back to root).
+    /// `Some(latch)` when the client must adopt it (`Some(None)` = back to the
+    /// default table).
     pub(crate) fn on_server_table(&mut self, server: Option<&str>) -> Option<Option<String>> {
-        let v = Self::normalize(server);
+        let v = self.normalize(server);
         if let Some(pos) = self.own_writes.iter().position(|w| *w == v) {
             // An echo of the client's own write: the latch already says so.
             self.own_writes.drain(..=pos);
@@ -3411,6 +3439,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// absent for root. See `KeyTableSync`.
         #[serde(default)]
         key_table: Option<String>,
+        /// The session's `key-table` option, absent for root.
+        #[serde(default)]
+        default_key_table: Option<String>,
         /// scroll-enter-copy-mode option (mirror of server-side AppState field).
         /// When false, root key bindings that enter copy mode (e.g. PageUp ->
         /// copy-mode -u) are skipped so the key reaches the PTY (#284).
@@ -4570,14 +4601,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         else if !prefix_armed && key_table_latch.is_none() && !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             synced_bindings.iter().any(|b| {
-                                b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                b.t == key_table_sync.default_table() && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
                                 // Skip scroll-triggered copy mode bindings when option is off (#284)
                                 && !(!scroll_enter_copy_mode && crate::copy_mode::is_page_up_copy_mode_command(&b.c))
                             })
                         } {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             if let Some(entry) = synced_bindings.iter().find(|b| {
-                                b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                b.t == key_table_sync.default_table() && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
                                 && !(!scroll_enter_copy_mode && crate::copy_mode::is_page_up_copy_mode_command(&b.c))
                             }) {
                                 if entry.c == "detach-client" || entry.c == "detach" {
@@ -4603,7 +4634,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             cmd_batch.extend(binding_wire_lines(&cmds));
                                             if latch.is_some() {
                                                 key_table_sync.note_own_write(latch.as_deref());
-                                                key_table_latch = latch;
+                                                key_table_latch = key_table_sync.latch_for(latch);
                                             }
                                         }
                                     }
@@ -4643,7 +4674,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // client's own latch, which `take()` above has
                             // already cleared.
                             if latched_table.is_some() {
-                                cmd_batch.push("switch-client -T root\n".into());
+                                // Back to the session's key-table, which is
+                                // root unless `key-table` is set.
+                                cmd_batch.push(format!("switch-client -T {}\n",
+                                    crate::util::quote_arg_if_needed(key_table_sync.default_table())));
                                 key_table_sync.note_own_write(None);
                             }
 
@@ -4653,11 +4687,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 b.t == active_table && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
                             });
                             // tmux: a key with no binding in a custom table
-                            // falls back to the root table before being
-                            // swallowed ("trying in root table").
+                            // falls back to the default table (root unless
+                            // `key-table` is set) before being swallowed
+                            // ("trying in root table").
                             if user_binding.is_none() && latched_table.is_some() {
                                 user_binding = synced_bindings.iter().find(|b| {
-                                    b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                    b.t == key_table_sync.default_table() && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
                                 });
                             }
                             if let Some(entry) = user_binding {
@@ -4743,7 +4778,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             cmd_batch.extend(binding_wire_lines(&cmds));
                                             if latch.is_some() {
                                                 key_table_sync.note_own_write(latch.as_deref());
-                                                key_table_latch = latch;
+                                                key_table_latch = key_table_sync.latch_for(latch);
                                             }
                                         }
                                     }
@@ -7495,6 +7530,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         defaults_suppressed = state.defaults_suppressed;
         // A table the server set without this client (CLI, command prompt,
         // run-shell, hook) becomes the client's latch for the next key.
+        key_table_sync.set_default(state.default_key_table.as_deref());
         if let Some(adopt) = key_table_sync.on_server_table(state.key_table.as_deref()) {
             key_table_latch = adopt;
         }

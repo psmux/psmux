@@ -250,9 +250,12 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 app.prefix_repeating = false;
                 return Ok(false);
             }
-            // Check root key table for bindings (bind-key -n / bind-key -T root)
+            // Check the default key table (bind-key -n / -T root, or the
+            // session's `key-table` when set: tmux looks keys up there and
+            // passes an unbound one to the pane without trying root).
             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
-            if let Some(bind) = app.key_tables.get("root").and_then(|t| t.iter().find(|b| b.key == key_tuple)).cloned() {
+            let default_table = crate::server::helpers::default_key_table(app).to_string();
+            if let Some(bind) = app.key_tables.get(default_table.as_str()).and_then(|t| t.iter().find(|b| b.key == key_tuple)).cloned() {
                 // Skip scroll-triggered copy mode entry when the option is
                 // off so the key (PageUp) reaches the PTY instead (#284).
                 let is_scroll_copy = matches!(&bind.action, crate::types::Action::Command(cmd) if crate::copy_mode::is_page_up_copy_mode_command(cmd));
