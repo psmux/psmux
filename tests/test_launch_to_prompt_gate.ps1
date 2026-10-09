@@ -77,7 +77,15 @@
 #   also sampled: the working set, private bytes, CPU and thread count of the
 #   server and of the attached client at the moment the pane's shell reached its
 #   prompt, and then a quiet window with nothing driving the session, reported as
-#   a percentage of one core. Same helpers and same field names as the creation
+#   a percentage of one core. That first window is where the server spawns the
+#   warm pool's spares, so it moves with warm-pool-size: measured 2026-10-09,
+#   interleaved, n=6 per cell, 4.2 % of a core at depth two and 7.0 % at depth
+#   three, while the server's CPU from 6 to 12 s after the prompt was the same
+#   ~47 ms at depth zero, two and three. So the gate also records the CPU from
+#   the prompt to $SettledAfterSeconds (the fill, a one time cost), a second
+#   quiet window after it (the steady state), and the memory of the whole
+#   session tree (pane shells, spares, console hosts, the standby server),
+#   which is where the pool's memory lives. Same helpers and same field names as the creation
 #   and keystroke gates (tests\perf_metrics_common.ps1), so a row from this file
 #   lines up with a row from those. The server is found by its <ns>__<session>.pid
 #   anchor, never by image name: this machine routinely has a dozen psmux servers
@@ -97,7 +105,12 @@ param(
     # the absolute delta is a hard failure; above it, a warning.
     [double]$QuietLoadPct = 25.0,
     # The quiet window used for the idle CPU sample on the last iteration.
-    [int]$IdleSeconds = 3
+    [int]$IdleSeconds = 3,
+    # The second idle sample starts this long after the prompt, once the warm
+    # pool has spawned and booted its spares. The first window (right at the
+    # prompt) is where the server spawns them, so it reads the pool's one time
+    # fill cost and moves with warm-pool-size; this one is the steady state.
+    [int]$SettledAfterSeconds = 8
 )
 
 $ErrorActionPreference = "Continue"
@@ -207,17 +220,36 @@ function Measure-Psmux([int]$i, [switch]$Sample) {
         if ($cliPid -le 0 -and $p -and -not $p.HasExited) { $cliPid = $p.Id }
         if ($cliPid -gt 0) { $roles["client"] = $cliPid }
         if ($roles.Count -gt 0) {
+            $promptSw = [System.Diagnostics.Stopwatch]::StartNew()
             $atPrompt = Get-PerfResourceSnapshot $roles
             $idle = Measure-PerfIdleCpu $roles $IdleSeconds
+            # Steady state: wait out the pool fill, then the same quiet window
+            # again. The CPU between the prompt and this point is the fill
+            # itself (spare spawns), recorded on its own so a deeper pool shows
+            # up as what it is, a one time cost, and not as a busier idle.
+            $restMs = [int]($SettledAfterSeconds * 1000 - $promptSw.ElapsedMilliseconds)
+            if ($restMs -gt 0) { Start-Sleep -Milliseconds $restMs }
+            $atSettled = Get-PerfResourceSnapshot $roles
+            $fillCpu = Get-PerfCpuDelta $atPrompt $atSettled 1.0 1.0
+            $idleSettled = Measure-PerfIdleCpu $roles $IdleSeconds
+            $tree = if ($srv -gt 0) { Get-PerfTreeMemory $srv } else { $null }
             $script:ResourceBlock = [ordered]@{
                 iteration             = $i
                 idle_window_seconds   = $IdleSeconds
                 at_prompt             = (Get-PerfMemorySummary $atPrompt)
                 idle_cpu_pct_of_core  = $idle.pct_of_one_core
                 idle_measured_over_ms = $idle.window_ms
+                settled_after_seconds = $SettledAfterSeconds
+                pool_fill_cpu_ms      = $fillCpu
+                idle_cpu_pct_of_core_settled = $idleSettled.pct_of_one_core
+                settled                = (Get-PerfMemorySummary $atSettled)
+                session_tree_settled   = $tree
             }
             Write-Info (Format-PerfResourceLine $atPrompt "at prompt  ")
-            Write-Info ("idle cpu, % of a core : " + (@($idle.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idle.pct_of_one_core[$_] }) -join "  "))
+            Write-Info ("idle cpu, % of a core : " + (@($idle.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idle.pct_of_one_core[$_] }) -join "  ") + "   (pool filling)")
+            Write-Info ("cpu ms, prompt to +{0}s: " -f $SettledAfterSeconds + (@($fillCpu.Keys | ForEach-Object { "{0} {1:F0}" -f $_, $fillCpu[$_] }) -join "  "))
+            Write-Info ("idle cpu, settled     : " + (@($idleSettled.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idleSettled.pct_of_one_core[$_] }) -join "  "))
+            if ($tree) { Write-Info ("session tree, settled: {0} processes, {1} MB working set, {2} MB private  ({3})" -f $tree.processes, $tree.ws_mb, $tree.private_mb, (@($tree.by_name.Keys | ForEach-Object { "$_ x$($tree.by_name[$_])" }) -join ', ')) }
         } else {
             Write-Info "neither the server nor the client could be identified, so no resource sample was taken"
         }
