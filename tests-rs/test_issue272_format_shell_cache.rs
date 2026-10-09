@@ -72,6 +72,20 @@ fn line_count(p: &std::path::Path) -> usize {
     }
 }
 
+/// Ceiling for "the worker has run" waits. Every wait below polls and returns
+/// as soon as its condition holds, so this costs nothing when spawning is
+/// quick; it only bounds how long a starved spawn may take.
+///
+/// It was 5 s, and that is not a property of the code under test but of the
+/// harness: unit tests run in ONE process, and on Windows process creation
+/// inside a process is serialized (std holds a lock across CreateProcessW).
+/// In `cargo test -- shell` some twenty tests spawn PowerShell at the same
+/// time, and Store PowerShell's app alias activation makes each creation
+/// slow, so the worker's `cmd` spawn() itself was measured blocking 5.8 s
+/// (instrumented 2026-10-09: spawn 5.83 s, the command 20 ms) while the
+/// assertions here are about COUNTS and VALUES, never latency. Latency of
+/// expand_format itself is still asserted, in expand_does_not_block_on_the_subprocess.
+const SPAWN_WAIT: Duration = Duration::from_secs(30);
 fn cleanup(p: &std::path::Path) {
     let _ = std::fs::remove_file(p);
 }
@@ -137,7 +151,7 @@ fn expand_does_not_block_on_the_subprocess() {
     assert_eq!(out, "", "first render shows empty #() before the worker completes; got {:?}", out);
 
     // Let the worker finish so it doesn't outlive the test.
-    wait_for_spawns(&counter, 1, Duration::from_secs(5));
+    wait_for_spawns(&counter, 1, SPAWN_WAIT);
     cleanup(&counter);
 }
 
@@ -161,7 +175,7 @@ fn one_spawn_per_window_and_value_after_drain() {
         let _ = expand_async(&fmt, &app);
     }
 
-    let drained = wait_for_drain(&app, Duration::from_secs(5));
+    let drained = wait_for_drain(&app, SPAWN_WAIT);
     assert_eq!(drained, 1, "exactly one result should drain");
 
     let second = expand_async(&fmt, &app);
@@ -182,7 +196,7 @@ fn respawns_after_ttl_expiry() {
     let fmt = format!("#({})", tracer_cmd(&counter));
 
     let _ = expand_async(&fmt, &app);
-    wait_for_drain(&app, Duration::from_secs(5));
+    wait_for_drain(&app, SPAWN_WAIT);
     assert_eq!(line_count(&counter), 1, "first call spawns");
 
     for _ in 0..10 {
@@ -192,7 +206,7 @@ fn respawns_after_ttl_expiry() {
 
     std::thread::sleep(Duration::from_millis(1100));
     let _ = expand_async(&fmt, &app);
-    let spawns = wait_for_spawns(&counter, 2, Duration::from_secs(5));
+    let spawns = wait_for_spawns(&counter, 2, SPAWN_WAIT);
     cleanup(&counter);
     assert_eq!(spawns, 2, "respawn after TTL expiry; got {}", spawns);
 }
@@ -215,7 +229,7 @@ fn in_flight_worker_blocks_a_second_spawn_after_ttl() {
         let _ = expand_async(&fmt, &app);
     }
 
-    let spawns = wait_for_spawns(&counter, 1, Duration::from_secs(5));
+    let spawns = wait_for_spawns(&counter, 1, SPAWN_WAIT);
     std::thread::sleep(Duration::from_millis(200));
     let after = line_count(&counter);
     cleanup(&counter);
@@ -238,8 +252,8 @@ fn distinct_commands_are_independent() {
         let _ = expand_async(&fb, &app);
     }
 
-    wait_for_spawns(&ca, 1, Duration::from_secs(5));
-    wait_for_spawns(&cb, 1, Duration::from_secs(5));
+    wait_for_spawns(&ca, 1, SPAWN_WAIT);
+    wait_for_spawns(&cb, 1, SPAWN_WAIT);
     std::thread::sleep(Duration::from_millis(150));
     let a = line_count(&ca);
     let b = line_count(&cb);
@@ -260,7 +274,7 @@ fn status_interval_zero_uses_one_second_floor() {
     for _ in 0..50 {
         let _ = expand_async(&fmt, &app);
     }
-    wait_for_spawns(&counter, 1, Duration::from_secs(5));
+    wait_for_spawns(&counter, 1, SPAWN_WAIT);
     std::thread::sleep(Duration::from_millis(150));
     let spawns = line_count(&counter);
     cleanup(&counter);
@@ -281,7 +295,7 @@ fn value_is_stdout_not_command_text() {
     let fmt = format!("#({})", cmd);
 
     let _ = expand_async(&fmt, &app); // spawn
-    wait_for_drain(&app, Duration::from_secs(5));
+    wait_for_drain(&app, SPAWN_WAIT);
     let out = expand_async(&fmt, &app); // cached value
     cleanup(&counter);
 

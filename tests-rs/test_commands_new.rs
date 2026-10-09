@@ -1667,6 +1667,14 @@ fn window_index_prompt_accepts_digits_only() {
 //  Issue #170: run-shell output display
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Ceiling for a run-shell result to arrive. recv_timeout returns the moment it
+/// does, so this only bounds a starved spawn: unit tests share one process, on
+/// Windows process creation in a process is serialized, and with some twenty
+/// tests in `cargo test -- shell` starting Store PowerShell at once a single
+/// spawn() was measured blocked for 5.8 s. 10 s timed out in that run; the
+/// assertions are about the output text, not how fast it came.
+const RUN_SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[test]
 fn run_shell_captures_and_displays_output() {
     let mut app = mock_app();
@@ -1681,7 +1689,7 @@ fn run_shell_captures_and_displays_output() {
     // run-shell is now async: the command runs in a background thread
     // and sends output via run_shell_rx. We need to recv the result.
     let rx = app.run_shell_rx.as_ref().expect("run_shell_rx should be created");
-    let (title, text) = rx.recv_timeout(std::time::Duration::from_secs(10))
+    let (title, text) = rx.recv_timeout(RUN_SHELL_WAIT)
         .expect("should receive run-shell output within 10s");
     assert_eq!(title, "run-shell");
     assert!(
@@ -1721,7 +1729,7 @@ fn run_shell_alias_captures_output() {
     let _ = execute_command_string(&mut app, cmd);
 
     let rx = app.run_shell_rx.as_ref().expect("run_shell_rx should be created");
-    let (_title, text) = rx.recv_timeout(std::time::Duration::from_secs(10))
+    let (_title, text) = rx.recv_timeout(RUN_SHELL_WAIT)
         .expect("should receive run alias output within 10s");
     assert!(
         text.contains("alias-test"),
@@ -1742,7 +1750,7 @@ fn run_shell_stderr_is_captured() {
     let _ = execute_command_string(&mut app, cmd);
 
     let rx = app.run_shell_rx.as_ref().expect("run_shell_rx should be created");
-    let (_title, text) = rx.recv_timeout(std::time::Duration::from_secs(10))
+    let (_title, text) = rx.recv_timeout(RUN_SHELL_WAIT)
         .expect("should receive run-shell stderr output within 10s");
     assert!(
         text.contains("error-output") || text.contains("error"),
