@@ -80,6 +80,30 @@ fn server_scope_formats_still_resolve_with_no_session() {
 }
 
 #[test]
+fn server_scope_formats_are_the_same_with_and_without_a_session() {
+    // These describe the server, not a session: the held server must answer
+    // them exactly as a server with a session does (#{socket_path} went empty
+    // when no-session mode routed every lookup through the windowless path).
+    let app = held_standby();
+    for var in ["socket_path", "start_time", "host", "host_short", "version", "pid", "prefix", "user"] {
+        let f = format!("#{{{}}}", var);
+        let normal = expand_format(&f, &app);
+        let held = with_sessionless(true, || expand_format(&f, &app));
+        assert_eq!(held, normal, "#{{{}}}", var);
+    }
+}
+
+#[test]
+fn pane_state_formats_are_empty_with_no_session() {
+    let app = held_standby();
+    for var in ["cursor_x", "history_size", "alternate_on", "pane_current_command", "pane_current_path", "window_flags", "mouse_any_flag"] {
+        let f = format!("#{{{}}}", var);
+        assert_eq!(with_sessionless(true, || expand_format(&f, &app)), "", "#{{{}}}", var);
+    }
+    assert_eq!(with_sessionless(true, || expand_format("[#T][#P][#F][#D]", &app)), "[][][][]");
+}
+
+#[test]
 fn loops_have_nothing_to_walk_with_no_session() {
     let app = held_standby();
     let out = with_sessionless(true, || {
