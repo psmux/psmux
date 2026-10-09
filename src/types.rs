@@ -2932,8 +2932,10 @@ pub enum Action {
     SwitchTable(String),
 }
 
+/// A key binding. `note` is `bind-key -N`'s text (tmux key_binding.note),
+/// what `list-keys -N` shows in place of the command.
 #[derive(Clone)]
-pub struct Bind { pub key: (KeyCode, KeyModifiers), pub action: Action, pub repeat: bool }
+pub struct Bind { pub key: (KeyCode, KeyModifiers), pub action: Action, pub repeat: bool, pub note: Option<String> }
 
 /// Tiled layout, border settings, and focus state used by chooser previews.
 /// Persistent floating panes and pane title bars are not included.
@@ -3402,11 +3404,13 @@ pub enum CtrlReq {
     },
     /// show-options -p (issue #580): list a pane's scoped options.
     ShowPaneOptions(String, mpsc::Sender<String>),
-    BindKey(String, String, String, bool),  // table, key, command, repeat
+    BindKey(String, String, String, bool, Option<String>),  // table, key, command, repeat, -N note
     UnbindKey(String, Option<String>),  // key, optional table (None = prefix)
     UnbindAll,
     UnbindAllInTable(String),
     ListKeys(mpsc::Sender<String>),
+    /// list-keys -N: (reply, -T table, -a, key filter).
+    ListKeyNotes(mpsc::Sender<String>, Option<String>, bool, Option<String>),
     SetOption(String, String),
     SetOptionQuiet(String, String, bool),  // set-option with quiet flag
     SetOptionUnset(String),  // set-option -u

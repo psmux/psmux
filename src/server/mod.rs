@@ -867,7 +867,7 @@ fn drain_plugin_req(
                 app, index, listing,
             ));
         }
-        CtrlReq::BindKey(table_name, key, command, repeat) => {
+        CtrlReq::BindKey(table_name, key, command, repeat, note) => {
             if let Some(kc) = parse_key_string(&key) {
                 let kc = normalize_key_for_binding(kc);
                 let sub_cmds = crate::config::split_chained_commands_pub(&command);
@@ -879,7 +879,7 @@ fn drain_plugin_req(
                 if let Some(act) = action {
                     let table = app.key_tables.entry(table_name).or_default();
                     table.retain(|b| b.key != kc);
-                    table.push(Bind { key: kc, action: act, repeat });
+                    table.push(Bind { key: kc, action: act, repeat, note });
                 }
             }
         }
@@ -5566,7 +5566,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::BindKey(table_name, key, command, repeat) => {
+                CtrlReq::BindKey(table_name, key, command, repeat, note) => {
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
                         // Support `\;` chaining in server-side bind-key
@@ -5579,11 +5579,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(act) = action {
                             let table = app.key_tables.entry(table_name).or_default();
                             table.retain(|b| b.key != kc);
-                            table.push(Bind { key: kc, action: act, repeat });
+                            table.push(Bind { key: kc, action: act, repeat, note });
                         }
                     }
                     meta_dirty = true;
                     state_dirty = true;
+                }
+                CtrlReq::ListKeyNotes(resp, table, all, key) => {
+                    let _ = resp.send(crate::config::list_key_notes(
+                        &app, table.as_deref(), all, key.as_deref(),
+                    ));
                 }
                 CtrlReq::UnbindKey(key, table) => {
                     if let Some(kc) = parse_key_string(&key) {

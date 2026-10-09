@@ -82,6 +82,7 @@ fn ensure_prefix_self_binding_does_not_clobber_user_override() {
         key: c_a,
         action: Action::Command("display-message custom".into()),
         repeat: false,
+        note: None,
     });
 
     ensure_prefix_self_binding(&mut app);

@@ -87,6 +87,7 @@ fn fresh_app() -> AppState {
             key: (crossterm::event::KeyCode::Char('v'), crossterm::event::KeyModifiers::NONE),
             action: crate::types::Action::Command("split-window -h".to_string()),
             repeat: false,
+            note: None,
         }],
     );
     app

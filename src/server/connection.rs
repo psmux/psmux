@@ -404,6 +404,41 @@ fn flag_value(args: &[&str], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].to_string())
 }
 
+/// Whether `arg` is a list-keys flag cluster (tmux "1aF:NO:P:rT:") that
+/// carries flag `c`.
+fn list_keys_flag(arg: &str, c: char) -> bool {
+    arg.len() > 1
+        && arg.starts_with('-')
+        && arg != "--"
+        && arg[1..].chars().all(|ch| "1aNr".contains(ch))
+        && arg[1..].contains(c)
+}
+
+/// The table and key of one `bind-key [-r] -T <table> <key> <command>` line.
+fn list_keys_line_table_key(line: &str) -> (Option<&str>, Option<&str>) {
+    let mut it = line.split(' ').skip_while(|t| *t != "-T").skip(1);
+    (it.next(), it.next())
+}
+
+/// `list-keys -N`'s operands: (`-T` table, `-a`, key filter).
+fn list_keys_notes_args(args: &[&str]) -> (Option<String>, bool, Option<String>) {
+    let mut table = None;
+    let mut all = false;
+    let mut key = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-T" => { table = args.get(i + 1).map(|s| s.to_string()); i += 2; continue; }
+            "-F" | "-O" | "-P" | "-t" => { i += 2; continue; }
+            a if list_keys_flag(a, 'a') => all = true,
+            a if a.starts_with('-') && a.len() > 1 => {}
+            a => { if key.is_none() { key = Some(a.to_string()); } }
+        }
+        i += 1;
+    }
+    (table, all, key)
+}
+
 fn requote_command_tail(args: &[&str]) -> String {
     args.iter().map(|t| {
         if t.is_empty() {
@@ -3372,11 +3407,18 @@ match cmd {
     "bind-key" | "bind" => {
         let mut table = "prefix".to_string();
         let mut repeatable = false;
+        let mut note: Option<String> = None;
         let mut i = 0;
         while i < args.len() {
             match args[i] {
                 "-T" if i + 1 < args.len() => {
                     table = args[i + 1].to_string();
+                    i += 2; continue;
+                }
+                // tmux bind-key -N note (cmd-bind-key.c "nrN:T:"). Unknown
+                // here, it was read as the KEY and the binding vanished.
+                "-N" if i + 1 < args.len() => {
+                    note = Some(args[i + 1].to_string());
                     i += 2; continue;
                 }
                 "-n" => { table = "root".to_string(); i += 1; continue; }
@@ -3401,7 +3443,7 @@ match cmd {
                 let _ = writeln!(write_stream, "ERROR: {}", flag_error);
                 let _ = write_stream.flush();
             } else {
-                let _ = tx.send(CtrlReq::BindKey(table, key, command, repeatable));
+                let _ = tx.send(CtrlReq::BindKey(table, key, command, repeatable, note));
             }
         }
     }
@@ -3446,6 +3488,20 @@ match cmd {
             }
         }
     }
+    "list-keys" | "lsk" if args.iter().any(|a| list_keys_flag(a, 'N')) => {
+        // tmux list-keys -N: the bindings that carry a note, as notes.
+        let (table, all, key) = list_keys_notes_args(&args);
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::ListKeyNotes(rtx, table, all, key));
+        if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("list-keys".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}", text); let _ = write_stream.flush();
+            }
+        }
+        if !persistent { break; }
+    }
     "list-keys" | "lsk" => {
         // Parse -T <table> for filtering by key table
         let table_filter = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].to_string());
@@ -3463,22 +3519,19 @@ match cmd {
         if let Ok(text) = rrx.recv() {
             let filtered = if table_filter.is_some() || key_filter.is_some() {
                 text.lines().filter(|line| {
+                    // list-keys output format: "bind-key [-r] -T <table> <key> <command>".
+                    // The optional -r shifts every field, so read the table
+                    // and key after the -T rather than at fixed positions (a
+                    // repeatable binding used to vanish from -T and key filters).
+                    let (line_table, line_key) = list_keys_line_table_key(line);
                     if let Some(ref tbl) = table_filter {
-                        // list-keys output format: "bind-key -T <table> <key> <command>"
-                        let parts: Vec<&str> = line.splitn(5, ' ').collect();
-                        if parts.len() >= 3 {
-                            if parts[2] != tbl.as_str() {
-                                return false;
-                            }
-                        } else {
+                        if line_table != Some(tbl.as_str()) {
                             return false;
                         }
                     }
                     if let Some(ref key) = key_filter {
-                        // Filter by key name (4th field)
-                        let parts: Vec<&str> = line.splitn(5, ' ').collect();
-                        if parts.len() >= 4 {
-                            if parts[3] != key.as_str() {
+                        if let Some(k) = line_key {
+                            if k != key.as_str() {
                                 return false;
                             }
                         }
@@ -5857,6 +5910,15 @@ fn dispatch_control_command(
             }
             true
         }
+        "list-keys" | "lsk" if args.iter().any(|a| list_keys_flag(a, 'N')) => {
+            let (table, all, key) = list_keys_notes_args(&args);
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ListKeyNotes(rtx, table, all, key));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text.trim_end_matches('\n').to_string());
+            }
+            true
+        }
         "list-keys" | "lsk" => {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ListKeys(rtx));
@@ -6074,11 +6136,16 @@ fn dispatch_control_command(
             // the key name as the verbatim command (preserving flags like -c).
             let mut table_name = "prefix".to_string();
             let mut repeat = false;
+            let mut note: Option<String> = None;
             let mut i = 0;
             while i < args.len() {
                 match args[i] {
                     "-T" if i + 1 < args.len() => {
                         table_name = args[i + 1].to_string();
+                        i += 2; continue;
+                    }
+                    "-N" if i + 1 < args.len() => {
+                        note = Some(args[i + 1].to_string());
                         i += 2; continue;
                     }
                     "-n" => { table_name = "root".to_string(); i += 1; continue; }
@@ -6089,7 +6156,7 @@ fn dispatch_control_command(
             if i < args.len() && i + 1 < args.len() {
                 let key = args[i].to_string();
                 let command = requote_command_tail(&args[i + 1..]);
-                let _ = tx.send(CtrlReq::BindKey(table_name, key, command, repeat));
+                let _ = tx.send(CtrlReq::BindKey(table_name, key, command, repeat, note));
             }
             let _ = resp_tx.send(String::new());
             true

@@ -167,7 +167,7 @@ pub fn populate_default_bindings(app: &mut AppState) {
             if let Some(action) = parse_command_to_action(cmd_str) {
                 // Only add if not already present (user config may have overridden)
                 if !table.iter().any(|b| b.key == key) {
-                    table.push(Bind { key, action, repeat: false });
+                    table.push(Bind { key, action, repeat: false, note: None });
                 }
             }
         }
@@ -181,7 +181,7 @@ pub fn populate_default_bindings(app: &mut AppState) {
             let key = normalize_key_for_binding(key);
             if let Some(action) = parse_command_to_action(cmd_str) {
                 if !root_table.iter().any(|b| b.key == key) {
-                    root_table.push(Bind { key, action, repeat: false });
+                    root_table.push(Bind { key, action, repeat: false, note: None });
                 }
             }
         }
@@ -270,6 +270,42 @@ pub fn list_keys_entries(app: &AppState) -> Vec<(String, String, String, bool)> 
             if app.copy_mode_defaults_unbound.contains(&(table.to_string(), *key)) { continue; }
             out.push((table.to_string(), (*name).to_string(), (*cmd).to_string(), false));
         }
+    }
+    out
+}
+
+/// `list-keys -N` output (tmux cmd-list-keys.c, the notes_only template
+/// `#{key_prefix} #{p|W:key_string} #{?key_note,#{key_note},#{key_command}}`).
+///
+/// With `-T` it lists that table, without it the prefix table then the root
+/// table. Only bindings with a note are listed unless `-a` is given, `key`
+/// keeps the one key, and every line starts with the prefix key, as in tmux.
+pub fn list_key_notes(app: &AppState, table: Option<&str>, all: bool, key: Option<&str>) -> String {
+    let tables: Vec<&str> = match table {
+        Some(t) => vec![t],
+        None => vec!["prefix", "root"],
+    };
+    let only = key.and_then(parse_key_name).map(normalize_key_for_binding);
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for t in tables {
+        let Some(binds) = app.key_tables.get(t) else { continue };
+        for b in binds {
+            if only.is_some_and(|k| k != b.key) {
+                continue;
+            }
+            if b.note.is_none() && !all {
+                continue;
+            }
+            let text = b.note.clone().unwrap_or_else(|| crate::commands::format_action(&b.action));
+            rows.push((format_key_binding(&b.key), text));
+        }
+    }
+    let width = rows.iter().map(|(k, _)| unicode_width::UnicodeWidthStr::width(k.as_str())).max().unwrap_or(0);
+    let prefix = format_key_binding(&app.prefix_key);
+    let mut out = String::new();
+    for (k, text) in rows {
+        let pad = width.saturating_sub(unicode_width::UnicodeWidthStr::width(k.as_str()));
+        out.push_str(&format!("{} {}{} {}\n", prefix, k, " ".repeat(pad), text));
     }
     out
 }
@@ -2023,37 +2059,99 @@ fn split_chained_commands(command: &str) -> Vec<String> {
     commands
 }
 
-pub fn parse_bind_key(app: &mut AppState, line: &str) {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 3 { return; }
-    
-    let mut i = 1;
-    let mut _key_table = "prefix".to_string();
-    let mut _repeatable = false;
-    
-    while i < parts.len() {
-        let p = parts[i];
-        // A flag must start with '-' AND be longer than 1 char (e.g. "-r", "-n", "-T").
-        // A bare "-" is a valid key name, not a flag.
-        if p.starts_with('-') && p.len() > 1 {
-            if p.contains('r') { _repeatable = true; }
-            if p.contains('n') { _key_table = "root".to_string(); }
-            if p.contains('T') {
-                i += 1;
-                if i < parts.len() { _key_table = parts[i].to_string(); }
+/// One whitespace separated token of `s` starting at or after byte `from`,
+/// quote aware: `(start, end, value)` where `value` has one level of `'...'`
+/// or `"..."` removed (and `\x` unescaped inside double quotes). Used where a
+/// flag VALUE may be quoted text, such as `bind-key -N "a note"`.
+pub(crate) fn next_quoted_token(s: &str, from: usize) -> Option<(usize, usize, String)> {
+    let bytes = s.as_bytes();
+    let mut i = from;
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let start = i;
+    let mut value = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = s[start..].char_indices().peekable();
+    let mut end = s.len();
+    while let Some((off, c)) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('"') if c == '\\' => {
+                if let Some((_, n)) = chars.next() {
+                    value.push(n);
+                }
             }
-            i += 1;
-        } else {
-            break;
+            Some(_) => value.push(c),
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c.is_whitespace() => {
+                end = start + off;
+                break;
+            }
+            None => value.push(c),
         }
     }
-    
-    if i >= parts.len() { return; }
-    let key_str = parts[i];
-    i += 1;
-    
-    if i >= parts.len() { return; }
-    let command = parts[i..].join(" ");
+    Some((start, end, value))
+}
+
+pub fn parse_bind_key(app: &mut AppState, line: &str) {
+    let mut _key_table = "prefix".to_string();
+    let mut _repeatable = false;
+    let mut note: Option<String> = None;
+
+    // The command name, then bind-key's own flags (tmux "nrN:T:"), then the
+    // key, then the command, which is kept as raw text from there on.
+    // Flags and the key are whitespace tokens taken as written (a bare `"`
+    // or `'` is a key name, not a quote); only a flag VALUE is quote aware,
+    // since a note is free text.
+    let raw_token = |from: usize| -> Option<(usize, &str)> {
+        let rest = &line[from..];
+        let skip = rest.len() - rest.trim_start().len();
+        let rest = &rest[skip..];
+        if rest.is_empty() {
+            return None;
+        }
+        let len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        Some((from + skip + len, &rest[..len]))
+    };
+    let Some((mut pos, _)) = raw_token(0) else { return; };
+    let mut key_str: Option<&str> = None;
+    while let Some((end, tok)) = raw_token(pos) {
+        pos = end;
+        // A flag must start with '-' AND be longer than 1 char (e.g. "-r", "-n", "-T").
+        // A bare "-" is a valid key name, not a flag.
+        if tok.starts_with('-') && tok.len() > 1 && tok != "--" {
+            let flags = &tok[1..];
+            if flags.contains('r') { _repeatable = true; }
+            if flags.contains('n') { _key_table = "root".to_string(); }
+            // A value flag ends its cluster and takes the next argument
+            // (getopt), so `-rN note` and `-T tbl` both work.
+            if flags.ends_with('T') || flags.ends_with('N') {
+                if let Some((_, vend, val)) = next_quoted_token(line, pos) {
+                    pos = vend;
+                    if flags.ends_with('T') { _key_table = val; } else { note = Some(val); }
+                }
+            }
+            continue;
+        }
+        if tok == "--" {
+            if let Some((kend, k)) = raw_token(pos) {
+                pos = kend;
+                key_str = Some(k);
+            }
+        } else {
+            key_str = Some(tok);
+        }
+        break;
+    }
+    let Some(key_str) = key_str else { return; };
+    // The command as written, whitespace runs folded the way the old
+    // split/join did.
+    let command = line[pos..].split_whitespace().collect::<Vec<_>>().join(" ");
+    if command.is_empty() { return; }
     
     // Split on `\;` or `;` to support command chaining (like tmux `bind x split-window \; select-pane -D`)
     let sub_commands: Vec<String> = split_chained_commands(&command);
@@ -2083,7 +2181,7 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
         };
         let table = app.key_tables.entry(_key_table).or_default();
         table.retain(|b| b.key != key);
-        table.push(Bind { key, action, repeat: _repeatable });
+        table.push(Bind { key, action, repeat: _repeatable, note });
     } else {
         // Silence is what made issue #616 so hard to see: a key name the parser
         // did not understand vanished with no boot warning, nothing in
@@ -2165,7 +2263,7 @@ pub fn ensure_prefix_self_binding(app: &mut AppState) {
         return;
     }
     if let Some(action) = parse_command_to_action("send-prefix") {
-        table.push(Bind { key, action, repeat: false });
+        table.push(Bind { key, action, repeat: false, note: None });
     }
 }
 
@@ -3141,3 +3239,7 @@ mod tests_issue734_ifshell_format;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue734_side_ifshell_braces.rs"]
 mod tests_issue734_side_ifshell_braces;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue734_side_bind_notes.rs"]
+mod tests_issue734_side_bind_notes;

@@ -250,11 +250,13 @@ fn app_with_move_table() -> AppState {
                 key: (KeyCode::Char('h'), KeyModifiers::NONE),
                 action: chain("-L"),
                 repeat: false,
+                note: None,
             },
             Bind {
                 key: (KeyCode::Char('l'), KeyModifiers::NONE),
                 action: chain("-R"),
                 repeat: false,
+                note: None,
             },
         ],
     );
