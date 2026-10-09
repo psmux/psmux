@@ -22,10 +22,16 @@ use super::inflight;
 /// other. `cargo test` runs the test binary multi threaded.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn guard() -> std::sync::MutexGuard<'static, ()> {
+/// The teardown flag these tests raise is process wide: while it is up, EVERY
+/// spare spawn in the test binary is refused ("server is shutting down; spare
+/// killed on arrival"). So they also hold the shared test lock that the tests
+/// spawning real warm panes take (test_issue450_dead_warm_pane and friends),
+/// which a parallel run otherwise hit about one run in two.
+fn guard() -> (std::sync::MutexGuard<'static, ()>, std::sync::MutexGuard<'static, ()>) {
+    let env = crate::util::lock_test_env();
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     inflight::reset_for_test();
-    g
+    (env, g)
 }
 
 #[test]
