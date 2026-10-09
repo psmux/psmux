@@ -166,6 +166,24 @@ pub(crate) fn append_session_name_json(name: &str, buf: &mut String) {
     buf.push_str("\"}");
 }
 
+/// The key table a `switch-client -T` left the client in, for the attached
+/// client's state frame. Absent means the default (root) table.
+///
+/// The attached client does its own key dispatch, so a table the SERVER set
+/// (`switch-client -T` from the CLI, the command prompt, run-shell, a hook)
+/// never reached it: `#{client_key_table}` said `mytbl` while the next key was
+/// still looked up in root. tmux has one `c->keytable` that every one of those
+/// routes writes and the key handler reads (cmd-switch-client.c:96,
+/// server-client.c server_client_handle_key), so the client must learn it.
+pub(crate) fn append_key_table_json(table: Option<&str>, buf: &mut String) {
+    let Some(t) = table else { return };
+    if !buf.ends_with('}') { return; }
+    buf.pop();
+    buf.push_str(",\"key_table\":\"");
+    buf.push_str(&json_escape_string(t));
+    buf.push_str("\"}");
+}
+
 pub(crate) fn json_escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {

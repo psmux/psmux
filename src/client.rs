@@ -211,6 +211,64 @@ pub fn dispatch_binding_commands(binding: &str) -> BindingDispatch {
     BindingDispatch::Commands { cmds, latch }
 }
 
+/// Keeps the attached client's `switch-client -T` latch in step with the key
+/// table the server holds.
+///
+/// tmux has a single `c->keytable`: a `switch-client -T` run from a binding,
+/// the command prompt, the CLI, run-shell or a hook all write it, and the next
+/// key is looked up in it. psmux dispatches keys in the client, so a table the
+/// server set behind the client's back (everything except a binding the client
+/// dispatched itself) used to change `#{client_key_table}` and nothing else:
+/// the next key still went to root.
+///
+/// The server reports its table in every state frame. A change there that the
+/// client did not cause itself is adopted as the client's latch. The client's
+/// own writes (the reset to root before a latched key's binding, a binding's
+/// `switch-client -T`, the drop on the prefix key) are queued, so their echoes,
+/// including a frame that was already in flight when a fast second key landed,
+/// never re-arm a latch the client has just consumed.
+#[derive(Debug, Default)]
+pub(crate) struct KeyTableSync {
+    last_server: Option<String>,
+    own_writes: std::collections::VecDeque<Option<String>>,
+}
+
+impl KeyTableSync {
+    /// The server stores the default table as no table at all.
+    fn normalize(table: Option<&str>) -> Option<String> {
+        match table {
+            None | Some("root") => None,
+            Some(t) => Some(t.to_string()),
+        }
+    }
+
+    /// The client sent the server a table change of its own.
+    pub(crate) fn note_own_write(&mut self, table: Option<&str>) {
+        if self.own_writes.len() >= 32 {
+            self.own_writes.pop_front();
+        }
+        self.own_writes.push_back(Self::normalize(table));
+    }
+
+    /// A state frame reported `server` as the server's table. Returns
+    /// `Some(latch)` when the client must adopt it (`Some(None)` = back to root).
+    pub(crate) fn on_server_table(&mut self, server: Option<&str>) -> Option<Option<String>> {
+        let v = Self::normalize(server);
+        if let Some(pos) = self.own_writes.iter().position(|w| *w == v) {
+            // An echo of the client's own write: the latch already says so.
+            self.own_writes.drain(..=pos);
+            self.last_server = v;
+            return None;
+        }
+        if v != self.last_server {
+            self.last_server = v.clone();
+            self.own_writes.clear();
+            return Some(v);
+        }
+        None
+    }
+}
+
 /// Extract the actual command from a confirm-before argument string.
 /// Handles: `confirm-before -p 'prompt text' kill-pane`
 /// Returns the command to execute after confirmation (e.g. "kill-pane").
@@ -2915,6 +2973,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // default (root) table. The prefix key always wins and forces the prefix
     // table, exactly as in `server_client_handle_key`'s `table_changed` block.
     let mut key_table_latch: Option<String> = None;
+    // Tables the server set without the client (CLI, command prompt,
+    // run-shell, hooks) arrive in the state frame and are adopted here.
+    let mut key_table_sync = KeyTableSync::default();
     // Track whether IME was open before we suppressed it for prefix mode (issue #286).
     #[cfg(windows)]
     let mut ime_was_open = false;
@@ -3346,6 +3407,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// When true, hardcoded default keybindings are suppressed (set by unbind-key -a)
         #[serde(default)]
         defaults_suppressed: bool,
+        /// The key table the server holds for this client (`switch-client -T`),
+        /// absent for root. See `KeyTableSync`.
+        #[serde(default)]
+        key_table: Option<String>,
         /// scroll-enter-copy-mode option (mirror of server-side AppState field).
         /// When false, root key bindings that enter copy mode (e.g. PageUp ->
         /// copy-mode -u) are skipped so the key reaches the PTY (#284).
@@ -4482,6 +4547,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // forces a switch to the prefix table", so a
                             // pending `switch-client -T` latch is dropped here.
                             key_table_latch = None;
+                            // prefix-begin clears the server's table too.
+                            key_table_sync.note_own_write(None);
                             prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into());
                         }
                         // NOTE: when the prefix key is pressed while the prefix is
@@ -4516,9 +4583,30 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 if entry.c == "detach-client" || entry.c == "detach" {
                                     quit = true;
                                 } else {
-                                    // Split on \; to support command chaining (issue #192)
-                                    let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
-                                    cmd_batch.extend(binding_wire_lines(&sub_cmds));
+                                    // A root binding goes through the same
+                                    // dispatch as a prefix or latched one, so a
+                                    // `bind -n F6 switch-client -T mytbl` latches
+                                    // the table for the next key. Forwarding the
+                                    // chain verbatim told the server (so
+                                    // #{client_key_table} said mytbl) but never
+                                    // armed the client, which kept looking the
+                                    // next key up in root. Chaining on \; is
+                                    // preserved (issue #192).
+                                    match dispatch_binding_commands(&entry.c) {
+                                        BindingDispatch::SessionNav { .. } => {
+                                            // Unchanged: root session
+                                            // navigation stays a server command.
+                                            let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
+                                            cmd_batch.extend(binding_wire_lines(&sub_cmds));
+                                        }
+                                        BindingDispatch::Commands { cmds, latch } => {
+                                            cmd_batch.extend(binding_wire_lines(&cmds));
+                                            if latch.is_some() {
+                                                key_table_sync.note_own_write(latch.as_deref());
+                                                key_table_latch = latch;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4556,6 +4644,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // already cleared.
                             if latched_table.is_some() {
                                 cmd_batch.push("switch-client -T root\n".into());
+                                key_table_sync.note_own_write(None);
                             }
 
                             // Check synced bindings from server (includes defaults from PREFIX_DEFAULTS)
@@ -4653,6 +4742,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         BindingDispatch::Commands { cmds, latch } => {
                                             cmd_batch.extend(binding_wire_lines(&cmds));
                                             if latch.is_some() {
+                                                key_table_sync.note_own_write(latch.as_deref());
                                                 key_table_latch = latch;
                                             }
                                         }
@@ -7403,6 +7493,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             synced_bindings = state.bindings;
         }
         defaults_suppressed = state.defaults_suppressed;
+        // A table the server set without this client (CLI, command prompt,
+        // run-shell, hook) becomes the client's latch for the next key.
+        if let Some(adopt) = key_table_sync.on_server_table(state.key_table.as_deref()) {
+            key_table_latch = adopt;
+        }
         scroll_enter_copy_mode = state.scroll_enter_copy_mode;
         mouse_drag_enter_copy_mode = state.mouse_drag_enter_copy_mode;
         client_copy_ln = (
@@ -10039,3 +10134,7 @@ mod test_issue658_idle_dump_floor;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue675_stale_writer.rs"]
 mod test_issue675_stale_writer;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_keytable_switch_client.rs"]
+mod test_keytable_switch_client;

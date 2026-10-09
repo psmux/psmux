@@ -3746,6 +3746,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // other one-off top-level fields. The push path below does
                     // the same through the same helper.
                     helpers::append_session_name_json(&app.session_name, &mut combined_buf);
+                    helpers::append_key_table_json(app.current_key_table.as_deref(), &mut combined_buf);
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
                         // Inject clock_colour if set
@@ -8260,6 +8261,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // clients take most frames from this push, so without it their
             // `[#S]` and the rename overlay never saw the live name.
             helpers::append_session_name_json(&app.session_name, &mut combined_buf);
+            helpers::append_key_table_json(app.current_key_table.as_deref(), &mut combined_buf);
             // Inject overlay state (popup, menu, confirm, display_panes)
             {
                 // Inject clock_colour if set
