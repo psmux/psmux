@@ -3444,8 +3444,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Synchronous by design: the caller is a connection thread
                     // that is about to run the expanded string, and it has
                     // already decided the round trip is worth it (it only sends
-                    // this when the command actually contains `#{`).
-                    let _ = resp.send(expand_format(&fmt, &app));
+                    // this when the command actually contains a `#`).
+                    // Untimed, like tmux's format_expand: every sender is a
+                    // shell command or a set-option -F value, where `%` is
+                    // not strftime (issue #734 follow up).
+                    let _ = resp.send(crate::format::expand_format_untimed(&fmt, &app));
                 }
                 CtrlReq::ClientAttach(cid, pid) => {
                     // Registration and the attached counter are one idempotent

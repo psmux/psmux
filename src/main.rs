@@ -3830,13 +3830,19 @@ fn run_main() -> io::Result<()> {
                 // executes). Without this, `psmux run-shell "x #{pane_id}"`
                 // passed the helper that literal text, exactly as the bind path
                 // used to.
-                if shell_cmd_str.contains("#{") {
+                //
+                // Any `#` counts, not only `#{`: tmux expands `##` and `#S`
+                // too. The command goes over as ONE quoted argument. Joined
+                // raw, the server split it again and dropped its quotes, so
+                // `run-shell "Write-Output ('x' + '#{pid}')"` reached the shell
+                // as `Write-Output (x + 1234)`.
+                if shell_cmd_str.contains('#') {
                     let mut line = String::from("run-shell");
                     if background {
                         line.push_str(" -b");
                     }
                     line.push(' ');
-                    line.push_str(&shell_cmd_str);
+                    line.push_str(&crate::util::quote_arg(&shell_cmd_str));
                     line.push('\n');
                     match crate::session::send_control_with_response(line) {
                         Ok(resp) => {
@@ -4423,13 +4429,14 @@ fn run_main() -> io::Result<()> {
                 let mut cmd_true: Option<String> = None;
                 let mut cmd_false: Option<String> = None;
                 let mut format_mode = false;
+                let mut target: Option<String> = None;
                 let mut i = 1;
                 
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-b" => { background = true; }
                         "-F" => { format_mode = true; }
-                        "-t" => { i += 1; } // Skip target
+                        "-t" => { i += 1; target = cmd_args.get(i).map(|s| s.to_string()); }
                         s if !s.starts_with('-') => {
                             if condition.is_none() {
                                 condition = Some(s.to_string());
@@ -4445,6 +4452,36 @@ fn run_main() -> io::Result<()> {
                 }
                 
                 if let (Some(cond), Some(true_cmd)) = (condition, cmd_true) {
+                    // tmux format expands the shell command before it runs
+                    // (cmd-if-shell.c:86), against the target or, on an empty
+                    // server, against no session at all. Only the server can
+                    // expand, so a condition with a `#` in it goes to the
+                    // server whole and runs there, as run-shell's does. This
+                    // process used to run it verbatim: `if-shell 'guard
+                    // #{pid}'` handed the guard the literal `#{pid}` (issue
+                    // #734 follow up).
+                    if !format_mode && cond.contains('#') {
+                        let mut line = String::from("if-shell");
+                        if background { line.push_str(" -b"); }
+                        if let Some(t) = &target {
+                            line.push_str(" -t ");
+                            line.push_str(&crate::util::quote_arg(t));
+                        }
+                        for a in [Some(&cond), Some(&true_cmd), cmd_false.as_ref()].into_iter().flatten() {
+                            line.push(' ');
+                            line.push_str(&crate::util::quote_arg(a));
+                        }
+                        line.push('\n');
+                        match send_control_with_response(line) {
+                            Ok(resp) => {
+                                if !resp.is_empty() { print!("{}", resp); }
+                                return Ok(());
+                            }
+                            // No server reachable: run it here unexpanded, the
+                            // old behaviour, rather than not at all.
+                            Err(e) => eprintln!("if-shell: {} (running without format expansion)", e),
+                        }
+                    }
                     if background && !format_mode {
                         // -b flag: run the condition check in a background thread
                         // and dispatch the result command asynchronously (like tmux)
