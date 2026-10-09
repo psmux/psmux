@@ -477,7 +477,8 @@ pub fn list_windows_tmux(app: &AppState) -> String {
     let mut lines = Vec::new();
     for (i, w) in app.windows.iter().enumerate() {
         let flag = if i == app.active_idx { "*" } else if w.activity_flag { "#" } else { "-" };
-        let pane_count = count_panes(&w.root);
+        // The window's floats are panes of it, the way tmux counts them.
+        let pane_count = count_panes(&w.root) + w.floating.len();
         let (width, height) = if let Some(p) = active_pane(&w.root, &w.active_path) {
             (p.last_cols, p.last_rows)
         } else { (120, 30) };
@@ -497,6 +498,13 @@ pub fn list_tree_json(app: &AppState) -> io::Result<String> {
     for (i, w) in app.windows.iter().enumerate() {
         let mut panes = Vec::new();
         collect_panes(&w.root, &mut panes);
+        // The window's floats are panes of it, so `choose-tree` lists them.
+        // tmux walks one pane list per window and a float is in it, which is
+        // why its tree shows a float and this one did not.
+        panes.extend(w.floating.iter().map(|fp| PaneInfo {
+            id: fp.pane.id,
+            title: if fp.title.is_empty() { fp.pane.title.clone() } else { fp.title.clone() },
+        }));
         v.push(WinTree { id: w.id, name: w.name.clone(), active: i == app.active_idx, panes, idx: app.win_display_index(i) });
     }
     let s = serde_json::to_string(&v).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
