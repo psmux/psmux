@@ -207,7 +207,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "bold-is-bright", scope: Server, option_type: Boolean, default: "on", description: "Rewrite crossterm's 256-indexed basic colors to standard SGR so the terminal applies bold-is-bright (issue #425); off keeps explicit 256-indexed low colors byte-accurate" },
     OptionDef { name: "history-limit", scope: Server, option_type: Number(Usize), default: "2000", description: "Maximum scrollback lines per pane" },
     OptionDef { name: "alternate-screen", scope: Server, option_type: Boolean, default: "on", description: "Honour DEC 47/1049 alt-screen mode (off = TUI output goes to scrollback, #88)" },
-    OptionDef { name: "set-clipboard", scope: Server, option_type: UNVALIDATED_CHOICE, default: "on", description: "OSC 52 clipboard integration" },
+    OptionDef { name: "set-clipboard", scope: Server, option_type: UNVALIDATED_CHOICE, default: "external", description: "OSC 52 clipboard integration" },
     OptionDef { name: "default-shell", scope: Server, option_type: OptionType::String, default: "", description: "Default shell for new panes" },
     OptionDef { name: "default-terminal", scope: Server, option_type: OptionType::String, default: "xterm-256color", description: "TERM value for new panes" },
     OptionDef { name: "copy-command", scope: Server, option_type: OptionType::String, default: "", description: "External copy command (pipe selection)" },

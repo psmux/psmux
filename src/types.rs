@@ -1827,7 +1827,7 @@ pub struct AppState {
     /// `file:line: message` (file comes from config::current_config_file()).
     /// None when parsing a single runtime command.
     pub config_warn_line: Option<usize>,
-    /// set-clipboard: "on", "off", "external" (default "on")
+    /// set-clipboard: "on", "off", "external" (default "external", as tmux)
     pub set_clipboard: String,
     /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
     pub clipboard_osc52: Option<String>,
@@ -2838,7 +2838,7 @@ impl AppState {
             terminal_overrides: Vec::new(),
             config_warnings: Vec::new(),
             config_warn_line: None,
-            set_clipboard: "on".to_string(),
+            set_clipboard: "external".to_string(),
             clipboard_osc52: None,
             bell_forward: false,
             env_shim: true,

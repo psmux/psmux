@@ -405,7 +405,9 @@ fn default_copy_command() {
 #[test]
 fn default_set_clipboard() {
     let app = mock_app();
-    assert_eq!(app.set_clipboard, "on");
+    // tmux's default (options-table.c, default_num = 1): the outer terminal's
+    // clipboard is set, and an application's OSC 52 does not make a buffer.
+    assert_eq!(app.set_clipboard, "external");
 }
 
 #[test]
