@@ -78,6 +78,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "set-titles" => "on",
         "set-titles-string" => "X#S",
         "word-separators" => " ,",
+        "key-table" => "mytbl",
         "allow-passthrough" => "on",
         "allow-rename" => "off",
         "allow-set-title" => "on",

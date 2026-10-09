@@ -25,6 +25,26 @@ pub(crate) fn collect_pane_paths_server(
     }
 }
 
+/// The session's default key table: tmux `server_client_get_key_table`, the
+/// `key-table` session option, root when unset or empty. A client goes back to
+/// it after every key, and a key not bound in it is passed to the pane.
+pub(crate) fn default_key_table(app: &AppState) -> &str {
+    match app.user_options.get("key-table").map(|s| s.as_str()) {
+        Some(t) if !t.is_empty() => t,
+        _ => "root",
+    }
+}
+
+/// The default key table for the attached client's state frame, left out when
+/// it is root so frames stay the same size for everyone who never sets it.
+pub(crate) fn append_default_key_table_json(table: &str, buf: &mut String) {
+    if table == "root" || !buf.ends_with('}') { return; }
+    buf.pop();
+    buf.push_str(",\"default_key_table\":\"");
+    buf.push_str(&json_escape_string(table));
+    buf.push_str("\"}");
+}
+
 /// Resolve a `switch-client -T <table>` request against the live key tables.
 ///
 /// Issue #640. tmux's `cmd_switch_client_exec` calls
@@ -42,8 +62,15 @@ pub(crate) fn resolve_switch_client_table(
     app: &AppState,
     table: &str,
 ) -> Result<Option<String>, String> {
-    if table == "root" {
+    // `None` is the session's `key-table` (root unless set). Naming the
+    // default table is the same as dropping back to it, and root always
+    // exists, so with a non root default `-T root` latches root for one key.
+    let default = default_key_table(app);
+    if table == default {
         return Ok(None);
+    }
+    if table == "root" {
+        return Ok(Some("root".to_string()));
     }
     if table == "prefix" || app.key_tables.contains_key(table) {
         return Ok(Some(table.to_string()));
