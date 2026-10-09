@@ -507,8 +507,20 @@ pub fn serialize_floats_json(app: &AppState) -> String {
         );
         out.push_str(&json_escape_string(&fp.title));
         out.push_str("\",\"rows\":[");
+        // The float's own cursor, so the client can put the terminal cursor
+        // inside the focused float the way tmux does for its active pane
+        // (#767). Without it the client only knew the tiled active pane's
+        // cursor and left the cursor there while typing went into the float.
+        let mut cur_row: u16 = 0;
+        let mut cur_col: u16 = 0;
+        let mut cur_hidden = false;
         if let Ok(parser) = fp.pane.term.lock() {
-            let rows_data = serialize_screen_rows(parser.screen(), inner_h, inner_w);
+            let screen = parser.screen();
+            let (cr, cc) = screen.cursor_position();
+            cur_row = cr;
+            cur_col = cc;
+            cur_hidden = screen.hide_cursor();
+            let rows_data = serialize_screen_rows(screen, inner_h, inner_w);
             for (j, row) in rows_data.iter().enumerate() {
                 if j > 0 {
                     out.push(',');
@@ -534,7 +546,14 @@ pub fn serialize_floats_json(app: &AppState) -> String {
                 out.push_str("]}");
             }
         }
-        out.push_str("]}");
+        out.push(']');
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                ",\"cursor_row\":{},\"cursor_col\":{},\"hide_cursor\":{}}}",
+                cur_row, cur_col, cur_hidden
+            ),
+        );
     }
     out.push(']');
     out

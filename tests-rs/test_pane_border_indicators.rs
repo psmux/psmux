@@ -154,6 +154,7 @@ fn floating_pane(width: u16, height: u16) -> FloatJson {
         rows: (0..height.saturating_sub(2))
             .map(|_| float_row('Z', width.saturating_sub(2) as usize))
             .collect(),
+        ..Default::default()
     }
 }
 

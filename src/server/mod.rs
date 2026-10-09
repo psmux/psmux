@@ -4653,7 +4653,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     let mut panes = Vec::new();
                     collect_panes(&win.root, &mut panes);
-                    let active_pane_id = crate::tree::get_active_pane_id(&win.root, &win.active_path);
+                    // A focused floating pane is the active pane (tmux makes it
+                    // w->active), so the tiled pane behind it is not (#767).
+                    let focused_float = win.floating_focus.filter(|fi| *fi < win.floating.len());
+                    let active_pane_id = match focused_float {
+                        Some(fi) => Some(win.floating[fi].id),
+                        None => crate::tree::get_active_pane_id(&win.root, &win.active_path),
+                    };
+                    let tiled_count = panes.len();
                     for (pos, (id, cols, rows, _mode, _enc, _alt, hist_rows, hist_bytes)) in panes.iter().enumerate() {
                         let idx = pos + app.pane_base_index;
                         let active_marker = if active_pane_id == Some(*id) { " (active)" } else { "" };
@@ -4661,6 +4668,26 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // Both used to be faked (the limit, and a literal 0),
                         // which hid the scrollback growth behind issue #641.
                         output.push_str(&format!("{}: [{}x{}] [history {}/{}, {} bytes] %{}{}\n", idx, cols, rows, hist_rows, app.history_limit, hist_bytes, id, active_marker));
+                    }
+                    // Floating panes follow the tiled ones, in tmux's own
+                    // default line: cmd-list-panes.c adds
+                    // `#{?pane_floating_flag, #{pane_x},#{pane_y},#{pane_z}}`
+                    // inside the size brackets (#767). They were not listed.
+                    let nfloat = win.floating.len();
+                    for (fi, fp) in win.floating.iter().enumerate() {
+                        let idx = tiled_count + fi + app.pane_base_index;
+                        let (hist_rows, hist_bytes) = match fp.pane.term.lock() {
+                            Ok(term) => (term.screen().scrollback_filled(), term.screen().history_bytes()),
+                            Err(_) => (0, 0),
+                        };
+                        let (ox, oy) = if fp.border == "none" { (fp.x, fp.y) } else { (fp.x + 1, fp.y + 1) };
+                        let px = win.area.x + ox;
+                        let py = win.area.y + oy;
+                        let pz = nfloat - 1 - fi;
+                        let active_marker = if active_pane_id == Some(fp.id) { " (active)" } else { "" };
+                        output.push_str(&format!("{}: [{}x{} {},{},{}] [history {}/{}, {} bytes] %{}{}\n",
+                            idx, fp.pane.last_cols, fp.pane.last_rows, px, py, pz,
+                            hist_rows, app.history_limit, hist_bytes, fp.id, active_marker));
                     }
                     let _ = resp.send(output);
                 }
@@ -4680,6 +4707,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     for (wi, win) in app.windows.iter().enumerate() {
                         let mut panes = Vec::new();
                         collect_all_panes(&win.root, &mut panes);
+                        // Floating panes are panes of the window too (#767).
+                        panes.extend(win.floating.iter().map(|fp| (fp.id, fp.pane.last_cols, fp.pane.last_rows)));
                         for (id, cols, rows) in panes {
                             output.push_str(&format!("{}:{}: %{} [{}x{}]\n", app.session_name, app.win_display_index(wi), id, cols, rows));
                         }
