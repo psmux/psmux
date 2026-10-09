@@ -486,7 +486,7 @@ function Median-Of {
 function Show-TrendRow {
     param([string]$Name, [string]$Unit, [int]$Round, $Series)
     if ($null -eq $Series -or @($Series).Count -eq 0) {
-        Write-Host ("  {0,-34} {1,-6} {2,>5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
+        Write-Host ("  {0,-34} {1,-6} {2,5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
             $Name, $Unit, 0, "-", "-", "-", "-", "-", "no runs recorded") -ForegroundColor DarkGray
         return
     }
