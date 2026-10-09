@@ -87,11 +87,53 @@ fn after_teardown_the_spawner_is_told_to_kill_its_own_child() {
         !inflight::record_pid(5, Some(1234)),
         "a spawn that lands after teardown must be told to kill its own child"
     );
-    assert!(
-        inflight::pending().is_empty(),
-        "the spawner owns that kill, so the entry must not linger for the reaper"
-    );
+    // The entry stays until the spawner has actually killed its child and
+    // released it, so a reaper still polling keeps waiting for that kill.
+    assert_eq!(inflight::pending(), vec![5]);
+    inflight::release(5);
+    assert!(inflight::pending().is_empty());
     inflight::reset_for_test();
+}
+
+#[test]
+fn reap_does_not_return_before_a_self_killing_spawner_has_released() {
+    let _g = guard();
+    // The spawner's CreateProcessW returns while the reaper is polling: it is
+    // told to kill its own child. Until that kill has run, the reaper must not
+    // report the registry empty, because its caller exits the process next and
+    // that would end the spawner thread before the kill (#686).
+    inflight::issue(31);
+    let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let k = killed.clone();
+    let t = std::thread::spawn(move || {
+        while !inflight::is_tearing_down() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!inflight::record_pid(31, Some(888)));
+        // The kill takes a while (snapshot, identity check, TerminateProcess).
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        k.store(true, std::sync::atomic::Ordering::SeqCst);
+        inflight::release(31);
+    });
+    let reaped = inflight::reap(std::time::Duration::from_millis(2000), std::thread::sleep);
+    assert!(
+        killed.load(std::sync::atomic::Ordering::SeqCst),
+        "reap returned before the spawner's own kill had run"
+    );
+    assert!(reaped.is_empty(), "the spawner owned that kill, got {reaped:?}");
+    t.join().unwrap();
+    inflight::reset_for_test();
+}
+
+#[test]
+fn the_teardown_budget_outlasts_a_slow_create_process() {
+    // A sweep measured a median CreateProcessW of 736 ms for the Store pwsh,
+    // and the old 400 ms budget (about 900 ms over both reaper passes) left
+    // three suspended shells outside their jobs. The kill-server socket must
+    // also stay open longer than the reaper may wait, or the caller's
+    // force-kill lands inside that wait.
+    assert!(super::INFLIGHT_REAP_BUDGET >= std::time::Duration::from_millis(3000));
+    assert!(super::KILL_SERVER_HOLD > super::INFLIGHT_REAP_BUDGET);
 }
 
 #[test]

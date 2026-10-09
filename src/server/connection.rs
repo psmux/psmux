@@ -4515,7 +4515,7 @@ match cmd {
             // caller reads it until EOF and force-kills the pid 50ms after,
             // so an early close makes the force-kill land in the middle of
             // the shutdown and orphan whatever it had not killed yet (#686).
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(crate::warm_pane_sync::KILL_SERVER_HOLD);
         }
     }
     "choose-tree" | "choose-window" | "choose-session" => {
@@ -6035,7 +6035,7 @@ fn dispatch_control_command(
             // this socket, which is the EOF the caller actually wants. The
             // sleep is the wedged-server fallback: if the shutdown never
             // happens, answer late rather than never.
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(crate::warm_pane_sync::KILL_SERVER_HOLD);
             let _ = resp_tx.send(String::new());
             true
         }

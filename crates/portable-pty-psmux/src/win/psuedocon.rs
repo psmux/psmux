@@ -42,6 +42,26 @@ fn joblist_refused(exe: &[u16]) -> bool {
     JOBLIST_REFUSED.lock().map(|v| v.iter().any(|e| e.as_slice() == exe)).unwrap_or(false)
 }
 
+/// Test hook (#686): `PSMUX_TEST_SLOW_CREATE_MS=<n>` holds every successful
+/// CreateProcessW for n ms before the process is assigned to its job and
+/// resumed, which is where a CreateProcessW that Windows is slow to return
+/// leaves a spawner thread: the shell exists, suspended and outside its job,
+/// and nothing has its pid yet. Measured in a sweep, the Store pwsh's
+/// CreateProcessW had a median of 736 ms, so this window is real; the hook
+/// makes it reproducible. Unset (the default) costs one cached env read.
+fn slow_create_hook() {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *MS.get_or_init(|| {
+        std::env::var("PSMUX_TEST_SLOW_CREATE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 fn remember_joblist_refused(exe: &[u16]) {
     if let Ok(mut v) = JOBLIST_REFUSED.lock() {
         if !v.iter().any(|e| e.as_slice() == exe) {
@@ -569,6 +589,9 @@ impl PsuedoCon {
                 create_err = IoError::last_os_error();
                 st::step(t, || format!("spawn.CreateProcessW kind=retry_plain ok={}", res != 0));
             }
+        }
+        if res != 0 {
+            slow_create_hook();
         }
         if assign_after {
             let t = st::now_us();

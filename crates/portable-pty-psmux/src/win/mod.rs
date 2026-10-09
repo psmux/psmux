@@ -71,8 +71,12 @@ pub struct WinChild {
 /// kernel leaves the new shell suspended and outside the job (0 to 4 of 20
 /// rounds when the server is killed 0 to 150 ms after `new-session -d`, where
 /// cb783dc left a RUNNING shell and its conhost in 11 to 14 of 15).  Such a
-/// shell never ran and holds no conhost; the test runner's orphan reaper ends
-/// it.  Launching the alias's real image path would not close it: from an
+/// shell never ran and holds no conhost.  A graceful shutdown (kill-server,
+/// the last client leaving a destroy-unattached session) closes this window
+/// for spare spawns: psmux's teardown reaper waits for every spare still
+/// inside CreateProcessW to return its pid before the process exits (#686,
+/// `INFLIGHT_REAP_BUDGET`), so only a server terminated from outside can still
+/// leave one.  Launching the alias's real image path would not close it: from an
 /// unpackaged caller such as the server, the real path under Program
 /// Files\WindowsApps refuses the job list too (measured, see spawn_command).
 ///

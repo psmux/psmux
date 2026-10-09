@@ -1175,7 +1175,10 @@ pub fn kill_servers_in_scope(
                         let _ = stream.flush();
                         let _ = stream.shutdown(std::net::Shutdown::Write);
                         // Wait for the server to exit (EOF = done).
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+                        // Longer than the server's own hold (KILL_SERVER_HOLD),
+                        // so the EOF that ends this wait is the server exiting
+                        // after its reaper, not this timeout (#686).
+                        let _ = stream.set_read_timeout(Some(crate::warm_pane_sync::KILL_SERVER_HOLD + Duration::from_millis(1000)));
                         let mut buf = [0u8; 64];
                         loop {
                             match std::io::Read::read(&mut stream, &mut buf) {
