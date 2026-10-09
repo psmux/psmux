@@ -277,7 +277,7 @@ if ($imgName -notin @("psmux", "pmux", "tmux")) {
 Write-Info "Using: $Binary"
 
 $DataDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR.TrimEnd('\', '/') } else { "$env:USERPROFILE\.psmux" }
-if (-not $MetricsDir) { $MetricsDir = "$env:USERPROFILE\.psmux-test-data\metrics" }
+$MetricsDir = Get-PerfMetricsDir $MetricsDir
 # Routing env vars would retarget every command at whatever session happens to
 # host the shell this suite was started from.
 $env:PSMUX_SESSION_NAME = $null

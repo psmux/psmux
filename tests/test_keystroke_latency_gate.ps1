@@ -239,8 +239,7 @@ foreach ($pair in @(@("keylat", $KeyLat), @("echo_load_child", $EchoChild), @("c
 
 $OutDir = Join-Path $env:TEMP "psmux_keylat_gate"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$MetricsDir = Join-Path $env:USERPROFILE ".psmux-test-data\metrics"
-New-Item -ItemType Directory -Force -Path $MetricsDir | Out-Null
+$MetricsDir = Get-PerfMetricsDir
 
 function Pct($arr, $p) {
     if ($arr.Count -eq 0) { return -1 }

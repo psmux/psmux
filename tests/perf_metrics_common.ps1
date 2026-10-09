@@ -287,6 +287,9 @@ function Get-PerfEnvelope {
 
 function Get-PerfMetricsDir {
     param([string]$MetricsDir = "")
+    # PSMUX_METRICS_DIR sends an A/B or bisect run (old builds, forced options)
+    # somewhere else, so it never lands in the trend tests\perf_summary.ps1 reads.
+    if (-not $MetricsDir -and $env:PSMUX_METRICS_DIR) { $MetricsDir = $env:PSMUX_METRICS_DIR }
     if (-not $MetricsDir) { $MetricsDir = Join-Path $env:USERPROFILE ".psmux-test-data\metrics" }
     if (-not (Test-Path $MetricsDir)) { New-Item -ItemType Directory -Force -Path $MetricsDir | Out-Null }
     return $MetricsDir
