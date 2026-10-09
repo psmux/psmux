@@ -381,6 +381,19 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
         lines.push((cont_start, continuation));
     }
 
+    // tmux's lexer reads `{` and `}` as tokens wherever they stand
+    // (cmd-parse.y yylex), so `if-shell C { A } { B }` on one line and a
+    // `} {` line between the two blocks are both valid. The collector below
+    // works on whole lines, so give every brace of an if-shell line, and of a
+    // line that continues one (starts with a brace), a line of its own.
+    let lines: Vec<(usize, String)> = lines
+        .into_iter()
+        .flat_map(|(lineno, line)| match split_brace_line(&line) {
+            Some(parts) => parts.into_iter().map(|p| (lineno, p)).collect::<Vec<_>>(),
+            None => vec![(lineno, line)],
+        })
+        .collect();
+
     // Brace-block collection state for if-shell 'cond' { ... } syntax.
     // When we encounter a line like `if-shell 'false' {`, we collect
     // subsequent lines until the matching `}` and only execute them
@@ -549,6 +562,120 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
     app.config_warn_line = None;
 }
 
+/// Split a config line at its block braces, for the if-shell collector.
+///
+/// Returns `None` when the line is left alone: it is not an if-shell line
+/// and does not start with a brace, or it has no block brace. Otherwise the
+/// pieces in order, where a header is kept with the `{` that opens its block
+/// (`if-shell 'c' {`) and every other brace stands alone:
+/// `if-shell 'c' { A } { B }` gives `if-shell 'c' {`, `A`, `}`, `{`, `B`, `}`.
+///
+/// A brace is a block brace the way tmux's lexer reads one: outside quotes,
+/// `{` at the start of a token, and `}` anywhere except where it closes a
+/// `#{...}` format (yylex_token, cmd-parse.y).
+pub(crate) fn split_brace_line(line: &str) -> Option<Vec<String>> {
+    let l = line.trim();
+    let candidate = l.starts_with("if-shell ")
+        || l.starts_with("if ")
+        || l.starts_with('{')
+        || l.starts_with('}');
+    if !candidate {
+        return None;
+    }
+    let mut pieces: Vec<String> = Vec::new();
+    let mut seg = String::new();
+    let mut quote: Option<char> = None;
+    let mut format_depth = 0usize;
+    let mut at_token_start = true;
+    let mut found = false;
+    let mut chars = l.chars().peekable();
+    let flush = |seg: &mut String, pieces: &mut Vec<String>| {
+        let s = seg.trim();
+        if !s.is_empty() {
+            pieces.push(s.to_string());
+        }
+        seg.clear();
+    };
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                seg.push(c);
+                if c == '\\' && q == '"' {
+                    if let Some(n) = chars.next() {
+                        seg.push(n);
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+                at_token_start = false;
+                continue;
+            }
+            None => {}
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                seg.push(c);
+                at_token_start = false;
+            }
+            '\\' => {
+                seg.push(c);
+                if let Some(n) = chars.next() {
+                    seg.push(n);
+                }
+                at_token_start = false;
+            }
+            '#' if chars.peek() == Some(&'{') => {
+                seg.push(c);
+                seg.push(chars.next().unwrap());
+                format_depth += 1;
+                at_token_start = false;
+            }
+            '}' if format_depth > 0 => {
+                seg.push(c);
+                format_depth -= 1;
+                at_token_start = false;
+            }
+            '{' if at_token_start => {
+                found = true;
+                // The header keeps its opening brace; a brace after a brace
+                // (the else block of `} {`) stands alone.
+                let s = seg.trim().to_string();
+                seg.clear();
+                if s.is_empty() {
+                    pieces.push("{".to_string());
+                } else {
+                    pieces.push(format!("{} {{", s));
+                }
+                at_token_start = true;
+            }
+            '}' => {
+                found = true;
+                flush(&mut seg, &mut pieces);
+                pieces.push("}".to_string());
+                at_token_start = true;
+            }
+            c if c.is_whitespace() => {
+                seg.push(c);
+                at_token_start = true;
+            }
+            ';' => {
+                seg.push(c);
+                at_token_start = true;
+            }
+            _ => {
+                seg.push(c);
+                at_token_start = false;
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    flush(&mut seg, &mut pieces);
+    Some(pieces)
+}
+
 /// Process a collected if-shell brace block by evaluating the condition
 /// and executing the appropriate branch.
 fn process_brace_if_shell(app: &mut AppState, bb: &parse_config_content_types::BraceBlock) {
@@ -630,6 +757,18 @@ fn process_brace_if_shell(app: &mut AppState, bb: &parse_config_content_types::B
 
     // Execute the appropriate branch
     let lines = if success { &bb.true_lines } else { &bb.else_lines };
+    // A branch holding a block of its own (`if-shell A { if-shell B { ... } }`)
+    // goes back through the block parser; a flat one keeps per line handling.
+    let nested = lines.iter().any(|l| {
+        let l = l.trim();
+        (l.starts_with("if-shell ") || l.starts_with("if ")) && l.ends_with('{')
+    });
+    if nested {
+        let saved = app.config_warn_line;
+        parse_config_content(app, &lines.join("\n"));
+        app.config_warn_line = saved;
+        return;
+    }
     for line in lines {
         let l = line.trim();
         if l.is_empty() || l.starts_with('#') { continue; }
@@ -2998,3 +3137,7 @@ mod tests_config_option_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue734_ifshell_format.rs"]
 mod tests_issue734_ifshell_format;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue734_side_ifshell_braces.rs"]
+mod tests_issue734_side_ifshell_braces;
