@@ -3319,10 +3319,12 @@ fn send_paste_to_active_impl(app: &mut AppState, text: &str, normalize: bool) ->
         return send_text_to_active(app, text);
     }
 
-    // Check if the child requested bracketed paste mode
+    // Check if the child requested bracketed paste mode. A focused floating
+    // pane is the one being pasted into, so it is the one to ask.
     let use_bracket = {
         let win = &app.windows[app.active_idx];
-        if let Some(p) = crate::tree::active_pane(&win.root, &win.active_path) {
+        let float_pane = win.floating_focus.and_then(|fi| win.floating.get(fi)).map(|fp| &fp.pane);
+        if let Some(p) = float_pane.or_else(|| crate::tree::active_pane(&win.root, &win.active_path)) {
             if let Ok(parser) = p.term.lock() {
                 let bp = parser.screen().bracketed_paste();
                 crate::debug_log::input_log("paste", &format!("child bracketed_paste()={}", bp));
@@ -3363,6 +3365,22 @@ fn send_paste_to_active_impl(app: &mut AppState, text: &str, normalize: bool) ->
     // mode and the host's build number: see `choose_paste_route`.
     #[cfg(windows)]
     {
+        // A focused floating pane takes the paste, the way it already takes
+        // typed text and raw bytes (`send_text_to_active`,
+        // `send_bytes_to_active`). This branch was missing, so Ctrl+V with a
+        // float focused went into the shell of the tiled pane behind it while
+        // everything typed went into the float. `sync_input` fans out over the
+        // tiled panes, and a float is not one of them, so the float wins here
+        // for the same reason it wins for a keystroke.
+        {
+            let win = &mut app.windows[app.active_idx];
+            if let Some(fi) = win.floating_focus {
+                if let Some(fp) = win.floating.get_mut(fi) {
+                    deliver_paste_to_pane(&mut fp.pane, text, use_bracket, normalize);
+                    return Ok(());
+                }
+            }
+        }
         if app.sync_input {
             let win = &mut app.windows[app.active_idx];
             fn write_all_panes(node: &mut crate::types::Node, text: &str, bracket: bool, normalize: bool) {
