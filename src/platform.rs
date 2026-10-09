@@ -6161,6 +6161,7 @@ pub fn ime_restore() {
 #[path = "../tests-rs/test_issue761_server_console_detach.rs"]
 mod tests_issue761_server_console_detach;
 
+#[cfg(test)]
 #[cfg(windows)]
 #[path = "../tests-rs/test_issue265_argv_backslash.rs"]
 mod tests_issue265_argv_backslash;
