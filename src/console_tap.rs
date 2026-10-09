@@ -116,6 +116,14 @@ fn control_key(u: u16) -> Option<Event> {
     })
 }
 
+/// The Alt UP record that completes an Alt code and carries its character
+/// (a BMP character above the C0 range; surrogate halves and control
+/// characters have their own branches). Shared with the VT route's reader,
+/// which skips every other key up record.
+pub(crate) fn alt_code_release_char(key_down: bool, vk: u16, u_char: u16) -> bool {
+    !key_down && vk == VK_MENU && u_char > 0x1F && !(0xD800..=0xDFFF).contains(&u_char)
+}
+
 impl ConsoleTap {
     pub fn new() -> Self { Self::default() }
 
@@ -160,6 +168,20 @@ impl ConsoleTap {
             }
             self.high = None;
             return Verdict::Consumed(control_key(u));
+        }
+
+        // An Alt code character (issue #766). The console delivers a
+        // character no key on the layout produces (an em dash written into a
+        // pseudoconsole by node-pty, or Alt+0151 typed by hand) as Alt down,
+        // numpad digits, then Alt UP carrying the character. crossterm reports
+        // that as a Release, and the client forwards only Press and Repeat,
+        // so the character vanished: `—` never reached the pane. It is decoded
+        // here as the key press it stands for.
+        if alt_code_release_char(rec.key_down, rec.vk, u) {
+            self.high = None;
+            return Verdict::Consumed(
+                char::from_u32(u as u32).map(|ch| press(KeyCode::Char(ch), modifiers(rec.ctrl_state))),
+            );
         }
 
         // Anything else is crossterm's. A character key arriving between two
@@ -271,3 +293,7 @@ pub(crate) fn take_head() -> Option<Event> {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue742_console_tap.rs"]
 mod tests_issue742_console_tap;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue766_alt_code_char.rs"]
+mod tests_issue766_alt_code_char;

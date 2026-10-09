@@ -3113,6 +3113,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // One log line per held group, not one per loop turn.
     #[cfg(windows)]
     let mut paste_head_logged = false;
+    // Whether the key that opened the current pending group was a character
+    // typed with Shift alone (issue #766, see PasteHeadEvidence::shifted_head).
+    #[cfg(windows)]
+    let mut paste_head_shifted = false;
 
     // Track whether a modified Enter Press was already handled this keypress
     // cycle.  WezTerm sends Shift+Enter as Release-only (no Press), so we
@@ -4095,6 +4099,50 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 modified_enter_press_handled = true;
                             } else {
                                 modified_enter_press_handled = false;
+                            }
+                        }
+                        // A key that arrives after a held paste has gone quiet
+                        // is not part of that paste (issue #766). The paste goes
+                        // out first, as its own bracketed paste, and the key is
+                        // handled after it, in the order the two were written.
+                        // Before this, stage 2 kept holding the paste until its
+                        // 300 ms window ran out and appended whatever came in
+                        // meanwhile, so an Enter written 150 ms after a paste
+                        // reached the pane as `text CR ESC[201~`, a pasted
+                        // newline instead of a submit. Chars pushed earlier in
+                        // this same batch count as arriving now: they came in
+                        // together with this key, so there was no gap.
+                        #[cfg(windows)]
+                        {
+                            if paste_pend.len() != paste_seen_len {
+                                paste_seen_len = paste_pend.len();
+                                paste_last_growth = if paste_pend.is_empty() { None } else { Some(Instant::now()) };
+                            }
+                            let quiet = paste_last_growth.map_or(Duration::MAX, |t| t.elapsed());
+                            if stage2_paste_ended_by_new_key(paste_stage2, !paste_pend.is_empty(), quiet) {
+                                if input_log_enabled() {
+                                    input_log("paste", &format!(
+                                        "stage2 paste ended by a key after {} ms quiet, sending {} chars as send-paste before it",
+                                        quiet.as_millis(), paste_pend.len()));
+                                }
+                                paste_gesture.record(&paste_pend);
+                                let encoded = base64_encode(&paste_pend);
+                                cmd_batch.push(format!("send-paste {}\n", encoded));
+                                paste_pend.clear();
+                                paste_pend_start = None;
+                                paste_stage2 = false;
+                                paste_seen_len = 0;
+                                paste_last_growth = None;
+                                // Same reason as the stage 2 timeout send: a late
+                                // Ctrl+V Release must not read the clipboard back,
+                                // and nothing that follows is discarded.
+                                paste_fallback_suppress_until = Some(Instant::now() + Duration::from_millis(200));
+                            }
+                            // The key that opens a pending group decides whether
+                            // its head is a shifted character (issue #766).
+                            if paste_pend.is_empty() {
+                                paste_head_shifted = key.modifiers == KeyModifiers::SHIFT
+                                    && matches!(key.code, KeyCode::Char(c) if c != ' ');
                             }
                         }
                         // Flush pending paste buffer before processing any non-bufferable key.
@@ -6842,6 +6890,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     gesture_open: paste_gesture.is_open(),
                     clip_head: paste_clip_head.get(),
                     held_for: paste_pend_start.map(|s| s.elapsed()).unwrap_or_default(),
+                    shifted_head: paste_head_shifted,
                 }
             } else {
                 PasteHeadEvidence::default()
@@ -6890,8 +6939,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // with two falses after it read as a contradiction (#684).
                     let gesture = evidence.gesture_open;
                     let prefix = evidence.clipboard_starts_with(&paste_pend);
-                    let why = if gesture || prefix {
-                        format!("head of a paste (ctrl-v gesture={}, clipboard prefix={})", gesture, prefix)
+                    let shifted = evidence.shifted_head && paste_pend.chars().count() == 1;
+                    let why = if gesture || prefix || shifted {
+                        format!("head of a paste (ctrl-v gesture={}, clipboard prefix={}, shifted head={})", gesture, prefix, shifted)
                     } else {
                         "newline or tab never takes the zero latency path".to_string()
                     };
@@ -9292,6 +9342,16 @@ struct PasteHeadEvidence<'a> {
     clip_head: Option<&'a str>,
     /// How long the pending buffer has been held so far.
     held_for: Duration,
+    /// The first pending character came with Shift and nothing else.
+    ///
+    /// The console host turns VT text written to its input into key records,
+    /// and a character that needs Shift (a capital, `(`, `"`) is handed over
+    /// as Shift down, key, Shift up in a write of its own, ahead of the rest
+    /// of the text. When that character opens a paste the client drains it
+    /// alone, and the rest arrives about a millisecond later (issue #766:
+    /// `Y` reached the pane in front of `ESC[200~`, 6 of 6 runs for a shifted
+    /// first character, 0 of 6 for an unshifted one).
+    shifted_head: bool,
 }
 
 /// How long a lone character that matches the clipboard's first character is
@@ -9337,6 +9397,22 @@ fn stage2_paste_is_over(held_for: Duration, since_last_char: Duration) -> bool {
     held_for > Duration::from_millis(300) && since_last_char >= PASTE_STAGE2_QUIET
 }
 
+/// A key arriving while stage 2 holds a paste ends that paste when the paste
+/// had already gone quiet for [`PASTE_STAGE2_QUIET`] (issue #766).
+///
+/// The quiet rule is the one [`stage2_paste_is_over`] uses, applied when the
+/// next key arrives instead of only when the 300 ms window runs out: a gap
+/// that long means the paste was complete, so the key is new input and goes
+/// to the pane AFTER the paste's closing `ESC[201~`. tmux gets this for free,
+/// because its host brackets the paste in the byte stream and the key after
+/// `ESC[201~` is parsed as a key (tty-keys.c `tty_keys_paste`). Fragments
+/// of one paste that sshd's ConPTY hands over 20 to 60 ms apart (#598) stay
+/// below the threshold and keep accumulating as before.
+#[cfg(windows)]
+fn stage2_paste_ended_by_new_key(paste_stage2: bool, pend_non_empty: bool, since_last_char: Duration) -> bool {
+    paste_stage2 && pend_non_empty && since_last_char >= PASTE_STAGE2_QUIET
+}
+
 #[cfg(windows)]
 impl<'a> PasteHeadEvidence<'a> {
     /// True when `pend` could be the start of the clipboard's text.
@@ -9353,6 +9429,15 @@ impl<'a> PasteHeadEvidence<'a> {
 
     fn head_of_paste(&self, pend: &str) -> bool {
         if self.gesture_open {
+            return true;
+        }
+        // A lone shifted character is held for the same short window as a
+        // clipboard prefix: the rest of a paste follows it inside a
+        // millisecond, a typed character has no follow up that fast.
+        if self.shifted_head
+            && pend.chars().count() == 1
+            && self.held_for < PASTE_HEAD_PREFIX_HOLD
+        {
             return true;
         }
         if !self.clipboard_starts_with(pend) {
@@ -9756,6 +9841,10 @@ mod test_issue744_paste_overlay_routing;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue684_clipboard_head_cache.rs"]
 mod test_issue684_clipboard_head_cache;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue766_paste_then_key.rs"]
+mod test_issue766_paste_then_key;
 
 /// How long the client keeps polling console input at 1ms after sending a key,
 /// waiting for that key's echo to come back and be drawn.
