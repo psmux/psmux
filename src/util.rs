@@ -706,6 +706,38 @@ pub fn quote_arg_if_needed(s: &str) -> String {
     }
 }
 
+/// The wire line for a CLI `bind-key` argv (`argv[0]` is the command name).
+///
+/// tmux keeps every argument of the bound command as its own argument, so
+/// `bind-key Y if-shell 'cond' 'set -g @k yes' 'set -g @k no'` binds an
+/// if-shell with three arguments. Joining argv with spaces flattened it to
+/// `if-shell cond set -g @k yes set -g @k no`, which no longer means anything.
+/// So each argument that needs it is quoted, EXCEPT when the bound command is
+/// one single argument: that one is a command string (tmux parses a lone
+/// argument as a command list, `bind x "split-window -h"`), and goes raw.
+pub fn bind_key_wire_line<S: AsRef<str>>(argv: &[S]) -> String {
+    let argv: Vec<&str> = argv.iter().map(|s| s.as_ref()).collect();
+    // Skip bind-key's own flags to find the key; what follows is the command.
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i] {
+            "-T" | "-N" => i += 2,
+            a if a.starts_with('-') && a.len() > 1 && a != "--" => i += 1,
+            "--" => { i += 1; break; }
+            _ => break,
+        }
+    }
+    let tail_start = i + 1; // argv[i] is the key
+    let single_tail = argv.len() == tail_start + 1;
+    argv.iter().enumerate().map(|(n, a)| {
+        if n == 0 || (single_tail && n == tail_start) {
+            a.to_string()
+        } else {
+            quote_arg_if_needed(a)
+        }
+    }).collect::<Vec<String>>().join(" ")
+}
+
 /// Parse the canonical tmux logging idiom `cat > <path>` / `cat >> <path>`
 /// so `pipe-pane` can service it in-process as a direct file sink.
 ///

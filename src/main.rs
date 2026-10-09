@@ -4249,7 +4249,7 @@ fn run_main() -> io::Result<()> {
             "bind-key" | "bind" => {
                 reject_unknown_key_name(&cmd_args, "bind-key");
                 reject_dangling_bound_command(&cmd_args);
-                let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
+                let cmd_str = crate::util::bind_key_wire_line(&cmd_args);
                 match send_control(format!("{}\n", cmd_str)) {
                     Ok(()) => {},
                     Err(e) if e.to_string().contains("no session") => {

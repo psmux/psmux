@@ -118,3 +118,32 @@ fn command_prompt_if_shell_expands_condition() {
     assert_eq!(opt(&app, "@g734").as_deref(), Some("no"));
 }
 
+// CLI `bind-key Y if-shell 'cond' 'set -g @k yes' 'set -g @k no'` used to go
+// over the wire as one space joined line, so the server stored
+// `if-shell cond set -g @k yes set -g @k no` and the key did nothing. tmux keeps
+// each argument; a lone command argument is a command string and stays raw.
+#[test]
+fn bind_key_wire_line_keeps_each_bound_argument() {
+    let argv = ["bind-key", "Y", "if-shell", "#{==:#{pane_id},x}", "set -g @k yes", "set -g @k no"];
+    assert_eq!(
+        crate::util::bind_key_wire_line(&argv),
+        "bind-key Y if-shell #{==:#{pane_id},x} \"set -g @k yes\" \"set -g @k no\""
+    );
+}
+
+#[test]
+fn bind_key_wire_line_leaves_a_single_command_string_raw() {
+    let argv = ["bind", "-T", "prefix", "x", "split-window -h"];
+    assert_eq!(crate::util::bind_key_wire_line(&argv), "bind -T prefix x split-window -h");
+    let argv = ["bind", "-n", "-r", "M-x", "display-message 'a b'"];
+    assert_eq!(crate::util::bind_key_wire_line(&argv), "bind -n -r M-x display-message 'a b'");
+}
+
+#[test]
+fn bind_key_wire_line_round_trips_through_the_server_parser() {
+    let argv = ["bind-key", "-N", "my note", "Y", "if-shell", "exit 0", "set -g @k yes"];
+    let line = crate::util::bind_key_wire_line(&argv);
+    let parsed = crate::commands::parse_command_line(&line);
+    assert_eq!(parsed, argv.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+}
+
