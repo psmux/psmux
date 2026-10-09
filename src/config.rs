@@ -605,6 +605,12 @@ fn process_brace_if_shell(app: &mut AppState, bb: &parse_config_content_types::B
 
     if condition.is_empty() { return; }
 
+    // A shell condition is format expanded before it runs, like tmux
+    // (cmd-if-shell.c:86); untimed, as `%` in a shell command is not strftime.
+    if !format_mode {
+        condition = crate::format::expand_format_untimed(&condition, app);
+    }
+
     // Evaluate the condition
     let success = if format_mode {
         let expanded = crate::format::expand_format(&condition, app);
@@ -2570,6 +2576,15 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     let shell_cmd = cmd_parts.join(" ");
     if shell_cmd.is_empty() { return; }
 
+    // Format expand the command first, like tmux (cmd-run-shell.c:144) and
+    // like the CLI and key binding paths already do. Untimed: `%` in a shell
+    // command is not strftime.
+    let shell_cmd = if shell_cmd.contains('#') {
+        crate::format::expand_format_untimed(&shell_cmd, app)
+    } else {
+        shell_cmd
+    };
+
     // Expand ~ to home directory + XDG fallback for plugin paths
     let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
 
@@ -2835,7 +2850,17 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
     }
 
     if positional.len() < 2 { return; }
-    let condition = &positional[0];
+    // A shell condition is format expanded before it runs, like tmux
+    // (cmd-if-shell.c:86 format_single_from_target). It went to the shell
+    // verbatim, so `if-shell 'check #{pid}'` in a config file saw the literal
+    // `#{pid}` (issue #734 follow up). Untimed: `%` in a shell command is not
+    // strftime.
+    let shell_condition = if format_mode {
+        positional[0].clone()
+    } else {
+        crate::format::expand_format_untimed(&positional[0], app)
+    };
+    let condition = &shell_condition;
     let true_cmd = &positional[1];
     let false_cmd = positional.get(2);
 
@@ -2969,3 +2994,7 @@ mod tests_issue619_set_option_already_set;
 #[cfg(test)]
 #[path = "../tests-rs/test_config_option_parity.rs"]
 mod tests_config_option_parity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue734_ifshell_format.rs"]
+mod tests_issue734_ifshell_format;

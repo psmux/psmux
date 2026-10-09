@@ -2532,17 +2532,26 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     let condition = positional[0];
                     let true_cmd = positional[1];
                     let false_cmd = positional.get(2).copied();
+                    // The shell command is format expanded before it runs,
+                    // like tmux (cmd-if-shell.c:86 format_single_from_target);
+                    // untimed, because a `%` in a shell command is not
+                    // strftime (issue #734 follow up).
+                    let shell_condition = if format_mode {
+                        String::new()
+                    } else {
+                        crate::format::expand_format_untimed(condition, app)
+                    };
                     let success = if format_mode {
                         let expanded = crate::format::expand_format(condition, app);
                         !expanded.is_empty() && expanded != "0"
-                    } else if condition == "true" || condition == "1" {
+                    } else if shell_condition == "true" || shell_condition == "1" {
                         true
-                    } else if condition == "false" || condition == "0" {
+                    } else if shell_condition == "false" || shell_condition == "0" {
                         false
                     } else {
                         {
                             let (shell_prog, mut shell_args) = resolve_run_shell();
-                            shell_args.push(condition.to_string());
+                            shell_args.push(shell_condition);
                             let mut cmd = std::process::Command::new(&shell_prog);
                             cmd.args(shell_args)
                             .stdout(std::process::Stdio::null())
@@ -3147,7 +3156,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 // status message, no log line. Only `-c`/`-d` start-dirs were
                 // being expanded (in server/mod.rs), which is why `popup -d
                 // "#{pane_current_path}"` worked and this did not.
-                let shell_cmd = crate::format::expand_format(&shell_cmd, app);
+                //
+                // Untimed, like tmux's format_expand: a `%` in a shell
+                // command (cmd's %VAR%, PowerShell's `%`) is not strftime.
+                let shell_cmd = crate::format::expand_format_untimed(&shell_cmd, app);
                 // Expand ~ to home directory + XDG fallback for plugin paths
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server

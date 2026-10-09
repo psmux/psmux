@@ -144,6 +144,27 @@ fn expand_set_option_value(
     rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(value)
 }
 
+/// Format expand the shell command of if-shell or run-shell before it runs.
+///
+/// tmux expands it unconditionally (cmd-if-shell.c:86
+/// format_single_from_target, cmd-run-shell.c:144 format_expand), against the
+/// command's target, or with no session at all on an empty server, where
+/// server variables such as `#{pid}` still resolve. A command with no `#` in
+/// it expands to itself, so the round trip to the server thread is skipped.
+/// The expansion is untimed: a `%` in a shell command is not strftime.
+fn expand_shell_command(tx: &TargetedSender, cmd: String) -> String {
+    if !cmd.contains('#') {
+        return cmd;
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    if tx.send(CtrlReq::ExpandFormat(cmd.clone(), rtx)).is_err() {
+        return cmd;
+    }
+    // On timeout run the unexpanded text: no worse than not expanding, and
+    // better than dropping the command silently.
+    rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(cmd)
+}
+
 /// The sender a command's handler sends its requests through.  When the
 /// command has a validated -t target, EVERY request it sends goes out as
 /// `CtrlReq::Targeted(target, request)`, so the server applies the target to
@@ -4582,27 +4603,12 @@ match cmd {
         } else {
             trimmed.to_string()
         };
-        // Expand #{...} against live server state (tmux parity). This thread has
-        // no &AppState — it belongs to the server loop — so the expansion makes
-        // a round trip over the control channel. Only pay for it when the
-        // command actually contains a format reference.
-        //
-        // Without this, `run-shell "helper '#{pane_id}'"` passed the helper the
+        // Expand formats against live server state (tmux parity). Without
+        // this, `run-shell "helper '#{pane_id}'"` passed the helper the
         // literal text `#{pane_id}`; with `-b` swallowing the spawn result, the
-        // bind then failed completely silently.
-        let shell_cmd = if shell_cmd.contains("#{") {
-            let (rtx, rrx) = mpsc::channel::<String>();
-            if tx.send(CtrlReq::ExpandFormat(shell_cmd.clone(), rtx)).is_ok() {
-                // On timeout fall back to the unexpanded string: running the
-                // command with a literal #{...} is no worse than the old
-                // behaviour, and better than dropping it silently.
-                rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(shell_cmd)
-            } else {
-                shell_cmd
-            }
-        } else {
-            shell_cmd
-        };
+        // bind then failed completely silently. Every `#` sequence counts, not
+        // only `#{`: tmux turns `##` into `#` and `#S` into the session name.
+        let shell_cmd = expand_shell_command(tx, shell_cmd);
         // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
         if shell_cmd.is_empty() {
@@ -4725,20 +4731,28 @@ match cmd {
                 let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None, client));
                 let expanded = rrx.recv().unwrap_or_default();
                 !expanded.is_empty() && expanded != "0"
-            } else if condition == "true" || condition == "1" {
-                true
-            } else if condition == "false" || condition == "0" {
-                false
             } else {
-                // Use resolve_run_shell for consistent shell fallback
-                let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
-                let mut c = std::process::Command::new(&shell_prog);
-                for a in &shell_args { c.arg(a); }
-                c.arg(condition.as_str());
-                c.stdout(std::process::Stdio::null());
-                c.stderr(std::process::Stdio::null());
-                { use crate::platform::HideWindowCommandExt; c.hide_window(); }
-                c.status().map(|s| s.success()).unwrap_or(false)
+                // The shell command is format expanded before it runs, like
+                // tmux (cmd-if-shell.c:86). It went to the shell verbatim, so
+                // a guard such as `if-shell 'check #{pid}'` saw the literal
+                // `#{pid}` while `if-shell -F` and run-shell expanded theirs
+                // (issue #734 follow up).
+                let condition = expand_shell_command(tx, condition.to_string());
+                if condition == "true" || condition == "1" {
+                    true
+                } else if condition == "false" || condition == "0" {
+                    false
+                } else {
+                    // Use resolve_run_shell for consistent shell fallback
+                    let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+                    let mut c = std::process::Command::new(&shell_prog);
+                    for a in &shell_args { c.arg(a); }
+                    c.arg(condition.as_str());
+                    c.stdout(std::process::Stdio::null());
+                    c.stderr(std::process::Stdio::null());
+                    { use crate::platform::HideWindowCommandExt; c.hide_window(); }
+                    c.status().map(|s| s.success()).unwrap_or(false)
+                }
             };
             let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
             if let Some(chosen) = cmd_to_run {

@@ -22,6 +22,9 @@ thread_local! {
     static BUFFER_IDX_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static NAMED_BUFFER_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
     static CLIENT_OVERRIDE: Cell<Option<u64>> = const { Cell::new(None) };
+    // Set while expanding a format the way tmux's format_expand does (no
+    // strftime pass). See `expand_format_untimed`.
+    static NO_STRFTIME: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Expand `f` with the `client_*` variables answering for client `cid`.
@@ -198,6 +201,20 @@ pub fn expand_format(fmt: &str, app: &AppState) -> String {
     expand_format_for_window(fmt, app, app.active_idx)
 }
 
+/// Expand a format WITHOUT the strftime pass, the way tmux's format_expand
+/// (format_single, format_single_from_target) does. tmux only runs strftime
+/// for format_expand_time callers (status line, display-message, pane
+/// titles); the shell command of if-shell and run-shell and a set-option -F
+/// value go through plain format_expand (cmd-if-shell.c:86,
+/// cmd-run-shell.c:144, cmd-set-option.c). A shell command is full of `%`
+/// that is not strftime: cmd's `%VAR%`, PowerShell's `%` alias, `100%`.
+pub fn expand_format_untimed(fmt: &str, app: &AppState) -> String {
+    let prev = NO_STRFTIME.replace(true);
+    let out = expand_format(fmt, app);
+    NO_STRFTIME.set(prev);
+    out
+}
+
 /// The REAL (user-visible) active window index. While a temporary -t focus
 /// is applied for command targeting, `active_idx` points at the target
 /// window; the pre-switch index saved in `temp_focus_saved_active` is what
@@ -218,7 +235,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
     // Whether the original format contains strftime %-sequences.
     // If so, we need to escape '%' in expanded variable content so chrono
     // only interprets the real strftime codes from the original format.
-    let has_strftime = fmt.contains('%');
+    let has_strftime = !NO_STRFTIME.get() && fmt.contains('%');
 
     while i < len {
         if bytes[i] == b'#' && i + 1 < len {
