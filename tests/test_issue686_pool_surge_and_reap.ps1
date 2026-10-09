@@ -296,6 +296,47 @@ if ($leaked -eq 0) {
 }
 
 Cleanup
+
+# ------------------------------------------- 3. the teardown leak, made certain
+# The rounds above only catch the leak when Windows happens to be slow. A sweep
+# whose median Store pwsh CreateProcessW was 736 ms left 3 orphans in one round
+# (2026-10-09): the reaper waited 400 ms twice, and a spawn still inside
+# CreateProcessW after that was ended by process::exit with its shell created
+# SUSPENDED and not yet in its job (the Store pwsh refuses the job list, so it
+# is assigned after creation). PSMUX_TEST_SLOW_CREATE_MS holds every created
+# shell for that long before the assign, which reproduces the window every
+# time: 9 orphans over 3 rounds before the fix, all suspended pwsh.
+Write-Test "kill-server while every spawn is held 1500 ms inside its create leaves no orphan pane shells"
+$env:PSMUX_TEST_SLOW_CREATE_MS = "1500"
+$slowLeaked = 0
+for ($r = 1; $r -le $LeakRounds; $r++) {
+    & $Binary -L $Ns new-session -d -s "slow$r" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 900
+    $srvPid = Get-ServerPid
+    if ($srvPid -eq 0) { Write-Fail "slow round ${r}: no server"; continue }
+    for ($i = 1; $i -le 6; $i++) { & $Binary -L $Ns new-window -t "slow${r}:" 2>&1 | Out-Null }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    & $Binary -L $Ns kill-server 2>&1 | Out-Null
+    $killMs = $sw.ElapsedMilliseconds
+    Start-Sleep -Seconds 4
+    $stillAlive = @(Get-CimInstance Win32_Process -Filter "ProcessId=$srvPid" -EA SilentlyContinue)
+    if ($stillAlive.Count -gt 0) { Write-Fail "slow round ${r}: server $srvPid survived kill-server" }
+    $orph = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$srvPid" -EA SilentlyContinue)
+    Write-Info "slow round ${r}: kill-server took ${killMs}ms, $($orph.Count) orphan(s) $(($orph | ForEach-Object { "$($_.Name)/$($_.ProcessId)" }) -join ' ')"
+    if ($orph.Count -gt 0) {
+        $slowLeaked += $orph.Count
+        foreach ($o in $orph) { try { Stop-Process -Id $o.ProcessId -Force -EA Stop } catch {} }
+    }
+    Start-Sleep -Milliseconds 300
+}
+Remove-Item Env:PSMUX_TEST_SLOW_CREATE_MS -ErrorAction SilentlyContinue
+if ($slowLeaked -eq 0) {
+    Write-Pass "no orphan pane shells over $LeakRounds rounds with every create held 1500 ms"
+} else {
+    Write-Fail "$slowLeaked orphan pane shell(s) over $LeakRounds rounds with every create held 1500 ms: teardown gave up on a spawn still inside CreateProcessW"
+}
+
+Cleanup
 Write-Host ""
 Write-Host "Passed: $script:Pass  Failed: $script:Fail"
 if ($script:Fail -gt 0) { exit 1 } else { exit 0 }

@@ -1585,6 +1585,12 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
     set_host_colors_env(&mut shell_cmd, p.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &p.environment);
     let spawn_cwd = shell_cmd.get_cwd().cloned();
+    // A teardown that began while this thread was opening the pty: do not
+    // create a shell now. Creating it would only make the reaper wait out a
+    // whole CreateProcessW for a spare nobody will ever claim (#686).
+    if crate::warm_pane_sync::inflight::is_tearing_down() {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "server is shutting down; spare not spawned"));
+    }
     let t_spawn0 = std::time::Instant::now();
     let child = pair.slave
         .spawn_command(shell_cmd)
