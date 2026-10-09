@@ -486,7 +486,7 @@ function Median-Of {
 function Show-TrendRow {
     param([string]$Name, [string]$Unit, [int]$Round, $Series)
     if ($null -eq $Series -or @($Series).Count -eq 0) {
-        Write-Host ("  {0,-34} {1,-6} {2,>5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
+        Write-Host ("  {0,-34} {1,-6} {2,5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
             $Name, $Unit, 0, "-", "-", "-", "-", "-", "no runs recorded") -ForegroundColor DarkGray
         return
     }
@@ -592,12 +592,24 @@ function Show-T {
     Show-TrendRow "server working set at prompt" "MB" 1 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "at_prompt") "server") "ws_mb" })
     Show-TrendRow "client working set at prompt" "MB" 1 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "at_prompt") "client") "ws_mb" })
     Show-TrendRow "server working set, session full" "MB" 1 (Get-TrendSeries "creation_latency_gate-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "after_panes") "server") "ws_mb" })
-    Show-TrendRow "idle cpu, server plus client" "%core" 2 (Get-TrendSeries "launch-to-prompt-*.json" @() {
+    # The window right at the prompt is where the server spawns the warm pool's
+    # spares, so that row moves with warm-pool-size (measured 2026-10-09: 4.2 %
+    # at depth two, 7.0 % at three, the same 0.8 % at both once settled). The
+    # settled row is the steady state; the fill row is the pool's one time cost.
+    Show-TrendRow "idle cpu at prompt (pool fill)" "%core" 2 (Get-TrendSeries "launch-to-prompt-*.json" @() {
         param($j)
         $i = Prop (Prop $j "resources") "idle_cpu_pct_of_core"
         if (-not $i) { return $null }
         return ((Prop $i "server" 0) + (Prop $i "client" 0))
     })
+    Show-TrendRow "idle cpu settled, srv+cli" "%core" 2 (Get-TrendSeries "launch-to-prompt-*.json" @() {
+        param($j)
+        $i = Prop (Prop $j "resources") "idle_cpu_pct_of_core_settled"
+        if (-not $i) { return $null }
+        return ((Prop $i "server" 0) + (Prop $i "client" 0))
+    })
+    Show-TrendRow "server cpu, prompt to settled" "ms" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop $j "resources") "pool_fill_cpu_ms") "server" })
+    Show-TrendRow "session tree working set, settled" "MB" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop $j "resources") "session_tree_settled") "ws_mb" })
     Show-TrendRow "cpu per 100 keystrokes, srv+cli" "ms" 0 (Get-TrendSeries "keystroke-latency-*.json" $kExcl {
         param($j)
         $c = Prop (Prop $j "resources") "cpu_ms_per_100_keys"

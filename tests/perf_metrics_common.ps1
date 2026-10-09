@@ -287,6 +287,9 @@ function Get-PerfEnvelope {
 
 function Get-PerfMetricsDir {
     param([string]$MetricsDir = "")
+    # PSMUX_METRICS_DIR sends an A/B or bisect run (old builds, forced options)
+    # somewhere else, so it never lands in the trend tests\perf_summary.ps1 reads.
+    if (-not $MetricsDir -and $env:PSMUX_METRICS_DIR) { $MetricsDir = $env:PSMUX_METRICS_DIR }
     if (-not $MetricsDir) { $MetricsDir = Join-Path $env:USERPROFILE ".psmux-test-data\metrics" }
     if (-not (Test-Path $MetricsDir)) { New-Item -ItemType Directory -Force -Path $MetricsDir | Out-Null }
     return $MetricsDir
@@ -432,6 +435,51 @@ function Measure-PerfIdleCpu {
         window_ms      = [math]::Round($sw.Elapsed.TotalMilliseconds, 0)
         pct_of_one_core = (Get-PerfCpuDelta $a $b ([double]$sw.Elapsed.TotalMilliseconds) 100.0)
     }
+}
+
+# The whole process tree under one root (the server): pane shells, the spare
+# shells of the warm pool, their console hosts, the standby server. The server's
+# own working set is ~16 MB while each spare pwsh and its console host is ~45 to
+# 50 MB, so the pool's memory is invisible in the server+client numbers and
+# shows up only here. Matched by parent pid with a creation time check, so a
+# recycled pid cannot pull a stranger's process into the sum.
+function Get-PerfTreeMemory {
+    param([int]$RootPid)
+    $o = [ordered]@{ processes = 0; ws_mb = 0.0; private_mb = 0.0; by_name = [ordered]@{} }
+    if ($RootPid -le 0) { return $o }
+    try { $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, WorkingSetSize, PrivatePageCount, CreationDate -ErrorAction Stop) }
+    catch { return $o }
+    $byParent = @{}
+    foreach ($p in $all) {
+        $k = [int]$p.ParentProcessId
+        if (-not $byParent.ContainsKey($k)) { $byParent[$k] = New-Object System.Collections.Generic.List[object] }
+        $byParent[$k].Add($p)
+    }
+    $root = $all | Where-Object { $_.ProcessId -eq $RootPid } | Select-Object -First 1
+    if (-not $root) { return $o }
+    $queue = New-Object System.Collections.Generic.Queue[object]
+    $queue.Enqueue($root)
+    $seen = @{}
+    while ($queue.Count -gt 0) {
+        $p = $queue.Dequeue()
+        if ($seen.ContainsKey([int]$p.ProcessId)) { continue }
+        $seen[[int]$p.ProcessId] = $true
+        $o.processes++
+        $o.ws_mb += [double]$p.WorkingSetSize / 1MB
+        $o.private_mb += [double]$p.PrivatePageCount / 1MB
+        $n = [IO.Path]::GetFileNameWithoutExtension([string]$p.Name).ToLower()
+        if (-not $o.by_name.Contains($n)) { $o.by_name[$n] = 0 }
+        $o.by_name[$n]++
+        if ($byParent.ContainsKey([int]$p.ProcessId)) {
+            foreach ($c in $byParent[[int]$p.ProcessId]) {
+                if ($c.CreationDate -and $p.CreationDate -and $c.CreationDate -lt $p.CreationDate) { continue }
+                $queue.Enqueue($c)
+            }
+        }
+    }
+    $o.ws_mb = [math]::Round($o.ws_mb, 1)
+    $o.private_mb = [math]::Round($o.private_mb, 1)
+    return $o
 }
 
 # Working set / private bytes of a snapshot, flattened for the JSON, plus the
