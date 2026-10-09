@@ -427,7 +427,11 @@ function Show-D {
     if ($vt.Count -eq 0) { return }
     Write-Host ""
     Write-Host ("  test_perf_vs_terminals, psmux attached cell") -ForegroundColor DarkCyan
-    Write-Host ("  {0,-17} {1,-11} {2,9} {3,9} {4,11} {5,11}" -f "when", "sha", "srvWS", "cliWS", "cpu/100keys", "idle % core") -ForegroundColor DarkCyan
+    # srv+cli is the narrow number every run has; treeWS is the whole session
+    # (pane shells, warm pool spares, console hosts, standby server, client),
+    # recorded from 2026-10-09 on. Files from before the split carried the
+    # narrow number under psmux_ws_mb, hence the fallback.
+    Write-Host ("  {0,-17} {1,-11} {2,9} {3,9} {4,9} {5,9} {6,6} {7,11} {8,11}" -f "when", "sha", "srvWS", "cliWS", "srv+cli", "treeWS", "procs", "cpu/100keys", "idle % core") -ForegroundColor DarkCyan
     foreach ($r in $vt) {
         $t = Prop $r.Json "summary_table" @()
         $cell = ($t | Where-Object { $_.host -eq "psmux_attached" } | Select-Object -First 1)
@@ -435,10 +439,13 @@ function Show-D {
         $row = [pscustomobject]@{
             when = $r.When.ToString("MM-dd HH:mm"); sha = (Sha $r.Json)
             srv_ws = (Prop $cell "server_ws_mb"); cli_ws = (Prop $cell "client_ws_mb")
+            narrow_ws = (Prop $cell "psmux_ws_mb_server_client" (Prop $cell "psmux_ws_mb"))
+            tree_ws = $(if ($null -ne (Prop $cell "psmux_ws_mb_server_client")) { Prop $cell "psmux_ws_mb" } else { $null })
+            tree_procs = (Prop $cell "psmux_tree_processes")
             cpu_100k = (Prop $cell "cpu_per_100_keys_psmux"); idle_pct = (Prop $cell "idle_cpu_pct_psmux")
         }
-        Write-Host ("  {0,-17} {1,-11} {2,9} {3,9} {4,11} {5,11}" -f `
-            $row.when, $row.sha, (Num $row.srv_ws 1), (Num $row.cli_ws 1), (Num $row.cpu_100k 0), (Num $row.idle_pct 2))
+        Write-Host ("  {0,-17} {1,-11} {2,9} {3,9} {4,9} {5,9} {6,6} {7,11} {8,11}" -f `
+            $row.when, $row.sha, (Num $row.srv_ws 1), (Num $row.cli_ws 1), (Num $row.narrow_ws 1), (Num $row.tree_ws 0), (Num $row.tree_procs 0), (Num $row.cpu_100k 0), (Num $row.idle_pct 2))
         Emit "D_vs_terminals" $row
     }
 }
@@ -609,6 +616,19 @@ function Show-T {
         return ((Prop $i "server" 0) + (Prop $i "client" 0))
     })
     Show-TrendRow "server cpu, prompt to settled" "ms" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop $j "resources") "pool_fill_cpu_ms") "server" })
+    Show-TrendRow "vs terms: psmux srv+cli ws" "MB" 1 (Get-TrendSeries "perf_vs_terminals-*.json" @() {
+        param($j)
+        $c = (Prop $j "summary_table" @()) | Where-Object { $_.host -eq "psmux_attached" } | Select-Object -First 1
+        if (-not $c) { return $null }
+        return (Prop $c "psmux_ws_mb_server_client" (Prop $c "psmux_ws_mb"))
+    })
+    Show-TrendRow "vs terms: psmux session tree ws" "MB" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() {
+        param($j)
+        $c = (Prop $j "summary_table" @()) | Where-Object { $_.host -eq "psmux_attached" } | Select-Object -First 1
+        if (-not $c -or $null -eq (Prop $c "psmux_ws_mb_server_client")) { return $null }
+        return (Prop $c "psmux_ws_mb")
+    })
+    Show-TrendRow "pane startup: session tree ws" "MB" 0 (Get-TrendSeries "pane_startup_perf-*.json" @() { param($j) Prop (Prop (Prop $j "resources") "session_tree") "ws_mb" })
     Show-TrendRow "session tree working set, settled" "MB" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop $j "resources") "session_tree_settled") "ws_mb" })
     Show-TrendRow "cpu per 100 keystrokes, srv+cli" "ms" 0 (Get-TrendSeries "keystroke-latency-*.json" $kExcl {
         param($j)

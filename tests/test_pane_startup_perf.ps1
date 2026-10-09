@@ -643,6 +643,38 @@ if ($deadCount -eq 0) {
 }
 Write-Host ""
 
+# MEMORY AND CPU of the session this suite just filled (first window, the new
+# windows, the splits and the burst), so a timing row here always has the cost
+# beside it. The server is found by its .pid anchor, never by image name; the
+# tree under it is every pane shell, the warm pool's spares, their console
+# hosts and the standby server, which is where nearly all the memory is.
+$script:ResourceBlock = $null
+try {
+    $srvPid = Get-PerfServerPid -Ns "" -Session $session1 -DataDir $PSMUX_DIR
+    if ($srvPid -gt 0) {
+        $snapA = Get-PerfResourceSnapshot ([ordered]@{ server = $srvPid })
+        $idle = Measure-PerfIdleCpu ([ordered]@{ server = $srvPid }) 3
+        $tree = Get-PerfTreeMemory $srvPid
+        $script:ResourceBlock = [ordered]@{
+            windows               = $winLines.Count
+            panes                 = $paneLines.Count
+            server                = (Get-PerfMemorySummary $snapA)
+            server_cpu_ms_total   = $(if ($snapA.Contains("server")) { $snapA["server"].cpu_ms } else { $null })
+            idle_cpu_pct_of_core  = $idle.pct_of_one_core
+            idle_measured_over_ms = $idle.window_ms
+            session_tree          = [ordered]@{ processes = $tree.processes; ws_mb = $tree.ws_mb; private_mb = $tree.private_mb; by_name = $tree.by_name }
+        }
+        Write-Info (Format-PerfResourceLine $snapA "session full")
+        Write-Info ("server idle cpu, % of a core: {0:F2}" -f $idle.pct_of_one_core["server"])
+        Write-Info ("session tree: {0} processes, {1} MB working set, {2} MB private  ({3})" -f $tree.processes, $tree.ws_mb, $tree.private_mb, (@($tree.by_name.Keys | ForEach-Object { "$_ x$($tree.by_name[$_])" }) -join ', '))
+    } else {
+        Write-Info "no .pid anchor for $session1 in $PSMUX_DIR, so no resource sample was taken"
+    }
+} catch {
+    Write-Info "resource sample failed: $_"
+}
+Write-Host ""
+
 # Kill session 1 before next test
 Kill-TestSession -SessionName $session1
 
@@ -1038,6 +1070,7 @@ try {
         pool_depth5_split_h_ms = @($poolSplitH | ForEach-Object { [math]::Round($_, 1) })
         standby_armed_new_session_ms = @($armedTimes | ForEach-Object { [math]::Round($_, 1) })
         stats_ms = $stats
+        resources = $script:ResourceBlock
         passed = $PASS
         failed = $FAIL
         total = $TOTAL_TESTS
