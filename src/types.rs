@@ -2016,6 +2016,14 @@ impl AppState {
         self.session_name == "__warm__"
     }
 
+    /// Whether this is a HELD standby (issue #734): unclaimed with
+    /// `exit-empty` off, so untargeted commands reach it as the namespace's
+    /// empty server. Its window and pane are the next session's, not a
+    /// session the user has, so commands it answers see no session.
+    pub fn is_held_standby(&self) -> bool {
+        self.is_warm_server() && !self.exit_empty
+    }
+
     /// Whether this server should run the periodic `status-interval` timer,
     /// which fires user `status-interval` hooks and re-renders the status line
     /// so time formats (`%H:%M:%S`, `%r`, ...) stay current.
