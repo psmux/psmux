@@ -68,7 +68,7 @@ fn make_float(x: u16, y: u16, w: u16, h: u16, border: &str) -> FloatJson {
     // inner is (w-2) x (h-2), filled with 'Z'.
     let rows: Vec<RowRunsJson> = (0..h.saturating_sub(2)).map(|_| row_of('Z', (w.saturating_sub(2)) as usize)).collect();
     FloatJson {
-        x, y, w, h, border: border.to_string(), focused: true, title: String::new(), rows,
+        x, y, w, h, border: border.to_string(), focused: true, title: String::new(), rows, ..Default::default()
     }
 }
 

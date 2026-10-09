@@ -79,6 +79,8 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("{",       "swap-pane -U"),
     ("}",       "swap-pane -D"),
     ("!",       "break-pane"),
+    // tmux key-bindings.c: `bind -N 'New floating pane' * { new-pane }` (#767).
+    ("*",       "new-pane"),
 
     // ── Pane resize (Ctrl+Arrow = 1 cell) ──
     ("C-Up",    "resize-pane -U"),

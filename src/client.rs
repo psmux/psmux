@@ -36,6 +36,46 @@ pub(crate) struct FloatJson {
     #[serde(default)] pub focused: bool,
     #[serde(default)] pub title: String,
     #[serde(default)] pub rows: Vec<crate::layout::RowRunsJson>,
+    /// The float's own cursor, content relative (#767).
+    #[serde(default)] pub cursor_row: u16,
+    #[serde(default)] pub cursor_col: u16,
+    #[serde(default)] pub hide_cursor: bool,
+}
+
+/// Content rect of a float on screen: the same placement and border inset
+/// `render_float_overlays` draws it with. `None` for a float too small to draw.
+pub(crate) fn float_inner_rect(content_chunk: Rect, fl: &FloatJson) -> Option<Rect> {
+    if fl.w < 2 || fl.h < 2 { return None; }
+    let w = fl.w.min(content_chunk.width);
+    let h = fl.h.min(content_chunk.height);
+    let x = content_chunk.x + fl.x.min(content_chunk.width.saturating_sub(w));
+    let y = content_chunk.y + fl.y.min(content_chunk.height.saturating_sub(h));
+    if fl.border == "none" {
+        Some(Rect { x, y, width: w, height: h })
+    } else {
+        Some(Rect { x: x + 1, y: y + 1, width: w.saturating_sub(2), height: h.saturating_sub(2) })
+    }
+}
+
+/// Where the terminal cursor goes when a floating pane holds the focus (#767).
+///
+/// tmux puts the cursor in the active pane, and a focused floating pane IS
+/// the active pane, so the cursor sits at that pane's cursor inside the float
+/// (`server_client_reset_state`, server-client.c, using `wp->xoff`/`wp->yoff`
+/// of the floating pane). The outer `None` means no float is focused, so the
+/// tiled active pane decides. `Some(None)` means a float is focused but its
+/// cursor is hidden (or the float cannot be drawn): the cursor must not fall
+/// back to the tiled pane behind it.
+pub(crate) fn focused_float_cursor(content_chunk: Rect, floats: &[FloatJson]) -> Option<Option<(u16, u16)>> {
+    let fl = floats.iter().rev().find(|fl| fl.focused)?;
+    let inner = match float_inner_rect(content_chunk, fl) {
+        Some(r) if r.width > 0 && r.height > 0 => r,
+        _ => return Some(None),
+    };
+    if fl.hide_cursor { return Some(None); }
+    let cx = inner.x + fl.cursor_col.min(inner.width - 1);
+    let cy = inner.y + fl.cursor_row.min(inner.height - 1);
+    Some(Some((cx, cy)))
 }
 
 /// Extract the `-T <table>` argument of a `switch-client` command line.
@@ -2961,6 +3001,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut popup_initial_offset: (i32, i32) = (0, 0);
     let mut popup_rect_last: Option<Rect> = None;
     let mut confirm_cmd: Option<String> = None;  // pending kill confirmation
+    // Whether any overlay was up on the previous loop pass, so the pass that
+    // closes one still draws a frame (#767): see `overlay_closed` below.
+    let mut prev_overlays_active = false;
     let current_session = name.clone();
     // What the session is CALLED, as against `current_session`, which is the
     // port file base: under `-L ns` the base reads `ns__name`, and it is read
@@ -7055,6 +7098,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
         let overlays_active = command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
+        // An overlay that closes without the server changing anything (n at
+        // `kill-pane? (y/n)`, Escape out of a prompt) leaves no new frame to
+        // draw, and the skip checks below used to `continue` on exactly that
+        // pass, so the closed box stayed painted on screen and read as a
+        // question still waiting for an answer (#767). The pass that sees the
+        // overlay go away renders once more to wipe it.
+        let overlay_closed = prev_overlays_active && !overlays_active;
+        prev_overlays_active = overlays_active;
         let should_dump = should_request_dump(force_dump, size_changed, typing_active, since_dump);
         // A failed request here is NOT the end of the client (issue #675).
         // The reader thread may have just noticed the same drop and started a
@@ -7090,13 +7141,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // ── STEP 3: Render if we have a frame ────────────────────────────
         // Also render if selection changed (for highlight overlay) even without new frame
         // Always render when overlays are active (command prompt, rename, choosers)
-        if !got_frame && !selection_changed && !overlays_active {
+        if !got_frame && !selection_changed && !overlays_active && !overlay_closed {
             continue;
         }
 
         // Skip parse + render when the raw JSON is identical to the previous
         // frame AND selection hasn't changed AND no overlays are active.
-        if dump_buf == prev_dump_buf && !selection_changed && !overlays_active {
+        if dump_buf == prev_dump_buf && !selection_changed && !overlays_active && !overlay_closed {
             last_dump_time = Instant::now();
             continue;
         }
@@ -7630,6 +7681,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             } // !active_pane_in_copy_mode
             } // if let sel_s, sel_e
 
+            // Floating panes (tmux new-pane) are part of the window: they draw
+            // above the tiled layout and BELOW every chooser, prompt and
+            // overlay. They used to be drawn after the client's own overlays
+            // (choose-tree, rename, command prompt, confirm), so a float
+            // covering the middle of the window painted over the centred
+            // `kill-pane? (y/n)` box: prefix x drew nothing while the question
+            // still waited for the next key (#767). tmux draws its prompts and
+            // overlays on top of panes, floating ones included.
+            if !srv_floats.is_empty() {
+                render_float_overlays(
+                    f,
+                    content_chunk,
+                    &srv_floats,
+                    window_styles,
+                    pane_border_style,
+                    pane_active_border_style,
+                    border_indicators,
+                );
+            }
             if session_chooser {
                 let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 let filtered_indices = session_filtered_indices(&session_entries, &session_filter);
@@ -8585,19 +8655,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
 
             // ── Server-side overlay rendering ────────────────────────
-            // Floating panes (tmux new-pane) draw above the tiled layout but
-            // below modal popups so a popup still stacks on top.
-            if !srv_floats.is_empty() {
-                render_float_overlays(
-                    f,
-                    content_chunk,
-                    &srv_floats,
-                    window_styles,
-                    pane_border_style,
-                    pane_active_border_style,
-                    border_indicators,
-                );
-            }
             if srv_popup_active {
                 let popup_area = popup_overlay_rect(content_chunk, srv_popup_width, srv_popup_height);
                 let w = popup_area.width;
@@ -8902,6 +8959,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // as the status message plus the offset of its cursor, and
                 // the draw above turned that into a position.
                 prompt_cursor_pos
+            } else if let Some(float_cursor) = focused_float_cursor(content_chunk, &srv_floats) {
+                // A focused floating pane is the active pane, so the cursor
+                // goes inside it (#767). It used to fall through to the tiled
+                // pane's cursor, leaving it blinking at the prompt behind the
+                // float while every keystroke went into the float.
+                float_cursor
             } else if let (Some((cc, cr)), Some(outer)) = (post_draw_cursor, active_pane_area) {
                 // Content lives inside the border-label reservation; use the render's inner rect.
                 let inner = pane_content_inner(outer, &client_border_status, &client_border_format);
@@ -8924,6 +8987,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 && !window_idx_input
                 && !status_prompt_open
                 && !renaming
+                && !srv_floats.iter().any(|fl| fl.focused)
             {
                 if let (Some((cc, cr)), Some(outer)) = (post_draw_park, active_pane_area) {
                     let inner = pane_content_inner(outer, &client_border_status, &client_border_format);
