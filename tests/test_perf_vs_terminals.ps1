@@ -333,7 +333,8 @@ if ($RunDir -match '\s') {
 Remove-Item -Recurse -Force $RunDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $RunDir "data") | Out-Null
 
-$MetricsDir = Join-Path $env:USERPROFILE ".psmux-test-data\metrics"
+# PSMUX_METRICS_DIR: same override as tests\perf_metrics_common.ps1 (not yet dot sourced here)
+$MetricsDir = if ($env:PSMUX_METRICS_DIR) { $env:PSMUX_METRICS_DIR } else { Join-Path $env:USERPROFILE ".psmux-test-data\metrics" }
 New-Item -ItemType Directory -Force -Path $MetricsDir | Out-Null
 $MetricsFile = Join-Path $MetricsDir ("perf_vs_terminals-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 
@@ -1460,6 +1461,31 @@ function Measure-KeyCell {
         Start-Sleep -Seconds $settledSeconds
         $idleD = Sample-Roles $roles
 
+        # The memory a psmux session really holds, taken here because the warm
+        # pool has long finished filling by now: the server's whole tree (pane
+        # shell, the pool's spare shells, their console hosts, the standby
+        # server and its shells) plus the attached client. server+client alone
+        # was ~25 MB against ~660 MB for the tree at warm-pool-size 3
+        # (2026-10-09), so a head to head on the narrow number flattered psmux.
+        # The narrow number is kept beside it (psmux_ws_mb_server_client) so the
+        # trend stays comparable with runs recorded before this.
+        $sessTree = $null
+        if ($IsPsmux -and $roles.ContainsKey("server")) {
+            $sessTree = Get-PerfTreeMemory ([int]$roles["server"])
+            if ($sessTree.processes -gt 0 -and $roles.ContainsKey("client") -and ($sessTree.pids -notcontains [int]$roles["client"])) {
+                $cs = Get-PerfProcSample ([int]$roles["client"]) "client"
+                if ($cs) {
+                    $sessTree.processes++
+                    $sessTree.pids += [int]$roles["client"]
+                    $sessTree.ws_mb = [math]::Round($sessTree.ws_mb + [double]$cs.ws_mb, 1)
+                    $sessTree.private_mb = [math]::Round($sessTree.private_mb + [double]$cs.private_mb, 1)
+                    if (-not $sessTree.by_name.Contains("psmux")) { $sessTree.by_name["psmux"] = 0 }
+                    $sessTree.by_name["psmux"]++
+                }
+            }
+            if ($sessTree.processes -eq 0) { $sessTree = $null }
+        }
+
         $keyCpu   = Cpu-Delta $atPrompt $afterKeys ([double]$Keys) 100.0
         $idleEarly = Cpu-Delta $idleA $idleB ([double]($IdleSeconds * 1000)) 100.0
         $idleCpu  = Cpu-Delta $idleC $idleD ([double]($settledSeconds * 1000)) 100.0
@@ -1487,6 +1513,7 @@ function Measure-KeyCell {
             cpu_ms_per_100_keys          = $keyCpu
             idle_cpu_pct_of_core         = $idleCpu
             idle_cpu_pct_of_core_settling = $idleEarly
+            session_tree_settled         = $sessTree
         }
         $memLine = (@($atPrompt.Keys | ForEach-Object { "{0} {1:F1}/{2:F1}MB" -f $_, $atPrompt[$_].ws_mb, $atPrompt[$_].priv_mb }) -join "  ")
         $cpuLine = (@($keyCpu.Keys  | ForEach-Object { "{0} {1:F1}" -f $_, $keyCpu[$_] }) -join "  ")
@@ -1499,6 +1526,7 @@ function Measure-KeyCell {
         }
         Write-Host ("      idle cpu, first window ({0}s ramp down, not judged): {1}" -f $IdleSeconds, $earLine) -ForegroundColor DarkGray
         Write-Host ("      idle cpu, settled window ({0}s, T7 judges this)   : {1}" -f $settledSeconds, $idlLine) -ForegroundColor DarkGray
+        if ($sessTree) { Write-Host ("      session tree, settled : {0} processes, {1:F1} MB working set, {2:F1} MB private  ({3})" -f $sessTree.processes, $sessTree.ws_mb, $sessTree.private_mb, (@($sessTree.by_name.Keys | ForEach-Object { "$_ x$($sessTree.by_name[$_])" }) -join ', ')) -ForegroundColor DarkGray }
         if ($sh.gui_shared) { Write-Host ("      host $($sh.gui_name) pid $($sh.gui) is shared with the user's own windows: its working set is not this cell's cost") -ForegroundColor DarkGray }
         }
     }
@@ -2182,11 +2210,18 @@ foreach ($cell in @("bare_pwsh","wt_pwsh","wezterm_pwsh","alacritty_pwsh","psmux
         client_ws_mb   = if ($cli) { $cli.ws_mb } else { $null }
         host_ws_mb     = if ($hst) { $hst.ws_mb } else { $null }
         host_shared    = if ($r) { [bool]$r.host_shared } else { $null }
-        psmux_ws_mb    = if ($srv -or $cli) {
+        # Before 2026-10-09 psmux_ws_mb was server plus client only; that narrow
+        # number is now psmux_ws_mb_server_client, and psmux_ws_mb is the whole
+        # session tree (pane shells, warm pool spares, console hosts, standby
+        # server, client). tests\perf_summary.ps1 reads the narrow key with a
+        # fallback to psmux_ws_mb for files written before the split.
+        psmux_ws_mb_server_client = if ($srv -or $cli) {
                              $a = 0.0; if ($srv) { $a += [double]$srv.ws_mb }
                              if ($cli) { $a += [double]$cli.ws_mb }
                              [math]::Round($a, 2)
                          } else { $null }
+        psmux_ws_mb    = if ($r -and $r.session_tree_settled) { $r.session_tree_settled.ws_mb } else { $null }
+        psmux_tree_processes = if ($r -and $r.session_tree_settled) { $r.session_tree_settled.processes } else { $null }
         cpu_per_100_keys_psmux = if ($r) { [math]::Round((Sum-Roles $r.cpu_ms_per_100_keys @("server","client")), 1) } else { $null }
         cpu_per_100_keys_host  = if ($r) { [math]::Round((Sum-Roles $r.cpu_ms_per_100_keys @("host","console_host","shell")), 1) } else { $null }
         idle_cpu_pct_psmux     = if ($r) { [math]::Round((Sum-Roles $r.idle_cpu_pct_of_core @("server","client")), 2) } else { $null }
@@ -2213,18 +2248,19 @@ foreach ($r in $rows) {
 # which is what shared means: read its CPU, not its working set.
 if ($script:Resource.Count -gt 0) {
     Write-Host ""
-    Write-Host ("  {0,-22} {1,9} {2,9} {3,9} {4,7} {5,10} {6,10} {7,9} {8,9}" -f `
-        "host","srv_ws","cli_ws","host_ws","shared","cpu/100k","host_cpu","idle%","host_idle%") -ForegroundColor White
-    Write-Host ("  " + ("-" * 104)) -ForegroundColor DarkGray
+    Write-Host ("  {0,-22} {1,9} {2,9} {3,9} {4,9} {5,7} {6,10} {7,10} {8,9} {9,9}" -f `
+        "host","srv_ws","cli_ws","tree_ws","host_ws","shared","cpu/100k","host_cpu","idle%","host_idle%") -ForegroundColor White
+    Write-Host ("  " + ("-" * 114)) -ForegroundColor DarkGray
     foreach ($r in $rows) {
         if ($null -eq $r.idle_cpu_pct_psmux -and $null -eq $r.host_ws_mb -and $null -eq $r.server_ws_mb) { continue }
-        Write-Host ("  {0,-22} {1,9} {2,9} {3,9} {4,7} {5,10} {6,10} {7,9} {8,9}" -f `
+        Write-Host ("  {0,-22} {1,9} {2,9} {3,9} {4,9} {5,7} {6,10} {7,10} {8,9} {9,9}" -f `
             $r.host,
-            (& $fmt $r.server_ws_mb "{0:F1}"), (& $fmt $r.client_ws_mb "{0:F1}"), (& $fmt $r.host_ws_mb "{0:F1}"),
+            (& $fmt $r.server_ws_mb "{0:F1}"), (& $fmt $r.client_ws_mb "{0:F1}"), (& $fmt $r.psmux_ws_mb "{0:F0}"), (& $fmt $r.host_ws_mb "{0:F1}"),
             $(if ($r.host_shared) { "yes" } else { "no" }),
             (& $fmt $r.cpu_per_100_keys_psmux "{0:F1}"), (& $fmt $r.cpu_per_100_keys_host "{0:F1}"),
             (& $fmt $r.idle_cpu_pct_psmux "{0:F2}"), (& $fmt $r.idle_cpu_pct_host "{0:F2}"))
     }
+    Write-Host ("  tree_ws is the whole psmux session (pane shells, warm pool spares, console hosts, standby server, client) once settled, the honest number to set beside a terminal's host_ws plus its shell") -ForegroundColor DarkGray
     Write-Host ("  srv_ws/cli_ws/host_ws are working set MB at prompt ready; cpu/100k is ms of CPU per 100 keystrokes; idle% is percent of ONE core over the settled window with nothing typed, and is the figure T7 judges") -ForegroundColor DarkGray
 }
 

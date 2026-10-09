@@ -334,7 +334,8 @@ function Get-PerfDataDir {
 function Get-PerfServerPid {
     param([string]$Ns, [string]$Session, [string]$DataDir = "")
     if (-not $DataDir) { $DataDir = Get-PerfDataDir }
-    $f = Join-Path $DataDir "${Ns}__$Session.pid"
+    # No namespace is the default socket, whose anchor carries no prefix.
+    $f = if ($Ns) { Join-Path $DataDir "${Ns}__$Session.pid" } else { Join-Path $DataDir "$Session.pid" }
     if (-not (Test-Path $f)) { return 0 }
     $txt = ""
     try { $txt = (Get-Content -LiteralPath $f -Raw).Trim() } catch { return 0 }
@@ -445,7 +446,7 @@ function Measure-PerfIdleCpu {
 # recycled pid cannot pull a stranger's process into the sum.
 function Get-PerfTreeMemory {
     param([int]$RootPid)
-    $o = [ordered]@{ processes = 0; ws_mb = 0.0; private_mb = 0.0; by_name = [ordered]@{} }
+    $o = [ordered]@{ processes = 0; ws_mb = 0.0; private_mb = 0.0; by_name = [ordered]@{}; pids = @() }
     if ($RootPid -le 0) { return $o }
     try { $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, WorkingSetSize, PrivatePageCount, CreationDate -ErrorAction Stop) }
     catch { return $o }
@@ -465,6 +466,7 @@ function Get-PerfTreeMemory {
         if ($seen.ContainsKey([int]$p.ProcessId)) { continue }
         $seen[[int]$p.ProcessId] = $true
         $o.processes++
+        $o.pids += [int]$p.ProcessId
         $o.ws_mb += [double]$p.WorkingSetSize / 1MB
         $o.private_mb += [double]$p.PrivatePageCount / 1MB
         $n = [IO.Path]::GetFileNameWithoutExtension([string]$p.Name).ToLower()
