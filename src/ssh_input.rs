@@ -2816,8 +2816,15 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
                     match rec.event_type {
                         KEY_EVENT => {
                             let key = unsafe { &*(rec.data.as_ptr() as *const KEY_EVENT_RECORD) };
-                            // Skip key-up events entirely.
-                            if key.key_down == 0 { continue; }
+                            // Skip key-up events, except the Alt UP that
+                            // carries an Alt code character (issue #766: an
+                            // em dash written by node-pty arrives that way
+                            // even with VT input on, and was dropped here).
+                            if key.key_down == 0
+                                && !crate::console_tap::alt_code_release_char(false, key.virtual_key_code, key.u_char)
+                            {
+                                continue;
+                            }
 
                             if verbose {
                                 ssh_debug_log(&format!(
