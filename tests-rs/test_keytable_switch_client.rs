@@ -7,6 +7,7 @@
 // else, and the next key went to root.
 
 use super::*;
+use crate::types::AppState;
 
 // --- root bindings latch like prefix bindings -------------------------------
 
@@ -148,4 +149,137 @@ fn state_frame_omits_root() {
     let mut buf = String::from("{\"a\":1}");
     crate::server::helpers::append_key_table_json(None, &mut buf);
     assert_eq!(buf, "{\"a\":1}");
+}
+
+// --- the key-table session option -------------------------------------------
+//
+// tmux options-table.c "key-table" (session, default "root"); server-client.c
+// server_client_get_key_table returns it and server_client_set_key_table(c,
+// NULL) puts the client back on it after every key. A key not bound in it is
+// passed to the pane without trying root; switch-client -T still overrides it
+// for one key; the prefix still arms from it.
+
+fn app_with_window() -> AppState {
+    let mut app = AppState::new("kt_probe".to_string());
+    app.windows.push(crate::types::Window {
+        root: crate::types::Node::Split {
+            kind: crate::types::LayoutKind::Horizontal,
+            sizes: vec![],
+            children: vec![],
+        },
+        active_path: vec![],
+        name: "w0".to_string(),
+        id: 0,
+        area: ratatui::layout::Rect::new(0, 0, 120, 30),
+        window_size: None,
+        window_options: Default::default(),
+        activity_flag: false,
+        bell_flag: false,
+        silence_flag: false,
+        last_output_time: std::time::Instant::now(),
+        last_seen_version: 0,
+        manual_rename: false,
+        layout_index: 0,
+        pane_mru: vec![],
+        zoom_saved: None,
+        linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
+    });
+    app
+}
+
+#[test]
+fn key_table_option_defaults_to_root_and_is_listed() {
+    let app = AppState::new("kt".to_string());
+    assert_eq!(crate::server::options::get_option_value(&app, "key-table"), "root");
+    assert_eq!(crate::server::helpers::default_key_table(&app), "root");
+    let listed = crate::server::option_catalog::build_option_list(&app);
+    let row = listed.iter().find(|(n, _, _)| n == "key-table").expect("key-table in show-options");
+    assert_eq!(row.1, "root");
+    assert_eq!(crate::server::option_catalog::default_for("key-table"), Some("root"));
+}
+
+#[test]
+fn key_table_option_set_at_runtime_and_from_config() {
+    let mut app = AppState::new("kt".to_string());
+    crate::server::options::apply_set_option(&mut app, "key-table", "mytbl", false).unwrap();
+    assert_eq!(crate::server::options::get_option_value(&app, "key-table"), "mytbl");
+    assert_eq!(crate::server::helpers::default_key_table(&app), "mytbl");
+
+    let mut app2 = AppState::new("kt2".to_string());
+    crate::config::parse_config_content(&mut app2, "set -g key-table cfgtbl\n");
+    assert_eq!(crate::server::helpers::default_key_table(&app2), "cfgtbl");
+}
+
+#[test]
+fn empty_key_table_is_root() {
+    let mut app = AppState::new("kt".to_string());
+    app.user_options.insert("key-table".to_string(), String::new());
+    assert_eq!(crate::server::helpers::default_key_table(&app), "root");
+}
+
+#[test]
+fn client_key_table_format_reports_the_default_table() {
+    let mut app = app_with_window();
+    assert_eq!(crate::format::expand_format("#{client_key_table}", &app), "root");
+    crate::server::options::apply_set_option(&mut app, "key-table", "mytbl", false).unwrap();
+    assert_eq!(crate::format::expand_format("#{client_key_table}", &app), "mytbl");
+    // A one key latch still wins over the default.
+    app.current_key_table = Some("other".to_string());
+    assert_eq!(crate::format::expand_format("#{client_key_table}", &app), "other");
+    // The prefix still wins over both.
+    app.client_prefix_active = true;
+    assert_eq!(crate::format::expand_format("#{client_key_table}", &app), "prefix");
+}
+
+#[test]
+fn switch_client_t_resolves_against_the_default_table() {
+    use crate::server::helpers::resolve_switch_client_table as resolve;
+    let mut app = AppState::new("kt".to_string());
+    app.user_options.insert("key-table".to_string(), "mytbl".to_string());
+    // Naming the default table is the unlatched state.
+    assert_eq!(resolve(&app, "mytbl"), Ok(None));
+    // root always exists and, not being the default, latches for one key.
+    assert_eq!(resolve(&app, "root"), Ok(Some("root".to_string())));
+    assert_eq!(resolve(&app, "prefix"), Ok(Some("prefix".to_string())));
+    assert!(resolve(&app, "NOSUCH").is_err());
+    // With the default left at root, root is still the unlatched state.
+    let plain = AppState::new("kt2".to_string());
+    assert_eq!(resolve(&plain, "root"), Ok(None));
+}
+
+#[test]
+fn state_frame_carries_a_non_root_default_table_only() {
+    let mut buf = String::from("{\"a\":1}");
+    crate::server::helpers::append_default_key_table_json("root", &mut buf);
+    assert_eq!(buf, "{\"a\":1}");
+    crate::server::helpers::append_default_key_table_json("mytbl", &mut buf);
+    let v: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
+    assert_eq!(v["default_key_table"], "mytbl");
+}
+
+#[test]
+fn client_sync_follows_the_default_table() {
+    let mut s = KeyTableSync::default();
+    assert_eq!(s.default_table(), "root");
+    s.set_default(Some("mytbl"));
+    assert_eq!(s.default_table(), "mytbl");
+    // A binding that names the default table leaves nothing latched...
+    assert_eq!(s.latch_for(Some("mytbl".to_string())), None);
+    // ...while root is a real one key latch when it is not the default.
+    assert_eq!(s.latch_for(Some("root".to_string())), Some("root".to_string()));
+    s.set_default(None);
+    assert_eq!(s.default_table(), "root");
+    assert_eq!(s.latch_for(Some("root".to_string())), None);
+}
+
+#[test]
+fn client_sync_treats_the_default_as_no_latch_from_the_server() {
+    let mut s = KeyTableSync::default();
+    s.set_default(Some("mytbl"));
+    // The server reports a latch of root (switch-client -T root from the CLI).
+    assert_eq!(s.on_server_table(Some("root")), Some(Some("root".to_string())));
+    // And back to the default.
+    assert_eq!(s.on_server_table(None), Some(None));
 }

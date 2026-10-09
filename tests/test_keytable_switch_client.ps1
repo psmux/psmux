@@ -50,6 +50,9 @@ bind -T mytbl x set -g @hit x
 bind -T mytbl F9 set -g @hit F9
 bind -T mytbl s set -g @hit s \; switch-client -T mytbl
 bind q switch-client -T mytbl
+bind w set -g @hit w
+bind -n F7 set -g @hit F7
+bind -T othertbl x set -g @hit ox
 "@
 
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -168,6 +171,87 @@ if ($cpid -eq 0) {
     $ll = LastLine
     if ((Hit) -eq "0" -and $ll -match 'x\s*$') { Write-Pass "after switch-client -T root, x went to the shell, not to mytbl" }
     else { Write-Fail "after -T root: @hit=$(Hit) lastline='$ll'" }
+    & $inj $cpid "{ESC}" 2>&1 | Out-Null
+
+    # Part F: the key-table session option (tmux options-table.c, default
+    # root). The client returns to it after every key; a key not bound in it
+    # goes to the pane; switch-client -T overrides it for one key; the prefix
+    # still arms from it.
+    Write-Host "`n=== Part F: key-table option ===" -ForegroundColor Cyan
+    $kv = (& $PSMUX -L $SOCK show -gv key-table 2>&1 | Out-String).Trim()
+    if ($kv -eq "root") { Write-Pass "show -gv key-table defaults to root" } else { Write-Fail "key-table default '$kv', expected root" }
+    $ls = (& $PSMUX -L $SOCK show -g 2>&1 | Out-String)
+    if ($ls -match '(?m)^key-table\s+"?root"?\s*$') { Write-Pass "show -g lists key-table root" } else { Write-Fail "show -g does not list key-table root" }
+
+    & $PSMUX -L $SOCK set -g key-table mytbl 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    $t = Q '#{client_key_table}'
+    if ($t -eq "mytbl") { Write-Pass "set -g key-table mytbl: #{client_key_table} = mytbl" } else { Write-Fail "#{client_key_table} = '$t' after set -g key-table mytbl" }
+    $ok = 0; $detail = ""
+    for ($r = 0; $r -lt $ROUNDS; $r++) {
+        Reset-Hit
+        & $inj $cpid "x" 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 1000
+        $h = Hit; $t = Q '#{client_key_table}'
+        if ($h -eq "x" -and $t -eq "mytbl") { $ok++ } else { $detail = "@hit=$h table=$t" }
+    }
+    if ($ok -eq $ROUNDS) { Write-Pass "x fires from the default table every time and the client stays on it ($ok/$ROUNDS)" }
+    else { Write-Fail "default table x: $ok/$ROUNDS ($detail)" }
+
+    # A key not bound in the default table is passed to the pane.
+    & $PSMUX -L $SOCK send-keys -t $S "cls" Enter 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    & $inj $cpid "Q" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 1000
+    $ll = LastLine
+    if ($ll -match 'Q\s*$') { Write-Pass "a key unbound in the default table reached the pane" } else { Write-Fail "Q did not reach the pane: '$ll'" }
+    & $inj $cpid "{ESC}" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 400
+
+    # The prefix still arms from a non root default, and returns to it.
+    Reset-Hit
+    & $inj $cpid "^b" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 700
+    $tp = Q '#{client_key_table}'
+    & $inj $cpid "w" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 1000
+    $h = Hit; $t = Q '#{client_key_table}'
+    if ($tp -eq "prefix" -and $h -eq "w" -and $t -eq "mytbl") { Write-Pass "prefix w fired from the mytbl default and returned to mytbl" }
+    else { Write-Fail "prefix from default: table after C-b=$tp @hit=$h table after=$t" }
+
+    # switch-client -T root overrides the default for one key.
+    Reset-Hit
+    & $PSMUX -L $SOCK switch-client -T root 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    $t1 = Q '#{client_key_table}'
+    & $inj $cpid "{F7}" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 1000
+    $h = Hit; $t2 = Q '#{client_key_table}'
+    if ($t1 -eq "root" -and $h -eq "F7" -and $t2 -eq "mytbl") { Write-Pass "switch-client -T root: F7 fired from root for one key, then back to mytbl" }
+    else { Write-Fail "-T root override: table=$t1 @hit=$h after=$t2" }
+
+    # The session scoped form (no -g) works too.
+    & $PSMUX -L $SOCK set key-table othertbl 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    Reset-Hit
+    & $inj $cpid "x" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 1000
+    $h = Hit; $t = Q '#{client_key_table}'
+    if ($h -eq "ox" -and $t -eq "othertbl") { Write-Pass "set key-table othertbl (session): x fired the othertbl binding" }
+    else { Write-Fail "session key-table: @hit=$h table=$t" }
+
+    # Back to root: x is no longer bound, so it goes to the shell.
+    & $PSMUX -L $SOCK set key-table root 2>&1 | Out-Null
+    & $PSMUX -L $SOCK set -g key-table root 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    & $PSMUX -L $SOCK send-keys -t $S "cls" Enter 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    Reset-Hit
+    & $inj $cpid "x" 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 1000
+    $ll = LastLine; $t = Q '#{client_key_table}'
+    if ((Hit) -eq "0" -and $ll -match 'x\s*$' -and $t -eq "root") { Write-Pass "key-table root again: x reached the shell, table root" }
+    else { Write-Fail "after reset: @hit=$(Hit) lastline='$ll' table=$t" }
     & $inj $cpid "{ESC}" 2>&1 | Out-Null
 
     # Part E: the session stays functional through the TUI (CLI-driven checks).
