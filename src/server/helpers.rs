@@ -725,10 +725,10 @@ pub(crate) fn active_pane_progress(app: &AppState) -> Option<(u8, u8)> {
 
 /// Ingest one staged pane OSC 52 payload: paste buffer plus client forward.
 ///
-/// tmux parity (input.c input_osc_52): a pane initiated OSC 52 is BOTH
-/// forwarded to the host terminal AND added to the paste buffer stack via
-/// paste_add, and tmux does this server side during input parsing whether or
-/// not a client is attached. The buffer add here is therefore unconditional.
+/// tmux parity (input.c input_osc_52): a pane initiated OSC 52 is forwarded
+/// to the host terminal whenever `set-clipboard` is not `off`, and added to
+/// the paste buffer stack via paste_add only when it is `on`. tmux does both
+/// server side during input parsing, whether or not a client is attached.
 /// The one-shot `clipboard_osc52` forward slot is OVERWRITTEN with the
 /// newest payload: a clipboard collapse must keep the latest write, and in a
 /// detached session the slot would otherwise wedge on the first never
@@ -744,9 +744,17 @@ pub(crate) fn drain_osc52(app: &mut AppState) {
     let Some((_sel, b64)) = take_pane_clipboard(app) else { return };
     let Ok(b64_str) = std::str::from_utf8(&b64) else { return };
     let Some(text) = crate::util::base64_decode(b64_str) else { return };
-    app.paste_buffers.insert(0, text.clone());
-    if app.paste_buffers.len() > 10 {
-        app.paste_buffers.pop();
+    // `on` lets the application create a buffer; `external` only forwards.
+    // tmux's option says so in as many words, "whether to allow applications
+    // to create paste buffers with an escape sequence ('on' only)", and
+    // input_osc_52 returns before decoding unless the value is `on`
+    // (input.c, the `!= 2` guard). The forward below is not gated, because
+    // `external` exists to do exactly that.
+    if app.set_clipboard == "on" {
+        app.paste_buffers.insert(0, text.clone());
+        if app.paste_buffers.len() > 10 {
+            app.paste_buffers.pop();
+        }
     }
     app.clipboard_osc52 = Some(text);
 }

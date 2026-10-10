@@ -660,7 +660,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     // Unicode
     ("codepoint-widths",           "\"\""),
     ("terminal-overrides",         "\"\""),
-    ("set-clipboard",              "on"),
+    ("set-clipboard",              "external"),
     ("set-titles-string",          "\"\""),
     // psmux extensions
     ("cursor-style",               "default"),
