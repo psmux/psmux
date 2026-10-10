@@ -424,6 +424,38 @@ fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
 /// A session header is `is_win == true` with `win_id == usize::MAX`.
 pub(crate) type TreeRow = (bool, usize, usize, String, String);
 
+/// A kill one of the choosers has asked about: the question on screen, and
+/// which row it names. The answer acts only when the cursor is still on that
+/// row, because the mouse wheel can move it while the question is up, where
+/// tmux's prompt holds the terminal and nothing can move under it.
+pub(crate) struct ChooserKill {
+    /// The confirm box's text, without the `? (y/n)` the box adds.
+    pub prompt: String,
+    /// The tree chooser's window id, or `None` in the session chooser, whose
+    /// rows are sessions.
+    pub window: Option<usize>,
+    /// The session the row belongs to, which in the session chooser is the row
+    /// itself.
+    pub session: String,
+}
+
+/// Whether a key answers a chooser's kill question with yes. tmux asks with
+/// `status_prompt_set(... PROMPT_SINGLE ...)`, which takes a single key, and
+/// its callback kills only when that key was `y` (`window-tree.c:1306` and
+/// `:1137`), so every other key cancels.
+pub(crate) fn chooser_kill_confirmed(code: KeyCode) -> bool {
+    matches!(code, KeyCode::Char('y') | KeyCode::Char('Y'))
+}
+
+/// What the tree chooser's kill question names. Its rows are built as
+/// `"  2: bash* (1 panes)"`, and tmux's own question carries the window index
+/// alone, `"Kill window 2? "` (`window-tree.c:1295`), so the part in front of
+/// the colon is what the question takes.
+pub(crate) fn chooser_kill_target(label: &str) -> String {
+    let label = label.trim();
+    label.split(':').next().unwrap_or(label).trim().to_string()
+}
+
 /// Classify every row of a choose-tree model so the tmux line rules in
 /// `crate::choose_tree` can be applied to it.
 pub(crate) fn tree_row_kinds(rows: &[TreeRow]) -> Vec<crate::choose_tree::RowKind> {
@@ -3099,6 +3131,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut popup_initial_offset: (i32, i32) = (0, 0);
     let mut popup_rect_last: Option<Rect> = None;
     let mut confirm_cmd: Option<String> = None;  // pending kill confirmation
+    // The kill a chooser's `x` has asked about and is waiting on, with the
+    // chooser still open behind it, the way tmux's `status_prompt_set(...
+    // PROMPT_SINGLE ...)` leaves the mode open behind its own prompt
+    // (`window-tree.c:1306`).
+    let mut chooser_kill: Option<ChooserKill> = None;
     // Whether any overlay was up on the previous loop pass, so the pass that
     // closes one still draws a frame (#767): see `overlay_closed` below.
     let mut prev_overlays_active = false;
@@ -4529,7 +4566,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                         }
                         else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
-                            if session_chooser && !session_filter.is_empty() {
+                            if chooser_kill.is_some() {
+                                // Escape answers a chooser's kill question with
+                                // "no" and leaves the chooser open, which is
+                                // what tmux's single key prompt does with any
+                                // key that is not `y`. Without this the branch
+                                // below would take Escape and close the chooser
+                                // under the question.
+                                chooser_kill = None;
+                            } else if session_chooser && !session_filter.is_empty() {
                                 let selected_entry = session_filter_escape_selection(
                                     &session_entries,
                                     &session_filter,
@@ -5264,7 +5309,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // ten VISIBLE lines and M-a..M-z on lines 10..35, so the
                             // key is a zero based visible line index.
                             let mut effective_code = key.code;
-                            if tree_chooser {
+                            if tree_chooser && chooser_kill.is_none() {
                                 let jump = match key.code {
                                     KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
                                         crate::choose_tree::meta_line(c)
@@ -5282,6 +5327,118 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             match effective_code {
+                                // A chooser's kill question takes the very next key, as
+                                // tmux's prompt does: it is set with PROMPT_SINGLE, so it
+                                // ends on one key (`window-tree.c:1306`), and its callback
+                                // kills only when that key was `y` (`:1137`). The chooser is
+                                // still open underneath either way, as tmux's mode is. This
+                                // arm comes before the chooser arms because theirs absorb
+                                // every remaining printable key, so an answer placed after
+                                // them would never be seen.
+                                code if chooser_kill.is_some() => {
+                                    // The question comes down whatever the key was, and
+                                    // survives as an answer only if that key was a yes.
+                                    let asked = chooser_kill.take().filter(|_| chooser_kill_confirmed(code));
+                                    if let Some(asked) = asked {
+                                        if tree_chooser {
+                                            // Copy out the fields we need so the immutable borrow
+                                            // ends before we mutate the model below.
+                                            if let Some((is_win, wid, sess_name)) = tree_entries
+                                                .get(tree_selected)
+                                                .map(|(iw, w, _p, _l, s)| (*iw, *w, s.clone()))
+                                            {
+                                                if is_win
+                                                    && Some(wid) == asked.window
+                                                    && sess_name == asked.session
+                                                    && sess_name == current_session
+                                                {
+                                                    cmd_batch.push(format!("focus-window {}\n", wid));
+                                                    cmd_batch.push("kill-window\n".into());
+                                                    // Drop the killed window and the panes underneath
+                                                    // it from the model, then rebuild the visible
+                                                    // lines so the chooser stays open for more kills.
+                                                    if let Some(model) = tree_vis_map.get(tree_selected).copied() {
+                                                        let kinds = tree_row_kinds(&tree_all);
+                                                        let mut end = model + 1;
+                                                        while end < kinds.len()
+                                                            && crate::choose_tree::depth(kinds[end])
+                                                                > crate::choose_tree::depth(kinds[model])
+                                                        {
+                                                            end += 1;
+                                                        }
+                                                        tree_all.drain(model..end);
+                                                        let shift = end - model;
+                                                        tree_collapsed = tree_collapsed
+                                                            .iter()
+                                                            .filter_map(|&i| {
+                                                                if i >= end { Some(i - shift) }
+                                                                else if i >= model { None }
+                                                                else { Some(i) }
+                                                            })
+                                                            .collect();
+                                                        let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+                                                        tree_entries = rows;
+                                                        tree_vis_map = map;
+                                                    }
+                                                    if tree_selected >= tree_entries.len() && tree_selected > 0 {
+                                                        tree_selected -= 1;
+                                                    }
+                                                    if tree_entries.is_empty() {
+                                                        tree_chooser = false;
+                                                    }
+                                                }
+                                            }
+                                        } else if session_chooser {
+                                            // Kill the selected session (like tmux session chooser)
+                                            let selected_entry = session_filtered_indices(&session_entries, &session_filter)
+                                                .get(session_selected)
+                                                .copied();
+                                            // The cursor has to be on the row the question
+                                            // named, which the wheel could have moved it off.
+                                            let selected = selected_entry
+                                                .and_then(|i| session_entries.get(i))
+                                                .map(|(sname, _)| sname.clone())
+                                                .filter(|sname| *sname == asked.session);
+                                            if let Some(sname) = selected {
+                                                if sname == current_session {
+                                                    // Killing the current session, so exit after the kill
+                                                    cmd_batch.push("kill-session\n".into());
+                                                    session_chooser = false;
+                                                    quit = true;
+                                                } else {
+                                                    // Kill another session by connecting to it
+                                                    let port_path = crate::paths::port_file(&sname);
+                                                    let key_path = crate::paths::key_file(&sname);
+                                                    if let Ok(port_str) = std::fs::read_to_string(&port_path) {
+                                                        if let Ok(port) = port_str.trim().parse::<u16>() {
+                                                            let addr = format!("127.0.0.1:{}", port);
+                                                            let sess_key = std::fs::read_to_string(&key_path).unwrap_or_default();
+                                                            if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
+                                                                &addr.parse().unwrap(), Duration::from_millis(100)
+                                                            ) {
+                                                                let _ = write!(ss, "AUTH {}\n", sess_key.trim());
+                                                                let _ = ss.write_all(b"kill-session\n");
+                                                            }
+                                                        }
+                                                    }
+                                                    // Remove the killed session from the list
+                                                    if let Some(idx) = selected_entry {
+                                                        session_entries.remove(idx);
+                                                    }
+                                                    let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                                    if session_selected >= visible_len && session_selected > 0 {
+                                                        session_selected -= 1;
+                                                    }
+                                                    if session_entries.is_empty() {
+                                                        session_chooser = false;
+                                                    }
+                                                    // Indexes shifted; drop any pending jump buffer.
+                                                    session_num_buffer.clear();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => {
                                     let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
@@ -5356,48 +5513,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Backspace if session_chooser => {
                                     session_num_buffer.pop();
                                 }
+                                // The same question for the session chooser, where tmux asks
+                                // `"Kill session %s? "` (`window-tree.c:1290`).
                                 KeyCode::Char('x') if session_chooser => {
-                                    // Kill the selected session (like tmux session chooser)
-                                    let selected_entry = session_filtered_indices(&session_entries, &session_filter)
+                                    let sname = session_filtered_indices(&session_entries, &session_filter)
                                         .get(session_selected)
-                                        .copied();
-                                    if let Some((sname, _)) = selected_entry.and_then(|i| session_entries.get(i)) {
-                                        let sname = sname.clone();
-                                        if sname == current_session {
-                                            // Killing current session — exit after kill
-                                            cmd_batch.push("kill-session\n".into());
-                                            session_chooser = false;
-                                            quit = true;
-                                        } else {
-                                            // Kill another session by connecting to it
-                                            let port_path = crate::paths::port_file(&sname);
-                                            let key_path = crate::paths::key_file(&sname);
-                                            if let Ok(port_str) = std::fs::read_to_string(&port_path) {
-                                                if let Ok(port) = port_str.trim().parse::<u16>() {
-                                                    let addr = format!("127.0.0.1:{}", port);
-                                                    let sess_key = std::fs::read_to_string(&key_path).unwrap_or_default();
-                                                    if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                                        &addr.parse().unwrap(), Duration::from_millis(100)
-                                                    ) {
-                                                        let _ = write!(ss, "AUTH {}\n", sess_key.trim());
-                                                        let _ = ss.write_all(b"kill-session\n");
-                                                    }
-                                                }
-                                            }
-                                            // Remove the killed session from the list
-                                            if let Some(idx) = selected_entry {
-                                                session_entries.remove(idx);
-                                            }
-                                            let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
-                                            if session_selected >= visible_len && session_selected > 0 {
-                                                session_selected -= 1;
-                                            }
-                                            if session_entries.is_empty() {
-                                                session_chooser = false;
-                                            }
-                                            // Indexes shifted; drop any pending jump buffer.
-                                            session_num_buffer.clear();
-                                        }
+                                        .copied()
+                                        .and_then(|i| session_entries.get(i))
+                                        .map(|(sname, _)| sname.clone());
+                                    if let Some(sname) = sname {
+                                        chooser_kill = Some(ChooserKill {
+                                            prompt: format!("kill-session {}", sname),
+                                            window: None,
+                                            session: sname,
+                                        });
                                     }
                                 }
                                 KeyCode::Char('f') if session_chooser => {
@@ -5516,52 +5645,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('p') if tree_chooser => {
                                     preview_enabled = !preview_enabled;
                                 }
-                                // 'x' kills the highlighted window (mirrors the session
-                                // chooser's `x` and tmux's window_tree_key 'x'). Scoped to a
-                                // window row in the current session: focus the window, then
-                                // kill it.
+                                // 'x' asks before it kills the highlighted window, which is what
+                                // tmux does (`window-tree.c:1282-1310`) and what psmux itself does
+                                // for the same act from `prefix &` (`src/help.rs:35`). Scoped to a
+                                // window row in the current session, as before. The kill runs from
+                                // the answer arm above.
                                 KeyCode::Char('x') if tree_chooser => {
-                                    // Copy out the fields we need so the immutable borrow
-                                    // ends before we mutate the model below.
-                                    if let Some((is_win, wid, sess_name)) = tree_entries
+                                    if let Some((is_win, wid, label, sess_name)) = tree_entries
                                         .get(tree_selected)
-                                        .map(|(iw, w, _p, _l, s)| (*iw, *w, s.clone()))
+                                        .map(|(iw, w, _p, l, s)| (*iw, *w, l.clone(), s.clone()))
                                     {
                                         if is_win && wid != usize::MAX && sess_name == current_session {
-                                            cmd_batch.push(format!("focus-window {}\n", wid));
-                                            cmd_batch.push("kill-window\n".into());
-                                            // Drop the killed window and the panes underneath
-                                            // it from the model, then rebuild the visible
-                                            // lines so the chooser stays open for more kills.
-                                            if let Some(model) = tree_vis_map.get(tree_selected).copied() {
-                                                let kinds = tree_row_kinds(&tree_all);
-                                                let mut end = model + 1;
-                                                while end < kinds.len()
-                                                    && crate::choose_tree::depth(kinds[end])
-                                                        > crate::choose_tree::depth(kinds[model])
-                                                {
-                                                    end += 1;
-                                                }
-                                                tree_all.drain(model..end);
-                                                let shift = end - model;
-                                                tree_collapsed = tree_collapsed
-                                                    .iter()
-                                                    .filter_map(|&i| {
-                                                        if i >= end { Some(i - shift) }
-                                                        else if i >= model { None }
-                                                        else { Some(i) }
-                                                    })
-                                                    .collect();
-                                                let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
-                                                tree_entries = rows;
-                                                tree_vis_map = map;
-                                            }
-                                            if tree_selected >= tree_entries.len() && tree_selected > 0 {
-                                                tree_selected -= 1;
-                                            }
-                                            if tree_entries.is_empty() {
-                                                tree_chooser = false;
-                                            }
+                                            chooser_kill = Some(ChooserKill {
+                                                prompt: format!(
+                                                    "kill-window {}", chooser_kill_target(&label)),
+                                                window: Some(wid),
+                                                session: sess_name,
+                                            });
                                         }
                                     }
                                 }
@@ -8835,7 +8935,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 f.set_cursor_position((cx, inner.y));
                 prompt_cursor_pos = Some((cx, inner.y));
             }
-            if let Some(ref cmd) = confirm_cmd {
+            // `confirm_cmd` is the prompt a binding put up, `chooser_kill` the
+            // one a chooser's `x` put up over its own list. They share the
+            // box so the question reads the same wherever it came from, and
+            // only one of the two can be up: the prefix table is out of reach
+            // while a chooser is open.
+            if let Some(cmd) = confirm_cmd
+                .as_deref()
+                .or(chooser_kill.as_ref().map(|k| k.prompt.as_str()))
+            {
                 let overlay = Block::default().borders(Borders::ALL).title("confirm");
                 let oa = centered_rect(50, 3, content_chunk);
                 f.render_widget(Clear, oa);
@@ -9973,6 +10081,10 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_bleed.rs"]
 mod test_zoom_bleed;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_chooser_kill_confirm.rs"]
+mod test_chooser_kill_confirm;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue744_paste_overlay_routing.rs"]

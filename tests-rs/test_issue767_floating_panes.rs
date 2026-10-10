@@ -322,7 +322,10 @@ fn client_draws_floats_before_its_own_overlays() {
         "            if keys_viewer {",
         "            if renaming {",
         "            if command_input {",
-        "            if let Some(ref cmd) = confirm_cmd {",
+        // The confirm box takes `chooser_kill` as well as `confirm_cmd` now
+        // (#778), so the marker is the start of that line rather than all of
+        // it.
+        "            if let Some(cmd) = confirm_cmd",
     ] {
         let at = src.find(marker).unwrap_or_else(|| panic!("marker {:?} not found", marker));
         assert!(floats_at < at, "floats must draw before {:?} so it is not painted over", marker);
