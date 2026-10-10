@@ -372,11 +372,12 @@ try {
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.3: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
-    # -g is the default scope for set-environment (global / session-wide)
+    # -g is the GLOBAL environment, as in tmux: it reads back with
+    # show-environment -g, not in the session listing (#775).
     & $PSMUX set-environment -g PSMUX_GLOBAL_TEST "global_value" -t $S110 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    $output = & $PSMUX show-environment -t $S110 2>&1 | Out-String
+    $output = & $PSMUX show-environment -g -t $S110 2>&1 | Out-String
     if ($output -match "PSMUX_GLOBAL_TEST=global_value") {
         Write-Pass "110.3: set-environment -g works"
     } else {

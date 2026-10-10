@@ -165,8 +165,9 @@ $output = & $psmux new-session -d -s "env1" 2>&1
 Start-Sleep -Milliseconds 1500
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 
-$showEnv = & $psmux show-environment -t env1 2>&1 | Out-String
-Write-Host "  INFO: show-environment: $($showEnv.Trim())" -ForegroundColor Gray
+# set-environment -g is the global environment, read back with -g (#775).
+$showEnv = & $psmux show-environment -g -t env1 2>&1 | Out-String
+Write-Host "  INFO: show-environment -g (filtered): $(($showEnv -split "`n" | Select-String 'MY_VAR|EDITOR') -join '; ')" -ForegroundColor Gray
 
 Test-Assert "MY_VAR in environment" ($showEnv -match "MY_VAR=hello_world")
 Test-Assert "EDITOR in environment" ($showEnv -match "EDITOR=vim")

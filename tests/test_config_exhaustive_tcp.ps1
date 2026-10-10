@@ -284,7 +284,8 @@ $env_out = Send-Tcp $sess "show-environment"
 Test-Result "env-alias-verify" ($env_out -match 'TCP_ENV_V2.*beta') "env contains TCP_ENV_V2"
 
 Send-Tcp $sess "set-environment -g TCP_ENV_G gamma" | Out-Null
-$env_out = Send-Tcp $sess "show-environment"
+# -g is the global environment, read back with -g like tmux (#775).
+$env_out = Send-Tcp $sess "show-environment -g TCP_ENV_G"
 Test-Result "env-global-verify" ($env_out -match 'TCP_ENV_G.*gamma') "env contains TCP_ENV_G"
 
 # ============================================================

@@ -162,7 +162,7 @@ The `-F` flag on `bind-key` now properly expands format variables, enabling plug
 
 ### Set Environment
 
-`set-environment` and `show-environment` are fully functional. Environment variables set with `set-environment -g` are inherited by all new panes at the process level (no shell commands echoed). The `new-session -e VAR=val` flag also sets session environment correctly.
+`set-environment` and `show-environment` follow tmux: `-g` global vs session scope, `-u`, `-r` removal markers (`-NAME`), `-h` hidden entries, `-F`, `show-environment NAME` with `unknown variable: NAME` at exit 1, and `-s` shell output. The global environment is the session server's start environment, since psmux runs one server per session. Variables are inherited by new panes at the process level (no shell commands echoed). The `new-session -e VAR=val` flag also sets session environment correctly.
 
 ### Unbind All Keys
 

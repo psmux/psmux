@@ -641,7 +641,8 @@ if ($r.ok -and $r.resp -match 'TUI_ENV_TEST2.*value2') {
 Write-Test "TUI set-environment -g global"
 Send-PsmuxCommand "set-environment -g TUI_ENV_GLOBAL gval"
 Start-Sleep -Milliseconds 300
-$r = Send-TcpCommand $SESSION "show-environment"
+# -g is the global environment, read back with -g like tmux (#775).
+$r = Send-TcpCommand $SESSION "show-environment -g TUI_ENV_GLOBAL"
 if ($r.ok -and $r.resp -match 'TUI_ENV_GLOBAL.*gval') {
     Write-Pass "TUI set-environment -g (verified via show-environment)"
 } else {
