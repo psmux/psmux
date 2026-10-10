@@ -165,3 +165,60 @@ fn shell_format_escapes_like_tmux() {
     set(&mut env, &mut sc, &["-u", &a]);
     set(&mut env, &mut sc, &["-u", &b]);
 }
+
+// update-environment (tmux environ_update, environ.c:186): the client's
+// value for every matching pattern, `-PATTERN` when nothing matches.
+#[test]
+fn update_environment_copies_client_values_and_marks_missing() {
+    let _g = crate::util::lock_test_env();
+    let (a, miss) = (n("UE"), n("UEMISS"));
+    let glob = format!("PSMUX_T775_UEG_*_{}", std::process::id());
+    let globbed = format!("PSMUX_T775_UEG_x_{}", std::process::id());
+    let mut env = HashMap::new();
+    let mut sc = EnvScopes::default();
+    let patterns = vec![a.clone(), miss.clone(), glob.clone()];
+
+    let src = vec![(a.clone(), "two".to_string()), (globbed.clone(), "g".to_string())];
+    let written = update_environment(&mut env, &mut sc, &patterns, &src, false);
+    assert_eq!(written.len(), 3);
+    assert_eq!(show_args(&env, &sc, &[&a]).unwrap(), format!("{}=two\n", a));
+    assert_eq!(show_args(&env, &sc, &[&miss]).unwrap(), format!("-{}\n", miss));
+    assert_eq!(show_args(&env, &sc, &[&globbed]).unwrap(), format!("{}=g\n", globbed));
+    assert_eq!(std::env::var(&a).as_deref(), Ok("two"), "children get the client's value");
+
+    // A later attach from a client without A records the removal.
+    update_environment(&mut env, &mut sc, &patterns, &[], false);
+    assert_eq!(show_args(&env, &sc, &[&a]).unwrap(), format!("-{}\n", a));
+    assert!(std::env::var(&a).is_err());
+    assert_eq!(show_args(&env, &sc, &[&glob]).unwrap(), format!("-{}\n", glob));
+
+    for name in [&a, &miss, &globbed, &glob] {
+        apply_set(&mut env, &mut sc, &parse_set_environment(&["-u", name]).unwrap());
+    }
+}
+
+#[test]
+fn new_session_seed_keeps_explicit_entries_and_is_replaced_on_claim() {
+    let _g = crate::util::lock_test_env();
+    let (a, b) = (n("SEEDA"), n("SEEDB"));
+    std::env::set_var(&a, "start-a");
+    std::env::remove_var(&b);
+    let mut env = HashMap::new();
+    let mut sc = EnvScopes::default();
+    // `new-session -e B=explicit` wins over the seed.
+    env.insert(b.clone(), "explicit".to_string());
+    let patterns = vec![a.clone(), b.clone()];
+    seed_session_from_start_env(&mut env, &mut sc, &patterns);
+    assert_eq!(show_args(&env, &sc, &[&a]).unwrap(), format!("{}=start-a\n", a));
+    assert_eq!(show_args(&env, &sc, &[&b]).unwrap(), format!("{}=explicit\n", b));
+    assert!(sc.seeded.contains(&a) && !sc.seeded.contains(&b));
+
+    // A warm claim adopts another environment and re-seeds.
+    std::env::remove_var(&a);
+    sc.global_under.remove(&a);
+    seed_session_from_start_env(&mut env, &mut sc, &patterns);
+    assert_eq!(show_args(&env, &sc, &[&a]).unwrap(), format!("-{}\n", a));
+    for name in [&a, &b] {
+        apply_set(&mut env, &mut sc, &parse_set_environment(&["-u", name]).unwrap());
+    }
+}

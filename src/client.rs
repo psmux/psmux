@@ -2606,6 +2606,15 @@ fn establish_connection_with_timeout(
     // results were discarded; now they are at least reported when the reconnect
     // trace is on.
     let persistent_res = writer.write_all(b"PERSISTENT\n");
+    // This client's environment, for the server's update-environment (tmux's
+    // client sends its environ in MSG_IDENTIFY_ENVIRON, #775). It must come
+    // BEFORE client-attach, which is what applies it.
+    {
+        use base64::Engine;
+        let block = crate::client_env::encode_env_block(std::env::vars_os());
+        let line = format!("client-environ {}\n", base64::engine::general_purpose::STANDARD.encode(&block));
+        let _ = writer.write_all(line.as_bytes());
+    }
     let attach_res = writer.write_all(b"client-attach\n");
     if (persistent_res.is_err() || attach_res.is_err()) && crate::debug_log::reconnect_log_enabled() {
         crate::debug_log::reconnect_log(&format!(

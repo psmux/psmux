@@ -2186,6 +2186,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     crate::startup_trace::mark("srv.prewarm");
     crate::config::populate_default_bindings(&mut app);
     load_config(&mut app);
+    // update-environment at new-session (tmux cmd-new-session.c environ_update
+    // from the creating client, #775): this server's start environment IS that
+    // client's. Entries from `-e` and the config keep their values.
+    {
+        let patterns = app.update_environment.clone();
+        crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
+    }
     crate::startup_trace::mark("srv.config");
     // Surface any non-fatal config parse warnings to the attaching client
     // (issue #370 follow-up) instead of silently dropping them.
@@ -3079,7 +3086,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let cmdstr = cmd.clone().unwrap_or_default();
                         let sd = start_dir.clone().map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                         let pane_id = app.next_pane_id;
-                        if let Some(mut pane) = crate::popup::create_popup_pane(&cmdstr, sd.as_deref(), inner_h, inner_w, pane_id, &app.session_name, &app.environment, app.host_colors.as_ref()) {
+                        if let Some(mut pane) = crate::popup::create_popup_pane(&cmdstr, sd.as_deref(), inner_h, inner_w, pane_id, &app.session_name, &app.environment, &app.env_scopes.child_removals(&app.environment), app.host_colors.as_ref()) {
                             app.next_pane_id += 1;
                             let t = title.clone().unwrap_or_default();
                             if !t.is_empty() { pane.title = t.clone(); pane.title_locked = true; }
@@ -3474,18 +3481,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // switch (issue #691).
                         notify_events.push("client-session-changed");
                         hook_event = Some("client-attached");
-                        // update-environment: refresh env vars from the attaching client's environment
-                        let update_vars = app.update_environment.clone();
-                        for var_spec in &update_vars {
-                            let remove = var_spec.starts_with('-');
-                            let name = if remove { &var_spec[1..] } else { var_spec.as_str() };
-                            if remove {
-                                app.environment.remove(name);
-                            } else if let Ok(val) = std::env::var(name) {
-                                app.environment.insert(name.to_string(), val);
-                            } else {
-                                app.environment.remove(name);
-                            }
+                        // update-environment from the ATTACHING client's
+                        // environment (tmux cmd-attach-session.c environ_update
+                        // from c->environ, #775), sent as `client-environ` just
+                        // before the attach. This used to read the server's own
+                        // environment, so it never changed anything, and it
+                        // dropped a missing name instead of recording -NAME.
+                        if let Some(src) = app.env_scopes.pending_client_environ.take() {
+                            let patterns = app.update_environment.clone();
+                            crate::environ::update_environment(&mut app.environment, &mut app.env_scopes, &patterns, &src, false);
                         }
                     }
                 }
@@ -5045,6 +5049,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // and every spare in its pool are already running it.
                     let shell_at_boot = app.default_shell.clone();
                     load_config(&mut app);
+                    // Re-seed update-environment from the adopted (claiming
+                    // client's) environment, replacing the standby's seed (#775).
+                    {
+                        let patterns = app.update_environment.clone();
+                        crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
+                    }
                     // Surface config warnings to the claiming client (#370 follow-up).
                     write_config_warnings_log(&app.config_warnings);
                     crate::startup_trace::mark_detail("srv.cfgwarn", &format!("n={}", app.config_warnings.len()));
@@ -7130,6 +7140,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let sync = crate::warm_pane_sync::for_env_change();
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                 }
+                CtrlReq::ClientEnviron(env) => {
+                    app.env_scopes.pending_client_environ = Some(env);
+                }
                 CtrlReq::ShowEnvironment(args, resp) => {
                     let _ = resp.send(crate::environ::show(&app.environment, &app.env_scopes, &args));
                 }
@@ -7267,6 +7280,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.next_pane_id,
                         &app.session_name,
                         &app.environment,
+                        &app.env_scopes.child_removals(&app.environment),
                         app.host_colors.as_ref(),
                     );
 
@@ -7330,6 +7344,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             pane_id,
                             &app.session_name,
                             &app.environment,
+                            &app.env_scopes.child_removals(&app.environment),
                             app.host_colors.as_ref(),
                         )
                     };
