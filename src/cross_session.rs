@@ -20,6 +20,12 @@ use std::time::Duration;
 
 /// Resolve a session name to (port, key).
 pub fn resolve_session(session_name: &str) -> io::Result<(u16, String)> {
+    // The registry lookup folds case; a session stored under another spelling
+    // is a different session (issue #774, tmux strcmp).
+    if crate::session::registry_case_variant(session_name).is_some() {
+        return Err(io::Error::new(io::ErrorKind::NotFound,
+            format!("no server for session '{}'", session_name)));
+    }
     let port_path = crate::paths::port_file(session_name);
     let port: u16 = std::fs::read_to_string(&port_path)
         .map_err(|_| io::Error::new(io::ErrorKind::NotFound,

@@ -271,6 +271,10 @@ fn ensure_session_registry_files(app: &AppState) {
     let _ = std::fs::create_dir_all(&dir);
 
     let base = app.port_file_base();
+    // A file left by a session spelled differently would keep its spelling
+    // under the writes below, and case-exact routing would then miss this
+    // session (issue #774).
+    crate::session::heal_registry_spelling(&base);
     let port_path = crate::paths::port_file(&base);
     let key_path = crate::paths::key_file(&base);
     let sid_path = crate::paths::sid_file(&base);
@@ -4829,6 +4833,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::HasSession(resp) => {
                     let _ = resp.send(true);
                 }
+                CtrlReq::RenameSession(name) if crate::session::rename_blocker(
+                    &app.port_file_base(),
+                    &crate::session::namespaced_session_base(app.socket_name.as_deref(), &name),
+                ).is_some() => {
+                    // tmux: `duplicate session: NAME`, and nothing is renamed.
+                    // Writing our files over a live session's orphaned it
+                    // (issue #774 covers the case-only spelling of this).
+                    app.status_message = Some((format!("duplicate session: {}", name), std::time::Instant::now(), None));
+                    state_dirty = true;
+                }
                 CtrlReq::RenameSession(name) => {
                     if let Some(cmds) = app.hooks.get("before-rename-session") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let old_path = crate::paths::port_file(&app.port_file_base());
@@ -4864,6 +4878,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // The new .port file goes LAST: it is the readiness beacon an
                         // attaching client polls for, so the .key/.sid/.pid it will
                         // read next must already exist when it appears (issue #496).
+                        // Entries left under another spelling take this one (#774).
+                        crate::session::heal_registry_spelling(&new_base);
                         let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
@@ -4946,6 +4962,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // The new .port file goes LAST: it is the readiness beacon an
                         // attaching client polls for, so the .key/.sid/.pid it will
                         // read next must already exist when it appears (issue #496).
+                        // Entries left under another spelling take this one (#774).
+                        crate::session::heal_registry_spelling(&new_base);
                         let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;

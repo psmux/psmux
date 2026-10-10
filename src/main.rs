@@ -1202,6 +1202,17 @@ fn run_main() -> io::Result<()> {
             // fall through to -s / $TMUX resolution.
             let is_detach_client = args.iter().any(|a| a == "detach-client" || a == "detach");
             if has_explicit_session && !is_switch_client && !is_detach_client {
+                // tmux matches a session name exactly and case-sensitively
+                // (`session_find` is a strcmp, and the prefix and fnmatch
+                // fallbacks of `cmd_find_get_session` are case-sensitive too).
+                // The registry lookup opens `<name>.port` on a case-insensitive
+                // directory, so `-t =REPRO-CASE` used to land on `repro-case`
+                // and even kill it (issue #774). A target whose stored spelling
+                // differs is not that session.
+                if crate::session::registry_case_variant(&port_file_base).is_some() {
+                    eprintln!("psmux: can't find session: {}", session);
+                    std::process::exit(1);
+                }
                 env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
                 explicit_session_target = true;
             }
@@ -1952,6 +1963,26 @@ fn run_main() -> io::Result<()> {
                         } else { false }
                     } else { false };
                     
+                    // Issue #774: the lookup above is case-insensitive, so a
+                    // live `repro-case` answers for `REPRO-CASE`. tmux would
+                    // create a second session; psmux keys every registry file,
+                    // the single-server mutex and the warm claim on the name in
+                    // a case-insensitive namespace, so it cannot keep the two
+                    // apart. Refuse, name the session that is in the way, and
+                    // never let `-A` attach to a session with another name.
+                    let case_variant = if server_alive {
+                        crate::session::registry_case_variant(&port_file_base)
+                    } else {
+                        None
+                    };
+                    if let Some(stored) = case_variant {
+                        eprintln!(
+                            "duplicate session: {} (differs only in case from session {}, which psmux cannot keep apart on Windows)",
+                            name,
+                            crate::session::display_session_name(l_socket_name.as_deref(), &stored)
+                        );
+                        std::process::exit(1);
+                    }
                     if server_alive {
                         if attach_if_exists {
                             // -A flag: attach to existing session instead of erroring
@@ -3317,7 +3348,10 @@ fn run_main() -> io::Result<()> {
                     .and_then(|l| session_name.strip_prefix(&format!("{}__", l)))
                     .unwrap_or(&session_name)
                     .to_string();
-                if !std::path::Path::new(&port_path).exists() {
+                // `-t =REPRO-CASE` must never kill `repro-case` (issue #774).
+                if !std::path::Path::new(&port_path).exists()
+                    || crate::session::registry_case_variant(&session_name).is_some()
+                {
                     eprintln!("psmux: can't find session: {}", shown);
                     std::process::exit(1);
                 }
@@ -3391,6 +3425,15 @@ fn run_main() -> io::Result<()> {
                 if crate::session::is_warm_session(&target) {
                     std::process::exit(1);
                 }
+                // A name spelled differently from the stored session is not
+                // that session (issue #774, tmux strcmp).
+                if crate::session::registry_case_variant(&target).is_some() {
+                    eprintln!(
+                        "psmux: can't find session: {}",
+                        crate::session::display_session_name(l_socket_name.as_deref(), &target)
+                    );
+                    std::process::exit(1);
+                }
                 let path = crate::paths::port_file(&target);
                 if let Ok(port_str) = std::fs::read_to_string(&path) {
                     if let Ok(port) = port_str.trim().parse::<u16>() {
@@ -3449,6 +3492,17 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 if let Some(name) = new_name {
+                    // tmux refuses a rename onto an existing session with
+                    // `duplicate session: NAME` at exit 1. psmux wrote over the
+                    // other session's registry and orphaned it, also for a name
+                    // that differs only in case (issue #774).
+                    if let Ok(current) = env::var("PSMUX_TARGET_SESSION") {
+                        let new_base = crate::session::namespaced_session_base(l_socket_name.as_deref(), &name);
+                        if crate::session::rename_blocker(&current, &new_base).is_some() {
+                            eprintln!("duplicate session: {}", name);
+                            std::process::exit(1);
+                        }
+                    }
                     send_control(format!("rename-session {}\n", crate::util::quote_arg(&name)))?;
                 }
                 return Ok(());

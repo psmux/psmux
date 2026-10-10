@@ -2718,7 +2718,12 @@ match cmd {
         if let Some(ref tgt) = raw_target {
             let port_path = crate::paths::port_file(tgt);
             let mut handled = false;
-            if let Ok(port_str) = std::fs::read_to_string(&port_path) {
+            // A differently spelled registry entry is another session: never
+            // kill `repro-case` for `-t REPRO-CASE` (issue #774).
+            let case_variant = crate::session::registry_case_variant(tgt).is_some();
+            if case_variant {
+                // fall through to the exact self-name comparison below
+            } else if let Ok(port_str) = std::fs::read_to_string(&port_path) {
                 if let Ok(port) = port_str.trim().parse::<u16>() {
                     let key = crate::session::read_session_key(tgt).unwrap_or_default();
                     let _ = crate::session::send_control_to_port(port, "kill-session\n", &key);
