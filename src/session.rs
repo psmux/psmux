@@ -3333,3 +3333,7 @@ mod tests_issue698_counter_lock_missing_dir;
 #[cfg(test)]
 #[path = "../tests-rs/test_namespaced_session_identity.rs"]
 mod tests_namespaced_session_identity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue774_session_name_case.rs"]
+mod tests_issue774_session_name_case;
