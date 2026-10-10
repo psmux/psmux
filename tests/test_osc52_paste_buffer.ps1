@@ -5,6 +5,11 @@
 # buffer side. Critically it runs DETACHED with no dump-state polling at all:
 # tmux captures the buffer server side during input parsing whether or not a
 # client is attached, so psmux must too.
+#
+# tmux takes the payload into a buffer only when set-clipboard is `on`
+# (input.c input_osc_52_parse returns unless the value is 2), and the default
+# is `external` (#771), so this suite turns `on` before it emits anything.
+# tests\test_issue771_set_clipboard.ps1 covers `off` and `external`.
 
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
@@ -33,6 +38,7 @@ Cleanup
 Start-Sleep -Seconds 3
 & $PSMUX has-session -t $SESSION 2>$null
 if ($LASTEXITCODE -ne 0) { Write-Fail "Session creation failed"; exit 1 }
+& $PSMUX set-option -s set-clipboard on 2>&1 | Out-Null
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
     $cap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
