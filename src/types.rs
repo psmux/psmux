@@ -3671,6 +3671,9 @@ pub enum CtrlReq {
     LoadBuffer(String),
     /// A parsed and validated `set-environment` (value already `-F` expanded).
     SetEnvironment(crate::environ::SetEnvArgs),
+    /// The attaching client's environment (`client-environ`), consumed by the
+    /// ClientAttach that follows it for update-environment (#775).
+    ClientEnviron(Vec<(String, String)>),
     /// A parsed `show-environment`: the listing, or tmux's error text.
     ShowEnvironment(crate::environ::ShowEnvArgs, mpsc::Sender<Result<String, String>>),
     SetHook(String, String),

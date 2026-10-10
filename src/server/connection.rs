@@ -925,7 +925,7 @@ pub(crate) fn readonly_client_may_run(cmd: &str) -> bool {
         // psmux client protocol
         "dump-state" | "dump" | "dump-layout" | "session-info" | "client-size"
         | "host-colors" | "client-attach" | "client-detach" | "client-last-session"
-        | "client-flags" | "focus-in" | "focus-out" | "prefix-begin" | "prefix-end"
+        | "client-flags" | "client-environ" | "focus-in" | "focus-out" | "prefix-begin" | "prefix-end"
         | "overlay-close" | "window-layout" | "window-dump" | "list-tree"
         // tmux CMD_READONLY commands
         | "attach-session" | "attach" | "detach-client" | "detach"
@@ -1693,6 +1693,8 @@ let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
 let mut attached_sent = false;
 // `attach -r` (issue #724): set by the client's `client-flags read-only`.
 let mut client_readonly = false;
+// The client's environment from `client-environ` (#775 update-environment).
+let mut client_environ: Option<Vec<(String, String)>> = None;
 let mut pending_chain: Vec<String> = Vec::new();
 // The rest of a command list that follows a foreground run-shell, held until
 // that shell exits (PR #740). tmux runs `run-shell X \; cmd` in that order: the
@@ -3370,8 +3372,23 @@ match cmd {
         }
         if !persistent { break; }
     }
+    "client-environ" => {
+        // The attaching client's environment (tmux MSG_IDENTIFY_ENVIRON), a
+        // base64 Windows environment block, for update-environment (#775).
+        use base64::Engine;
+        client_environ = args.first()
+            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b.as_bytes()).ok())
+            .and_then(|bytes| crate::client_env::decode_env_block(&bytes))
+            .map(|entries| entries.into_iter()
+                .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+                .collect());
+        if !persistent { let _ = write!(write_stream, "ok\n"); }
+    }
     "client-attach" => {
         if !attached_sent {
+            if let Some(env) = client_environ.clone() {
+                let _ = tx.send(CtrlReq::ClientEnviron(env));
+            }
             let _ = tx.send(CtrlReq::ClientAttach(client_id, connection_peer_pid(r.get_ref())));
             attached_sent = true;
         }
@@ -4525,6 +4542,9 @@ match cmd {
     }
     "attach-session" | "attach" => {
         if !attached_sent {
+            if let Some(env) = client_environ.clone() {
+                let _ = tx.send(CtrlReq::ClientEnviron(env));
+            }
             let _ = tx.send(CtrlReq::ClientAttach(client_id, connection_peer_pid(r.get_ref())));
             attached_sent = true;
         }

@@ -58,6 +58,7 @@ pub fn create_popup_pane(
     pane_id: usize,
     session_name: &str,
     environment: &std::collections::HashMap<String, String>,
+    env_removals: &[String],
     host_colors: Option<&crate::types::HostColors>,
 ) -> Option<Pane> {
     let pty_sys = portable_pty::native_pty_system();
@@ -100,6 +101,10 @@ pub fn create_popup_pane(
     // query psmux for the terminal colors, so hand it the ones we already know.
     crate::pane::set_host_colors_env(&mut cmd_builder, host_colors);
     crate::pane::apply_user_environment(&mut cmd_builder, environment);
+    // Same environment as a new pane (#775): names removed with
+    // `set-environment -r` or hidden with `-h` must not come back from the
+    // registry fill (#773) in a popup either.
+    crate::pane::apply_env_removals(&mut cmd_builder, env_removals);
     // NOTE: the interactive-shell-for-empty-command behavior (tmux parity, #351)
     // is handled above where cmd_builder is constructed: an empty command uses
     // build_command(None, true, false) to launch the default shell as a REPL.

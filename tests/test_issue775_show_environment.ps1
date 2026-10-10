@@ -278,6 +278,74 @@ if (Wait-Session w1) {
 } else { Write-Fail "w1 never came up" }
 Kill-Rig
 
+# ── 7. update-environment: new-session seed, attach from another shell ──
+# tmux environ_update: the client's value for each matching pattern, the
+# pattern recorded as -NAME when nothing matches (new-session, attach).
+Write-Head "7. update-environment from the creating and the attaching client"
+$env:PSMUX_NO_WARM = '1'
+$UECONF = Join-Path $TMP "ue.conf"
+@("set -g default-shell $POWERSHELL", 'set -g update-environment "E775_UE E775_UEMISS E775_UEG*"') | Set-Content $UECONF -Encoding ASCII
+$env:E775_UE = 'one'
+& $PSMUX -L $NS -f $UECONF new-session -d -s ue 2>&1 | Out-Null
+Remove-Item Env:E775_UE
+if (-not (Wait-Session ue)) { Write-Fail "session ue never came up" } else {
+    $r = Run show-environment -t ue E775_UE
+    Check ($r.Out -eq "E775_UE=one`n") "new-session seeds the creating client's value" "got [$($r.Out)] err=[$($r.Err)]"
+    $r = Run show-environment -t ue E775_UEMISS
+    Check ($r.Out -eq "-E775_UEMISS`n") "a name the client lacks is recorded as -NAME" "got [$($r.Out)] err=[$($r.Err)]"
+    $r = Run show-environment -t ue 'E775_UEG*'
+    Check ($r.Out -eq "-E775_UEG*`n") "an unmatched glob is recorded as -PATTERN like tmux" "got [$($r.Out)] err=[$($r.Err)]"
+
+    $env:E775_UE = 'two'; $env:E775_UEMISS = 'now-here'; $env:E775_UEGLOB = 'globbed'
+    $ap = Start-Process -FilePath $PSMUX -ArgumentList "-L",$NS,"attach","-t","ue" -PassThru
+    Remove-Item Env:E775_UE, Env:E775_UEMISS, Env:E775_UEGLOB
+    $script:Opened += $ap.Id
+    $got = $null
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        $got = (Run show-environment -t ue E775_UE).Out
+        if ($got -eq "E775_UE=two`n") { break }
+    }
+    Check ($got -eq "E775_UE=two`n") "attach takes the ATTACHING client's value" "got [$got]"
+    $r = Run show-environment -t ue E775_UEMISS
+    Check ($r.Out -eq "E775_UEMISS=now-here`n") "attach fills a name the creator lacked" "got [$($r.Out)]"
+    $r = Run show-environment -t ue E775_UEGLOB
+    Check ($r.Out -eq "E775_UEGLOB=globbed`n") "attach copies glob matches" "got [$($r.Out)]"
+    $ueOut = Join-Path $TMP "ue_pane.txt"
+    $ueDump = Join-Path $TMP "ue_dump.ps1"
+    'param($o) "E775_UE=" + $env:E775_UE + "|E775_UEMISS=" + $env:E775_UEMISS + "|E775_UEGLOB=" + $env:E775_UEGLOB | Set-Content $o' | Set-Content $ueDump -Encoding ASCII
+    Run new-window -d -t ue "$POWERSHELL -NoProfile -ExecutionPolicy Bypass -File $ueDump $ueOut" | Out-Null
+    for ($i = 0; $i -lt 60 -and -not (Test-Path $ueOut); $i++) { Start-Sleep -Milliseconds 250 }
+    Start-Sleep -Milliseconds 300
+    $ueSaw = (Get-Content $ueOut -EA SilentlyContinue) -join ''
+    Check ($ueSaw -eq "E775_UE=two|E775_UEMISS=now-here|E775_UEGLOB=globbed") "a new pane after the attach gets the attaching client's values" "pane saw [$ueSaw]"
+}
+Kill-Rig
+
+# ── 8. display-popup gets the same environment as a new pane ──
+Write-Head "8. display-popup environment"
+$pp = Start-Process -FilePath $PSMUX -ArgumentList "-f",$CONF,"-L",$NS,"new-session","-s","pp","-x","120","-y","30" -PassThru
+$script:Opened += $pp.Id
+if (-not (Wait-Session pp)) { Write-Fail "session pp never came up" } else {
+    Start-Sleep -Milliseconds 2500
+    Run set-environment -t pp -r TEMP | Out-Null
+    Run set-environment -t pp -h E775_PH hidden | Out-Null
+    Run set-environment -t pp E775_PS sesval | Out-Null
+    $ppDump = Join-Path $TMP "pp_dump.ps1"
+    'param($o) "TEMP=" + $env:TEMP + "|E775_PH=" + $env:E775_PH + "|E775_PS=" + $env:E775_PS | Set-Content $o' | Set-Content $ppDump -Encoding ASCII
+    $ppPane = Join-Path $TMP "pp_pane.txt"; $ppPop = Join-Path $TMP "pp_popup.txt"
+    Run new-window -d -t pp "$POWERSHELL -NoProfile -ExecutionPolicy Bypass -File $ppDump $ppPane" | Out-Null
+    Run display-popup -t pp -E "$POWERSHELL -NoProfile -ExecutionPolicy Bypass -File $ppDump $ppPop" | Out-Null
+    for ($i = 0; $i -lt 60 -and -not ((Test-Path $ppPane) -and (Test-Path $ppPop)); $i++) { Start-Sleep -Milliseconds 250 }
+    Start-Sleep -Milliseconds 300
+    $sawPane = (Get-Content $ppPane -EA SilentlyContinue) -join ''
+    $sawPop = (Get-Content $ppPop -EA SilentlyContinue) -join ''
+    Write-Info "pane [$sawPane] popup [$sawPop]"
+    Check ($sawPane -eq "TEMP=|E775_PH=|E775_PS=sesval") "pane: -r and hidden dropped, session var set" "pane saw [$sawPane]"
+    Check ($sawPop -eq $sawPane) "popup gets exactly the pane's environment" "popup saw [$sawPop]"
+}
+Kill-Rig
+
 Remove-Item $TMP -Recurse -Force -EA SilentlyContinue
 Write-Host "`nResults: $($script:TestsPassed) passed, $($script:TestsFailed) failed, $($script:Skipped) skipped"
 if ($script:TestsFailed -gt 0) { exit 1 } else { exit 0 }

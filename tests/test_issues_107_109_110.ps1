@@ -17,22 +17,22 @@ function Write-Skip { param($msg) Write-Host "[SKIP] $msg" -ForegroundColor Yell
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Write-Test { param($msg) Write-Host "[TEST] $msg" -ForegroundColor White }
 
-$PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path
+$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path }
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\debug\psmux.exe" -ErrorAction SilentlyContinue).Path }
 if (-not $PSMUX) { Write-Error "psmux binary not found"; exit 1 }
 Write-Info "Using: $PSMUX"
 
-# Clean slate
-Write-Info "Cleaning up existing sessions..."
-& $PSMUX kill-server 2>$null
-Start-Sleep -Milliseconds 1500
-Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
+# Every session of this suite lives in its own -L namespace, so it never
+# touches the user's sessions, their .port/.key files, or the default
+# namespace (bare kill-server is scoped to the default namespace, #649).
+$NS = "t107-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
+Write-Info "Namespace: $NS"
 
 function Wait-ForSession {
     param($name, $timeout = 10)
     for ($i = 0; $i -lt ($timeout * 2); $i++) {
-        & $PSMUX has-session -t $name 2>$null
+        & $PSMUX -L $NS has-session -t $name 2>$null
         if ($LASTEXITCODE -eq 0) { return $true }
         Start-Sleep -Milliseconds 500
     }
@@ -41,13 +41,13 @@ function Wait-ForSession {
 
 function Capture-Pane {
     param($target)
-    $raw = & $PSMUX capture-pane -t $target -p 2>&1
+    $raw = & $PSMUX -L $NS capture-pane -t $target -p 2>&1
     return ($raw | Out-String)
 }
 
 function Cleanup-Session {
     param($name)
-    & $PSMUX kill-session -t $name 2>$null
+    & $PSMUX -L $NS kill-session -t $name 2>$null
     Start-Sleep -Milliseconds 500
 }
 
@@ -66,18 +66,18 @@ try {
     $testDir = Join-Path $env:TEMP "psmux_test_107_$(Get-Random)"
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S107" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S107" -WindowStyle Hidden
     if (-not (Wait-ForSession $S107)) { Write-Fail "107.1: Session did not start"; throw "skip" }
 
     # Let the warm pane fully spawn so we test the stash logic
     Start-Sleep -Milliseconds 1500
 
     # Split with -c pointing to our test directory
-    & $PSMUX split-window -h -c $testDir -t $S107 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -c $testDir -t $S107 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
     # Ask the new pane for its CWD
-    & $PSMUX send-keys -t $S107 "pwd" Enter
+    & $PSMUX -L $NS send-keys -t $S107 "pwd" Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S107
     $dirName = Split-Path $testDir -Leaf
@@ -102,14 +102,14 @@ try {
     $testDir = Join-Path $env:TEMP "psmux_test_107v_$(Get-Random)"
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S107" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S107" -WindowStyle Hidden
     if (-not (Wait-ForSession $S107)) { Write-Fail "107.2: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
-    & $PSMUX split-window -v -c $testDir -t $S107 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -v -c $testDir -t $S107 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
-    & $PSMUX send-keys -t $S107 "pwd" Enter
+    & $PSMUX -L $NS send-keys -t $S107 "pwd" Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S107
     $dirName = Split-Path $testDir -Leaf
@@ -132,14 +132,14 @@ try {
     $testDir = Join-Path $env:TEMP "psmux_test_107nw_$(Get-Random)"
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S107" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S107" -WindowStyle Hidden
     if (-not (Wait-ForSession $S107)) { Write-Fail "107.3: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
-    & $PSMUX new-window -c $testDir -t $S107 2>&1 | Out-Null
+    & $PSMUX -L $NS new-window -c $testDir -t $S107 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
-    & $PSMUX send-keys -t $S107 "pwd" Enter
+    & $PSMUX -L $NS send-keys -t $S107 "pwd" Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S107
     $dirName = Split-Path $testDir -Leaf
@@ -162,21 +162,21 @@ try {
     $testDir = Join-Path $env:TEMP "psmux_test_107cc_$(Get-Random)"
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S107" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S107" -WindowStyle Hidden
     if (-not (Wait-ForSession $S107)) { Write-Fail "107.4: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
     # Exact Claude Code teammate spawn pattern
-    $paneId = & $PSMUX split-window -h -d -c $testDir -t $S107 -P -F "#{pane_id}" 2>&1
+    $paneId = & $PSMUX -L $NS split-window -h -d -c $testDir -t $S107 -P -F "#{pane_id}" 2>&1
     Start-Sleep -Seconds 2
 
     if ($paneId -match '%\d+') {
         # -d means detached — focus stayed on pane 0. Select the new pane.
-        & $PSMUX select-pane -t "$S107" -R 2>&1 | Out-Null
+        & $PSMUX -L $NS select-pane -t "$S107" -R 2>&1 | Out-Null
         Start-Sleep -Milliseconds 1500
 
         # Use $PWD.Path to avoid pwd truncation in narrow panes
-        & $PSMUX send-keys -t $S107 'Write-Output "CWDVAL=$($PWD.Path)"' Enter
+        & $PSMUX -L $NS send-keys -t $S107 'Write-Output "CWDVAL=$($PWD.Path)"' Enter
         Start-Sleep -Seconds 2
         $cap = Capture-Pane $S107
         $dirName = Split-Path $testDir -Leaf
@@ -210,7 +210,7 @@ $S109 = "test_109"
 # --- Test 109.1: Session starts without PSReadLine errors ---
 Write-Test "109.1: Session starts cleanly (no GetHistoryItems errors)"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S109" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S109" -WindowStyle Hidden
     if (-not (Wait-ForSession $S109)) { Write-Fail "109.1: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
@@ -230,12 +230,12 @@ try {
 # --- Test 109.2: Profile is sourced (basic prompt/env works) ---
 Write-Test "109.2: User profile is sourced inside psmux"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S109" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S109" -WindowStyle Hidden
     if (-not (Wait-ForSession $S109)) { Write-Fail "109.2: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
     # Check that $PROFILE variable is set (it always is in pwsh)
-    & $PSMUX send-keys -t $S109 'Write-Output "PROFILE_PATH=$PROFILE"' Enter
+    & $PSMUX -L $NS send-keys -t $S109 'Write-Output "PROFILE_PATH=$PROFILE"' Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S109
 
@@ -255,11 +255,11 @@ try {
 # --- Test 109.3: PSReadLine predictions are disabled (no display corruption) ---
 Write-Test "109.3: PSReadLine predictions are disabled"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S109" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S109" -WindowStyle Hidden
     if (-not (Wait-ForSession $S109)) { Write-Fail "109.3: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
-    & $PSMUX send-keys -t $S109 '(Get-PSReadLineOption).PredictionSource' Enter
+    & $PSMUX -L $NS send-keys -t $S109 '(Get-PSReadLineOption).PredictionSource' Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S109
 
@@ -280,11 +280,11 @@ try {
 # --- Test 109.4: split-window also starts without errors ---
 Write-Test "109.4: Split pane starts without PSReadLine errors"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S109" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S109" -WindowStyle Hidden
     if (-not (Wait-ForSession $S109)) { Write-Fail "109.4: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
-    & $PSMUX split-window -h -t $S109 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $S109 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
     $cap = Capture-Pane $S109
@@ -311,14 +311,14 @@ $S110 = "test_110"
 # --- Test 110.1: set-environment + show-environment basic ---
 Write-Test "110.1: set-environment sets a variable visible in show-environment"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S110" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S110" -WindowStyle Hidden
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.1: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
-    & $PSMUX set-environment -t $S110 PSMUX_TEST_FOO "hello_world" 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -t $S110 PSMUX_TEST_FOO "hello_world" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    $output = & $PSMUX show-environment -t $S110 2>&1 | Out-String
+    $output = & $PSMUX -L $NS show-environment -t $S110 2>&1 | Out-String
     if ($output -match "PSMUX_TEST_FOO=hello_world") {
         Write-Pass "110.1: set-environment + show-environment works"
     } else {
@@ -333,27 +333,27 @@ try {
 # --- Test 110.2: set-environment -u unsets a variable ---
 Write-Test "110.2: set-environment -u removes a variable"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S110" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S110" -WindowStyle Hidden
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.2: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
     # Set it first
-    & $PSMUX set-environment -t $S110 PSMUX_TEST_BAR "to_be_removed" 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -t $S110 PSMUX_TEST_BAR "to_be_removed" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
     # Verify it's there
-    $before = & $PSMUX show-environment -t $S110 2>&1 | Out-String
+    $before = & $PSMUX -L $NS show-environment -t $S110 2>&1 | Out-String
     if ($before -notmatch "PSMUX_TEST_BAR=to_be_removed") {
         Write-Fail "110.2: Pre-condition failed — variable not set. Got:`n$before"
         throw "skip"
     }
 
     # Unset it
-    & $PSMUX set-environment -u PSMUX_TEST_BAR -t $S110 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -u PSMUX_TEST_BAR -t $S110 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
     # Verify it's gone
-    $after = & $PSMUX show-environment -t $S110 2>&1 | Out-String
+    $after = & $PSMUX -L $NS show-environment -t $S110 2>&1 | Out-String
     if ($after -match "PSMUX_TEST_BAR") {
         Write-Fail "110.2: Variable still present after -u unset. Got:`n$after"
     } else {
@@ -368,16 +368,16 @@ try {
 # --- Test 110.3: set-environment -g (global flag, same as default) ---
 Write-Test "110.3: set-environment -g works (global scope)"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S110" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S110" -WindowStyle Hidden
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.3: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
     # -g is the GLOBAL environment, as in tmux: it reads back with
     # show-environment -g, not in the session listing (#775).
-    & $PSMUX set-environment -g PSMUX_GLOBAL_TEST "global_value" -t $S110 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -g PSMUX_GLOBAL_TEST "global_value" -t $S110 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    $output = & $PSMUX show-environment -g -t $S110 2>&1 | Out-String
+    $output = & $PSMUX -L $NS show-environment -g -t $S110 2>&1 | Out-String
     if ($output -match "PSMUX_GLOBAL_TEST=global_value") {
         Write-Pass "110.3: set-environment -g works"
     } else {
@@ -392,20 +392,20 @@ try {
 # --- Test 110.4: set-environment propagates to new panes ---
 Write-Test "110.4: Environment variable propagates to new split pane"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S110" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S110" -WindowStyle Hidden
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.4: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
     # Set a variable AFTER session is created
-    & $PSMUX set-environment -t $S110 PSMUX_PROPAGATE_TEST "propagated_ok" 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -t $S110 PSMUX_PROPAGATE_TEST "propagated_ok" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
     # Create a new split pane — it should inherit the variable
-    & $PSMUX split-window -h -t $S110 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $S110 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
     # Check if the new pane has the env var
-    & $PSMUX send-keys -t $S110 'Write-Output "ENVVAL=$env:PSMUX_PROPAGATE_TEST"' Enter
+    & $PSMUX -L $NS send-keys -t $S110 'Write-Output "ENVVAL=$env:PSMUX_PROPAGATE_TEST"' Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S110
 
@@ -423,21 +423,21 @@ try {
 # --- Test 110.5: set-environment -u prevents propagation to new panes ---
 Write-Test "110.5: Unset variable does NOT propagate to new panes"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S110" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S110" -WindowStyle Hidden
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.5: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
     # Set then unset
-    & $PSMUX set-environment -t $S110 PSMUX_UNSET_PROP "should_vanish" 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -t $S110 PSMUX_UNSET_PROP "should_vanish" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
-    & $PSMUX set-environment -u PSMUX_UNSET_PROP -t $S110 2>&1 | Out-Null
+    & $PSMUX -L $NS set-environment -u PSMUX_UNSET_PROP -t $S110 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
 
     # Create a new split — should NOT have the variable
-    & $PSMUX split-window -h -t $S110 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $S110 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
-    & $PSMUX send-keys -t $S110 'Write-Output "UVAL=[$env:PSMUX_UNSET_PROP]"' Enter
+    & $PSMUX -L $NS send-keys -t $S110 'Write-Output "UVAL=[$env:PSMUX_UNSET_PROP]"' Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S110
 
@@ -455,23 +455,30 @@ try {
 # --- Test 110.6: CLAUDECODE unset use case (issue #110 motivating example) ---
 Write-Test "110.6: Unset CLAUDECODE prevents poisoning new panes"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $S110" -WindowStyle Hidden
+    # The server really is started from a Claude Code session: CLAUDECODE is
+    # in its START (global) environment. As in tmux, a session `-u` would only
+    # drop a session entry and new panes would fall back to the global value,
+    # so the way to keep it out of new panes is `set-environment -r` (a removal
+    # marker, environ_for_session) or `-gu` (#775).
+    $savedCC = $env:CLAUDECODE
+    $env:CLAUDECODE = "1"
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $S110" -WindowStyle Hidden
+    if ($null -eq $savedCC) { Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue } else { $env:CLAUDECODE = $savedCC }
     if (-not (Wait-ForSession $S110)) { Write-Fail "110.6: Session did not start"; throw "skip" }
     Start-Sleep -Milliseconds 1500
 
-    # Simulate: server was started from a Claude Code session
-    & $PSMUX set-environment -t $S110 CLAUDECODE "1" 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 300
+    $g = (& $PSMUX -L $NS show-environment -g -t $S110 CLAUDECODE 2>&1 | Out-String).Trim()
+    if ($g -ne "CLAUDECODE=1") { Write-Fail "110.6: precondition, CLAUDECODE not in the server start env. Got: $g"; throw "skip" }
 
-    # User realizes and unsets it
-    & $PSMUX set-environment -u CLAUDECODE -t $S110 2>&1 | Out-Null
+    # User realizes and removes it for new panes
+    & $PSMUX -L $NS set-environment -r CLAUDECODE -t $S110 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
 
     # New pane should not have CLAUDECODE
-    & $PSMUX split-window -h -t $S110 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $S110 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 
-    & $PSMUX send-keys -t $S110 'Write-Output "CC=[$env:CLAUDECODE]"' Enter
+    & $PSMUX -L $NS send-keys -t $S110 'Write-Output "CC=[$env:CLAUDECODE]"' Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $S110
 
@@ -498,12 +505,12 @@ $SCOMPAT = "test_compat"
 # --- Test COMPAT.1: cmd.exe shell works ---
 Write-Test "COMPAT.1: cmd.exe works as default-shell"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $SCOMPAT" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $SCOMPAT" -WindowStyle Hidden
     if (-not (Wait-ForSession $SCOMPAT)) { Write-Fail "COMPAT.1: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
     # Create a new window with cmd.exe
-    & $PSMUX split-window -h -t $SCOMPAT "cmd.exe /K echo CMD_ALIVE" 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $SCOMPAT "cmd.exe /K echo CMD_ALIVE" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 1500
 
     $cap = Capture-Pane $SCOMPAT
@@ -532,15 +539,15 @@ try {
     }
     if (-not $gitBash) { Write-Skip "COMPAT.2: Git Bash not found"; throw "skip" }
 
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $SCOMPAT" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $SCOMPAT" -WindowStyle Hidden
     if (-not (Wait-ForSession $SCOMPAT)) { Write-Fail "COMPAT.2: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
     # Use split-window to open bash, then send-keys to echo
-    & $PSMUX split-window -h -t $SCOMPAT "$gitBash" 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $SCOMPAT "$gitBash" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 1500
 
-    & $PSMUX send-keys -t $SCOMPAT "echo BASH_ALIVE" Enter
+    & $PSMUX -L $NS send-keys -t $SCOMPAT "echo BASH_ALIVE" Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $SCOMPAT
     if ($cap -match "BASH_ALIVE") {
@@ -564,16 +571,16 @@ try {
     $distros = wsl.exe --list --quiet 2>$null
     if (-not $distros -or $LASTEXITCODE -ne 0) { Write-Skip "COMPAT.3: No WSL distro installed"; throw "skip" }
 
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $SCOMPAT" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $SCOMPAT" -WindowStyle Hidden
     if (-not (Wait-ForSession $SCOMPAT)) { Write-Fail "COMPAT.3: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
     # Open WSL as an interactive shell, then send echo
     # WSL cold start can take 6+ seconds, give it plenty of time
-    & $PSMUX split-window -h -t $SCOMPAT "wsl.exe" 2>&1 | Out-Null
+    & $PSMUX -L $NS split-window -h -t $SCOMPAT "wsl.exe" 2>&1 | Out-Null
     Start-Sleep -Seconds 8
 
-    & $PSMUX send-keys -t $SCOMPAT "echo WSL_ALIVE" Enter
+    & $PSMUX -L $NS send-keys -t $SCOMPAT "echo WSL_ALIVE" Enter
     $swWsl = [System.Diagnostics.Stopwatch]::StartNew()
     $cap = ""
     while ($swWsl.ElapsedMilliseconds -lt 10000) {
@@ -595,11 +602,11 @@ try {
 # --- Test COMPAT.4: PowerShell (pwsh) basic session still works ---
 Write-Test "COMPAT.4: pwsh session works normally"
 try {
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $SCOMPAT" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -d -s $SCOMPAT" -WindowStyle Hidden
     if (-not (Wait-ForSession $SCOMPAT)) { Write-Fail "COMPAT.4: Session did not start"; throw "skip" }
     Start-Sleep -Seconds 2
 
-    & $PSMUX send-keys -t $SCOMPAT 'Write-Output "PWSH_ALIVE"' Enter
+    & $PSMUX -L $NS send-keys -t $SCOMPAT 'Write-Output "PWSH_ALIVE"' Enter
     Start-Sleep -Seconds 2
     $cap = Capture-Pane $SCOMPAT
 
@@ -617,7 +624,9 @@ try {
 # ══════════════════════════════════════════════════════════════════════
 # Final cleanup & summary
 # ══════════════════════════════════════════════════════════════════════
-& $PSMUX kill-server 2>$null
+& $PSMUX -L $NS kill-server 2>$null
+Start-Sleep -Milliseconds 500
+Get-ChildItem "$psmuxDir\${NS}__*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host ("=" * 60)

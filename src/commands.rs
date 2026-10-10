@@ -1853,6 +1853,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     app.next_pane_id,
                     "1", // session name not available in local mode
                     &app.environment,
+                    &app.env_scopes.child_removals(&app.environment),
                     app.host_colors.as_ref(),
                 )
             } else { None };

@@ -39,6 +39,12 @@ pub struct EnvScopes {
     /// Global value of every name a session entry shadows in the process
     /// environment (`None`: the global environment has no value for it).
     pub global_under: BTreeMap<String, Option<String>>,
+    /// Session entries the new-session `update-environment` seed wrote, with
+    /// the creating client's (start environment) values.
+    pub seeded: BTreeSet<String>,
+    /// Environment of the client whose attach is being processed (sent as
+    /// `client-environ`, consumed by the attach that follows it).
+    pub pending_client_environ: Option<Vec<(String, String)>>,
 }
 
 /// Windows environment names are case insensitive; tmux's are not.
@@ -296,6 +302,99 @@ pub fn apply_set(
         Some(v)
     };
     process_put(name, desired.as_deref());
+}
+
+/// `update-environment` patterns are fnmatch globs (environ.c:203); Windows
+/// variable names compare case insensitively.
+fn pattern_match(pattern: &str, name: &str) -> bool {
+    if cfg!(windows) {
+        crate::terminal_overrides::fnmatch(&pattern.to_uppercase(), &name.to_uppercase())
+    } else {
+        crate::terminal_overrides::fnmatch(pattern, name)
+    }
+}
+
+fn session_set(environment: &mut HashMap<String, String>, scopes: &mut EnvScopes, name: &str, value: Option<&str>) {
+    let a = SetEnvArgs {
+        name: name.to_string(),
+        remove: value.is_none(),
+        value: value.map(|v| v.to_string()),
+        ..Default::default()
+    };
+    apply_set(environment, scopes, &a);
+}
+
+/// tmux `environ_update` (environ.c:186): for every `update-environment`
+/// pattern, copy each matching variable of `src` (the attaching or creating
+/// client's environment) into the session environment, and when nothing
+/// matches record the pattern itself as a removal (`-NAME`).
+///
+/// `skip_existing` is the new-session seed: a name the session already has an
+/// entry for (`new-session -e`, a config `set-environment`) keeps it.
+/// Returns the names written.
+pub fn update_environment(
+    environment: &mut HashMap<String, String>,
+    scopes: &mut EnvScopes,
+    patterns: &[String],
+    src: &[(String, String)],
+    skip_existing: bool,
+) -> Vec<String> {
+    let mut written = Vec::new();
+    for pat in patterns {
+        // psmux extension kept for old configs: `-NAME` drops the entry.
+        if let Some(name) = pat.strip_prefix('-') {
+            if !name.is_empty() && !name.contains('=') {
+                apply_set(environment, scopes, &SetEnvArgs { name: name.to_string(), unset: true, ..Default::default() });
+            }
+            continue;
+        }
+        if pat.is_empty() || pat.contains('=') { continue; }
+        let has_entry = |env: &HashMap<String, String>, sc: &EnvScopes, n: &str| {
+            env.keys().any(|k| name_eq(k, n))
+                || find_key(sc.session_removed.iter(), n).is_some()
+                || find_key(sc.session_hidden.keys(), n).is_some()
+        };
+        let mut found = false;
+        for (k, v) in src {
+            if k.is_empty() || k.starts_with('=') || k.contains('=') || !pattern_match(pat, k) { continue; }
+            found = true;
+            if skip_existing && has_entry(environment, scopes, k) { continue; }
+            session_set(environment, scopes, k, Some(v));
+            written.push(k.clone());
+        }
+        if !found && !(skip_existing && has_entry(environment, scopes, pat)) {
+            session_set(environment, scopes, pat, None);
+            written.push(pat.clone());
+        }
+    }
+    written
+}
+
+/// The global environment as `update-environment` source at new-session: on a
+/// cold server it is the creating client's environment, on a claimed warm
+/// server the adopted one (#659).
+pub fn global_source(scopes: &EnvScopes) -> Vec<(String, String)> {
+    global_entries(scopes)
+        .into_values()
+        .filter(|e| !e.hidden)
+        .filter_map(|e| e.value.map(|v| (e.name, v)))
+        .collect()
+}
+
+/// New-session half of tmux's update-environment (cmd-new-session.c:
+/// `environ_update(global_s_options, c->environ, env)`), applied after the
+/// config so its option value is final.  Remembers what it seeded so a warm
+/// claim can replace it and the post-config warm-pane check knows those
+/// values already reached the early shell.
+pub fn seed_session_from_start_env(environment: &mut HashMap<String, String>, scopes: &mut EnvScopes, patterns: &[String]) {
+    // A claim replaces the previous seed (it came from the standby's spawner).
+    let old: Vec<String> = std::mem::take(&mut scopes.seeded).into_iter().collect();
+    for name in old {
+        apply_set(environment, scopes, &SetEnvArgs { name, unset: true, ..Default::default() });
+    }
+    let src = global_source(scopes);
+    let written = update_environment(environment, scopes, patterns, &src, true);
+    scopes.seeded.extend(written);
 }
 
 /// The session environment, sorted like tmux's RB tree.

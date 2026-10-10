@@ -196,9 +196,17 @@ pub fn for_post_config(app: &AppState) -> WarmPaneSync {
     // Config injected env vars (e.g. via set -g default-terminal,
     // set-environment in the config, or update-environment passing
     // through client env): the early child has them missing.
+    // Names the update-environment seed wrote (#775) carry the start
+    // environment's values, which the early child inherited already; a seeded
+    // removal is a name the start environment never had.  Config removals and
+    // hidden entries, though, are names the early child still has.
+    let seeded = &app.env_scopes.seeded;
     let needs_env = app.environment.iter().any(|(k, _)| {
         !k.starts_with("PSMUX_TARGET_SESSION") && k != "TMUX" && k != "TMUX_PANE"
-    });
+            && !seeded.contains(k)
+    }) || app.env_scopes.session_removed.iter().chain(app.env_scopes.session_hidden.keys())
+        .any(|k| !seeded.contains(k))
+        || !app.env_scopes.global_removed.is_empty();
     if needs_env {
         return WarmPaneSync::Respawn("post-config: env vars set");
     }
