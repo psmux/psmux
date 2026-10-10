@@ -190,6 +190,19 @@ impl<'a> TargetedSender<'a> {
             None => self.inner.send(req),
         }
     }
+
+    /// The validated target this sender wraps requests in, for a request that
+    /// carries its target itself (`CtrlReq::SetPaneInputOff`).
+    pub(crate) fn target(&self) -> Option<&crate::types::TempTarget> {
+        self.target.as_ref()
+    }
+
+    /// Send `req` WITHOUT the temporary-focus wrapper.  Only for a request
+    /// that already carries `target()` inside it.  A send fails only when the
+    /// server loop is gone, and the caller's reply wait then returns at once.
+    pub(crate) fn send_unwrapped(&self, req: CtrlReq) {
+        let _ = self.inner.send(req);
+    }
 }
 
 /// Validate a command's -t target on the server, read only.  Ok is the
@@ -638,6 +651,39 @@ pub(crate) fn select_pane_has_own_operation(args: &[&str], raw_target: Option<&s
         || args.iter().any(|a| {
             matches!(*a, "-U" | "-D" | "-L" | "-R" | "-l" | "-m" | "-M" | "-e" | "-d")
         })
+}
+
+/// `select-pane -e` / `-d` as an input toggle: `Some((off, last))` when this
+/// command sets (`-d`, off true) or clears (`-e`) the target pane's input-off
+/// flag, `last` when `-l` moves that to the window's last pane.
+///
+/// tmux's cmd-select-pane.c tests `-l` first and toggles the LAST pane's
+/// `PANE_INPUTOFF` there when `-e`/`-d` come with it; `-m`/`-M` come next and
+/// return before `-e`/`-d` are looked at, and `-e` is tested before `-d`, so
+/// `-e` wins when both are given.  A toggle also returns before `-T`/`-P`.
+///
+/// None for the forms psmux still runs as a NAVIGATION: a direction or a
+/// relative `:.+`/`:.-` target with `-e`/`-d`.  tmux toggles the pane in that
+/// direction there without selecting it; psmux keeps its long standing
+/// behaviour (it moves) rather than guess, since none of its directional code
+/// can name the neighbour without moving to it.
+pub(crate) fn select_pane_input_toggle(args: &[&str], raw_target: Option<&str>) -> Option<(bool, bool)> {
+    let has = |f: &str| args.iter().any(|a| *a == f);
+    let enable = has("-e");
+    let disable = has("-d");
+    if !enable && !disable {
+        return None;
+    }
+    let last = has("-l");
+    if !last {
+        let relative = raw_target.is_some_and(|t| {
+            t.contains(".+") || t.contains(".-") || t == "+" || t == "-"
+        });
+        if relative || ["-U", "-D", "-L", "-R", "-m", "-M"].iter().any(|f| has(f)) {
+            return None;
+        }
+    }
+    Some((!enable, last))
 }
 
 /// The single request a `select-pane`'s `-t` emits (issue #691).
@@ -1457,7 +1503,11 @@ if control_echo || control_noecho {
         let ctrl_sp_attr_only = matches!(cmd_name, "select-pane" | "selectp")
             && cmd_args.windows(2).any(|w| w[0] == "-T" || w[0] == "-P")
             && !cmd_args.iter().any(|a| matches!(*a, "-U" | "-D" | "-L" | "-R" | "-l" | "-m" | "-M" | "-e" | "-d"));
-        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp") && !ctrl_sp_attr_only;
+        // select-pane -d/-e: validated target, never focused (see the
+        // one-shot route's `sp_input_toggle`).
+        let ctrl_sp_input_toggle = matches!(cmd_name, "select-pane" | "selectp")
+            && select_pane_input_toggle(&cmd_args, ctrl_raw_target.as_deref()).is_some();
+        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp") && !ctrl_sp_attr_only && !ctrl_sp_input_toggle;
         // Same skip list as the one-shot path below. The two lists had
         // diverged (issue #545 sub-note): join-pane/move-pane/move-window/
         // swap-window/switch-client resolve their own targets (or name a
@@ -1895,8 +1945,12 @@ if set_option_command {
 let sp_attr_only = matches!(cmd, "select-pane" | "selectp")
     && args.windows(2).any(|w| w[0] == "-T" || w[0] == "-P")
     && !args.iter().any(|a| matches!(*a, "-U" | "-D" | "-L" | "-R" | "-l" | "-m" | "-M" | "-e" | "-d"));
+// select-pane -d/-e (tmux PANE_INPUTOFF) selects nothing either: its -t is
+// validated like any other command's and handed to the request, never focused.
+let sp_input_toggle = matches!(cmd, "select-pane" | "selectp")
+    && select_pane_input_toggle(&args, raw_target.as_deref()).is_some();
 // Commands that should permanently change focus when used with -t
-let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp") && !sp_attr_only;
+let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp") && !sp_attr_only && !sp_input_toggle;
 // Commands that handle -t internally and should NOT get FocusWindowTemp.
 // switch-client resolves the window/pane target itself (#483) and makes the
 // change PERMANENT; letting the generic block issue a temporary focus here
@@ -2586,6 +2640,24 @@ match cmd {
             }
         }
     }
+    "select-pane" | "selectp" if sp_input_toggle => {
+        // select-pane -d / -e: tmux's PANE_INPUTOFF, on the -t pane (or with
+        // -l the last pane), selecting nothing (cmd-select-pane.c).
+        let (off, last) = select_pane_input_toggle(&args, raw_target.as_deref()).unwrap_or((true, false));
+        let (resp_s, resp_r) = mpsc::channel();
+        tx.send_unwrapped(CtrlReq::SetPaneInputOff {
+            target: tx.target().cloned(),
+            off,
+            last,
+            resp: Some(resp_s),
+        });
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
+    }
     "select-pane" | "selectp" => {
         // Detect relative pane targets: -t :.+  or  -t :.-
         let is_next_pane = raw_target.as_deref().map_or(false, |t| t.contains(".+") || t == "+" || t == ":.+");
@@ -2599,8 +2671,7 @@ match cmd {
             else if args.iter().any(|a| *a == "-l") { "last" }
             else if args.iter().any(|a| *a == "-m") { "mark" }
             else if args.iter().any(|a| *a == "-M") { "unmark" }
-            else if args.iter().any(|a| *a == "-e") { "enable-input" }
-            else if args.iter().any(|a| *a == "-d") { "disable-input" }
+            // -e / -d without any of the above are the input toggle arm.
             else { "" };
         // Check for -T title and -P style (per-pane style, e.g.
         // "bg=default,fg=blue" — Claude Code uses -P for agent pane
@@ -5601,6 +5672,23 @@ fn dispatch_control_command(
         "select-window" | "selectw" => {
             // Already handled by target focus above
             let _ = resp_tx.send(String::new());
+            true
+        }
+        "select-pane" | "selectp" if select_pane_input_toggle(args, raw_target).is_some() => {
+            // select-pane -d / -e (tmux PANE_INPUTOFF); same request as the
+            // one-shot route, target carried inside it, nothing focused.
+            let (off, last) = select_pane_input_toggle(args, raw_target).unwrap_or((true, false));
+            let (resp_s, resp_r) = mpsc::channel();
+            tx.send_unwrapped(CtrlReq::SetPaneInputOff {
+                target: tx.target().cloned(),
+                off,
+                last,
+                resp: Some(resp_s),
+            });
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
             true
         }
         "select-pane" | "selectp" => {
