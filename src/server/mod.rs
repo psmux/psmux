@@ -5018,9 +5018,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // `set-environment` plants) win over the client's, and
                     // before PSMUX_TARGET_SESSION is re-asserted just below.
                     let mut env_adopted = false;
+                    let mut path_changed = false;
                     if let Some(ref envf) = client_env_file {
                         let plan = crate::client_env::adopt_from_file(envf);
                         env_adopted = !plan.is_empty();
+                        path_changed = plan.touches("PATH");
                         warm_debug(&format!(
                             "CLAIM: env adopt set={} removed={}",
                             plan.set.len(),
@@ -5115,6 +5117,29 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     state_dirty = true;
                     let _ = resp.send("OK\n".to_string());
+                    // A claim that changed PATH (#773) respawns window 0 too.
+                    // Panes inherit the server's PATH (no registry rebuild any
+                    // more), so the standby's window 0 shell carries the PATH
+                    // of whoever spawned the standby, and a launcher that put a
+                    // dev build or a portable tool first would land in a shell
+                    // that cannot see it. A claim from the same shell leaves
+                    // PATH untouched (measured: plan set=0 removed=0), so the
+                    // common path pays nothing. When it does run, the claim
+                    // costs about a cold start (measured 360 to 630 ms against
+                    // 50 to 70 ms, cold new-session -d 505 to 527 ms): the
+                    // client's next request waits for this arm, and the shell
+                    // CreateProcessW contends with the replacement standby and
+                    // the pool refill. Placed after the reply with the pool
+                    // refill; no other request runs in between.
+                    if path_changed && !shell_changed {
+                        warm_debug("CLAIM: PATH changed by the claim; respawning window 0");
+                        let respawn_dir = client_cwd
+                            .as_deref()
+                            .filter(|c| std::path::Path::new(c).is_dir());
+                        if let Err(e) = respawn_active_pane(&mut app, Some(&*pty_system), respawn_dir, true, None, false, &[]) {
+                            warm_debug(&format!("CLAIM: window 0 respawn failed: {}", e));
+                        }
+                    }
                     // Spawn a replacement warm server for the NEXT new-session
                     spawn_warm_server(&app);
                     // The spare shells in the pane pool were spawned before the

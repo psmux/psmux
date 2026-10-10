@@ -252,3 +252,23 @@ fn duplicate_incoming_names_are_applied_once() {
 fn norm_is_dup(k: &OsString) -> bool {
     k.to_string_lossy().eq_ignore_ascii_case("dup")
 }
+
+/// #773: a claim that changes PATH respawns the standby's window 0 pane, so
+/// the server needs to know whether the plan touched PATH, in any casing.
+#[test]
+fn issue773_plan_touches_path_case_insensitively() {
+    let current = sane(&[]);
+    let same = plan_adoption(&current, &sane(&[]));
+    assert!(!same.touches("PATH"));
+
+    let mut changed = sane(&[]);
+    changed[0] = (os("Path"), os(r"C:\path-marker;C:\Windows;C:\psmux"));
+    let plan = plan_adoption(&current, &changed);
+    assert!(plan.touches("PATH"));
+    assert!(plan.touches("path"));
+    assert!(!plan.touches("TEMP"));
+
+    let other = plan_adoption(&current, &sane(&[("TEMP", r"C:\t")]));
+    assert!(!other.touches("PATH"));
+    assert!(other.touches("temp"));
+}

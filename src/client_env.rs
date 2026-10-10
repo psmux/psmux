@@ -68,6 +68,13 @@ impl EnvPlan {
     pub fn is_empty(&self) -> bool {
         self.set.is_empty() && self.remove.is_empty()
     }
+
+    /// Does this plan set or remove `name` (case insensitive)?
+    pub fn touches(&self, name: &str) -> bool {
+        let n = name.to_uppercase();
+        self.set.iter().any(|(k, _)| norm_key(k) == n)
+            || self.remove.iter().any(|k| norm_key(k) == n)
+    }
 }
 
 /// Windows environment variable names are case insensitive, so every lookup
