@@ -49,6 +49,7 @@ mod startup_trace;
 mod wsl_path;
 mod terminal_overrides;
 mod socket_path;
+mod environ;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;
@@ -4824,52 +4825,28 @@ fn run_main() -> io::Result<()> {
                 print!("{}", resp);
                 return Ok(());
             }
-            // set-environment / setenv - Set environment variable
-            "set-environment" | "setenv" => {
-                let mut cmd = "set-environment".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-g" => { cmd.push_str(" -g"); }
-                        "-r" => { cmd.push_str(" -r"); }
-                        "-u" => { cmd.push_str(" -u"); }
-                        "-h" => { cmd.push_str(" -h"); }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        s => { cmd.push_str(&format!(" {}", s)); }
-                    }
-                    i += 1;
-                }
-                cmd.push('\n');
-                send_control(cmd)?;
-                return Ok(());
-            }
-            // show-environment / showenv - Show environment variables
-            "show-environment" | "showenv" => {
-                let mut cmd = "show-environment".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-g" => { cmd.push_str(" -g"); }
-                        "-s" => { cmd.push_str(" -s"); }
-                        "-h" => { cmd.push_str(" -h"); }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        s if !s.starts_with('-') => { cmd.push_str(&format!(" {}", s)); }
-                        _ => {}
-                    }
-                    i += 1;
+            // set-environment / setenv, show-environment / showenv (#775).
+            // Every argument is forwarded (quoted when it needs it) and the
+            // server's parser applies tmux's flags; a refusal such as
+            // `unknown variable: NAME` or `no value specified` is printed on
+            // stderr at exit 1, like tmux's cmdq_error.
+            "set-environment" | "setenv" | "show-environment" | "showenv" => {
+                let verb = if matches!(cmd_args[0].as_str(), "set-environment" | "setenv") {
+                    "set-environment"
+                } else {
+                    "show-environment"
+                };
+                let mut cmd = verb.to_string();
+                for a in &cmd_args[1..] {
+                    cmd.push(' ');
+                    cmd.push_str(&crate::util::quote_arg_if_needed(a));
                 }
                 cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
+                if let Some(err) = resp.trim_start().strip_prefix("ERROR:") {
+                    eprintln!("{}", err.trim());
+                    std::process::exit(1);
+                }
                 print!("{}", resp);
                 return Ok(());
             }

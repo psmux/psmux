@@ -89,8 +89,8 @@ set -g default-terminal "xterm-256color"
 set -g allow-rename on
 set -g terminal-overrides "xterm*:Tc"
 set -g activity-action other
-set-environment -g MY_CUSTOM_VAR hello
-set-environment -g EDITOR vim
+set-environment MY_CUSTOM_VAR hello
+set-environment EDITOR vim
 "#;
     parse_config_content(&mut app, config);
 

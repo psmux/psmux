@@ -7119,34 +7119,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::SetEnvironment(key, value) => {
-                    app.environment.insert(key.clone(), value.clone());
-                    env::set_var(&key, &value);
+                CtrlReq::SetEnvironment(args) => {
+                    // tmux global vs session scopes, removal markers and
+                    // hidden entries (#775); the process environment stays
+                    // equal to what a new child inherits.
+                    crate::environ::apply_set(&mut app.environment, &mut app.env_scopes, &args);
                     // Env vars affect the child shell's process state,
                     // which can't be patched in place — must respawn.
                     // Centralised through warm_pane_sync (#137 / #271).
                     let sync = crate::warm_pane_sync::for_env_change();
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                 }
-                CtrlReq::UnsetEnvironment(key) => {
-                    app.environment.remove(&key);
-                    env::remove_var(&key);
-                    let sync = crate::warm_pane_sync::for_env_change();
-                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                }
-                CtrlReq::ShowEnvironment(resp) => {
-                    let mut output = String::new();
-                    // Show psmux/tmux-specific environment vars
-                    for (key, value) in &app.environment {
-                        output.push_str(&format!("{}={}\n", key, value));
-                    }
-                    // Also show inherited PSMUX_/TMUX_ vars from process env
-                    for (key, value) in env::vars() {
-                        if (key.starts_with("PSMUX") || key.starts_with("TMUX")) && !app.environment.contains_key(&key) {
-                            output.push_str(&format!("{}={}\n", key, value));
-                        }
-                    }
-                    let _ = resp.send(output);
+                CtrlReq::ShowEnvironment(args, resp) => {
+                    let _ = resp.send(crate::environ::show(&app.environment, &app.env_scopes, &args));
                 }
                 CtrlReq::SetHook(hook, cmd) => {
                     // Replace (not append) to match tmux semantics – prevents

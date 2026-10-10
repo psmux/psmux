@@ -3702,6 +3702,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     crate::pane::set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     crate::pane::apply_user_environment(&mut shell_cmd, &app.environment);
+    crate::pane::apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
     // respawn-pane / respawn-window -e KEY=VALUE (#708): applied last so it
     // overrides the global and session environment, the order tmux spawn.c
     // builds the child's environment in (environ_for_session, then
@@ -3850,6 +3851,7 @@ pub fn heal_respawn_pane(
     set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     crate::pane::set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     crate::pane::apply_user_environment(&mut shell_cmd, &app.environment);
+    crate::pane::apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     drop(pair.slave);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
