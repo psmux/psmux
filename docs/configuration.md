@@ -194,7 +194,7 @@ Details worth knowing:
 | `allow-set-title` | Bool | `off` | Allow programs to set pane title via OSC 0/2 escape sequences (see [pane-titles.md](pane-titles.md)) |
 | `allow-predictions` | Bool | `off` | Preserve PSReadLine prediction settings (see below) |
 | `default-terminal` | Str | | Terminal type string (sets `TERM` env var in panes) |
-| `update-environment` | Str | *(tmux defaults)* | Space-separated list of env vars to refresh on client attach |
+| `update-environment` | Str | *(tmux defaults)* | Space-separated glob patterns; at new-session and on every attach each matching variable of the client's environment is copied into the session environment, and a pattern nothing matches is recorded as a `-NAME` removal (tmux environ_update) |
 | `warm` | Bool | `on` | Pre-spawn shells for instant window/pane creation (see [warm-sessions.md](warm-sessions.md)) |
 | `copy-command` | Str | | Shell command for clipboard pipe |
 | `codepoint-widths` | Str | | Comma separated overrides for how many columns Unicode codepoints occupy (see [Codepoint widths](#codepoint-widths)) |

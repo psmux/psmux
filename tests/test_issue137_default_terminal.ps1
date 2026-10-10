@@ -13,8 +13,14 @@
 # 3. PowerShell injection uses ${env:NAME} brace syntax for safety
 
 $ErrorActionPreference = "Continue"
-$psmux = Get-Command psmux -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+$psmux = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { Get-Command psmux -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
 if (-not $psmux) { $psmux = "psmux" }
+
+# Every session of this suite lives in its own -L namespace: it never touches
+# the user's sessions, their .port/.key files, or the default namespace (bare
+# kill-server is scoped to the default namespace, #649).
+$NS = "t137-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { Join-Path $env:USERPROFILE ".psmux" }
 
 $pass = 0
 $fail = 0
@@ -32,17 +38,11 @@ function Test-Assert($name, $condition) {
 }
 
 function Cleanup-PsmuxState {
-    & $psmux kill-server 2>$null
+    & $psmux -L $NS kill-server 2>$null
     Start-Sleep -Milliseconds 500
-    $dir = Join-Path $env:USERPROFILE ".psmux"
-    if (Test-Path $dir) {
-        Get-ChildItem $dir -Filter "*.port" | Remove-Item -Force -ErrorAction SilentlyContinue
-        Get-ChildItem $dir -Filter "*.key" | Remove-Item -Force -ErrorAction SilentlyContinue
-    }
+    Get-ChildItem $psmuxDir -Filter "${NS}__*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 200
 }
-
-$psmuxDir = Join-Path $env:USERPROFILE ".psmux"
 
 Write-Host "`n=== Issue #137: ParserError from default-terminal ===" -ForegroundColor Cyan
 
@@ -56,7 +56,7 @@ Set-Content -Path $tempConf -Value 'set -g default-terminal "xterm-256color"'
 
 # Start a detached session with this config
 $env:PSMUX_CONFIG_FILE = $tempConf
-$output = & $psmux new-session -d -s "t137" 2>&1 | Out-String
+$output = & $psmux -L $NS new-session -d -s "t137" 2>&1 | Out-String
 $exitCode = $LASTEXITCODE
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 1500
@@ -64,10 +64,10 @@ Start-Sleep -Milliseconds 1500
 Test-Assert "Session created without error (exit=$exitCode)" ($exitCode -eq 0)
 
 # Check that the server accepted the config by querying show-option
-$portFile = Join-Path $psmuxDir "t137.port"
-$keyFile = Join-Path $psmuxDir "t137.key"
+$portFile = Join-Path $psmuxDir "${NS}__t137.port"
+$keyFile = Join-Path $psmuxDir "${NS}__t137.key"
 if (Test-Path $portFile) {
-    $envOutput = & $psmux show-environment -t t137 2>&1 | Out-String
+    $envOutput = & $psmux -L $NS show-environment -t t137 2>&1 | Out-String
     Write-Host "  INFO: show-environment filtered: $(($envOutput -split "`n" | Select-String 'TERM') -join '; ')" -ForegroundColor Gray
     Test-Assert "TERM=xterm-256color in environment" ($envOutput -match "TERM=xterm-256color")
 }
@@ -81,11 +81,11 @@ Cleanup-PsmuxState
 $env:PSMUX_CONFIG_FILE = $tempConf
 
 # Create first session (triggers warm server spawn)
-$output1 = & $psmux new-session -d -s "w0" 2>&1 | Out-String
+$output1 = & $psmux -L $NS new-session -d -s "w0" 2>&1 | Out-String
 Start-Sleep -Milliseconds 2000
 
 # Create second session (should use warm claim)
-$output2 = & $psmux new-session -d -s "w1" 2>&1 | Out-String
+$output2 = & $psmux -L $NS new-session -d -s "w1" 2>&1 | Out-String
 $exitCode = $LASTEXITCODE
 Start-Sleep -Milliseconds 1000
 
@@ -97,7 +97,7 @@ Test-Assert "Second session created without error (exit=$exitCode)" ($exitCode -
 $hasParserError = $output2 -match "ParserError"
 Test-Assert "No ParserError in output" (-not $hasParserError)
 
-$portW1 = Join-Path $psmuxDir "w1.port"
+$portW1 = Join-Path $psmuxDir "${NS}__w1.port"
 Test-Assert "Session w1 exists" (Test-Path $portW1)
 
 Cleanup-PsmuxState
@@ -107,12 +107,12 @@ Write-Host "`nTest 3: Verify TERM env var is set (not default-terminal)" -Foregr
 Cleanup-PsmuxState
 
 $env:PSMUX_CONFIG_FILE = $tempConf
-$output = & $psmux new-session -d -s "env0" 2>&1
+$output = & $psmux -L $NS new-session -d -s "env0" 2>&1
 Start-Sleep -Milliseconds 1500
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 
 # Use show-environment to check what's in the env
-$showEnv = & $psmux show-environment -t env0 2>&1 | Out-String
+$showEnv = & $psmux -L $NS show-environment -t env0 2>&1 | Out-String
 Write-Host "  INFO: show-environment output: $($showEnv.Trim())" -ForegroundColor Gray
 
 # TERM should be set
@@ -137,11 +137,11 @@ set -g activity-action other
 "@ | Set-Content -Path $tempConf2
 
 $env:PSMUX_CONFIG_FILE = $tempConf2
-$output = & $psmux new-session -d -s "hyp0" 2>&1
+$output = & $psmux -L $NS new-session -d -s "hyp0" 2>&1
 Start-Sleep -Milliseconds 1500
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 
-$showEnv = & $psmux show-environment -t hyp0 2>&1 | Out-String
+$showEnv = & $psmux -L $NS show-environment -t hyp0 2>&1 | Out-String
 Write-Host "  INFO: show-environment: $($showEnv.Trim())" -ForegroundColor Gray
 
 Test-Assert "allow-rename not in environment" (-not ($showEnv -match "allow-rename"))
@@ -161,12 +161,12 @@ set-environment -g EDITOR vim
 "@ | Set-Content -Path $tempConf3
 
 $env:PSMUX_CONFIG_FILE = $tempConf3
-$output = & $psmux new-session -d -s "env1" 2>&1
+$output = & $psmux -L $NS new-session -d -s "env1" 2>&1
 Start-Sleep -Milliseconds 1500
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 
 # set-environment -g is the global environment, read back with -g (#775).
-$showEnv = & $psmux show-environment -g -t env1 2>&1 | Out-String
+$showEnv = & $psmux -L $NS show-environment -g -t env1 2>&1 | Out-String
 Write-Host "  INFO: show-environment -g (filtered): $(($showEnv -split "`n" | Select-String 'MY_VAR|EDITOR') -join '; ')" -ForegroundColor Gray
 
 Test-Assert "MY_VAR in environment" ($showEnv -match "MY_VAR=hello_world")
@@ -183,12 +183,12 @@ Set-Content -Path $tempConf4 -Value 'set -g default-terminal "xterm-256color"'
 
 $env:PSMUX_CONFIG_FILE = $tempConf4
 # Create the first (initial) session: this uses the early warm pane
-$output = & $psmux new-session -d -s "echo0" 2>&1 | Out-String
+$output = & $psmux -L $NS new-session -d -s "echo0" 2>&1 | Out-String
 Start-Sleep -Milliseconds 3000
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 
 # Capture the pane buffer to see what the user would see
-$captured = & $psmux capture-pane -t echo0 -p 2>&1 | Out-String
+$captured = & $psmux -L $NS capture-pane -t echo0 -p 2>&1 | Out-String
 Write-Host "  INFO: captured pane: $($captured.Trim())" -ForegroundColor Gray
 
 # The env assignment command must NOT appear in the pane output
@@ -208,17 +208,17 @@ Cleanup-PsmuxState
 $env:PSMUX_CONFIG_FILE = $tempConf4
 
 # First session
-$output1 = & $psmux new-session -d -s "echo1" 2>&1 | Out-String
+$output1 = & $psmux -L $NS new-session -d -s "echo1" 2>&1 | Out-String
 Start-Sleep -Milliseconds 2000
 
 # Split to trigger warm pane consumption and respawn
-$splitOutput = & $psmux split-window -t echo1 2>&1 | Out-String
+$splitOutput = & $psmux -L $NS split-window -t echo1 2>&1 | Out-String
 Start-Sleep -Milliseconds 2000
 
 Remove-Item env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue
 
 # Capture the second pane (the one from warm claim)
-$captured2 = & $psmux capture-pane -t echo1 -p 2>&1 | Out-String
+$captured2 = & $psmux -L $NS capture-pane -t echo1 -p 2>&1 | Out-String
 Write-Host "  INFO: captured pane 2: $($captured2.Trim())" -ForegroundColor Gray
 
 $hasEnvEcho2 = $captured2 -match '\$\{?env:TERM\}?\s*='
