@@ -2430,8 +2430,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                // Same parser and semantics as the server (#775).
-                match crate::environ::parse_set_environment(&parts[1..]) {
+                // Same parser and semantics as the server (#775). The
+                // arguments are split quote aware: `parts` is a plain
+                // whitespace split, so `NAME "a b"` reached the parser as
+                // three tokens with the quotes still on them.
+                let args = parse_command_line(cmd);
+                let args: Vec<&str> = args.iter().skip(1).map(|s| s.as_str()).collect();
+                match crate::environ::parse_set_environment(&args) {
                     Ok(parsed) => crate::environ::apply_set(&mut app.environment, &mut app.env_scopes, &parsed),
                     Err(e) => app.status_message = Some((e, std::time::Instant::now(), None)),
                 }
@@ -2441,7 +2446,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                match crate::environ::parse_show_environment(&parts[1..])
+                let args = parse_command_line(cmd);
+                let args: Vec<&str> = args.iter().skip(1).map(|s| s.as_str()).collect();
+                match crate::environ::parse_show_environment(&args)
                     .and_then(|a| crate::environ::show(&app.environment, &app.env_scopes, &a))
                 {
                     Ok(output) if output.is_empty() => show_output_popup(app, "show-environment", "(no environment variables)\n".to_string()),

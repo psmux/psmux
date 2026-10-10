@@ -677,11 +677,16 @@ fn set_environment_basic() {
     assert_eq!(app.environment.get("MY_VAR").map(|s| s.as_str()), Some("my_value"));
 }
 
+/// tmux refuses a name with no value (cmd-set-environment.c: "no value
+/// specified") and sets nothing; an empty value has to be given explicitly
+/// (#775). psmux used to store `NAME=` here.
 #[test]
-fn set_environment_empty_value() {
+fn set_environment_without_value_is_refused_like_tmux() {
     let mut app = mock_app_with_window();
-    execute_command_string(&mut app, "set-environment EMPTY_VAR").unwrap();
-    assert!(app.environment.contains_key("EMPTY_VAR"), "single arg should set with empty value");
+    let _ = execute_command_string(&mut app, "set-environment EMPTY_VAR");
+    assert!(!app.environment.contains_key("EMPTY_VAR"), "a bare name must not set anything");
+    execute_command_string(&mut app, "set-environment EMPTY_VAR \"\"").unwrap();
+    assert_eq!(app.environment.get("EMPTY_VAR").map(|s| s.as_str()), Some(""), "an explicit empty value is set");
 }
 
 #[test]
@@ -2185,4 +2190,17 @@ fn command_chain_three_commands() {
     assert_eq!(app.user_options.get("@a").map(|s| s.as_str()), Some("1"));
     assert_eq!(app.user_options.get("@b").map(|s| s.as_str()), Some("2"));
     assert_eq!(app.user_options.get("@c").map(|s| s.as_str()), Some("3"));
+}
+
+/// The in-process path (command prompt, key bindings with no server) splits
+/// its arguments quote aware, like the server does (#775 follow up): a quoted
+/// value with a space used to reach the parser as two tokens with the quotes
+/// attached, and nothing was set.
+#[test]
+fn set_environment_quoted_values_on_the_local_path() {
+    let mut app = mock_app_with_window();
+    execute_command_string(&mut app, "set-environment QV \"a b\"").unwrap();
+    execute_command_string(&mut app, "set-environment QS 'c d'").unwrap();
+    assert_eq!(app.environment.get("QV").map(|s| s.as_str()), Some("a b"));
+    assert_eq!(app.environment.get("QS").map(|s| s.as_str()), Some("c d"));
 }
