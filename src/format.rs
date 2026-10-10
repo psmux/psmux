@@ -2045,8 +2045,12 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
         "pane_dead_signal" | "pane_dead_status" | "pane_dead_time" => "0".into(),
         "pane_format" => "1".into(),
-        "pane_input_off"
-        | "pane_pipe" | "pane_unseen_changes" => "0".into(),
+        // select-pane -d / -e (tmux format.c format_cb_pane_input_off:
+        // `wp->flags & PANE_INPUTOFF`).
+        "pane_input_off" => {
+            if target_pane().is_some_and(|p| p.input_off) { "1".into() } else { "0".into() }
+        }
+        "pane_pipe" | "pane_unseen_changes" => "0".into(),
         "pane_last" => {
             if let Some(p) = target_pane() {
                 if !app.last_pane_path.is_empty() {

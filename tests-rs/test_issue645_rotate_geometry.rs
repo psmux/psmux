@@ -74,7 +74,7 @@ fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
         last_special_key: None,
         vt_bridge_cache: None,
         vti_mode_cache: None,
-        mouse_input_cache: None, win32_input_latched: false,
+        mouse_input_cache: None, win32_input_latched: false, input_off: false,
         scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None,
         cursor_shape: Arc::new(AtomicU8::new(0)),
         bell_pending: Arc::new(AtomicBool::new(false)),

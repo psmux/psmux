@@ -264,6 +264,30 @@ pub struct Pane {
     /// window is unaffected, and `respawn_active_pane` clears it with the rest
     /// of the per-ConPTY caches.
     pub win32_input_latched: bool,
+    /// `select-pane -d` / `-e`: tmux's per-pane `PANE_INPUTOFF` flag
+    /// (cmd-select-pane.c sets and clears it, tmux.h `PANE_INPUTOFF`).
+    ///
+    /// While it is set, nothing typed or sent as INPUT reaches the pane's
+    /// program: tmux's `window_pane_key` (window.c) returns before
+    /// `input_key_pane` for such a pane, so keys from an attached client,
+    /// every `send-keys` form, `send-prefix` and forwarded mouse events are
+    /// dropped, `window_pane_copy_key` leaves the pane out of a
+    /// `synchronize-panes` fan out, and `paste-buffer` writes nothing
+    /// (cmd-paste-buffer.c checks the flag before `bufferevent_write`).
+    ///
+    /// Two things deliberately still get through, because tmux does not route
+    /// them through `window_pane_key`'s program half: keys a pane MODE consumes
+    /// (copy mode and its prompts, `send-keys -X`), and the server's own replies
+    /// to the program's terminal queries (CPR, DA, OSC 4/10/11 colours, focus
+    /// reports).  The replies share `writer` with input, which is why the gate
+    /// lives at the input entry points (`input::input_target_accepts_input`
+    /// and its callers) and never in the writer.
+    ///
+    /// Like tmux's `wp->flags`, it belongs to the pane, not to its process:
+    /// `respawn-pane` keeps it (spawn.c only clears PANE_STATUSREADY and
+    /// PANE_STATUSDRAWN on a respawn), and swap/break/join-pane move it with
+    /// the pane.  Exposed read-only as `#{pane_input_off}`.
+    pub input_off: bool,
     /// Cached foreground-process classification for the scroll-wheel
     /// alternate-scroll decision (issue #277): `(timestamp, is_shell,
     /// foreground_exe_name)`. `is_shell` mirrors
@@ -388,6 +412,13 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// May input reach this pane's program?  False after `select-pane -d`
+    /// (see [`Pane::input_off`]); every key, paste and mouse forward to the
+    /// program checks this.
+    pub fn accepts_input(&self) -> bool {
+        !self.input_off
+    }
+
     /// Display this pane through a copy-mode snapshot: `term` becomes a frozen
     /// copy of the current screen and the live parser is parked in
     /// `live_term`.  The PTY reader keeps feeding the live parser, so the
@@ -3335,6 +3366,27 @@ pub enum CtrlReq {
     /// reply channel carries tmux's diagnostic.
     LastPane {
         resp: mpsc::Sender<Result<(), String>>,
+    },
+    /// `select-pane -d` (`off` true) / `select-pane -e` (`off` false): set or
+    /// clear [`Pane::input_off`] on the pane `target` names (None: the active
+    /// pane), and with `last` on that window's last pane instead
+    /// (`select-pane -l -d/-e`).  See `server::set_pane_input_off`.
+    ///
+    /// The target travels INSIDE the request rather than as a
+    /// `CtrlReq::Targeted` wrapper on purpose: the temporary focus a wrapper
+    /// applies moves the target WINDOW's active pane and only the real active
+    /// window's is put back, so `select-pane -d -t %N` for a pane in another
+    /// window would have changed which pane that window shows as active.
+    /// tmux's cmd-select-pane.c flips `PANE_INPUTOFF`, redraws borders and
+    /// status, and returns: the active pane, zoom, last pane and MRU stay as
+    /// they were, and the `after-select-pane` hook (cmd-select-pane.c:276) is
+    /// never reached.  `resp` carries tmux's error (`no last pane`, or a
+    /// target that vanished after validation) to a one-shot caller.
+    SetPaneInputOff {
+        target: Option<TempTarget>,
+        off: bool,
+        last: bool,
+        resp: Option<mpsc::Sender<Result<(), String>>>,
     },
     /// `rotate-window`. The flag is tmux's `-U` (its default): true moves the
     /// first pane to the last cell, false is `-D`.

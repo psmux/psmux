@@ -1264,6 +1264,14 @@ fn deliver_paste_buffer(app: &mut AppState, text: &str, pb: &PasteBufferArgs) ->
     if payload.is_empty() {
         return Ok(());
     }
+    // select-pane -d: cmd-paste-buffer.c writes only `if (~wp->flags &
+    // PANE_INPUTOFF)`, and that is not an error (a `-d` still deletes the
+    // buffer, in the caller).  Checked here and not just in the writers
+    // below because a pane in copy mode would otherwise take the text as
+    // copy mode keys, where tmux writes nothing at all.
+    if !crate::input::input_target_accepts_input(app) {
+        return Ok(());
+    }
     if pb.bracket {
         crate::input::send_paste_buffer_to_active(app, &payload)
     } else {
@@ -1621,6 +1629,26 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "select-pane" | "selectp" => {
+            // select-pane -d / -e (tmux PANE_INPUTOFF) from a key binding,
+            // hook, menu or the command prompt: the same rule and the same
+            // server helper as the client routes, selecting nothing.
+            let raw_target = parts.iter().position(|p| *p == "-t").and_then(|i| parts.get(i + 1)).copied();
+            if let Some((off, last)) = crate::server::connection::select_pane_input_toggle(&parts[1..], raw_target) {
+                let target = raw_target.map(|t| {
+                    let pt = crate::cli::parse_target(t);
+                    crate::types::TempTarget {
+                        win: pt.window,
+                        win_is_id: pt.window_is_id,
+                        win_name: pt.window_name,
+                        pane: pt.pane,
+                        pane_is_id: pt.pane_is_id,
+                    }
+                });
+                if let Err(e) = crate::server::set_pane_input_off(app, target.as_ref(), off, last) {
+                    app.status_message = Some((e, Instant::now(), None));
+                }
+                return Ok(());
+            }
             // Save/restore copy mode across pane switches (tmux parity #43)
             let is_last = parts.iter().any(|p| *p == "-l");
             if is_last {
@@ -1770,7 +1798,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             {
                 // scroll-enter-copy-mode off: forward PageUp to PTY (#284)
                 if let Some(win) = app.windows.get_mut(app.active_idx) {
-                    if let Some(pane) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                    // A PageUp KEY for the program: not for an input-off pane.
+                    if let Some(pane) = crate::tree::active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
                         let _ = pane.writer.write_all(b"\x1b[5~");
                     }
                 }
@@ -2006,6 +2035,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         "send-keys" | "send" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else if !crate::input::active_tiled_accepts_input(app) {
+                // select-pane -d (tmux PANE_INPUTOFF): the keys go nowhere.
             } else {
                 // Local: write key text directly to active pane
                 let literal = parts.iter().any(|p| *p == "-l");
@@ -2509,7 +2540,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 };
                 if !encoded.is_empty() {
                     if let Some(win) = app.windows.get_mut(app.active_idx) {
-                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                        // send-prefix is a key (tmux window_pane_key), so an
+                        // input-off pane does not get it.
+                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
                             let _ = p.writer.write_all(&encoded);
                             let _ = p.writer.flush();
                         }

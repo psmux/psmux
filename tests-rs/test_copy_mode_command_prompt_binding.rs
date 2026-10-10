@@ -55,7 +55,7 @@ fn make_pane(id: usize) -> crate::types::Pane {
         vt_bridge_cache: None,
         vti_mode_cache: None,
         mouse_input_cache: None,
-        win32_input_latched: false,
+        win32_input_latched: false, input_off: false,
         scroll_fg_cache: None,
         mouse_proto_owner: None,
         wheel_auth: None,

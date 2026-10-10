@@ -905,6 +905,16 @@ pub(crate) fn record_bypass_applies(event_flags: u32) -> bool {
 ///   behavior (right-click=paste, scroll=copy-mode) before calling this.
 pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: bool,
                           _button_state: u32, _event_flags: u32, win_name: &str) {
+    // select-pane -d (tmux PANE_INPUTOFF): a mouse event forwarded to the
+    // program is a key like any other in tmux (window_pane_key returns before
+    // input_key_pane), so it is dropped.  Every route that hands a mouse event
+    // to a pane's program comes through here; what psmux does with the mouse
+    // itself (focus, copy mode, resize) is not input and is unaffected.
+    if !pane.accepts_input() {
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> DROPPED (pane input off)",
+            col, row, vt_button, press, win_name));
+        return;
+    }
     let vt_bridge = detect_vt_bridge(pane);
 
     if vt_bridge {
@@ -2156,7 +2166,8 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     if is_legacy_pager && !up {
         // `more.com`: Enter is its "advance one line" key.
         mouse_log("  -> legacy pager (more.com), sending Enter x3");
-        if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
+        // Three Enter KEYS for the program, so not for an input-off pane.
+        if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
             for _ in 0..3 {
                 crate::input::write_key_seq(pane, b"\r");
             }
@@ -3779,6 +3790,9 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     // Fresh ConPTY, fresh input state machine: the win32-input-mode latch that
     // eats a bare ESC (#588) does not carry over to the respawned child.
     pane.win32_input_latched = false;
+    // `input_off` (select-pane -d) is deliberately left alone: it belongs to
+    // the pane, not its process, and tmux's spawn.c keeps `wp->flags` across
+    // a respawn apart from PANE_STATUSREADY / PANE_STATUSDRAWN.
     pane.dead = false;
     pane.spawned_at = Some(std::time::Instant::now());
 
@@ -3895,6 +3909,7 @@ pub fn heal_respawn_pane(
     // Fresh ConPTY, fresh input state machine: the win32-input-mode latch that
     // eats a bare ESC (#588) does not carry over to the respawned child.
     pane.win32_input_latched = false;
+    // `input_off` survives the respawn, as in tmux (see respawn_active_pane).
     pane.dead = false;
     pane.spawned_at = Some(std::time::Instant::now());
     Ok(())
