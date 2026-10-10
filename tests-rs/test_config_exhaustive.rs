@@ -1849,7 +1849,11 @@ fn config_hidden_basic() {
 fn config_hidden_in_environment() {
     let mut app = mock_app();
     parse_config_content(&mut app, "%hidden THEME=dark\n");
-    assert_eq!(app.environment.get("THEME").unwrap(), "dark");
+    // tmux keeps %hidden in the global environment as a hidden entry: not
+    // in the session map, never passed to a child (#775).
+    assert_eq!(app.env_scopes.global_hidden.get("THEME").unwrap(), "dark");
+    assert!(!app.environment.contains_key("THEME"));
+    assert_eq!(app.env_scopes.child_removals(&app.environment), vec!["THEME".to_string()]);
 }
 
 #[test]
@@ -1880,20 +1884,21 @@ fn config_hidden_inside_if_false() {
     let mut app = mock_app();
     parse_config_content(&mut app, "%if \"0\"\n%hidden NOPE=yes\n%endif\n");
     assert!(!app.environment.contains_key("NOPE"));
+    assert!(app.env_scopes.hidden_value("NOPE").is_none());
 }
 
 #[test]
 fn config_hidden_inside_if_true() {
     let mut app = mock_app();
     parse_config_content(&mut app, "%if \"1\"\n%hidden YES=yep\n%endif\n");
-    assert_eq!(app.environment.get("YES").unwrap(), "yep");
+    assert_eq!(app.env_scopes.hidden_value("YES").as_deref(), Some("yep"));
 }
 
 #[test]
 fn config_hidden_quoted_value() {
     let mut app = mock_app();
     parse_config_content(&mut app, "%hidden GREETING=\"hello world\"\n");
-    assert_eq!(app.environment.get("GREETING").unwrap(), "hello world");
+    assert_eq!(app.env_scopes.hidden_value("GREETING").as_deref(), Some("hello world"));
 }
 
 // --- UTF-8 BOM handling ---
@@ -2068,9 +2073,25 @@ fn config_setenv_alias() {
 
 #[test]
 fn config_set_environment_with_flags() {
+    let _g = env_lock();
     let mut app = mock_app();
-    parse_config_content(&mut app, "set-environment -g GLOBAL_VAR gval\n");
-    assert_eq!(app.environment.get("GLOBAL_VAR").unwrap(), "gval");
+    parse_config_content(&mut app, "set-environment -g PSMUX_T775_CFG_GLOBAL gval\n");
+    // -g is the global environment (this server's process environment, what
+    // every child inherits), not the session map (#775).
+    assert!(!app.environment.contains_key("PSMUX_T775_CFG_GLOBAL"));
+    assert_eq!(std::env::var("PSMUX_T775_CFG_GLOBAL").as_deref(), Ok("gval"));
+    let shown = crate::environ::show(&app.environment, &app.env_scopes,
+        &crate::environ::parse_show_environment(&["-g", "PSMUX_T775_CFG_GLOBAL"]).unwrap()).unwrap();
+    assert_eq!(shown, "PSMUX_T775_CFG_GLOBAL=gval\n");
+    // -r in a config is a removal marker, -u drops it.
+    parse_config_content(&mut app, "set-environment -g -r PSMUX_T775_CFG_GLOBAL\n");
+    assert!(std::env::var("PSMUX_T775_CFG_GLOBAL").is_err());
+    assert!(app.config_warnings.is_empty(), "{:?}", app.config_warnings);
+    parse_config_content(&mut app, "set-environment -gu PSMUX_T775_CFG_GLOBAL\n");
+    // Unquoted multi word values keep working from a config.
+    parse_config_content(&mut app, "set-environment PSMUX_T775_CFG_WORDS hello big world\n");
+    assert_eq!(app.environment.get("PSMUX_T775_CFG_WORDS").unwrap(), "hello big world");
+    parse_config_content(&mut app, "set-environment -u PSMUX_T775_CFG_WORDS\n");
 }
 
 // --- source-file via config file ---

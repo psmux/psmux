@@ -562,7 +562,10 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
                     // Only process if active
                     let active = if_stack.last().map(|s| s.active).unwrap_or(true);
                     if active {
-                        app.environment.insert(name.to_string(), value.to_string());
+                        // tmux cmd-parse.y:264 puts %hidden in the GLOBAL
+                        // environment with ENVIRON_HIDDEN: usable as $NAME and
+                        // in formats, never passed to a child (#775).
+                        app.env_scopes.global_hidden.insert(name.to_string(), value.to_string());
                     }
                 }
                 continue;
@@ -580,7 +583,13 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
         // tmux's %hidden directive defines server-level variables that are
         // expanded with $ syntax in subsequent config lines.
         let l = if l.contains('$') {
-            expand_hidden_vars(l, &app.environment)
+            // %hidden entries live in the global hidden set (#775); session
+            // entries keep their old precedence over them.
+            let mut vars: std::collections::HashMap<String, String> = app.env_scopes.global_hidden
+                .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            vars.extend(app.env_scopes.session_hidden.iter().map(|(k, v)| (k.clone(), v.clone())));
+            vars.extend(app.environment.iter().map(|(k, v)| (k.clone(), v.clone())));
+            expand_hidden_vars(l, &vars)
         } else {
             l.to_string()
         };
@@ -1064,16 +1073,31 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         }
     }
     else if l.starts_with("set-environment ") || l.starts_with("setenv ") {
-        let parts: Vec<&str> = l.split_whitespace().collect();
-        let mut i = 1;
-        while i < parts.len() && parts[i].starts_with('-') { i += 1; }
-        if i + 1 < parts.len() {
-            let val = parts[i+1..].join(" ");
-            app.environment.insert(parts[i].to_string(), val.clone());
-            // Also set on the server process so child panes inherit via env block
-            std::env::set_var(parts[i], &val);
-        } else {
-            warn_config(app, "set-environment requires a name and value");
+        // Same parser and scopes as the CLI/TCP/prompt paths (#775): -g
+        // global, -u, -r removal marker, -h hidden, -F format value. The
+        // process environment is kept equal to what a child inherits.
+        let tokens = crate::commands::parse_command_line(l);
+        let args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
+        let parsed = crate::environ::parse_set_environment(&args).or_else(|e| {
+            // psmux has always joined an unquoted multi word value; keep
+            // accepting `set-environment NAME several words` from configs.
+            if !e.starts_with("too many arguments") { return Err(e); }
+            let name_at = args.iter().position(|a| !a.starts_with('-')).unwrap_or(0);
+            let mut joined: Vec<String> = args[..=name_at].iter().map(|s| s.to_string()).collect();
+            joined.push(args[name_at + 1..].join(" "));
+            let refs: Vec<&str> = joined.iter().map(|s| s.as_str()).collect();
+            crate::environ::parse_set_environment(&refs)
+        });
+        match parsed {
+            Ok(mut a) => {
+                if a.format {
+                    if let Some(v) = a.value.take() {
+                        a.value = Some(crate::format::expand_format_untimed(&v, app));
+                    }
+                }
+                crate::environ::apply_set(&mut app.environment, &mut app.env_scopes, &a);
+            }
+            Err(e) => warn_config(app, format!("set-environment: {}", e)),
         }
     }
     else {

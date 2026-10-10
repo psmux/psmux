@@ -1720,6 +1720,9 @@ pub struct AppState {
     pub update_environment: Vec<String>,
     /// Environment variables set via set-environment
     pub environment: std::collections::HashMap<String, String>,
+    /// Removal markers, hidden entries and shadowed global values that
+    /// `environment` cannot express (tmux global vs session scopes, #775).
+    pub env_scopes: crate::environ::EnvScopes,
     /// User/plugin options (@-prefixed, tmux convention).
     /// Stored separately from `environment` so they are NOT passed as
     /// shell environment variables to child panes (#105).
@@ -2794,6 +2797,7 @@ impl AppState {
                 "XAUTHORITY".to_string(),
             ],
             environment: std::collections::HashMap::new(),
+            env_scopes: crate::environ::EnvScopes::default(),
             user_options: std::collections::HashMap::new(),
             user_set_options: std::collections::HashSet::new(),
             pane_border_style: String::new(),
@@ -3665,9 +3669,10 @@ pub enum CtrlReq {
     DebugStall(u64),
     SaveBuffer(String),
     LoadBuffer(String),
-    SetEnvironment(String, String),
-    UnsetEnvironment(String),
-    ShowEnvironment(mpsc::Sender<String>),
+    /// A parsed and validated `set-environment` (value already `-F` expanded).
+    SetEnvironment(crate::environ::SetEnvArgs),
+    /// A parsed `show-environment`: the listing, or tmux's error text.
+    ShowEnvironment(crate::environ::ShowEnvArgs, mpsc::Sender<Result<String, String>>),
     SetHook(String, String),
     AppendHook(String, String),
     ShowHooks(mpsc::Sender<String>),

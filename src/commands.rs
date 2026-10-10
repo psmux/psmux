@@ -2430,19 +2430,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                let has_u = parts.iter().any(|p| *p == "-u");
-                let non_flag: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
-                if has_u {
-                    if let Some(key) = non_flag.first() {
-                        app.environment.remove(*key);
-                        std::env::remove_var(key);
-                    }
-                } else if non_flag.len() >= 2 {
-                    app.environment.insert(non_flag[0].to_string(), non_flag[1].to_string());
-                    std::env::set_var(non_flag[0], non_flag[1]);
-                } else if non_flag.len() == 1 {
-                    app.environment.insert(non_flag[0].to_string(), String::new());
-                    std::env::set_var(non_flag[0], "");
+                // Same parser and semantics as the server (#775).
+                match crate::environ::parse_set_environment(&parts[1..]) {
+                    Ok(parsed) => crate::environ::apply_set(&mut app.environment, &mut app.env_scopes, &parsed),
+                    Err(e) => app.status_message = Some((e, std::time::Instant::now(), None)),
                 }
             }
         }
@@ -2450,12 +2441,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                let mut output = String::new();
-                for (key, value) in &app.environment {
-                    output.push_str(&format!("{}={}\n", key, value));
+                match crate::environ::parse_show_environment(&parts[1..])
+                    .and_then(|a| crate::environ::show(&app.environment, &app.env_scopes, &a))
+                {
+                    Ok(output) if output.is_empty() => show_output_popup(app, "show-environment", "(no environment variables)\n".to_string()),
+                    Ok(output) => show_output_popup(app, "show-environment", output),
+                    Err(e) => app.status_message = Some((e, std::time::Instant::now(), None)),
                 }
-                if output.is_empty() { output.push_str("(no environment variables)\n"); }
-                show_output_popup(app, "show-environment", output);
             }
         }
         "set-hook" => {

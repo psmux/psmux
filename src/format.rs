@@ -1332,6 +1332,7 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
             // (format strings use #{cpu_percentage} without the @ prefix).
             app.user_options.get(name).cloned()
                 .or_else(|| app.environment.get(name).cloned())
+                .or_else(|| app.env_scopes.hidden_value(name))
                 .or_else(|| {
                     if !name.starts_with('@') {
                         app.user_options.get(&format!("@{}", name)).cloned()

@@ -898,7 +898,7 @@ Notes:
 - Only the first matching branch runs. Once one has, later `%elif` and `%else` branches are skipped.
 - `%hidden` assignments inside a skipped branch are not applied.
 - The two ways to read a `%hidden` variable are not interchangeable. `$NAME` and `${NAME}` are substituted only on ordinary config lines, so they do **not** work inside a `%if` condition. Use the format form `#{NAME}` there, which resolves through the same session environment.
-- `%hidden` writes into the session environment, so the name is also visible to `show-environment` and is inherited by new panes. It is not a private compile-time constant.
+- `%hidden` writes a hidden entry into the global environment, as tmux does: it is usable as `$NAME` and `#{NAME}`, it is listed only by `show-environment -gh`, and it is never passed to new panes.
 
 ## Accepted but Not Functional
 
@@ -1004,10 +1004,17 @@ psmux set-environment MY_VAR value
 # Unset an env var
 psmux set-environment -gu MY_VAR
 
-# Show all environment variables
+# Keep a variable OUT of new panes, even one the server inherited
+psmux set-environment -r MY_VAR
+
+# Show the session environment, the global one, or one variable
 psmux show-environment
 psmux show-environment -g
+psmux show-environment MY_VAR      # MY_VAR=value, -MY_VAR, or "unknown variable: MY_VAR" (exit 1)
+psmux show-environment -s          # shell syntax: NAME="value"; export NAME;
 ```
+
+As in tmux there are two scopes. The global environment (`-g`) is the server's start environment (the environment of the shell that started the session) plus anything set with `-g`; the session environment holds what was set without `-g`, and `new-session -e`. A new pane gets the global environment with the session one laid over it, without names removed by `-r` or marked hidden with `-h`. Because psmux runs one server per session, "global" means global to that session's server, so `set-environment -g` affects the session it is sent to rather than every session.
 
 Environment variables set this way are injected at the process level when new panes spawn, so they are completely invisible (no commands echoed in the shell).
 

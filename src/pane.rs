@@ -1131,6 +1131,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
+    apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
     // new-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
     for (k, v) in extra_env { shell_cmd.env(k, v); }
@@ -1525,6 +1526,8 @@ pub struct WarmSpawnParams {
     pub claude_code_force_interactive: bool,
     pub host_colors: Option<crate::types::HostColors>,
     pub environment: std::collections::HashMap<String, String>,
+    /// Names a child must not inherit (`set-environment -r` / `-h`, #775).
+    pub env_removals: Vec<String>,
     pub history_limit: usize,
     pub allow_alternate_screen: bool,
 }
@@ -1560,6 +1563,7 @@ pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
         claude_code_force_interactive: app.claude_code_force_interactive,
         host_colors: app.host_colors.clone(),
         environment: app.environment.clone(),
+        env_removals: app.env_scopes.child_removals(&app.environment),
         history_limit: app.history_limit,
         allow_alternate_screen: app.allow_alternate_screen,
     })
@@ -1584,6 +1588,7 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
     set_tmux_env(&mut shell_cmd, pane_id, p.control_port, p.socket_name.as_deref(), &p.session_name, p.claude_code_fix_tty, p.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, p.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &p.environment);
+    apply_env_removals(&mut shell_cmd, &p.env_removals);
     let spawn_cwd = shell_cmd.get_cwd().cloned();
     // A teardown that began while this thread was opening the pty: do not
     // create a shell now. Creating it would only make the reaper wait out a
@@ -1678,6 +1683,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
+    apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
     let child = pair
         .slave
         .spawn_command(shell_cmd)
@@ -1972,6 +1978,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
+    apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
     // split-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
     for (k, v) in extra_env { shell_cmd.env(k, v); }
@@ -2221,6 +2228,15 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
 pub fn apply_user_environment(builder: &mut CommandBuilder, environment: &std::collections::HashMap<String, String>) {
     for (key, value) in environment {
         builder.env(key, value);
+    }
+}
+
+/// Drop every name a new child must not inherit (`set-environment -r` and
+/// hidden entries, #775) from the final environment block, whatever put it
+/// there: the server process environment or the registry fill (#773).
+pub fn apply_env_removals(builder: &mut CommandBuilder, names: &[String]) {
+    for name in names {
+        builder.env_remove(name);
     }
 }
 

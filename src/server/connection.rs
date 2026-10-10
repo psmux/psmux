@@ -4260,30 +4260,53 @@ match cmd {
         let _ = tx.send(CtrlReq::LoadBuffer(path));
     }
     "set-environment" | "setenv" => {
-        let has_u = args.iter().any(|a| {
-            if *a == "-u" { return true; }
-            a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains('u')
-        });
-        let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-        if has_u {
-            if let Some(key) = non_flag.first() {
-                let _ = tx.send(CtrlReq::UnsetEnvironment(key.to_string()));
+        // tmux cmd-set-environment.c: -g global / session scope, -u unset,
+        // -r removal marker, -h hidden, -F format expanded value (#775).
+        match crate::environ::parse_set_environment(&args) {
+            Ok(mut parsed) => {
+                if let Some(v) = parsed.value.take() {
+                    parsed.value = Some(expand_set_option_value(tx, parsed.format, v));
+                }
+                let _ = tx.send(CtrlReq::SetEnvironment(parsed));
             }
-        } else if non_flag.len() >= 2 {
-            let _ = tx.send(CtrlReq::SetEnvironment(non_flag[0].to_string(), non_flag[1].to_string()));
-        } else if non_flag.len() == 1 {
-            let _ = tx.send(CtrlReq::SetEnvironment(non_flag[0].to_string(), String::new()));
+            Err(e) => {
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(e));
+                } else {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "show-environment" | "showenv" => {
-        let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::ShowEnvironment(rtx));
-        if let Ok(text) = rrx.recv() {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("show-environment".to_string(), text));
-            } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+        // tmux cmd-show-environment.c: one entry for a NAME, `-NAME` for a
+        // removal, `unknown variable: NAME` for a miss, -g the global
+        // (server start) environment, -s shell syntax, -h hidden (#775).
+        let reply = match crate::environ::parse_show_environment(&args) {
+            Ok(parsed) => {
+                let (rtx, rrx) = mpsc::channel::<Result<String, String>>();
+                let _ = tx.send(CtrlReq::ShowEnvironment(parsed, rtx));
+                rrx.recv().ok()
             }
+            Err(e) => Some(Err(e)),
+        };
+        match reply {
+            Some(Ok(text)) => {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("show-environment".to_string(), text));
+                } else {
+                    let _ = write!(write_stream, "{}", text); let _ = write_stream.flush();
+                }
+            }
+            Some(Err(e)) => {
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(e));
+                } else {
+                    let _ = writeln!(write_stream, "ERROR: {}", e); let _ = write_stream.flush();
+                }
+            }
+            None => {}
         }
         if !persistent { break; }
     }
@@ -6211,24 +6234,31 @@ fn dispatch_control_command(
             true
         }
         "set-environment" | "setenv" => {
-            let unset = args.iter().any(|a| {
-                if *a == "-u" { return true; }
-                a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains('u')
-            });
-            let positional: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-            if unset && !positional.is_empty() {
-                let _ = tx.send(CtrlReq::UnsetEnvironment(positional[0].to_string()));
-            } else if positional.len() >= 2 {
-                let _ = tx.send(CtrlReq::SetEnvironment(positional[0].to_string(), positional[1].to_string()));
+            // Same parser and semantics as the CLI/TCP arm (#775).
+            match crate::environ::parse_set_environment(args) {
+                Ok(mut parsed) => {
+                    if let Some(v) = parsed.value.take() {
+                        parsed.value = Some(expand_set_option_value(tx, parsed.format, v));
+                    }
+                    let _ = tx.send(CtrlReq::SetEnvironment(parsed));
+                    let _ = resp_tx.send(String::new());
+                }
+                Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
             }
-            let _ = resp_tx.send(String::new());
             true
         }
         "show-environment" | "showenv" => {
-            let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ShowEnvironment(rtx));
-            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
-                let _ = resp_tx.send(text);
+            match crate::environ::parse_show_environment(args) {
+                Ok(parsed) => {
+                    let (rtx, rrx) = mpsc::channel::<Result<String, String>>();
+                    let _ = tx.send(CtrlReq::ShowEnvironment(parsed, rtx));
+                    match rrx.recv_timeout(Duration::from_secs(5)) {
+                        Ok(Ok(text)) => { let _ = resp_tx.send(text); }
+                        Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                        Err(_) => {}
+                    }
+                }
+                Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
             }
             true
         }

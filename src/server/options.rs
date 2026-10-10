@@ -495,6 +495,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
             // Check user_options first (@-prefixed), then environment
             app.user_options.get(name).cloned()
                 .or_else(|| app.environment.get(name).cloned())
+                .or_else(|| app.env_scopes.hidden_value(name))
                 .unwrap_or_default()
         }
     };
