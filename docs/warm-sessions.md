@@ -480,10 +480,19 @@ that later claims them. psmux carries the parts that matter across the claim:
 What does not carry over: `-e VAR=value` on `new-session`, `new-window` or `split-window` cannot
 reach a shell that already has its environment, so a spawn with `-e` skips the warm pool and starts
 cold. For the same reason the standby's first shell, the one you land in, keeps the environment it
-was born with: a running process's environment block cannot be edited from outside. Its `PATH` is
-read from the registry when the shell is spawned rather than inherited, so installed tools stay
-resolvable there; a variable you exported in your own shell reaches the panes you open next, not
-that first one. tmux behaves the same way, for the same reason.
+was born with: a running process's environment block cannot be edited from outside. The one
+exception is `PATH`: when your shell's `PATH` differs from the standby's, the claim respawns that
+first shell (it is one nobody has typed into yet) so a dev build or portable tool you put first on
+`PATH` is found there too ([#773](https://github.com/psmux/psmux/issues/773)). That respawn makes
+the claim cost about what a cold start does; a claim from a shell with the same `PATH` as the
+standby, the common case, stays instant. Any other variable you exported in your own shell reaches
+the panes you open next, not that first one. tmux behaves the same way, for the same reason.
+
+Every pane inherits the environment of the server, which is the environment of the shell you
+started psmux from, like tmux. The registry environment (`HKLM\...\Session Manager\Environment`
+and `HKCU\Environment`) only fills variables that environment does not have at all; before
+[#773](https://github.com/psmux/psmux/issues/773) it replaced them, so your shell's `PATH`, `TEMP`,
+`GOPATH` and the like were swapped for the registry values in every pane.
 
 ## One Warm Server per Registry
 
