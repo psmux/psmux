@@ -192,7 +192,7 @@ The full index with one line summaries of every page lives in **[docs/README.md]
   <tr>
     <td align="center" width="50%">
       <a href="https://github.com/psmux/pstop">
-        <img src="https://raw.githubusercontent.com/psmux/pstop/master/pstop-demo.gif" width="400" alt="pstop demo" /><br/>
+        <img src="https://psmux.github.io/media/pstop/pstop-demo.jpg" width="400" alt="pstop showing per-core CPU bars and the process list" /><br/>
         <b>pstop</b>
       </a><br/>
       <sub>htop for Windows: real-time system monitor with per-core CPU bars, tree view, 7 color schemes</sub><br/>
@@ -259,6 +259,24 @@ The full index with one line summaries of every page lives in **[docs/README.md]
       </a><br/>
       <sub>Security dashboard for Linux servers: attack radar, every listening port with its risk, a 0 to 100 security score</sub><br/>
       <code>build from source</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="https://github.com/psmux/browserglass">
+        <img src="https://raw.githubusercontent.com/psmux/psmux/master/docs/media/readme/browserglass.jpg" width="400" alt="browserglass: an agent drives one browser tab while a person watches the wall" /><br/>
+        <b>browserglass</b>
+      </a><br/>
+      <sub>Stream real Chrome browsers into any web page, drive them from code or AI agents, and hand control to a person at any moment</sub><br/>
+      <code>pnpm install &amp;&amp; pnpm -r build</code>
+    </td>
+    <td align="center" width="50%">
+      <a href="https://github.com/psmux/tmuxtop">
+        <img src="https://psmux.github.io/media/tmuxtop/tmuxtop-live.jpg" width="400" alt="tmuxtop live process view" /><br/>
+        <b>tmuxtop</b>
+      </a><br/>
+      <sub>A top for tmux: every process in every session, with session navigation, export and backup</sub><br/>
+      <code>pip install psutil</code>
     </td>
   </tr>
 </table>
