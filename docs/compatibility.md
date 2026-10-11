@@ -105,6 +105,14 @@ Multiple commands can be chained with `;` on a single line, matching tmux behavi
 bind-key M-s split-window -h \; select-pane -L
 ```
 
+From the command line, a `;` or `\;` given as its own argument separates commands the same way. The whole list goes to the server over one connection and runs in order; the first command that fails ends it, and its error is printed with exit status 1:
+
+```powershell
+psmux select-pane -t work ';' set-option -t work @ready yes
+```
+
+The list goes to the session the first command names. `bind-key`, `set-hook`, `if-shell`, `confirm-before`, `command-prompt`, `display-menu`, `run-shell`, `start-server`, `new-session` and `attach-session` still take the whole line as their own arguments.
+
 ### Run Shell Output
 
 `run-shell` now displays output in the status bar, matching tmux behavior. Background mode with `-b` runs fire and forget.
