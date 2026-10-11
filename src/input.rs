@@ -2635,6 +2635,11 @@ pub(crate) fn write_pane_input(p: &mut crate::types::Pane, bytes: &[u8]) {
 /// instead of the tiled active pane and it is that pane's ConPTY that gets
 /// latched.
 pub fn mark_win32_input_latched(app: &mut AppState) {
+    // Nothing was written to an input-off pane (`input_target_accepts_input`),
+    // so its ConPTY is exactly as latched as it was.
+    if !input_target_accepts_input(app) {
+        return;
+    }
     {
         let win = &mut app.windows[app.active_idx];
         if let Some(fi) = win.floating_focus {
@@ -2647,6 +2652,7 @@ pub fn mark_win32_input_latched(app: &mut AppState) {
     if app.sync_input {
         fn mark_all(node: &mut Node) {
             match node {
+                Node::Leaf(p) if !p.accepts_input() => {}
                 Node::Leaf(p) => p.win32_input_latched = true,
                 Node::Split { children, .. } => { for c in children { mark_all(c); } }
             }
@@ -2711,16 +2717,61 @@ pub(crate) fn is_ctrl_c_key_event(key: &KeyEvent) -> bool {
     }
 }
 
+/// The `select-pane -d` gate (tmux `PANE_INPUTOFF`) for the pane that input
+/// for the PROGRAM goes to: the focused floating pane when there is one, else
+/// the active tiled pane.  Every `*_to_active` entry point asks this once,
+/// after its mode routing (copy mode, its prompts, popups, menus) and before
+/// it writes anything to a pane.
+///
+/// It decides the WHOLE key, synchronize-panes copies included, because that
+/// is the shape of tmux's `window_pane_key` (window.c): a pane in a mode hands
+/// the key to the mode, and otherwise
+///
+/// ```c
+/// if (wp->fd == -1 || wp->flags & PANE_INPUTOFF)
+///     return (0);
+/// if (input_key_pane(wp, key, m) != 0) ...
+/// if (options_get_number(wp->options, "synchronize-panes"))
+///     window_pane_copy_key(wp, key);
+/// ```
+///
+/// so a key for an input-off pane reaches neither it nor its synchronized
+/// siblings, and `window_pane_copy_key` separately skips a sibling that is
+/// input-off itself (see the sync walks, which test `Pane::accepts_input`).
+///
+/// It is deliberately not in the pane's writer: the server's replies to the
+/// program's terminal queries (CPR, DA, OSC colours, focus reports) travel the
+/// same writer and tmux never gates those.
+pub(crate) fn input_target_accepts_input(app: &AppState) -> bool {
+    let Some(win) = app.windows.get(app.active_idx) else { return true };
+    if let Some(fp) = win.floating_focus.and_then(|fi| win.floating.get(fi)) {
+        return fp.pane.accepts_input();
+    }
+    crate::tree::active_pane(&win.root, &win.active_path).is_none_or(|p| p.accepts_input())
+}
+
+/// [`input_target_accepts_input`] for the routes that write to the TILED
+/// active pane whatever floating pane has focus (`forward_key_to_active`,
+/// `send-prefix`, the more.com wheel Enter).
+pub(crate) fn active_tiled_accepts_input(app: &AppState) -> bool {
+    let Some(win) = app.windows.get(app.active_idx) else { return true };
+    crate::tree::active_pane(&win.root, &win.active_path).is_none_or(|p| p.accepts_input())
+}
+
 /// Apply `f` to every pane that will RECEIVE the current interactive key --
 /// every non-dead pane under sync-input, else the active pane if alive -- so the
-/// route-signal timestamps match what's actually routed.
+/// route-signal timestamps match what's actually routed.  An input-off pane
+/// receives nothing (`input_target_accepts_input`), so it is not stamped.
 fn for_each_receiving_pane<F: FnMut(&mut Pane)>(app: &mut AppState, mut f: F) {
+    if !active_tiled_accepts_input(app) {
+        return;
+    }
     let sync = app.sync_input;
     let win = &mut app.windows[app.active_idx];
     if sync {
         fn walk<F: FnMut(&mut Pane)>(node: &mut Node, f: &mut F) {
             match node {
-                Node::Leaf(p) if !p.dead => f(p),
+                Node::Leaf(p) if !p.dead && p.accepts_input() => f(p),
                 Node::Leaf(_) => {}
                 Node::Split { children, .. } => { for c in children { walk(c, f); } }
             }
@@ -2791,6 +2842,14 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
         for_each_receiving_pane(app, |p| p.last_special_key = Some((now, name.clone())));
     }
 
+    // select-pane -d (tmux PANE_INPUTOFF): the key goes nowhere, not even to
+    // synchronized siblings (`input_target_accepts_input`).  This route writes
+    // to the TILED active pane, so that is the pane asked.  Checked before the
+    // native injections below, which bypass the pane writer entirely.
+    if !active_tiled_accepts_input(app) {
+        return Ok(());
+    }
+
     // On Windows, modified Enter delivery depends on the modifier:
     //
     // Shift/Alt+Enter (no Ctrl): Use VT encoding ONLY (\x1b\r).  Native
@@ -2827,7 +2886,8 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
                     let win = &mut app.windows[app.active_idx];
                     fn inject_all(node: &mut Node, ctrl: bool, alt: bool, shift: bool) {
                         match node {
-                            Node::Leaf(p) if !p.dead => {
+                            // tmux window_pane_copy_key skips an input-off sibling.
+                            Node::Leaf(p) if !p.dead && p.accepts_input() => {
                                 if let Some(pid) = p.child_pid {
                                     if !crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift) {
                                         // Fallback: xterm CSI encoding for non-console apps
@@ -2896,7 +2956,7 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
                     let win = &mut app.windows[app.active_idx];
                     fn inject_ctrl_all(node: &mut Node, ch: char, raw: u8, is_ctrl_c: bool) {
                         match node {
-                            Node::Leaf(p) if !p.dead => {
+                            Node::Leaf(p) if !p.dead && p.accepts_input() => {
                                 // Ctrl+C: consult the interrupt router BEFORE writing the
                                 // byte — when it decides "raw 0x03 only" it may strip
                                 // PROCESSED_INPUT from the pane console so conhost hands
@@ -2967,7 +3027,7 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
         let win = &mut app.windows[app.active_idx];
         fn write_all_panes(node: &mut Node, data: &[u8]) {
             match node {
-                Node::Leaf(p) if !p.dead => write_pane_input(p, data),
+                Node::Leaf(p) if !p.dead && p.accepts_input() => write_pane_input(p, data),
                 Node::Leaf(_) => {}
                 Node::Split { children, .. } => { for c in children { write_all_panes(c, data); } }
             }
@@ -3318,6 +3378,10 @@ fn send_paste_to_active_impl(app: &mut AppState, text: &str, normalize: bool) ->
     if app.mode.in_copy() {
         return send_text_to_active(app, text);
     }
+    // select-pane -d: a paste is input like any key (tmux PANE_INPUTOFF).
+    if !input_target_accepts_input(app) {
+        return Ok(());
+    }
 
     // Check if the child requested bracketed paste mode. A focused floating
     // pane is the one being pasted into, so it is the one to ask.
@@ -3385,6 +3449,7 @@ fn send_paste_to_active_impl(app: &mut AppState, text: &str, normalize: bool) ->
             let win = &mut app.windows[app.active_idx];
             fn write_all_panes(node: &mut crate::types::Node, text: &str, bracket: bool, normalize: bool) {
                 match node {
+                    crate::types::Node::Leaf(p) if !p.accepts_input() => {}
                     crate::types::Node::Leaf(p) => {
                         deliver_paste_to_pane(p, text, bracket, normalize);
                     }
@@ -3409,6 +3474,7 @@ fn send_paste_to_active_impl(app: &mut AppState, text: &str, normalize: bool) ->
             let win = &mut app.windows[app.active_idx];
             fn write_paste_all_panes(node: &mut Node, text: &[u8], bracket: bool, normalize: bool) {
                 match node {
+                    Node::Leaf(p) if !p.accepts_input() => {}
                     Node::Leaf(p) => {
                         write_paste_bytes(&mut p.writer, text, bracket, normalize);
                     }
@@ -3440,6 +3506,10 @@ pub fn send_bytes_to_active(app: &mut AppState, bytes: &[u8]) -> io::Result<()> 
     if let Ok(text) = std::str::from_utf8(bytes) {
         return send_text_to_active(app, text);
     }
+    // select-pane -d: `send-keys -H` is input too (tmux PANE_INPUTOFF).
+    if !input_target_accepts_input(app) {
+        return Ok(());
+    }
     {
         let win = &mut app.windows[app.active_idx];
         if let Some(fi) = win.floating_focus {
@@ -3454,6 +3524,7 @@ pub fn send_bytes_to_active(app: &mut AppState, bytes: &[u8]) -> io::Result<()> 
         let win = &mut app.windows[app.active_idx];
         fn write_all_panes(node: &mut Node, data: &[u8]) {
             match node {
+                Node::Leaf(p) if !p.accepts_input() => {}
                 Node::Leaf(p) => { let _ = p.writer.write_all(data); let _ = p.writer.flush(); }
                 Node::Split { children, .. } => { for c in children { write_all_panes(c, data); } }
             }
@@ -3609,6 +3680,13 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         return Ok(());
     }
 
+    // select-pane -d (tmux PANE_INPUTOFF): every mode above has had its turn,
+    // so what is left is input for the program, and an input-off pane takes
+    // none of it, nor do its synchronized siblings (`input_target_accepts_input`).
+    if !input_target_accepts_input(app) {
+        return Ok(());
+    }
+
     // A focused floating pane (tmux new-pane) receives input instead of the
     // tiled active pane, while the layout keeps rendering underneath.
     {
@@ -3622,10 +3700,12 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     }
 
     if app.sync_input {
-        // Fan out to ALL panes in the current window
+        // Fan out to ALL panes in the current window, except an input-off one
+        // (tmux window_pane_copy_key).
         let win = &mut app.windows[app.active_idx];
         fn write_all_panes(node: &mut Node, text: &[u8]) {
             match node {
+                Node::Leaf(p) if !p.accepts_input() => {}
                 Node::Leaf(p) => write_pane_input(p, text),
                 Node::Split { children, .. } => { for c in children { write_all_panes(c, text); } }
             }
@@ -4354,6 +4434,14 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
         let _ = p.writer.flush();
     }
 
+    // select-pane -d (tmux PANE_INPUTOFF): past the mode routing, so this key
+    // is for the program.  Checked before `write_named_key_to_pane`, whose
+    // Ctrl+C / Ctrl+Break signals and WriteConsoleInputW injections bypass
+    // the pane writer.
+    if !input_target_accepts_input(app) {
+        return Ok(());
+    }
+
     // A focused floating pane (tmux new-pane) receives the key instead of the
     // tiled active pane.
     {
@@ -4371,6 +4459,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
         let win = &mut app.windows[app.active_idx];
         fn send_key_all_panes(node: &mut crate::types::Node, k: &str) {
             match node {
+                crate::types::Node::Leaf(p) if !p.accepts_input() => {}
                 crate::types::Node::Leaf(p) => write_named_key_to_pane(p, k),
                 crate::types::Node::Split { children, .. } => {
                     for c in children { send_key_all_panes(c, k); }
