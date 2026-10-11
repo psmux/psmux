@@ -200,6 +200,76 @@ fn the_flags_parse_like_cmd_select_pane() {
 }
 
 #[test]
+fn a_title_style_or_target_value_is_never_a_flag() {
+    // tmux's getopt `DdegLlMmP:RT:t:UZ`: -T, -P and -t take a value, so the
+    // value "-d" / "-e" is a title, a style or a target, not the flag.
+    assert_eq!(select_pane_input_toggle(&["-T", "-d"], None), None);
+    assert_eq!(select_pane_input_toggle(&["-P", "-e"], None), None);
+    assert_eq!(select_pane_input_toggle(&["-t", "-d"], None), None);
+    assert_eq!(select_pane_input_toggle(&["-T-d"], None), None, "a value glued to its flag");
+    // The real flag still counts alongside a value that looks like the other.
+    assert_eq!(select_pane_input_toggle(&["-d", "-T", "-e"], None), Some((true, false)));
+    assert_eq!(select_pane_input_toggle(&["-T", "-e", "-d"], None), Some((true, false)));
+    // Clustered flags, as getopt reads them.
+    assert_eq!(select_pane_input_toggle(&["-dt", "%1"], Some("%1")), Some((true, false)));
+    assert_eq!(select_pane_input_toggle(&["-ld"], None), Some((true, true)));
+}
+
+#[test]
+fn the_in_server_route_does_not_read_a_title_as_a_flag() {
+    let mut f = fixture();
+    crate::commands::execute_command_string(&mut f.app, "select-pane -T -d").unwrap();
+    assert!((1..=5).all(|id| !f.input_off(id)), "-T -d sets a title, not input off");
+    f.set(1, true);
+    crate::commands::execute_command_string(&mut f.app, "select-pane -d -T -e").unwrap();
+    assert!(f.input_off(1), "-d -T -e disables; -e is the title");
+}
+
+/// Adds floating pane %6 to window 0 and returns what it is sent.
+fn add_floating(f: &mut Fixture, focus: bool) -> Captured {
+    let out = Captured::default();
+    let pane = make_pane(6, out.clone());
+    let win = &mut f.app.windows[0];
+    win.floating.push(crate::types::FloatingPane {
+        pane,
+        x: 2, y: 2, w: 20, h: 6,
+        border: "single".to_string(),
+        id: 6,
+        title: String::new(),
+        position: None,
+    });
+    if focus {
+        win.floating_focus = Some(win.floating.len() - 1);
+    }
+    out
+}
+
+#[test]
+fn a_floating_pane_id_target_toggles_that_floating_pane() {
+    let mut f = fixture();
+    let float_out = add_floating(&mut f, false);
+    let before = f.focus();
+
+    set_pane_input_off(&mut f.app, Some(&pane_id(6)), true, false).unwrap();
+    assert!(f.app.windows[0].floating[0].pane.input_off);
+    assert!((1..=5).all(|id| !f.input_off(id)), "only the floating pane");
+    assert_eq!(f.focus(), before);
+    assert_eq!(f.app.windows[0].floating_focus, None, "-d must not focus the float");
+
+    // From a key binding or the prompt too.
+    crate::commands::execute_command_string(&mut f.app, "select-pane -e -t %6").unwrap();
+    assert!(!f.app.windows[0].floating[0].pane.input_off);
+    crate::commands::execute_command_string(&mut f.app, "select-pane -d -t %6").unwrap();
+    assert!(f.app.windows[0].floating[0].pane.input_off);
+
+    // Focused, it is the input target, and it takes nothing.
+    f.app.windows[0].floating_focus = Some(0);
+    send_text_to_active(&mut f.app, "echo typed\r").unwrap();
+    assert_eq!(float_out.text(), "");
+    assert_eq!(f.sent(1), "", "the tiled pane under the float gets nothing either");
+}
+
+#[test]
 fn disable_and_enable_flip_the_target_pane_and_select_nothing() {
     let mut f = fixture();
     let before = f.focus();

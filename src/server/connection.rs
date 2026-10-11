@@ -667,23 +667,74 @@ pub(crate) fn select_pane_has_own_operation(args: &[&str], raw_target: Option<&s
 /// direction there without selecting it; psmux keeps its long standing
 /// behaviour (it moves) rather than guess, since none of its directional code
 /// can name the neighbour without moving to it.
+///
+/// The flags are read the way tmux's getopt reads `DdegLlMmP:RT:t:UZ`, so a
+/// `-T` title, `-P` style or `-t` target VALUE is never taken for a flag:
+/// `select-pane -T -d` sets the title "-d" and leaves input alone.
 pub(crate) fn select_pane_input_toggle(args: &[&str], raw_target: Option<&str>) -> Option<(bool, bool)> {
-    let has = |f: &str| args.iter().any(|a| *a == f);
-    let enable = has("-e");
-    let disable = has("-d");
+    let flags = select_pane_flags(args);
+    let has = |f: char| flags.contains(&f);
+    let enable = has('e');
+    let disable = has('d');
     if !enable && !disable {
         return None;
     }
-    let last = has("-l");
+    let last = has('l');
     if !last {
         let relative = raw_target.is_some_and(|t| {
             t.contains(".+") || t.contains(".-") || t == "+" || t == "-"
         });
-        if relative || ["-U", "-D", "-L", "-R", "-m", "-M"].iter().any(|f| has(f)) {
+        if relative || ['U', 'D', 'L', 'R', 'm', 'M'].iter().any(|f| has(*f)) {
             return None;
         }
     }
     Some((!enable, last))
+}
+
+/// The target a `CtrlReq::SetPaneInputOff` carries: the validated one, plus a
+/// `%N` pane id the route deliberately left unvalidated because it may name a
+/// floating pane, which `ValidateTarget` cannot see (`set_pane_input_off`
+/// resolves it, and reports tmux's `can't find pane` for a bad one).
+fn input_toggle_target(
+    validated: Option<&crate::types::TempTarget>,
+    pane: Option<usize>,
+    pane_is_id: bool,
+) -> Option<crate::types::TempTarget> {
+    let mut target = validated.cloned();
+    if let (Some(p), true) = (pane, pane_is_id) {
+        let t = target.get_or_insert_with(Default::default);
+        t.pane = Some(p);
+        t.pane_is_id = true;
+    }
+    target
+}
+
+/// The boolean flags of a `select-pane` argument list, parsed like tmux's
+/// getopt string `DdegLlMmP:RT:t:UZ` (cmd-select-pane.c): flags may be
+/// clustered (`-dt %1`), `-P`, `-T` and `-t` consume the rest of their word
+/// or the next argument as a value, and `--` or the first non-option ends
+/// the options.
+fn select_pane_flags(args: &[&str]) -> Vec<char> {
+    let mut flags = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if a == "--" || !a.starts_with('-') || a.len() < 2 {
+            break;
+        }
+        for (pos, c) in a.char_indices().skip(1) {
+            if matches!(c, 'P' | 'T' | 't') {
+                // The value is the rest of this word, or else the next one.
+                if pos + c.len_utf8() == a.len() {
+                    i += 1;
+                }
+                break;
+            }
+            flags.push(c);
+        }
+        i += 1;
+    }
+    flags
 }
 
 /// The single request a `select-pane`'s `-t` emits (issue #691).
@@ -1535,7 +1586,10 @@ if control_echo || control_noecho {
         // active pane (temp-focusing the target would make active == target
         // and turn the swap into a no-op).
         let ctrl_capture_by_id = matches!(cmd_name, "capture-pane" | "capturep") && ctrl_pane_is_id && ctrl_target_pane.is_some();
-        let skip_pane_focus = matches!(cmd_name, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || ctrl_capture_by_id;
+        // select-pane -d/-e -t %N may name a floating pane, which ValidateTarget
+        // cannot see; set_pane_input_off resolves the id itself.
+        let ctrl_input_toggle_by_id = ctrl_sp_input_toggle && ctrl_pane_is_id && ctrl_target_pane.is_some();
+        let skip_pane_focus = matches!(cmd_name, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || ctrl_capture_by_id || ctrl_input_toggle_by_id;
         // Issue #635: a dangling value-taking flag is reported through the
         // same %error path as an unresolvable -t, and skips dispatch (and the
         // temp focus below) entirely, so control clients see tmux's message
@@ -1988,7 +2042,10 @@ let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_i
 let capture_pane_by_id = matches!(cmd, "capture-pane" | "capturep") && pane_is_id && target_pane.is_some();
 // swap-pane swaps the target with the *current* active pane; focusing the
 // target first would make active == target and turn the swap into a no-op.
-let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || capture_pane_by_id;
+// select-pane -d/-e -t %N may name a floating pane, which ValidateTarget
+// cannot see; set_pane_input_off resolves the id itself.
+let input_toggle_by_id = sp_input_toggle && pane_is_id && target_pane.is_some();
+let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || capture_pane_by_id || input_toggle_by_id;
 // Issue #690: `select-window` decides its own window target, in
 // `select_window_requests`, and this block does not touch it.  Both used
 // to act on it, a permanent FocusWindow here and a SelectWindow from the
@@ -2646,7 +2703,7 @@ match cmd {
         let (off, last) = select_pane_input_toggle(&args, raw_target.as_deref()).unwrap_or((true, false));
         let (resp_s, resp_r) = mpsc::channel();
         tx.send_unwrapped(CtrlReq::SetPaneInputOff {
-            target: tx.target().cloned(),
+            target: input_toggle_target(tx.target(), target_pane, pane_is_id),
             off,
             last,
             resp: Some(resp_s),
@@ -5680,7 +5737,7 @@ fn dispatch_control_command(
             let (off, last) = select_pane_input_toggle(args, raw_target).unwrap_or((true, false));
             let (resp_s, resp_r) = mpsc::channel();
             tx.send_unwrapped(CtrlReq::SetPaneInputOff {
-                target: tx.target().cloned(),
+                target: input_toggle_target(tx.target(), target_pane, pane_is_id),
                 off,
                 last,
                 resp: Some(resp_s),
