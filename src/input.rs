@@ -2731,7 +2731,7 @@ pub(crate) fn is_ctrl_c_key_event(key: &KeyEvent) -> bool {
 /// if (wp->fd == -1 || wp->flags & PANE_INPUTOFF)
 ///     return (0);
 /// if (input_key_pane(wp, key, m) != 0) ...
-/// if (options_get_number(wp->window->options, "synchronize-panes"))
+/// if (options_get_number(wp->options, "synchronize-panes"))
 ///     window_pane_copy_key(wp, key);
 /// ```
 ///
