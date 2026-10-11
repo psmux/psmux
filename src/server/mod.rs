@@ -1311,6 +1311,84 @@ pub(crate) fn last_pane_path(app: &AppState) -> Option<Vec<usize>> {
     None
 }
 
+/// `select-pane -d` (`off` true) / `select-pane -e` (`off` false): set or clear
+/// [`crate::types::Pane::input_off`], tmux's `PANE_INPUTOFF`.
+///
+/// The pane is the one `target` names, resolved the way every other `-t` is
+/// (`temp_target::resolve_temp_target`), or the active pane without one; a
+/// target naming only a window means that window's active pane, its focused
+/// floating pane when it has one (tmux makes that `w->active`).  With `last`
+/// it is that window's last pane instead, tmux's `select-pane -l -d/-e`, and
+/// `no last pane` when there is none (cmd-select-pane.c:165-177).
+///
+/// Nothing else changes: not the active window or pane, not zoom, not
+/// `last_pane_path`, not the MRU.  That is why this resolves the pane itself
+/// rather than running under a temporary focus: the temporary focus moves the
+/// TARGET window's active pane, and only the real active window's is restored.
+///
+/// A `%N` naming a floating pane is found here first: `list-panes` shows a
+/// floating pane's id like any other, but `resolve_temp_target` searches only
+/// the tiled tree, so it would refuse the pane.  The client routes skip their
+/// own validation of a `%N` for this command for the same reason.
+pub(crate) fn set_pane_input_off(
+    app: &mut AppState,
+    target: Option<&crate::types::TempTarget>,
+    off: bool,
+    last: bool,
+) -> Result<(), String> {
+    // A pane id is unique across the session, so any window part is moot.
+    if let Some(pid) = target.filter(|t| t.pane_is_id && !last).and_then(|t| t.pane) {
+        if let Some(fp) = app.windows.iter_mut()
+            .flat_map(|w| w.floating.iter_mut())
+            .find(|fp| fp.id == pid)
+        {
+            fp.pane.input_off = off;
+            return Ok(());
+        }
+    }
+    let resolved = match target {
+        Some(t) => temp_target::resolve_temp_target(app, t)?,
+        None => crate::types::TempTarget::default(),
+    };
+    let win_idx = match (resolved.win, resolved.pane) {
+        (Some(wid), _) => app.windows.iter().position(|w| w.id == wid),
+        (None, Some(pid)) => tree::find_pane_by_id_global(app, pid).map(|(wi, _)| wi),
+        (None, None) => Some(app.active_idx),
+    }
+    .filter(|&i| i < app.windows.len())
+    .ok_or_else(|| "can't find window".to_string())?;
+
+    let pane = if last {
+        // `last_pane_path` answers for the active window, which is the only
+        // one psmux remembers a last pane for; any other window has just
+        // tmux's two-pane fallback.
+        let path = if win_idx == app.active_idx {
+            last_pane_path(app)
+        } else {
+            let win = &app.windows[win_idx];
+            let paths = crate::tree::pane_paths(&win.root);
+            if paths.len() == 2 { paths.into_iter().find(|p| *p != win.active_path) } else { None }
+        }
+        .ok_or_else(|| "no last pane".to_string())?;
+        active_pane_mut(&mut app.windows[win_idx].root, &path)
+    } else if let Some(pid) = resolved.pane {
+        tree::find_pane_mut_by_id_global(app, pid)
+    } else {
+        let win = &mut app.windows[win_idx];
+        match win.floating_focus.filter(|fi| *fi < win.floating.len()) {
+            Some(fi) => Some(&mut win.floating[fi].pane),
+            None => active_pane_mut(&mut win.root, &win.active_path),
+        }
+    };
+    match pane {
+        Some(p) => {
+            p.input_off = off;
+            Ok(())
+        }
+        None => Err("can't find pane".to_string()),
+    }
+}
+
 /// Record the pane focus notifications a change of active pane owes.
 ///
 /// tmux moves the active pane through `window_set_active_pane`, which calls
@@ -4381,7 +4459,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                 // booting WSL launch (#579).
                                                 if ctrl == 0x03 {
                                                     if let Some(win) = app.windows.get_mut(app.active_idx) {
-                                                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                                                        // The console signal bypasses the pane
+                                                        // writer, so it needs the input-off gate
+                                                        // send_text_to_active applies to the byte.
+                                                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
                                                             if p.child_pid.is_none() {
                                                                 p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
                                                             }
@@ -4465,6 +4546,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SendKeysXRun { cmd, count, resp } => {
                     let outcome = run_send_keys_x(&mut app, &cmd, count);
                     if let Some(resp) = resp { let _ = resp.send(outcome); }
+                }
+                CtrlReq::SetPaneInputOff { target, off, last, resp } => {
+                    // select-pane -d / -e.  No hook: tmux returns from
+                    // cmd-select-pane.c right after flipping the flag, before
+                    // the activation that fires `after-select-pane`.
+                    let outcome = set_pane_input_off(&mut app, target.as_ref(), off, last);
+                    match resp {
+                        Some(r) => { let _ = r.send(outcome); }
+                        None => {
+                            if let Err(e) = outcome {
+                                app.status_message = Some((e, Instant::now(), None));
+                            }
+                        }
+                    }
+                    // `#{pane_input_off}` may be on the status line.
+                    meta_dirty = true;
+                    state_dirty = true;
                 }
                 CtrlReq::SelectPane(dir, keep_zoom) => {
                     if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
@@ -4614,9 +4712,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     // tmux fires `after-select-pane` from the activation at
                     // cmd-select-pane.c:276, which line :269 skips when the
-                    // pane did not move; `-m`, `-M`, `-e` and `-d` return
-                    // earlier still (cmd-select-pane.c:100, :180) and never
-                    // reach it.
+                    // pane did not move; `-m` and `-M` return earlier still
+                    // (cmd-select-pane.c:100) and never reach it, and neither
+                    // do `-e` and `-d` (:180), which are not this request at
+                    // all but `CtrlReq::SetPaneInputOff`.
                     if active_pane_identity(&app) != _pane_before {
                         note_pane_focus_change(&app, &mut notify_events);
                         hook_event = Some("after-select-pane");
@@ -5353,7 +5452,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if idx < app.paste_buffers.len() {
                         let text = app.paste_buffers[idx].clone();
                         let win = &mut app.windows[app.active_idx];
-                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                        // Not into an input-off pane (cmd-paste-buffer.c
+                        // checks PANE_INPUTOFF before it writes).
+                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
                             let _ = write!(p.writer, "{}", text);
                         }
                     }
@@ -7559,7 +7660,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     if !encoded.is_empty() {
                         let win = &mut app.windows[app.active_idx];
-                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                        // send-prefix is a key (tmux window_pane_key), so an
+                        // input-off pane does not get it.
+                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
                             let _ = p.writer.write_all(&encoded);
                             let _ = p.writer.flush();
                         }
@@ -8765,3 +8868,7 @@ mod test_issue706_config_warnings_reply;
 #[cfg(test)]
 #[path = "../../tests-rs/test_copy_mode_parity_send_keys_x.rs"]
 mod tests_copy_mode_parity_send_keys_x;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_select_pane_input_off.rs"]
+mod tests_select_pane_input_off;

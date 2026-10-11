@@ -208,6 +208,10 @@ The `#{window_zoomed_flag}` format variable is correctly maintained during zoom/
 
 `select-pane -T` and `select-pane -P` set the pane title or style without moving the active window or pane, matching tmux (#592). Only a direction flag or `-l` changes focus.
 
+### Pane Input Off (`select-pane -d` / `-e`)
+
+`select-pane -d` stops input from reaching a pane's program and `select-pane -e` lets it through again, tmux's `PANE_INPUTOFF`; `#{pane_input_off}` reports which. Neither selects the pane. While input is off, typed keys, `send-keys` in every form, `paste-buffer` and forwarded mouse events are dropped and `synchronize-panes` leaves the pane out, while copy mode, `send-keys -X` and psmux's answers to the program's terminal queries keep working. The flag survives `respawn-pane`. See [tmux_args_reference.md](tmux_args_reference.md) for the details. Earlier releases accepted both flags and ignored them.
+
 ### Bare Command Routing
 
 A command with no `-t` reaches the session with the most recent activity, the same choice tmux's `cmd_find_best_session` makes, rather than whichever session was attached last according to a stale file (#603). A bare `attach` with nothing to attach to prints `no sessions` (#605).
