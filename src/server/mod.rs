@@ -1321,12 +1321,27 @@ pub(crate) fn last_pane_path(app: &AppState) -> Option<Vec<usize>> {
 /// `last_pane_path`, not the MRU.  That is why this resolves the pane itself
 /// rather than running under a temporary focus: the temporary focus moves the
 /// TARGET window's active pane, and only the real active window's is restored.
+///
+/// A `%N` naming a floating pane is found here first: `list-panes` shows a
+/// floating pane's id like any other, but `resolve_temp_target` searches only
+/// the tiled tree, so it would refuse the pane.  The client routes skip their
+/// own validation of a `%N` for this command for the same reason.
 pub(crate) fn set_pane_input_off(
     app: &mut AppState,
     target: Option<&crate::types::TempTarget>,
     off: bool,
     last: bool,
 ) -> Result<(), String> {
+    // A pane id is unique across the session, so any window part is moot.
+    if let Some(pid) = target.filter(|t| t.pane_is_id && !last).and_then(|t| t.pane) {
+        if let Some(fp) = app.windows.iter_mut()
+            .flat_map(|w| w.floating.iter_mut())
+            .find(|fp| fp.id == pid)
+        {
+            fp.pane.input_off = off;
+            return Ok(());
+        }
+    }
     let resolved = match target {
         Some(t) => temp_target::resolve_temp_target(app, t)?,
         None => crate::types::TempTarget::default(),
