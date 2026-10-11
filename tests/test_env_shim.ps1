@@ -2,6 +2,8 @@
 # Tests for:
 #   1. set-environment -g propagation to panes (config + runtime)
 #   2. show-environment correctness
+#      Globals (set-environment -g) are read back with show-environment -g, as in
+#      tmux, where a plain listing shows only the session environment (#775).
 #   3. env shim function (POSIX `env VAR=val cmd` syntax in PowerShell)
 #   4. env-shim on/off config option
 #   5. Claude Code-compatible env invocation patterns
@@ -86,7 +88,7 @@ try {
     $proc = Start-TestSession
     & $PSMUX set-environment -t $SESSION -g CLAUDE_TEST_VAR "hello_world" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
-    $env_output = & $PSMUX show-environment -t $SESSION 2>&1 | Out-String
+    $env_output = & $PSMUX show-environment -g -t $SESSION 2>&1 | Out-String
     if ($env_output -match "CLAUDE_TEST_VAR=hello_world") {
         Write-Pass "Runtime set-environment stored and visible in show-environment"
     } else {
@@ -106,7 +108,7 @@ try {
     & $PSMUX set-environment -t $SESSION -g CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS "1" 2>&1 | Out-Null
     & $PSMUX set-environment -t $SESSION -g ANTHROPIC_BASE_URL "https://api.minimax.io/anthropic" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
-    $env_output = & $PSMUX show-environment -t $SESSION 2>&1 | Out-String
+    $env_output = & $PSMUX show-environment -g -t $SESSION 2>&1 | Out-String
     $found = 0
     if ($env_output -match "CLAUDECODE=1") { $found++ }
     if ($env_output -match "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1") { $found++ }
@@ -130,7 +132,7 @@ set-environment -g PSMUX_CFG_TEST_VAR config_value_123
 set-environment -g PSMUX_CFG_TEST_VAR2 quoted_value
 "@
     $proc = Start-TestSession -ConfigContent $config
-    $env_output = & $PSMUX show-environment -t $SESSION 2>&1 | Out-String
+    $env_output = & $PSMUX show-environment -g -t $SESSION 2>&1 | Out-String
     $found = 0
     if ($env_output -match "PSMUX_CFG_TEST_VAR=config_value_123") { $found++ }
     if ($env_output -match "PSMUX_CFG_TEST_VAR2=quoted_value") { $found++ }
@@ -557,7 +559,7 @@ try {
     $proc = Start-TestSession
     & $PSMUX setenv -t $SESSION -g SHORTHAND_TEST "aliased_ok" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
-    $env_output = & $PSMUX show-environment -t $SESSION 2>&1 | Out-String
+    $env_output = & $PSMUX show-environment -g -t $SESSION 2>&1 | Out-String
     if ($env_output -match "SHORTHAND_TEST=aliased_ok") {
         Write-Pass "setenv shorthand works"
     } else {
@@ -575,7 +577,7 @@ try {
     $proc = Start-TestSession
     & $PSMUX set-environment -t $SESSION -g SHOW_ALIAS_TEST "visible" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
-    $env_output = & $PSMUX showenv -t $SESSION 2>&1 | Out-String
+    $env_output = & $PSMUX showenv -g -t $SESSION 2>&1 | Out-String
     if ($env_output -match "SHOW_ALIAS_TEST=visible") {
         Write-Pass "showenv shorthand works"
     } else {

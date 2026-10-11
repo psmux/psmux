@@ -264,11 +264,13 @@ Write-Host "`n=== 7. SET-ENVIRONMENT COMBINED FLAGS ===" -ForegroundColor Cyan
 
 # -gu (combined unset) via TCP
 Write-Test "TCP setenv + unsetenv -gu"
-Send-Tcp "set-environment CFTEST_VAR myval" | Out-Null
-$env1 = Send-Tcp "show-environment"
+# -gu removes the GLOBAL value (tmux cmd-set-environment.c), so the variable
+# is set and read back in the global environment (#775).
+Send-Tcp "set-environment -g CFTEST_VAR myval" | Out-Null
+$env1 = Send-Tcp "show-environment -g"
 Test-Result "tcp-env-set" ($env1.ok -and $env1.resp -match 'CFTEST_VAR=myval') "env='$($env1.resp)'"
 Send-Tcp "set-environment -gu CFTEST_VAR" | Out-Null
-$env2 = Send-Tcp "show-environment"
+$env2 = Send-Tcp "show-environment -g"
 Test-Result "tcp-env-gu-unset" ($env2.ok -and $env2.resp -notmatch 'CFTEST_VAR') "env='$($env2.resp)'"
 
 # Separated -u via TCP

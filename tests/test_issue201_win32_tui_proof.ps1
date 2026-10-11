@@ -162,9 +162,11 @@ Start-Sleep -Milliseconds 600
 [Win32Proof]::SendCtrlU()
 Start-Sleep -Milliseconds 200
 
-# Type a new session name
-$newSessName = "provenSession201"
-[Win32Proof]::SendString($newSessName.ToLower())
+# Type a new session name. Typed and checked in the same spelling: session
+# targets are case exact, as in tmux (#774), so the check must ask for the
+# name exactly as it was typed.
+$newSessName = "provensession201"
+[Win32Proof]::SendString($newSessName)
 Start-Sleep -Milliseconds 300
 [Win32Proof]::SendEnter()
 Start-Sleep -Seconds 1
