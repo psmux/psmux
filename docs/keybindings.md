@@ -201,13 +201,18 @@ so muscle memory carries over.
 | `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty) |
 | `f` | Enter session-name filter mode (choose-session only) |
 | `p` | Toggle live preview |
-| `x` | Kill the highlighted entry (session in choose-session, window in choose-tree) |
-| `Esc` | Clear an active session filter; otherwise close the chooser |
+| `x` | Kill the highlighted entry (session in choose-session, window in choose-tree), with confirmation |
+| `Esc` | Answer a pending kill question with no; otherwise clear an active session filter; otherwise close the chooser |
 
 In the session picker, `f` starts filter mode, which matches session names
 case-insensitively as you type. `Backspace` edits the filter. `Esc` with filter
 text entered clears the filter and shows every session again; `Esc` with no
 filter text closes the picker.
+
+`x` puts up a `y/n` question before it kills, as `Prefix + x` and
+`Prefix + &` do, and as tmux's chooser does. Only `y` kills; every other key
+cancels, including `Enter`, which inside a chooser is the key that activates a
+row. The chooser stays open behind the question either way.
 
 `q` does **not** close these two choosers. Every printable key other than the ones above is
 swallowed so it cannot leak into the focused pane, and `q` falls into that group. Use `Esc`.
