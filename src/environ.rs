@@ -42,6 +42,13 @@ pub struct EnvScopes {
     /// Session entries the new-session `update-environment` seed wrote, with
     /// the creating client's (start environment) values.
     pub seeded: BTreeSet<String>,
+    /// Names given a global value, unset or hidden by `set-environment -g`
+    /// since the server started. A global value lives in the process
+    /// environment rather than in `environment`, so the post-config warm pane
+    /// check (`warm_pane_sync::for_post_config`) reads this to know that a
+    /// config `set-environment -g` changed what a child inherits: the early
+    /// pane was spawned before the config ran and has to be respawned.
+    pub global_set: BTreeSet<String>,
     /// Environment of the client whose attach is being processed (sent as
     /// `client-environ`, consumed by the attach that follows it).
     pub pending_client_environ: Option<Vec<(String, String)>>,
@@ -253,6 +260,9 @@ pub fn apply_set(
     let name = a.name.as_str();
     let value = a.value.clone();
     if a.global {
+        if !a.remove {
+            scopes.global_set.insert(name.to_string());
+        }
         set_remove(&mut scopes.global_removed, name);
         map_remove(&mut scopes.global_hidden, name);
         // The value the global environment ends up with for the process.

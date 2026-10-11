@@ -260,6 +260,21 @@ fn post_config_env_vars_respawn() {
     assert!(matches!(for_post_config(&app), WarmPaneSync::Respawn(_)));
 }
 
+/// A config `set-environment -g` keeps its value in the process environment,
+/// not in `app.environment` (#775), so the early pane, spawned before the
+/// config ran, must still be respawned to inherit it (test_env_shim 1.5).
+#[test]
+fn post_config_global_env_set_respawns() {
+    let mut app = fresh_app();
+    let args = crate::environ::parse_set_environment(&["-g", "PSMUX_T775_GLOBAL_SET", "v"]).unwrap();
+    let _lock = crate::util::lock_test_env();
+    crate::environ::apply_set(&mut app.environment, &mut app.env_scopes, &args);
+    let verdict = for_post_config(&app);
+    std::env::remove_var("PSMUX_T775_GLOBAL_SET");
+    assert!(app.environment.is_empty(), "a global value is not a session entry");
+    assert!(matches!(verdict, WarmPaneSync::Respawn(_)), "the early pane lacks the config's global value");
+}
+
 #[test]
 fn post_config_predictions_respawn() {
     let mut app = fresh_app();

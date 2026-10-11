@@ -206,7 +206,11 @@ pub fn for_post_config(app: &AppState) -> WarmPaneSync {
             && !seeded.contains(k)
     }) || app.env_scopes.session_removed.iter().chain(app.env_scopes.session_hidden.keys())
         .any(|k| !seeded.contains(k))
-        || !app.env_scopes.global_removed.is_empty();
+        || !app.env_scopes.global_removed.is_empty()
+        // A config `set-environment -g` (#775 keeps global values in the
+        // process environment, not in `app.environment`): the early pane was
+        // born before the config ran, so it lacks the value.
+        || !app.env_scopes.global_set.is_empty();
     if needs_env {
         return WarmPaneSync::Respawn("post-config: env vars set");
     }
