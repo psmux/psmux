@@ -1123,6 +1123,25 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
             let _ = crate::commands::execute_command_string(app, l);
             return;
         }
+        // And for `select-pane -d/-e` / `last-pane -d/-e` (tmux PANE_INPUTOFF):
+        // a sourced file that fences a pane off must fence it, not drop the
+        // line in silence.  Same startup exclusion: there is no pane yet.
+        if !app.windows.is_empty() && !in_startup_load() {
+            let tokens = crate::commands::parse_command_line(l);
+            let args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
+            let toggle = match cmd {
+                "select-pane" | "selectp" => crate::server::connection::select_pane_input_toggle(
+                    &args,
+                    crate::server::connection::select_pane_target_arg(&args),
+                ).is_some(),
+                "last-pane" | "lastp" => crate::server::connection::last_pane_input_toggle(&args).is_some(),
+                _ => false,
+            };
+            if toggle {
+                let _ = crate::commands::execute_command_string(app, l);
+                return;
+            }
+        }
         if !cmd.is_empty() && !is_known_command(app, cmd) {
             warn_config(app, format!("unknown command: {}", cmd));
         }

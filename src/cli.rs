@@ -333,6 +333,43 @@ pub fn flag_takes_value(command: &str, flag: char) -> bool {
     kind != FlagValue::None
 }
 
+/// Split clustered short flags into one token per flag, as tmux's getopt
+/// reads them: `-dt %1` becomes `-d -t %1`, and `-t%1` becomes `-t %1`.
+///
+/// For the client arms that rebuild a command line from exact tokens
+/// (`select-pane`, `last-pane`), which otherwise drop a cluster without a word
+/// (`select-pane -dt %2` reached the server as a bare `select-pane`).  A
+/// value-taking flag ends its cluster and takes the rest of the word or the
+/// next argument; `--` and the first non-option end the flags, and what follows
+/// is passed through untouched.  Only for commands whose templates have no
+/// OPTIONAL (`::`) values, which both callers satisfy.
+pub fn expand_flag_clusters<S: AsRef<str>>(command: &str, args: &[S]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_ref();
+        if a == "--" || !a.starts_with('-') || a.len() < 2 {
+            out.extend(args[i..].iter().map(|s| s.as_ref().to_string()));
+            break;
+        }
+        for (pos, c) in a.char_indices().skip(1) {
+            out.push(format!("-{}", c));
+            if flag_takes_value(command, c) {
+                let rest = &a[pos + c.len_utf8()..];
+                if !rest.is_empty() {
+                    out.push(rest.to_string());
+                } else if let Some(v) = args.get(i + 1) {
+                    out.push(v.as_ref().to_string());
+                    i += 1;
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Normalize `-x=VALUE` short-flag forms into `["-x", "VALUE"]`.
 ///
 /// tmux accepts both `-t VALUE` (space) and `-t=VALUE` (equals) for

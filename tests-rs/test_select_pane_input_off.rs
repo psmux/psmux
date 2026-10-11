@@ -490,3 +490,73 @@ impl PaneIds for crate::types::Window {
             .collect()
     }
 }
+
+// Follow ups found by live testing the PR.
+
+#[test]
+fn a_clustered_target_names_its_pane_on_the_in_server_route() {
+    // `-dt %3` used to find no `-t` token, so the toggle hit the ACTIVE pane.
+    let mut f = fixture();
+    crate::commands::execute_command_string(&mut f.app, "select-pane -dt %3").unwrap();
+    assert!(f.input_off(3));
+    assert!(!f.input_off(1), "the active pane is not the target");
+    crate::commands::execute_command_string(&mut f.app, "select-pane -et%3").unwrap();
+    assert!(!f.input_off(3));
+    assert_eq!(f.focus(), (0, 1, vec![0]));
+}
+
+#[test]
+fn the_getopt_walk_reads_the_target_value() {
+    use crate::server::connection::select_pane_target_arg;
+    assert_eq!(select_pane_target_arg(&["-dt", "%3"]), Some("%3"));
+    assert_eq!(select_pane_target_arg(&["-t%3", "-d"]), Some("%3"));
+    assert_eq!(select_pane_target_arg(&["-T", "-t", "-d"]), None, "-t is the title there");
+    assert_eq!(select_pane_target_arg(&["-d"]), None);
+}
+
+#[test]
+fn clusters_split_one_token_per_flag_for_the_client_arms() {
+    use crate::cli::expand_flag_clusters;
+    assert_eq!(expand_flag_clusters("select-pane", &["-dt", "%2"]), vec!["-d", "-t", "%2"]);
+    assert_eq!(expand_flag_clusters("select-pane", &["-t", "%2", "-ed"]), vec!["-t", "%2", "-e", "-d"]);
+    assert_eq!(expand_flag_clusters("select-pane", &["-Tx", "-d"]), vec!["-T", "x", "-d"]);
+    assert_eq!(expand_flag_clusters("select-pane", &["-T", "-d"]), vec!["-T", "-d"], "a value is not split");
+    assert_eq!(expand_flag_clusters("last-pane", &["-dt", ":1"]), vec!["-d", "-t", ":1"]);
+}
+
+#[test]
+fn last_pane_d_and_e_toggle_the_last_pane_without_selecting_it() {
+    use crate::server::connection::last_pane_input_toggle;
+    assert_eq!(last_pane_input_toggle(&["-d"]), Some(true));
+    assert_eq!(last_pane_input_toggle(&["-de"]), Some(false), "-e is tested first");
+    assert_eq!(last_pane_input_toggle(&["-t", "-d"]), None, "-d is the target there");
+    assert_eq!(last_pane_input_toggle(&["-Z"]), None);
+
+    let mut f = fixture();
+    f.app.last_pane_path = vec![2];
+    crate::commands::execute_command_string(&mut f.app, "last-pane -d").unwrap();
+    assert!(f.input_off(3));
+    assert_eq!(f.focus(), (0, 1, vec![0]), "last-pane -d must not select");
+    assert_eq!(f.app.last_pane_path, vec![2]);
+    crate::commands::execute_command_string(&mut f.app, "last-pane -e").unwrap();
+    assert!(!f.input_off(3));
+    // A binding keeps the flags (it used to be rewritten to a bare last-pane).
+    assert!(matches!(
+        crate::commands::parse_command_to_action("last-pane -d"),
+        Some(crate::types::Action::Command(ref c)) if c == "last-pane -d"
+    ));
+}
+
+#[test]
+fn a_sourced_file_runs_the_toggle() {
+    // parse_config_line dropped every select-pane line in silence.
+    let mut f = fixture();
+    crate::config::parse_config_line(&mut f.app, "select-pane -d -t %2");
+    assert!(f.input_off(2));
+    assert_eq!(f.focus(), (0, 1, vec![0]));
+    f.app.last_pane_path = vec![2];
+    crate::config::parse_config_line(&mut f.app, "last-pane -d");
+    assert!(f.input_off(3));
+    crate::config::parse_config_line(&mut f.app, "selectp -e -t %2");
+    assert!(!f.input_off(2));
+}

@@ -2829,6 +2829,11 @@ fn run_main() -> io::Result<()> {
             }
             // select-pane - Select the active pane
             "select-pane" | "selectp" => {
+                // The match below reads exact tokens, so split clusters first:
+                // `select-pane -dt %2` reached the server as a bare select-pane.
+                let cmd_args: Vec<String> = std::iter::once(cmd_args[0].clone())
+                    .chain(crate::cli::expand_flag_clusters("select-pane", &cmd_args[1..]))
+                    .collect();
                 let mut cmd = "select-pane".to_string();
                 let mut i = 1;
                 while i < cmd_args.len() {
@@ -3987,7 +3992,34 @@ fn run_main() -> io::Result<()> {
                 // tmux errors "no last pane" at exit 1 when the window has
                 // none (cmd-select-pane.c:176); psmux exited 0 in silence
                 // (#693 item 5).
-                let resp = send_control_with_response("last-pane\n".to_string())?;
+                // -d / -e toggle the last pane's input (tmux's last-pane
+                // shares cmd_select_pane_exec with select-pane -l), so they
+                // and -t travel with the command; they used to be dropped,
+                // which made `last-pane -d` SELECT the last pane.
+                // A plain `last-pane -t` keeps acting on the current window as
+                // it always has here; only the toggle carries its -t.
+                let mut cmd = "last-pane".to_string();
+                let expanded = crate::cli::expand_flag_clusters("last-pane", &cmd_args[1..]);
+                let toggle = expanded.iter().any(|a| a == "-d" || a == "-e");
+                let mut i = 0;
+                while i < expanded.len() {
+                    match expanded[i].as_str() {
+                        "-t" => {
+                            if let Some(t) = expanded.get(i + 1) {
+                                if toggle {
+                                    cmd.push_str(&format!(" -t {}", t));
+                                }
+                                i += 1;
+                            }
+                        }
+                        "-d" => cmd.push_str(" -d"),
+                        "-e" => cmd.push_str(" -e"),
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                cmd.push('\n');
+                let resp = send_control_with_response(cmd)?;
                 if resp.trim_start().starts_with("ERROR") {
                     eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
                     std::process::exit(1);

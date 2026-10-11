@@ -758,6 +758,8 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
             }
         }
         "last-window" | "last" => Some(Action::Command("last-window".to_string())),
+        // Keep the flags: `last-pane -d` / `-e` toggle input, not select.
+        "last-pane" | "lastp" if parts.len() > 1 => Some(Action::Command(cmd.to_string())),
         "last-pane" | "lastp" => Some(Action::Command("last-pane".to_string())),
         "swap-pane" | "swapp" => Some(Action::Command(cmd.to_string())),
         "resize-pane" | "resizep" => Some(Action::Command(cmd.to_string())),
@@ -1255,6 +1257,21 @@ pub(crate) fn paste_buffer_payload(text: &str, pb: &PasteBufferArgs) -> String {
     apply_separator(text, pb.effective_separator())
 }
 
+/// The `-t` of an in-server `select-pane -d/-e` or `last-pane -d/-e`, in the
+/// shape `server::set_pane_input_off` resolves.
+fn input_toggle_temp_target(raw_target: Option<&str>) -> Option<crate::types::TempTarget> {
+    raw_target.map(|t| {
+        let pt = crate::cli::parse_target(t);
+        crate::types::TempTarget {
+            win: pt.window,
+            win_is_id: pt.window_is_id,
+            win_name: pt.window_name,
+            pane: pt.pane,
+            pane_is_id: pt.pane_is_id,
+        }
+    })
+}
+
 /// Write a `paste-buffer` payload to the active pane.  Neither route rewrites
 /// line endings again: `-p` uses the verbatim paste writer, plain text the
 /// send-keys text path, so `-r` keeps its LF and a CR in the buffer stays a CR,
@@ -1632,19 +1649,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // select-pane -d / -e (tmux PANE_INPUTOFF) from a key binding,
             // hook, menu or the command prompt: the same rule and the same
             // server helper as the client routes, selecting nothing.
-            let raw_target = parts.iter().position(|p| *p == "-t").and_then(|i| parts.get(i + 1)).copied();
+            // The getopt walk, so a clustered `-dt %1` names %1 here too.
+            let raw_target = crate::server::connection::select_pane_target_arg(&parts[1..]);
             if let Some((off, last)) = crate::server::connection::select_pane_input_toggle(&parts[1..], raw_target) {
-                let target = raw_target.map(|t| {
-                    let pt = crate::cli::parse_target(t);
-                    crate::types::TempTarget {
-                        win: pt.window,
-                        win_is_id: pt.window_is_id,
-                        win_name: pt.window_name,
-                        pane: pt.pane,
-                        pane_is_id: pt.pane_is_id,
-                    }
-                });
-                if let Err(e) = crate::server::set_pane_input_off(app, target.as_ref(), off, last) {
+                if let Err(e) = crate::server::set_pane_input_off(app, input_toggle_temp_target(raw_target).as_ref(), off, last) {
                     app.status_message = Some((e, Instant::now(), None));
                 }
                 return Ok(());
@@ -1729,6 +1737,15 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     app.last_pane_path = win.active_path.clone();
                     crate::input::move_focus(app, dir);
                 });
+            }
+        }
+        "last-pane" | "lastp" if crate::server::connection::last_pane_input_toggle(&parts[1..]).is_some() => {
+            // last-pane -d / -e: select-pane -l -d / -e (cmd-select-pane.c
+            // runs last-pane through the same -l branch), selecting nothing.
+            let off = crate::server::connection::last_pane_input_toggle(&parts[1..]).unwrap_or(true);
+            let raw_target = crate::server::connection::select_pane_target_arg(&parts[1..]);
+            if let Err(e) = crate::server::set_pane_input_off(app, input_toggle_temp_target(raw_target).as_ref(), off, true) {
+                app.status_message = Some((e, Instant::now(), None));
             }
         }
         "last-pane" | "lastp" => {

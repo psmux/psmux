@@ -691,6 +691,22 @@ pub(crate) fn select_pane_input_toggle(args: &[&str], raw_target: Option<&str>) 
     Some((!enable, last))
 }
 
+/// `last-pane -e` / `-d`: `Some(off)` when the command toggles the last pane's
+/// input instead of selecting it.  tmux's last-pane runs cmd_select_pane_exec,
+/// whose `-l` branch tests `-e` before `-d` (cmd-select-pane.c:178-186).  Its
+/// template `det:Z` takes a value only for `-t`, which `select_pane_flags`
+/// steps over (`-P`/`-T` never reach here: the flag validator refuses them).
+pub(crate) fn last_pane_input_toggle(args: &[&str]) -> Option<bool> {
+    let flags = select_pane_flags(args);
+    if flags.contains(&'e') {
+        Some(false)
+    } else if flags.contains(&'d') {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// The target a `CtrlReq::SetPaneInputOff` carries: the validated one, plus a
 /// `%N` pane id the route deliberately left unvalidated because it may name a
 /// floating pane, which `ValidateTarget` cannot see (`set_pane_input_off`
@@ -715,7 +731,19 @@ fn input_toggle_target(
 /// or the next argument as a value, and `--` or the first non-option ends
 /// the options.
 fn select_pane_flags(args: &[&str]) -> Vec<char> {
+    select_pane_getopt(args).0
+}
+
+/// The `-t` value of a `select-pane` / `last-pane` argument list, read by the
+/// same getopt walk as [`select_pane_flags`], so `-dt %1` and `-t%1` name
+/// `%1` and a `-T -t` title is not a target.
+pub(crate) fn select_pane_target_arg<'a>(args: &[&'a str]) -> Option<&'a str> {
+    select_pane_getopt(args).1
+}
+
+fn select_pane_getopt<'a>(args: &[&'a str]) -> (Vec<char>, Option<&'a str>) {
     let mut flags = Vec::new();
+    let mut target = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i];
@@ -725,8 +753,15 @@ fn select_pane_flags(args: &[&str]) -> Vec<char> {
         for (pos, c) in a.char_indices().skip(1) {
             if matches!(c, 'P' | 'T' | 't') {
                 // The value is the rest of this word, or else the next one.
-                if pos + c.len_utf8() == a.len() {
+                let rest = &a[pos + c.len_utf8()..];
+                let value = if rest.is_empty() {
                     i += 1;
+                    args.get(i).copied()
+                } else {
+                    Some(rest)
+                };
+                if c == 't' {
+                    target = value;
                 }
                 break;
             }
@@ -734,7 +769,7 @@ fn select_pane_flags(args: &[&str]) -> Vec<char> {
         }
         i += 1;
     }
-    flags
+    (flags, target)
 }
 
 /// The single request a `select-pane`'s `-t` emits (issue #691).
@@ -1480,6 +1515,14 @@ if control_echo || control_noecho {
         } else {
             (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect())
         };
+        // Clustered select-pane / last-pane flags, as in the one-shot route.
+        let ctrl_cluster_split: Vec<String>;
+        let cmd_args: Vec<&str> = if matches!(cmd_name, "select-pane" | "selectp" | "last-pane" | "lastp") {
+            ctrl_cluster_split = crate::cli::expand_flag_clusters(cmd_name, &cmd_args);
+            ctrl_cluster_split.iter().map(|s| s.as_str()).collect()
+        } else {
+            cmd_args
+        };
 
         // Parse -t from command args
         let mut ctrl_target_win: Option<usize> = None;
@@ -1897,6 +1940,16 @@ loop {
         (expanded_parts.first().copied().unwrap_or(raw_cmd), all_args)
     } else {
         (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect())
+    };
+    // select-pane / last-pane read flags by exact token below (the -t scan,
+    // the -l/-m/-T arms), so a clustered `-dt %2` lost its target and fenced
+    // the ACTIVE pane.  Split clusters the way tmux's getopt reads them.
+    let cluster_split: Vec<String>;
+    let args: Vec<&str> = if matches!(cmd, "select-pane" | "selectp" | "last-pane" | "lastp") {
+        cluster_split = crate::cli::expand_flag_clusters(cmd, &args);
+        cluster_split.iter().map(|s| s.as_str()).collect()
+    } else {
+        args
     };
 
 // Issue #635: a value-taking flag with nothing after it never runs. Checked
@@ -3232,6 +3285,24 @@ match cmd {
         if !persistent { break; }
     }
     "last-window" | "last" => { let _ = tx.send(CtrlReq::LastWindow); }
+    "last-pane" | "lastp" if last_pane_input_toggle(&args).is_some() => {
+        // last-pane -d / -e: select-pane -l -d / -e, the -t naming the
+        // window whose last pane it is; nothing is selected.
+        let off = last_pane_input_toggle(&args).unwrap_or(true);
+        let (resp_s, resp_r) = mpsc::channel();
+        tx.send_unwrapped(CtrlReq::SetPaneInputOff {
+            target: tx.target().cloned(),
+            off,
+            last: true,
+            resp: Some(resp_s),
+        });
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
+    }
     "last-pane" | "lastp" => {
         // tmux's last-pane shares cmd_select_pane_exec with `select-pane -l`,
         // so it owes the same `no last pane` at exit 1 (cmd-select-pane.c:176).
@@ -6491,6 +6562,21 @@ fn dispatch_control_command(
         "last-window" | "last" => {
             let _ = tx.send(CtrlReq::LastWindow);
             let _ = resp_tx.send(String::new());
+            true
+        }
+        "last-pane" | "lastp" if last_pane_input_toggle(args).is_some() => {
+            let off = last_pane_input_toggle(args).unwrap_or(true);
+            let (resp_s, resp_r) = mpsc::channel();
+            tx.send_unwrapped(CtrlReq::SetPaneInputOff {
+                target: tx.target().cloned(),
+                off,
+                last: true,
+                resp: Some(resp_s),
+            });
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
             true
         }
         "last-pane" | "lastp" => {
