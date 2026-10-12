@@ -3419,6 +3419,75 @@ fn scan_rmcup(data: &[u8]) -> bool {
     data.windows(RMCUP.len()).any(|w| w == RMCUP)
 }
 
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+/// tmux gives up on an unterminated synchronized update after one second.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(1);
+/// Bound on what one unterminated update may hold back.
+const SYNC_MAX_HELD: usize = 4 * 1024 * 1024;
+
+fn rfind_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if hay.len() < needle.len() { return None; }
+    (0..=hay.len() - needle.len()).rev().find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Synchronized output (DECSET 2026), as tmux does it: once a program sends
+/// `ESC[?2026h`, its output is held back until `ESC[?2026l` arrives or
+/// `SYNC_TIMEOUT` expires, then released to the parser in one batch.  Without
+/// this the render path can snapshot a half-drawn frame, which shows up as a
+/// flashing cursor and torn redraws while a TUI such as Claude Code repaints.
+/// A marker split across two reads is not detected as a begin (harmless: that
+/// frame is simply not held), but is found as an end because held bytes are
+/// rescanned together with each new batch.
+pub(crate) struct SyncGate {
+    held: Vec<u8>,
+    since: Instant,
+}
+
+impl SyncGate {
+    pub(crate) fn new() -> Self {
+        Self { held: Vec::new(), since: Instant::now() }
+    }
+
+    /// Time left before the held update must be released; `None` when nothing is held.
+    pub(crate) fn time_left(&self, now: Instant) -> Option<Duration> {
+        if self.held.is_empty() { return None; }
+        Some(SYNC_TIMEOUT.saturating_sub(now.saturating_duration_since(self.since)))
+    }
+
+    /// Everything still held, for a pane that is going away.
+    pub(crate) fn take_all(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.held)
+    }
+
+    /// Takes a new batch, returns the bytes the parser should process now.
+    pub(crate) fn feed(&mut self, bytes: Vec<u8>, now: Instant) -> Vec<u8> {
+        let was_held = !self.held.is_empty();
+        if !was_held && !bytes.windows(SYNC_BEGIN.len()).any(|w| w == SYNC_BEGIN) {
+            return bytes;
+        }
+        let expired = was_held
+            && now.saturating_duration_since(self.since) >= SYNC_TIMEOUT;
+        let mut data = std::mem::take(&mut self.held);
+        data.extend_from_slice(&bytes);
+        if expired || data.len() > SYNC_MAX_HELD {
+            return data;
+        }
+        let last_begin = rfind_bytes(&data, SYNC_BEGIN);
+        let last_end = rfind_bytes(&data, SYNC_END);
+        match last_begin {
+            Some(b) if last_end.map_or(true, |e| e < b) => {
+                if !was_held || last_end.is_some() {
+                    self.since = now;
+                }
+                self.held = data.split_off(b);
+                data
+            }
+            _ => data,
+        }
+    }
+}
+
 /// Returns true if `data` contains a Cursor Position Request (ESC[6n).
 /// ConPTY children (e.g. pwsh) emit this at startup and after session events
 /// such as lock/unlock.  The host must respond with ESC[row;colR or the
@@ -3639,13 +3708,12 @@ fn decrqm_private_value(mode: u16, st: &DecrqmState) -> u8 {
         1005 => onoff(st.mouse_utf8),
         1006 => onoff(st.mouse_sgr),
         2004 => onoff(st.bracketed_paste),
-        // 2026 (synchronized output) is deliberately 0, not 2.  tmux answers 2
-        // because tmux implements MODE_SYNC; psmux's vt100 has no synchronized
-        // output, so claiming the mode exists would invite programs to bracket
-        // every frame with a sequence psmux drops on the floor.  0 is also
-        // byte for byte what the inbox console host answers on 26200
-        // (measured: `ESC[?2026;0$y`), so a pane sees the same reply whichever
-        // console host is under it.  The same reasoning covers 2031.
+        // 2026 (synchronized output) answers 2 like tmux: the parser thread
+        // holds a pane's output between `ESC[?2026h` and `ESC[?2026l` (see
+        // `SyncGate`), so programs may bracket their frames with it.  The
+        // mode is never "set" from the DECRQM point of view because the gate
+        // consumes the bracket before the vt100 parser sees it.  2031 stays 0.
+        2026 => 2,
         _ => 0,
     }
 }
@@ -4194,6 +4262,8 @@ pub fn spawn_reader_thread(
         // palette, so a pane id reused by respawn-pane withdraws whatever the
         // previous child published the moment its successor writes anything.
         let mut published_palette_gen: u64 = u64::MAX;
+        // DECSET 2026: output held back between `ESC[?2026h` and `ESC[?2026l`.
+        let mut sync_gate = SyncGate::new();
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -4207,7 +4277,13 @@ pub fn spawn_reader_thread(
                         // Reader is gone and nothing left to drain — exit
                         // after running alt-screen cleanup below.
                         drop(buf);
+                        let held = sync_gate.take_all();
                         if let Ok(mut parser) = term_reader.lock() {
+                            if !held.is_empty() {
+                                parser.process(&held);
+                                dv_writer.fetch_add(1, Ordering::Release);
+                                crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                            }
                             if parser.screen().alternate_screen() {
                                 parser.process(b"\x1b[?25h\x1b[?1049l");
                                 cursor_shape.store(0, Ordering::Release);
@@ -4217,7 +4293,14 @@ pub fn spawn_reader_thread(
                         }
                         return;
                     }
-                    let res = cv.wait_timeout(buf, Duration::from_millis(100));
+                    // A held synchronized update must be released on time even
+                    // if the pane goes quiet; the gate below does the release.
+                    let wait = match sync_gate.time_left(Instant::now()) {
+                        Some(left) if left.is_zero() => break,
+                        Some(left) => left.min(Duration::from_millis(100)),
+                        None => Duration::from_millis(100),
+                    };
+                    let res = cv.wait_timeout(buf, wait);
                     buf = match res {
                         Ok((g, _)) => g,
                         Err(_) => return,
@@ -4265,6 +4348,7 @@ pub fn spawn_reader_thread(
                     Err(_) => break,
                 }
             };
+            let bytes = sync_gate.feed(bytes, Instant::now());
             if bytes.is_empty() { continue; }
 
             // Scan for cursor shape and RMCUP on the raw batch BEFORE
@@ -4349,6 +4433,10 @@ pub fn spawn_reader_thread(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_sync_output_gate.rs"]
+mod test_sync_output_gate;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue597_xtversion_reply.rs"]
