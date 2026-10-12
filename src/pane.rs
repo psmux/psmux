@@ -3420,71 +3420,128 @@ fn scan_rmcup(data: &[u8]) -> bool {
 }
 
 const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
-const SYNC_END: &[u8] = b"\x1b[?2026l";
-/// tmux gives up on an unterminated synchronized update after one second.
+/// The shared head of `ESC[?2026h` and `ESC[?2026l`.
+const SYNC_MARKER_HEAD: &[u8] = b"\x1b[?2026";
+/// tmux gives up on an unterminated synchronized update after one second
+/// (screen-write.c, screen_write_start_sync).
 const SYNC_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bound on what one unterminated update may hold back.
 const SYNC_MAX_HELD: usize = 4 * 1024 * 1024;
 
-fn rfind_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if hay.len() < needle.len() { return None; }
-    (0..=hay.len() - needle.len()).rev().find(|&i| &hay[i..i + needle.len()] == needle)
+/// Next `ESC[?2026h` (true) or `ESC[?2026l` (false) at or after `from`.
+/// One ESC search per escape sequence, so a batch without any is one pass.
+fn find_sync_marker(data: &[u8], from: usize) -> Option<(usize, bool)> {
+    let n = SYNC_BEGIN.len();
+    let mut i = from;
+    while i + n <= data.len() {
+        let p = i + data[i..].iter().position(|&c| c == 0x1b)?;
+        if p + n > data.len() { return None; }
+        if &data[p..p + n - 1] == SYNC_MARKER_HEAD {
+            match data[p + n - 1] {
+                b'h' => return Some((p, true)),
+                b'l' => return Some((p, false)),
+                _ => {}
+            }
+        }
+        i = p + 1;
+    }
+    None
 }
 
-/// Synchronized output (DECSET 2026), as tmux does it: once a program sends
-/// `ESC[?2026h`, its output is held back until `ESC[?2026l` arrives or
-/// `SYNC_TIMEOUT` expires, then released to the parser in one batch.  Without
-/// this the render path can snapshot a half-drawn frame, which shows up as a
-/// flashing cursor and torn redraws while a TUI such as Claude Code repaints.
-/// A marker split across two reads is not detected as a begin (harmless: that
-/// frame is simply not held), but is found as an end because held bytes are
-/// rescanned together with each new batch.
+/// Synchronized output (DECSET 2026).  Once a program sends `ESC[?2026h`,
+/// its output is held back until `ESC[?2026l` arrives or `SYNC_TIMEOUT`
+/// expires, then released to the parser in one batch.  Without this the
+/// render path can snapshot a half-drawn frame, which shows up as a flashing
+/// cursor and torn redraws while a TUI such as Claude Code repaints.
+///
+/// tmux keeps parsing and defers only its redraw to the outer terminal
+/// (screen-write.c, MODE_SYNC).  A psmux client renders a full snapshot of
+/// the parser, so holding the bytes is how the same frame atomicity is had
+/// here.  The one thing that would otherwise change, a query inside the
+/// update waiting a whole second for its reply, is handled by `feed`'s
+/// `flush`.
+///
+/// A begin marker split across two reads is not detected (that frame is
+/// simply not held); an end marker split across reads is, because each new
+/// batch is scanned together with the last few held bytes.  Only new bytes
+/// are scanned, so a flood inside an open update stays linear.
 pub(crate) struct SyncGate {
     held: Vec<u8>,
+    /// An update is open: everything from `held[0]` on is held.  `held` can
+    /// be empty while open, after a query forced a release.
+    open: bool,
     since: Instant,
 }
 
 impl SyncGate {
     pub(crate) fn new() -> Self {
-        Self { held: Vec::new(), since: Instant::now() }
+        Self { held: Vec::new(), open: false, since: Instant::now() }
     }
 
-    /// Time left before the held update must be released; `None` when nothing is held.
+    /// Whether a synchronized update is in progress (DECRQM 2026 answers 1).
+    pub(crate) fn is_open(&self) -> bool { self.open }
+
+    /// Time left before the open update must be released; `None` when none is open.
     pub(crate) fn time_left(&self, now: Instant) -> Option<Duration> {
-        if self.held.is_empty() { return None; }
+        if !self.open { return None; }
         Some(SYNC_TIMEOUT.saturating_sub(now.saturating_duration_since(self.since)))
     }
 
     /// Everything still held, for a pane that is going away.
     pub(crate) fn take_all(&mut self) -> Vec<u8> {
+        self.open = false;
         std::mem::take(&mut self.held)
     }
 
     /// Takes a new batch, returns the bytes the parser should process now.
-    pub(crate) fn feed(&mut self, bytes: Vec<u8>, now: Instant) -> Vec<u8> {
-        let was_held = !self.held.is_empty();
-        if !was_held && !bytes.windows(SYNC_BEGIN.len()).any(|w| w == SYNC_BEGIN) {
-            return bytes;
+    ///
+    /// `flush` releases everything at once but leaves the update open: the
+    /// batch carries a query (DA, DSR, CPR, DECRQM) the program is blocked
+    /// on, and it will not send `ESC[?2026l` before it has the reply.  tmux
+    /// answers such a query straight away because it never stops parsing.
+    pub(crate) fn feed(&mut self, bytes: Vec<u8>, now: Instant, flush: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.open && now.saturating_duration_since(self.since) >= SYNC_TIMEOUT {
+            self.open = false;
+            out = std::mem::take(&mut self.held);
         }
-        let expired = was_held
-            && now.saturating_duration_since(self.since) >= SYNC_TIMEOUT;
-        let mut data = std::mem::take(&mut self.held);
-        data.extend_from_slice(&bytes);
-        if expired || data.len() > SYNC_MAX_HELD {
-            return data;
+        if !self.open && find_sync_marker(&bytes, 0).is_none() {
+            if out.is_empty() { return bytes; }
+            out.extend_from_slice(&bytes);
+            return out;
         }
-        let last_begin = rfind_bytes(&data, SYNC_BEGIN);
-        let last_end = rfind_bytes(&data, SYNC_END);
-        match last_begin {
-            Some(b) if last_end.map_or(true, |e| e < b) => {
-                if !was_held || last_end.is_some() {
+        let (mut data, scan_from) = if self.held.is_empty() {
+            (bytes, 0)
+        } else {
+            let from = self.held.len().saturating_sub(SYNC_BEGIN.len() - 1);
+            let mut d = std::mem::take(&mut self.held);
+            d.extend_from_slice(&bytes);
+            (d, from)
+        };
+        let mut open_at = if self.open { Some(0) } else { None };
+        let mut i = scan_from;
+        while let Some((p, begin)) = find_sync_marker(&data, i) {
+            if begin {
+                if open_at.is_none() {
+                    open_at = Some(p);
                     self.since = now;
                 }
-                self.held = data.split_off(b);
-                data
+            } else {
+                open_at = None;
             }
-            _ => data,
+            i = p + SYNC_BEGIN.len();
         }
+        self.open = match open_at {
+            Some(_) if flush => true,
+            Some(at) if data.len() - at <= SYNC_MAX_HELD => {
+                self.held = data.split_off(at);
+                true
+            }
+            _ => false,
+        };
+        if out.is_empty() { return data; }
+        out.extend_from_slice(&data);
+        out
     }
 }
 
@@ -3675,6 +3732,8 @@ pub(crate) struct DecrqmState {
     pub mouse_all: bool,
     pub mouse_utf8: bool,
     pub mouse_sgr: bool,
+    /// A synchronized update (DECSET 2026) is open in the pane's `SyncGate`.
+    pub synchronized_output: bool,
 }
 
 impl DecrqmState {
@@ -3689,6 +3748,7 @@ impl DecrqmState {
             mouse_all: s.mouse_all_flag(),
             mouse_utf8: s.mouse_utf8_flag(),
             mouse_sgr: s.mouse_sgr_flag(),
+            synchronized_output: false,
         }
     }
 }
@@ -3708,12 +3768,14 @@ fn decrqm_private_value(mode: u16, st: &DecrqmState) -> u8 {
         1005 => onoff(st.mouse_utf8),
         1006 => onoff(st.mouse_sgr),
         2004 => onoff(st.bracketed_paste),
-        // 2026 (synchronized output) answers 2 like tmux: the parser thread
-        // holds a pane's output between `ESC[?2026h` and `ESC[?2026l` (see
-        // `SyncGate`), so programs may bracket their frames with it.  The
-        // mode is never "set" from the DECRQM point of view because the gate
-        // consumes the bracket before the vt100 parser sees it.  2031 stays 0.
-        2026 => 2,
+        // 2026 (synchronized output) answers like tmux (input.c, case 2026:
+        // MODE_SYNC ? 1 : 2).  The parser thread holds a pane's output
+        // between `ESC[?2026h` and `ESC[?2026l` (see `SyncGate`), so this is
+        // 1 while an update is open and 2 otherwise.  Only a console host
+        // that forwards the query (OpenConsole via PSMUX_CONPTY_DIR) lets
+        // psmux answer it; the inbox host on 26200 answers 0 itself and
+        // swallows the query.  2031 stays 0.
+        2026 => onoff(st.synchronized_output),
         _ => 0,
     }
 }
@@ -4348,7 +4410,15 @@ pub fn spawn_reader_thread(
                     Err(_) => break,
                 }
             };
-            let bytes = sync_gate.feed(bytes, Instant::now());
+            // The query scanners see every byte as it arrives, BEFORE the
+            // synchronized output gate: a program that asks a question inside
+            // an open update is blocked on the answer and will not close the
+            // update first, so the gate must not sit on the question for its
+            // one second timeout (PR #781).  A query releases what is held.
+            let has_cpr_query = cpr_scanner.scan(&bytes);
+            let device_queries = device_scanner.scan(&bytes);
+            let flush = has_cpr_query || !device_queries.is_empty();
+            let bytes = sync_gate.feed(bytes, Instant::now(), flush);
             if bytes.is_empty() { continue; }
 
             // Scan for cursor shape and RMCUP on the raw batch BEFORE
@@ -4357,8 +4427,6 @@ pub fn spawn_reader_thread(
                 cursor_shape.store(shape, Ordering::Release);
             }
             let rmcup = scan_rmcup(&bytes);
-            let has_cpr_query = cpr_scanner.scan(&bytes);
-            let device_queries = device_scanner.scan(&bytes);
 
             // Issue #502 diagnostic: capture the exact pre-parse byte stream
             // when PSMUX_PANE_RAW=1. Off by default, one atomic load when off.
@@ -4371,7 +4439,9 @@ pub fn spawn_reader_thread(
             if let Ok(mut parser) = term_reader.lock() {
                 parser.process(&bytes);
                 if !device_queries.is_empty() {
-                    decrqm_state = Some(DecrqmState::from_screen(parser.screen()));
+                    let mut st = DecrqmState::from_screen(parser.screen());
+                    st.synchronized_output = sync_gate.is_open();
+                    decrqm_state = Some(st);
                 }
                 if parser.screen_mut().take_audible_bell() {
                     bell_pending.store(true, Ordering::Release);

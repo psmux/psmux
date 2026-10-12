@@ -142,15 +142,15 @@ function Get-ProbeHex($text, $name) {
 
 # tmux input.c: 1589 "\033[?1;2c", 1602 "\033[>84;0;0c",
 #               1650-1721 "\033[?%d;%d$y".
-# 2026 is reported 0 on purpose: psmux has no synchronized output, and 0 is
-# byte for byte what the inbox console host answers on this build, so a pane
-# sees the same reply under either host.
+# 2026 is reported 2 (reset) like tmux since PR #781 gave psmux synchronized
+# output (tmux input.c, case 2026: MODE_SYNC ? 1 : 2).  The inbox console host
+# still answers 0 itself; only a host that forwards the query reaches psmux.
 # 1006 is SGR mouse reporting, which the probe has not enabled, so tmux's
 # value semantics make it 2 (reset).
 foreach ($case in @(
     @{ n = "DA1";         want = "1b 5b 3f 31 3b 32 63";                   why = "ESC[?1;2c, tmux input.c:1589" },
     @{ n = "DA2";         want = "1b 5b 3e 38 34 3b 30 3b 30 63";          why = "ESC[>84;0;0c, tmux input.c:1602" },
-    @{ n = "DECRQM_2026"; want = "1b 5b 3f 32 30 32 36 3b 30 24 79";       why = "ESC[?2026;0`$y, not recognised" },
+    @{ n = "DECRQM_2026"; want = "1b 5b 3f 32 30 32 36 3b 32 24 79";       why = "ESC[?2026;2`$y, reset (PR #781)" },
     @{ n = "DECRQM_1006"; want = "1b 5b 3f 31 30 30 36 3b 32 24 79";       why = "ESC[?1006;2`$y, reset" },
     @{ n = "DSR_STATUS";  want = "1b 5b 30 6e";                            why = "ESC[0n, tmux input.c:1727" }
 )) {

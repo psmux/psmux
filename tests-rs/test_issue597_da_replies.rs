@@ -223,6 +223,13 @@ fn decrqm_2026_reports_reset_like_tmux() {
 }
 
 #[test]
+fn decrqm_2026_reports_set_inside_an_open_update() {
+    // tmux input.c: `case 2026: n = (s->mode & MODE_SYNC) ? 1 : 2;`
+    let st = DecrqmState { synchronized_output: true, ..fresh() };
+    assert_eq!(reply_for(b"\x1b[?2026$p", &st), "\x1b[?2026;1$y");
+}
+
+#[test]
 fn decrqm_for_an_unknown_mode_reports_zero() {
     assert_eq!(reply_for(b"\x1b[?31337$p", &fresh()), "\x1b[?31337;0$y");
     // Every ANSI mode is unknown to psmux, including tmux's one tracked mode.
