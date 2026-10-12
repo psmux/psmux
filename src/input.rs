@@ -221,6 +221,35 @@ pub fn run_copy_mode_command_line(app: &mut AppState, cmd: &str) {
 /// Key-table lookups and `switch-client -T <table>` state below are test-only
 /// unless the same behavior exists in the live handlers.
 ///
+/// One key at the server side command prompt, through the shared prompt
+/// editor (`copy_mode::prompt_edit`), the one the copy mode prompts and the
+/// client's overlays use.
+///
+/// The editor counts the cursor in characters from the END of the line, while
+/// this prompt keeps a byte index, so the two are converted around the call.
+/// The walk to the byte offset is the one the client's overlays do when they
+/// draw. Counting in characters is also what makes the prompt UTF-8 safe: the
+/// arms this replaces moved the byte index by one per character and then
+/// indexed the line with it, so a multi byte character left the index inside a
+/// character.
+fn command_prompt_edit(
+    input: &mut String,
+    cursor: &mut usize,
+    key: &str,
+) -> crate::copy_mode::PromptEdit {
+    // Counted without slicing, because an index left inside a character by the
+    // old arms would panic on a slice.
+    let mut back = input.char_indices().filter(|(i, _)| *i >= *cursor).count();
+    let result = crate::copy_mode::prompt_edit(input, &mut back, key);
+    let total = input.chars().count();
+    let idx = total - back.min(total);
+    *cursor = input
+        .char_indices()
+        .nth(idx)
+        .map_or(input.len(), |(i, _)| i);
+    result
+}
+
 pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
     // Fold NUL onto C-Space up front, for the same reason as the client input
     // loop: the raw `is_prefix` tuple comparisons below must see C-Space when
@@ -666,111 +695,80 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     }
                     execute_command_prompt(app)?;
                 }
-                KeyCode::Backspace => {
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        if *cursor > 0 {
-                            input.remove(*cursor - 1);
-                            *cursor -= 1;
-                        }
-                    }
+                // C-c and C-g cancel tmux's prompt the way Escape does
+                // (`status.c:1671` to `:1674`), and C-[ IS Escape. They used to
+                // be typed into the line as a bare letter, because the text arm
+                // below carried no Ctrl guard.
+                KeyCode::Char(c)
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !crate::client::is_altgr_char(c, key.modifiers)
+                        && matches!(c.to_ascii_lowercase(), 'c' | 'g' | '[') =>
+                {
+                    app.command_vi_normal = false;
+                    app.mode = Mode::Passthrough;
                 }
-                KeyCode::Delete => {
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        if *cursor < input.len() {
-                            input.remove(*cursor);
-                        }
-                    }
-                }
-                KeyCode::Left => {
-                    if let Mode::CommandPrompt { cursor, .. } = &mut app.mode {
-                        if *cursor > 0 { *cursor -= 1; }
-                    }
-                }
-                KeyCode::Right => {
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        if *cursor < input.len() { *cursor += 1; }
-                    }
-                }
-                KeyCode::Home => {
-                    if let Mode::CommandPrompt { cursor, .. } = &mut app.mode {
-                        *cursor = 0;
-                    }
-                }
-                KeyCode::End => {
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        *cursor = input.len();
-                    }
-                }
-                KeyCode::Up => {
-                    // Cycle through command history (older)
-                    if app.command_history_idx > 0 {
-                        app.command_history_idx -= 1;
-                        let cmd = app.command_history[app.command_history_idx].clone();
-                        let len = cmd.len();
-                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                            *input = cmd;
-                            *cursor = len;
-                        }
-                    }
-                }
-                KeyCode::Down => {
-                    // Cycle through command history (newer)
-                    if app.command_history_idx < app.command_history.len() {
-                        app.command_history_idx += 1;
-                        let cmd = if app.command_history_idx < app.command_history.len() {
-                            app.command_history[app.command_history_idx].clone()
-                        } else {
-                            String::new()
-                        };
-                        let len = cmd.len();
-                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                            *input = cmd;
-                            *cursor = len;
-                        }
-                    }
-                }
-                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+A: move to beginning
-                    if let Mode::CommandPrompt { cursor, .. } = &mut app.mode {
-                        *cursor = 0;
-                    }
-                }
-                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+E: move to end
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        *cursor = input.len();
-                    }
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+U: kill line (clear from cursor to start)
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        input.drain(..*cursor);
-                        *cursor = 0;
-                    }
-                }
-                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+K: kill to end of line
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        input.truncate(*cursor);
-                    }
-                }
-                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+W: delete word backwards
-                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        let mut pos = *cursor;
-                        while pos > 0 && input.as_bytes().get(pos - 1) == Some(&b' ') { pos -= 1; }
-                        while pos > 0 && input.as_bytes().get(pos - 1) != Some(&b' ') { pos -= 1; }
-                        input.drain(pos..*cursor);
-                        *cursor = pos;
-                    }
-                }
-                KeyCode::Char(c) => {
+                // Text at the cursor. The byte index moves by the WIDTH of the
+                // character: `*cursor += 1` left it inside a multi byte
+                // character, and the Backspace that followed indexed the line
+                // with it. AltGr is the exception to the Ctrl guard, as it is in
+                // the client's overlays: Windows reports AltGr as Ctrl+Alt, so
+                // `@` on a German layout arrives as Ctrl+Alt+@ and is text.
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        || crate::client::is_altgr_char(c, key.modifiers) =>
+                {
                     if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
                         input.insert(*cursor, c);
-                        *cursor += 1;
+                        *cursor += c.len_utf8();
                     }
                 }
-                _ => {}
+                // Every other key goes to the shared prompt editor, the one the
+                // copy mode prompts and the client's overlays use, by its tmux
+                // name. A key the editor has no use for stops here, which is
+                // what tmux's prompt does with the keys it does not know
+                // (`status.c:1704`).
+                _ => {
+                    let name = crate::config::format_key_binding(&(key.code, key.modifiers));
+                    let mut recall = None;
+                    if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                        match command_prompt_edit(input, cursor, &name) {
+                            crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
+                            crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
+                            _ => {}
+                        }
+                    }
+                    // The history lives on `app`, so it is stepped outside the
+                    // borrow above, the way the copy mode search prompt does it.
+                    match recall {
+                        Some(true) => {
+                            if app.command_history_idx > 0 {
+                                app.command_history_idx -= 1;
+                                let cmd = app.command_history[app.command_history_idx].clone();
+                                let len = cmd.len();
+                                if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                                    *input = cmd;
+                                    *cursor = len;
+                                }
+                            }
+                        }
+                        Some(false) => {
+                            if app.command_history_idx < app.command_history.len() {
+                                app.command_history_idx += 1;
+                                let cmd = if app.command_history_idx < app.command_history.len() {
+                                    app.command_history[app.command_history_idx].clone()
+                                } else {
+                                    String::new()
+                                };
+                                let len = cmd.len();
+                                if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                                    *input = cmd;
+                                    *cursor = len;
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
             }
             Ok(false)
         }
@@ -4589,3 +4587,7 @@ mod tests_issue722_goto_line;
 #[cfg(test)]
 #[path = "../tests-rs/test_paste_no_server_stall.rs"]
 mod tests_paste_no_server_stall;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue783_prompt_edit_unify_server.rs"]
+mod tests_issue783_prompt_edit_unify_server;
