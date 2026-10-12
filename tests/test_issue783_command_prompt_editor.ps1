@@ -55,7 +55,7 @@ if (-not (Test-Path $csc)) {
     $csc = Get-ChildItem "C:\Windows\Microsoft.NET\Framework64\v4*\csc.exe" -EA SilentlyContinue |
            Select-Object -First 1 -ExpandProperty FullName
 }
-foreach ($tool in "conread", "injector") {
+foreach ($tool in "conread", "injector", "paste_host_injector") {
     $exe = Join-Path $TMP "$tool.exe"
     if ($csc -and (Test-Path $csc)) {
         & $csc /nologo /optimize /out:$exe (Join-Path $PSScriptRoot "$tool.cs") 2>&1 | Out-Null
@@ -123,7 +123,9 @@ function Screen {
 function Prompt-Value {
     $screen = Screen
     for ($i = 0; $i -lt $screen.Count; $i++) {
-        $title = (([string]$screen[$i]) -replace '[^ -~]', '').Trim()
+        # The border is dropped whether it comes back as box drawing characters
+        # or, through an ANSI code page best fit, as `+` and `-`.
+        $title = (([string]$screen[$i]) -replace '[^ -~]', '' -replace '[+-]', '').Trim()
         if ($title -eq 'command' -and $i + 1 -lt $screen.Count) {
             $line = (([string]$screen[$i + 1]) -replace '[^ -~]', '').TrimEnd()
             $at = $line.IndexOf(':')
@@ -295,6 +297,40 @@ Inj "^n"
 $v = Prompt-Value
 Check ($v -eq '') "C-n steps back to an empty line" "the prompt reads [$v]"
 Close-Prompt
+
+# -- 11. the host's duplicate of a paste stays out of the line --
+#
+# A host that pastes on its own AND forwards the characters (#290) delivers
+# the text twice: once as the clipboard paste the prompt takes whole, then as
+# key events inside the client's paste suppress window, which are dropped.
+# The catch all arm used to hand those to the prompt editor, which types a
+# Space as a space, so "a b c d e f" left five extra spaces in the line. The
+# letters were dropped, so a run of two spaces is the tell: the paste itself
+# has none, and whatever of the duplicate arrives after the window closes
+# starts with a letter or a single space.
+
+Write-Head "11. a paste's duplicate key events add nothing to the line"
+$savedClip = try { Get-Clipboard -Raw -EA Stop } catch { $null }
+$clipOk = $false
+try { Set-Clipboard -Value "a b c d e f" -EA Stop; $clipOk = ((Get-Clipboard -Raw) -eq "a b c d e f") } catch {}
+if (-not $clipOk) {
+    Write-Info "SKIP: the desktop refuses clipboard access to this process"
+} else {
+    Open-Prompt "X"
+    $PASTE = Join-Path $TMP "paste_host_injector.exe"
+    & $PASTE $script:cpid plain 20 "a b c d e f" | Out-Null
+    & $INJ $script:cpid "a b c d e f" | Out-Null
+    Start-Sleep -Milliseconds 1200
+    # A closing letter, because the reader trims the end of the line and the
+    # spaces would be typed at the end.
+    Inj "Y"
+    $v = Prompt-Value
+    Write-Info "the prompt holds: [$v]"
+    Check ($v -like 'Xa b c d e f*Y') "the paste arrived in the prompt [$v]" "the prompt reads [$v]"
+    Check ($v -notmatch '  ') "no duplicate space was typed into the line" "the line gained duplicate spaces: [$v]"
+    Close-Prompt
+    if ($null -ne $savedClip) { Set-Clipboard -Value $savedClip }
+}
 
 # -- Done --
 
