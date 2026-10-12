@@ -3084,7 +3084,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut pane_title_buf = String::new();
     let mut command_input = false;
     let mut command_buf = String::new();
-    let mut command_cursor: usize = 0;
+    // Characters from the END of `command_buf`, the way the shared prompt
+    // editor and the rename overlay count (`copy_mode::prompt_edit`).
+    let mut command_back: usize = 0;
     let mut command_history: Vec<String> = Vec::new();
     let mut command_history_idx: usize = 0;
     // Template for command-prompt -I '#W' 'rename-window "%%"' style bindings.
@@ -4610,7 +4612,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 session_num_buffer.clear();
                             } else {
                                 command_input = false;
-                                command_cursor = 0;
+                                command_back = 0;
                                 command_template = None;
                                 command_prompt_label = None;
                                 renaming = false;
@@ -4646,7 +4648,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             rsel_end = None;
                             selection_changed = true;
                         }
-                        else if is_prefix && !prefix_armed {
+                        // An open prompt takes the key first, the prefix key
+                        // included. tmux hands a key to `status_prompt_key`
+                        // before the key table that holds the prefix is even
+                        // looked at (`server-client.c:1485` to `:1489`, tag
+                        // 3.7c), so `C-b` at a prompt with the default prefix
+                        // moves the cursor one character left. psmux armed the
+                        // prefix instead, which left the prompt's own `C-b`
+                        // unreachable on a default configuration and ate the
+                        // next key as a prefix command. Only the two prompts
+                        // with an editor are excluded here; the pane title and
+                        // window index prompts and the choosers keep what they
+                        // had.
+                        else if is_prefix && !prefix_armed && !command_input && !renaming {
                             // Suppress IME while in prefix mode so command keys
                             // are not intercepted by the input method (issue #286).
                             #[cfg(windows)]
@@ -4817,7 +4831,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         .replace("#{window_name}", &active_window_name)
                                         .replace("#S", &session_label)
                                         .replace("#{session_name}", &session_label);
-                                    command_cursor = command_buf.len();
+                                    command_back = 0;
                                     command_template = spec.template;
                                     command_prompt_label = spec.label;
                                 } else if cmd == "list-keys" {
@@ -4936,7 +4950,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // because the `.` fallback below sets one and
                                 // this table is read before the first state dump
                                 // has a chance to rebuild either prompt.
-                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; }
+                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
                                 // Same command as the PREFIX_DEFAULTS entry for
                                 // `.`, so the key is not dead for the moment
@@ -4944,7 +4958,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('.') => {
                                     command_input = true;
                                     command_buf.clear();
-                                    command_cursor = 0;
+                                    command_back = 0;
                                     command_history_idx = command_history.len();
                                     command_template = Some("move-window -t '%%'".into());
                                     command_prompt_label = Some("(move-window)".into());
@@ -5817,7 +5831,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // other character fall through to the pane, so a
                                 // letter typed or pasted here reached the shell.
                                 KeyCode::Char(c) if window_idx_input && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { window_idx_buf.push(c); paste_gesture.record_char(c); }
-                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { command_buf.insert(command_cursor, c); command_cursor += c.len_utf8(); paste_gesture.record_char(c); }
+                                // Text goes in at the cursor, through the same
+                                // helper the rename overlay uses. AltGr is the
+                                // exception to the CONTROL guard: Windows reports
+                                // it as Ctrl+Alt, so `@` on a German layout
+                                // arrives as Ctrl+Alt+@ and is text. It used to
+                                // fail this guard and reach the AltGr arm below,
+                                // which hands the character to the PANE, so the
+                                // character never arrived in the prompt at all.
+                                KeyCode::Char(c) if command_input
+                                    && (!key.modifiers.contains(KeyModifiers::CONTROL)
+                                        || is_altgr_char(c, key.modifiers))
+                                    && !paste_burst_active => {
+                                    let mut buf = [0u8; 4];
+                                    crate::copy_mode::prompt_insert(&mut command_buf, command_back, c.encode_utf8(&mut buf));
+                                    paste_gesture.record_char(c);
+                                }
                                 // The copy-mode prompt editor, as it stands,
                                 // reused here: tmux reaches this overlay
                                 // through `command-prompt`, which has the full
@@ -5844,15 +5873,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                                 KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
                                 KeyCode::Backspace if window_idx_input => { let _ = window_idx_buf.pop(); }
-                                KeyCode::Backspace if command_input => {
-                                    if command_cursor > 0 {
-                                        // Walk back to the previous char boundary so we never split a UTF-8 sequence.
-                                        let prev_len = command_buf[..command_cursor].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
-                                        let new_cursor = command_cursor - prev_len;
-                                        command_buf.replace_range(new_cursor..command_cursor, "");
-                                        command_cursor = new_cursor;
-                                    }
-                                }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
                                         cmd_batch.push(format!("rename-session {}\n", quote_arg(&rename_buf)));
@@ -5966,65 +5986,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         }
                                     }
                                     command_input = false;
-                                    command_cursor = 0;
+                                    command_back = 0;
                                     command_template = None;
                                     command_prompt_label = None;
                                 }
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
                                 KeyCode::Esc if pane_renaming => { pane_renaming = false; }
                                 KeyCode::Esc if window_idx_input => { window_idx_input = false; }
-                                KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; command_template = None; command_prompt_label = None; }
+                                KeyCode::Esc if command_input => { command_input = false; command_back = 0; command_template = None; command_prompt_label = None; }
 
-                                // Command prompt: cursor movement, history, and editing keys
-                                KeyCode::Left if command_input => {
-                                    if command_cursor > 0 {
-                                        let prev_len = command_buf[..command_cursor].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
-                                        command_cursor -= prev_len;
-                                    }
-                                }
-                                KeyCode::Right if command_input => {
-                                    if command_cursor < command_buf.len() {
-                                        let next_len = command_buf[command_cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                                        command_cursor += next_len;
-                                    }
-                                }
-                                KeyCode::Home if command_input => { command_cursor = 0; }
-                                KeyCode::End if command_input => { command_cursor = command_buf.len(); }
-                                KeyCode::Delete if command_input => { if command_cursor < command_buf.len() { command_buf.remove(command_cursor); } }
-                                KeyCode::Up if command_input => {
-                                    if command_history_idx > 0 {
-                                        command_history_idx -= 1;
-                                        command_buf = command_history[command_history_idx].clone();
-                                        command_cursor = command_buf.len();
-                                    }
-                                }
-                                KeyCode::Down if command_input => {
-                                    if command_history_idx < command_history.len() {
-                                        command_history_idx += 1;
-                                        command_buf = if command_history_idx < command_history.len() {
-                                            command_history[command_history_idx].clone()
-                                        } else {
-                                            String::new()
-                                        };
-                                        command_cursor = command_buf.len();
-                                    }
-                                }
-                                KeyCode::Char('a') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => { command_cursor = 0; }
-                                KeyCode::Char('e') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => { command_cursor = command_buf.len(); }
-                                KeyCode::Char('u') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                    command_buf.drain(..command_cursor);
-                                    command_cursor = 0;
-                                }
-                                KeyCode::Char('k') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                    command_buf.truncate(command_cursor);
-                                }
-                                KeyCode::Char('w') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                    let mut pos = command_cursor;
-                                    while pos > 0 && command_buf.as_bytes().get(pos - 1) == Some(&b' ') { pos -= 1; }
-                                    while pos > 0 && command_buf.as_bytes().get(pos - 1) != Some(&b' ') { pos -= 1; }
-                                    command_buf.drain(pos..command_cursor);
-                                    command_cursor = pos;
-                                }
                                 // Every key the rename overlay has no use for
                                 // stops here. Up, Down, Tab, PageUp, F keys and
                                 // the rest used to fall through to the arms
@@ -6033,6 +6003,61 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // before the overlay had an editor. tmux's
                                 // prompt keeps every key it is given.
                                 _ if renaming => {}
+
+                                // Every other key at the command prompt goes to
+                                // the shared prompt editor, the one the rename
+                                // overlay and the copy mode prompts already use,
+                                // and stops here whether the editor had a use for
+                                // it or not. tmux's prompt does the same: its own
+                                // `default` case appends the key to the buffer
+                                // (`status.c:1704`), so no key pressed at a prompt
+                                // reaches a pane. These used to fall through to
+                                // the arms below, where a Ctrl plus letter becomes
+                                // `send-key C-<letter>` for the focused pane:
+                                // `C-l` cleared the shell's screen behind the
+                                // prompt and `C-p` recalled the shell's own
+                                // history (discussion #782).
+                                _ if command_input => {
+                                    match command_prompt_key(
+                                        &mut command_buf,
+                                        &mut command_back,
+                                        effective_code,
+                                        key.modifiers,
+                                    ) {
+                                        PromptKeyAction::Close => {
+                                            command_input = false;
+                                            command_back = 0;
+                                            command_template = None;
+                                            command_prompt_label = None;
+                                            // Nothing else asks for a repaint
+                                            // here: on an idle pane no frame
+                                            // comes, and the closed overlay
+                                            // stayed drawn. Escape's branch and
+                                            // the rename overlay's cancel do the
+                                            // same.
+                                            selection_changed = true;
+                                        }
+                                        PromptKeyAction::HistoryUp => {
+                                            if command_history_idx > 0 {
+                                                command_history_idx -= 1;
+                                                command_buf = command_history[command_history_idx].clone();
+                                                command_back = 0;
+                                            }
+                                        }
+                                        PromptKeyAction::HistoryDown => {
+                                            if command_history_idx < command_history.len() {
+                                                command_history_idx += 1;
+                                                command_buf = if command_history_idx < command_history.len() {
+                                                    command_history[command_history_idx].clone()
+                                                } else {
+                                                    String::new()
+                                                };
+                                                command_back = 0;
+                                            }
+                                        }
+                                        PromptKeyAction::Edited => {}
+                                    }
+                                }
 
                                 // The CONTROL guard is load bearing (issue #623).
                                 // `fold_nul_to_ctrl_space` has already rewritten a
@@ -6327,7 +6352,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // prompt / rename prompts into the underlying pane.
                         let consumed = route_paste_to_overlay(
                             &data,
-                            command_input, &mut command_buf, &mut command_cursor,
+                            command_input, &mut command_buf, command_back,
                             renaming, &mut rename_buf,
                             pane_renaming, &mut pane_title_buf,
                             window_idx_input, &mut window_idx_buf,
@@ -7228,7 +7253,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // behind the prompt.
                 let consumed = route_paste_to_overlay(
                     &paste_pend,
-                    command_input, &mut command_buf, &mut command_cursor,
+                    command_input, &mut command_buf, command_back,
                     renaming, &mut rename_buf,
                     pane_renaming, &mut pane_title_buf,
                     window_idx_input, &mut window_idx_buf,
@@ -7278,7 +7303,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // at all.
                             let consumed = route_paste_to_overlay(
                                 &text,
-                                command_input, &mut command_buf, &mut command_cursor,
+                                command_input, &mut command_buf, command_back,
                                 renaming, &mut rename_buf,
                                 pane_renaming, &mut pane_title_buf,
                                 window_idx_input, &mut window_idx_buf,
@@ -8929,9 +8954,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
+                // `command_back` counts characters from the end, the way the
+                // shared prompt editor does; the window wants a byte offset, and
+                // the same walk the rename overlay does turns one into the other.
+                let mut at = command_buf.len();
+                for ch in command_buf.chars().rev().take(command_back.min(command_buf.chars().count())) {
+                    at -= ch.len_utf8();
+                }
                 // The cursor column is the display WIDTH of the text before
-                // it, not its byte offset: command_cursor counts bytes
-                // (c.len_utf8() above), and eight box drawing characters are
+                // it, not its byte offset: eight box drawing characters are
                 // 24 bytes over 8 columns, so adding the offset to a column
                 // drew the cursor 16 past the text and eventually outside the
                 // border (#741). The window scrolls with the cursor as tmux's
@@ -8939,7 +8970,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // being typed on screen instead of clipping it.
                 let avail = inner.width.saturating_sub(2) as usize; // after ": "
                 let (shown, cur_col) =
-                    crate::util::prompt_window(&command_buf, command_cursor, avail);
+                    crate::util::prompt_window(&command_buf, at, avail);
                 let para = Paragraph::new(format!(": {}", shown));
                 f.render_widget(para, inner);
                 let cx = inner.x + 2 + cur_col as u16;
@@ -10010,6 +10041,47 @@ pub(crate) fn is_altgr_char(c: char, mods: KeyModifiers) -> bool {
         && !c.is_ascii_lowercase()
 }
 
+/// What a key typed at the client's command prompt asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptKeyAction {
+    /// C-c, C-g or C-[: cancel the prompt, as Escape does.
+    Close,
+    /// Up or C-p: the caller recalls an older entry from the history.
+    HistoryUp,
+    /// Down or C-n: a newer one.
+    HistoryDown,
+    /// The editor took the key, or had no use for it. Either way it stops at
+    /// the prompt.
+    Edited,
+}
+
+/// One key at the client's command prompt, other than text, Enter and Escape.
+///
+/// The editing itself is `copy_mode::prompt_edit`, the editor the copy mode
+/// prompts and the rename overlay already share, reached by the tmux name of
+/// the key. C-c and C-g cancel tmux's prompt the way Escape does
+/// (`status.c:1671` to `:1674`) and C-[ IS Escape.
+pub(crate) fn command_prompt_key(
+    buf: &mut String,
+    back: &mut usize,
+    code: KeyCode,
+    mods: KeyModifiers,
+) -> PromptKeyAction {
+    if let KeyCode::Char(c) = code {
+        if mods.contains(KeyModifiers::CONTROL)
+            && matches!(c.to_ascii_lowercase(), 'c' | 'g' | '[')
+        {
+            return PromptKeyAction::Close;
+        }
+    }
+    let name = crate::config::format_key_binding(&(code, mods));
+    match crate::copy_mode::prompt_edit(buf, back, &name) {
+        crate::copy_mode::PromptEdit::HistoryUp => PromptKeyAction::HistoryUp,
+        crate::copy_mode::PromptEdit::HistoryDown => PromptKeyAction::HistoryDown,
+        _ => PromptKeyAction::Edited,
+    }
+}
+
 /// A Ctrl+letter typed into the rename overlay. Returns true when the key
 /// closes the overlay: C-c and C-g cancel tmux's prompt (prompt.c, beside
 /// Escape) and C-[ is Escape itself. Anything else goes to the copy-mode prompt
@@ -10066,7 +10138,7 @@ fn route_paste_to_overlay(
     data: &str,
     command_input: bool,
     command_buf: &mut String,
-    command_cursor: &mut usize,
+    command_back: usize,
     renaming: bool,
     rename_buf: &mut String,
     pane_renaming: bool,
@@ -10075,8 +10147,7 @@ fn route_paste_to_overlay(
     window_idx_buf: &mut String,
 ) -> bool {
     if command_input {
-        command_buf.insert_str(*command_cursor, data);
-        *command_cursor += data.len();
+        crate::copy_mode::prompt_insert(command_buf, command_back, data);
         true
     } else if renaming {
         rename_buf.push_str(data);
@@ -10318,3 +10389,7 @@ mod test_issue675_stale_writer;
 #[cfg(test)]
 #[path = "../tests-rs/test_keytable_switch_client.rs"]
 mod test_keytable_switch_client;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue783_prompt_edit_unify.rs"]
+mod test_issue783_prompt_edit_unify;
