@@ -5847,6 +5847,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     crate::copy_mode::prompt_insert(&mut command_buf, command_back, c.encode_utf8(&mut buf));
                                     paste_gesture.record_char(c);
                                 }
+                                // A character inside the paste suppress window is
+                                // the host's duplicate of a paste the prompt has
+                                // already taken (#290), so it is dropped here. The
+                                // catch all arm below would hand it to the prompt
+                                // editor, which types a Space as a space: pasting
+                                // "a b c d" left "a b c d   " in the line.
+                                KeyCode::Char(c) if command_input
+                                    && paste_burst_active
+                                    && (!key.modifiers.contains(KeyModifiers::CONTROL)
+                                        || is_altgr_char(c, key.modifiers)) => {}
                                 // The copy-mode prompt editor, as it stands,
                                 // reused here: tmux reaches this overlay
                                 // through `command-prompt`, which has the full
