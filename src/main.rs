@@ -740,6 +740,42 @@ fn session_holding_client(ns: Option<&str>, spec: &str) -> Option<String> {
         .map(|(name, _)| name)
 }
 
+/// A CLI command list (see [`crate::cli::split_cli_command_list`]): `args`
+/// cut to its first command, and the one line the whole list goes to the
+/// server as. `None` dispatches `args` whole, as before. Control mode reads
+/// its commands from stdin and keeps its argv.
+fn split_command_list_args(args: &[String]) -> Option<(Vec<String>, String)> {
+    let index = process_command_index(args)?;
+    if args[1..index].iter().any(|a| a == "-C" || a == "-CC") {
+        return None;
+    }
+    let (first, queued) = crate::cli::split_cli_command_list(&args[index..])?;
+    let line = crate::cli::command_list_wire_line(&first, &queued);
+    let mut cut = args[..index].to_vec();
+    cut.extend(first);
+    Some((cut, line))
+}
+
+/// Run a command list on the server over one connection, routed by its first
+/// command. The server's connection loop splits the line and runs the
+/// commands in order, stopping at the first that fails, so the commands go
+/// out back to back instead of one client invocation each. What they print
+/// goes to stdout, their errors to stderr, and any error is exit 1, as in
+/// tmux.
+fn run_command_list(line: String) -> io::Result<()> {
+    let reply = send_control_with_response(format!("{}\n", line))?;
+    let (out, errors) = crate::cli::command_list_reply(&reply);
+    io::stdout().write_all(out.as_bytes())?;
+    io::stdout().flush()?;
+    if errors.is_empty() {
+        return Ok(());
+    }
+    for error in errors {
+        eprintln!("psmux: {}", error);
+    }
+    std::process::exit(1);
+}
+
 fn main() {
     crate::startup_trace::mark("cli.entry");
     if let Err(e) = run_main() {
@@ -1007,6 +1043,13 @@ fn run_main() -> io::Result<()> {
             crate::cli::normalize_flag_equals(env::args().collect()),
         ),
     );
+    // `psmux a \; b`: from here on `args` is the first command alone, which
+    // decides routing and the client side target check; the whole list goes
+    // to the server as one line just before dispatch (run_command_list).
+    let (args, command_list) = match split_command_list_args(&args) {
+        Some((first, line)) => (first, Some(line)),
+        None => (args, None),
+    };
 
     // Issue #635: a value-taking flag with NO value must be rejected before
     // anything else happens, exactly as tmux's arguments.c does. This must be
@@ -1292,6 +1335,12 @@ fn run_main() -> io::Result<()> {
         | "previous-layout" | "prevl")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref());
+    }
+
+    // A command list goes to the server whole, past the first command's arm,
+    // which would rebuild the request from its own flags and drop the rest.
+    if let Some(line) = command_list {
+        return run_command_list(line);
     }
 
     // Handle help and version flags first

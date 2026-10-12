@@ -606,6 +606,104 @@ pub fn split_command_queue<S: AsRef<str>>(args: &[S]) -> Vec<Vec<String>> {
     out
 }
 
+/// Split a one-shot CLI command list (`argv` from the command name on) into
+/// its first command and the commands after it, or `None` when the argv is to
+/// be dispatched whole, exactly as before command lists were recognised.
+///
+/// tmux runs `tmux cmd1 \; cmd2` as one command list. psmux's CLI dispatches
+/// on the FIRST command's name, and most of those arms rebuild the request
+/// from the flags they know, so everything after the separator was silently
+/// dropped (`select-pane -t p \; set-option ...` never set the option) or read
+/// as the first command's own arguments. The caller sends the whole list to
+/// the server as one line instead (see [`command_list_wire_line`]).
+///
+/// Only a lone `;` or `\;` argument separates, the same whole-token rule
+/// [`crate::config::split_chained_commands_pub`] applies to the line the
+/// server reads; an argument that merely ends in `;` stays data, as it always
+/// has on this route. Commands whose own arguments carry a command list
+/// (`bind-key x a \; b` binds both), that run on the client (`run-shell`,
+/// `start-server` with its own queue, #734), or that need a server the list
+/// cannot be sent to yet (`new-session`) or never hand control back (an
+/// attaching client) keep their whole argv.
+pub fn split_cli_command_list<S: AsRef<str>>(
+    argv: &[S],
+) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    let command = argv.first()?.as_ref();
+    let keeps_whole_line = matches!(
+        command,
+        // The arguments after the key, hook or prompt are themselves a
+        // command list that runs later, not now.
+        "bind-key" | "bind" | "set-hook" | "confirm-before" | "confirm"
+        | "if-shell" | "if" | "command-prompt" | "display-menu" | "menu"
+        // The CLI runs the shell itself and exits with its status.
+        | "run-shell" | "run"
+        // Runs its own queue against the server it starts (#734).
+        | "start-server" | "start" | "warmup"
+        // Creates the server the list would have to go to.
+        | "new-session" | "new"
+        // An attaching client does not come back until it detaches.
+        | "attach-session" | "attach" | "at" | "a" | "server"
+    );
+    if keeps_whole_line {
+        return None;
+    }
+    let mut groups: Vec<Vec<String>> = vec![Vec::new()];
+    for arg in argv {
+        let arg = arg.as_ref();
+        if arg == ";" || arg == "\\;" {
+            groups.push(Vec::new());
+        } else if let Some(last) = groups.last_mut() {
+            last.push(arg.to_string());
+        }
+    }
+    let mut groups = groups.into_iter();
+    let first = groups.next().unwrap_or_default();
+    let queued: Vec<Vec<String>> = groups.filter(|g| !g.is_empty()).collect();
+    if first.is_empty() || queued.is_empty() {
+        return None;
+    }
+    Some((first, queued))
+}
+
+/// The one line a CLI command list goes to the server as: each command's
+/// arguments quoted where the server's tokenizer needs it (the same
+/// [`crate::util::quote_arg_if_needed`] rule the CLI arms use, so a value such
+/// as `a ; b` stays one quoted argument), commands joined by ` ; `. The
+/// server's connection loop splits it back with
+/// [`crate::config::split_chained_commands_pub`] and runs the commands in
+/// order, stopping at the first that fails.
+pub fn command_list_wire_line(first: &[String], queued: &[Vec<String>]) -> String {
+    std::iter::once(first)
+        .chain(queued.iter().map(Vec::as_slice))
+        .map(|command| {
+            command
+                .iter()
+                .map(|arg| crate::util::quote_arg_if_needed(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
+/// Split a command list's reply into what its commands printed, verbatim,
+/// and their error messages: a line starting with `ERROR` (`ERROR: msg`, or
+/// switch-client's `ERROR msg`) is a failed command, the server's one-shot
+/// reply convention every CLI arm reads.
+pub fn command_list_reply(reply: &str) -> (String, Vec<String>) {
+    let mut out = String::new();
+    let mut errors = Vec::new();
+    for line in reply.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("ERROR") {
+            errors.push(rest.strip_prefix(':').unwrap_or(rest).trim().to_string());
+        } else {
+            out.push_str(line);
+        }
+    }
+    (out, errors)
+}
+
 /// Same as [`normalize_flag_equals`] but operates on `Vec<&str>`, returning
 /// owned strings (needed where the caller already has borrowed slices).
 pub fn normalize_flag_equals_borrowed(args: &[&str]) -> Vec<String> {
@@ -1698,3 +1796,7 @@ mod tests_issue692_select_window_targets;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue734_command_queue.rs"]
 mod tests_issue734_command_queue;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_cli_command_list.rs"]
+mod tests_cli_command_list;
