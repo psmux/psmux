@@ -56,10 +56,12 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     where
         CB: Default,
     {
+        let mut screen = self.screen.screen.clone();
+        screen.capture_queries(false);
         Self {
             parser: vte::Parser::new(),
             screen: crate::perform::WrappedScreen {
-                screen: self.screen.screen.clone(),
+                screen,
                 callbacks: CB::default(),
             },
         }

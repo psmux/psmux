@@ -94,6 +94,18 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         _ignore: bool,
         c: char,
     ) {
+        let first = params.iter().next().and_then(|p| p.first()).copied().unwrap_or(0);
+        if !_ignore {
+            let query = match (c, intermediates, first) {
+                ('c', [], 0) => Some(crate::TerminalQuery::Da1),
+                ('c', [b'>'], 0) => Some(crate::TerminalQuery::Da2),
+                ('n', [], 5) => Some(crate::TerminalQuery::DsrStatus),
+                ('p', [b'?', b'$'], mode) if mode > 0 => Some(crate::TerminalQuery::DecrqmPrivate(mode)),
+                ('p', [b'$'], mode) if mode > 0 => Some(crate::TerminalQuery::DecrqmAnsi(mode)),
+                _ => None,
+            };
+            if let Some(query) = query { self.screen.query(query); }
+        }
         let unhandled = |screen: &mut crate::screen::Screen| {
             self.callbacks.unhandled_csi(
                 screen,
@@ -298,6 +310,19 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 }
                 self.screen.set_path_literal(&cwd);
             }
+            [b"7501", body @ ..] => {
+                // vte excludes OSC/ST and semicolon separators from params.
+                let sequence_len = 2 + params.iter().map(|p| p.len()).sum::<usize>()
+                    + params.len().saturating_sub(1) + if _bel_terminated { 1 } else { 2 };
+                if sequence_len <= 4096 {
+                    let body = body.join(&b';');
+                    if body == b"?" {
+                        self.screen.query(crate::TerminalQuery::ProgramStatus);
+                    } else {
+                        self.screen.program_status_mut().report(&body);
+                    }
+                }
+            }
             [b"9999", ..] => {
                 self.screen.squelch_cleared = true;
             }
@@ -355,6 +380,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // Extras (k=i, cl=line, aid=...) are optional kitty/ghostty
             // parameters; we ignore them via `..`.
             [b"133", b"A", ..] => {
+                self.screen.program_status_mut().expire();
                 self.screen.set_shell_command(None);
             }
             // 133;C with cmdline_url= parameter (kitty's fish integration).

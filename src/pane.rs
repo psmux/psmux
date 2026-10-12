@@ -3858,19 +3858,10 @@ impl XtversionScanner {
 // deliberately skips both.
 
 /// A device query psmux answers itself when the console host forwards it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeviceQuery {
-    /// `CSI c` or `CSI 0 c` — primary device attributes.
-    Da1,
-    /// `CSI > c` or `CSI > 0 c` — secondary device attributes.
-    Da2,
-    /// `CSI 5 n` — device status report ("are you ok").
-    DsrStatus,
-    /// `CSI ? Ps $ p` — DECRQM for a private (DEC) mode.
-    DecrqmPrivate(u16),
-    /// `CSI Ps $ p` — DECRQM for an ANSI mode.
-    DecrqmAnsi(u16),
-}
+/// The replies come from the vt100 parser's ordered query capture; the byte
+/// scanner below only decides whether a held synchronized update must be
+/// released so the parser sees the query at once (PR #781).
+pub(crate) use vt100::TerminalQuery as DeviceQuery;
 
 /// The pane screen state a DECRQM answer depends on.
 ///
@@ -3944,6 +3935,7 @@ fn decrqm_ansi_value(_mode: u16) -> u8 { 0 }
 /// reply, which is tmux's `if (m > 0)` guard on both DECRQM arms.
 pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     match q {
+        DeviceQuery::ProgramStatus => vt100::PROGRAM_STATUS_REPLY.to_string(),
         DeviceQuery::Da1 => "\x1b[?1;2c".to_string(),
         DeviceQuery::Da2 => "\x1b[>84;0;0c".to_string(),
         DeviceQuery::DsrStatus => "\x1b[0n".to_string(),
@@ -4475,6 +4467,9 @@ pub fn spawn_reader_thread(
         // either: a console host's opening `ESC[1t ESC[c` is 31 bytes, far
         // under ECHO_CHUNK_MAX, so it skips the coalescing wait entirely.
         let mut device_scanner = DeviceQueryScanner::new();
+        if let Ok(mut parser) = term_reader.lock() {
+            parser.screen_mut().capture_queries(true);
+        }
         // Issue #685: the palette generation last mirrored into
         // `types::PANE_PALETTES`.  A fresh parser starts at 0 with an empty
         // palette, so a pane id reused by respawn-pane withdraws whatever the
@@ -4502,6 +4497,11 @@ pub fn spawn_reader_thread(
                                 dv_writer.fetch_add(1, Ordering::Release);
                                 crate::types::PTY_DATA_READY.store(true, Ordering::Release);
                             }
+                            // Nobody drains queries once this thread returns.
+                            parser.screen_mut().capture_queries(false);
+                            parser.screen_mut().program_status_mut().expire();
+                            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                            crate::types::wake_server_loop();
                             if parser.screen().alternate_screen() {
                                 parser.process(b"\x1b[?25h\x1b[?1049l");
                                 cursor_shape.store(0, Ordering::Release);
@@ -4572,8 +4572,7 @@ pub fn spawn_reader_thread(
             // update first, so the gate must not sit on the question for its
             // one second timeout (PR #781).  A query releases what is held.
             let has_cpr_query = cpr_scanner.scan(&bytes);
-            let device_queries = device_scanner.scan(&bytes);
-            let flush = has_cpr_query || !device_queries.is_empty();
+            let flush = has_cpr_query || !device_scanner.scan(&bytes).is_empty();
             let bytes = sync_gate.feed(bytes, Instant::now(), flush);
             if bytes.is_empty() { continue; }
 
@@ -4592,8 +4591,10 @@ pub fn spawn_reader_thread(
             // that shares a write with the DECSET it asks about reports the
             // post-write value, the way tmux's in-order dispatch does.
             let mut decrqm_state: Option<DecrqmState> = None;
+            let mut device_queries = Vec::new();
             if let Ok(mut parser) = term_reader.lock() {
                 parser.process(&bytes);
+                device_queries = parser.screen_mut().take_queries();
                 if !device_queries.is_empty() {
                     let mut st = DecrqmState::from_screen(parser.screen());
                     st.synchronized_output = sync_gate.is_open();
