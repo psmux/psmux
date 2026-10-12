@@ -289,6 +289,8 @@ fn both_respawn_arms_report_the_error_to_the_requesting_client() {
 ///     vestigial. NOT user-reachable.
 ///   * `dump_layout_json*` / `list_windows_json*` / `list_tree_json` —
 ///     `serde_json` on plain owned structs. NOT user-reachable.
+///   * `refresh_program_status_tabs` — its only fallible operation delegates
+///     to `list_windows_json_with_tabs` above. NOT user-reachable.
 ///   * `send_{text,key,bytes,paste}_to_active` — every branch swallows its
 ///     write and lock failures and returns `Ok(())`. NOT user-reachable.
 ///   * `map_err` / `ok_or_else` / `resolve_window_spec` — inside the
@@ -307,6 +309,7 @@ fn every_question_mark_in_the_event_loop_is_a_classified_one() {
         "dump_layout_json_fast",
         "list_windows_json",
         "list_windows_json_with_tabs",
+        "refresh_program_status_tabs",
         "list_tree_json",
         "send_text_to_active",
         "send_key_to_active",

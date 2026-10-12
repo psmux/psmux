@@ -2592,6 +2592,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // mutations, so we rebuild them lazily via `meta_dirty`.
     let mut meta_dirty = true;
     let mut cached_windows_json = String::new();
+    let mut cached_program_status_version = 0u64;
     let mut cached_tree_json = String::new();
     let mut cached_prefix_str = String::new();
     let mut cached_prefix2_str = String::new();
@@ -3762,6 +3763,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(json);
                 }
                 CtrlReq::DumpState(resp, allow_nc, dump_client_id) => {
+                    state_dirty |= helpers::refresh_program_status_tabs(&app, &mut cached_program_status_version, &mut cached_windows_json)?;
                     // ── Activity / bell / silence detection ──
                     let alert_hooks = helpers::check_window_activity(&mut app);
                     for event in &alert_hooks {
@@ -4275,7 +4277,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                 }
                 CtrlReq::FocusWindowCmd(wid) => { switch_with_copy_save(&mut app, |app| { if let Some(idx) = find_window_index_by_id(app, wid) { app.active_idx = idx; } }); resize_all_panes(&mut app); meta_dirty = true; }
-                CtrlReq::MouseDown(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_down(&mut app, x, y); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseDown(cid,x,y) => { if app.mouse_enabled { let previous = crate::program_status::focused_identity(&app); app.latest_client_id = Some(cid); remote_mouse_down(&mut app, x, y); if crate::program_status::focused_identity(&app) != previous { crate::program_status::acknowledge_focused(&app); } state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::MouseDownRight(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 2, true); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::MouseDownMiddle(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 1, true); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::MouseDrag(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_drag(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
@@ -5706,6 +5708,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::DisplayPaneSelect(digit) => {
+                    let previous = crate::program_status::focused_identity(&app);
                     // User pressed a digit during display-panes overlay: select the matching pane
                     let win = &app.windows[app.active_idx];
                     let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
@@ -5717,6 +5720,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let new_path = path.clone();
                             let old_path = app.windows[app.active_idx].active_path.clone();
                             app.windows[app.active_idx].active_path = new_path;
+                            if crate::program_status::focused_identity(&app) != previous {
+                                crate::program_status::acknowledge_focused(&app);
+                            }
                             if app.windows[app.active_idx].active_path != old_path {
                                 app.last_pane_path = old_path;
                             }
@@ -8500,6 +8506,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // or the output that caused it never reaches the view.
         if state_dirty {
             crate::copy_mode::tick_auto_refresh(&mut app);
+        }
+        if (state_dirty || meta_dirty) && crate::types::has_frame_receivers() {
+            state_dirty |= helpers::refresh_program_status_tabs(&app, &mut cached_program_status_version, &mut cached_windows_json)?;
         }
         let owe_push = (state_dirty || meta_dirty) && crate::types::has_frame_receivers();
         push_deferred = owe_push && pty_batch_pending;

@@ -1,13 +1,13 @@
-# Test: Status bar tab spacing must match tmux exactly
+# Test: Status bar tab spacing and psmux defaults
 # Verifies:
 #   1. Default window-status-format/current-format match tmux
 #   2. Correct conditional expansion (flags present -> flag char; absent -> trailing space)
 #   3. No double-space between session name and first tab
 #   4. Tab assembly spacing matches tmux exactly
-#   5. set -gu resets to tmux default (not a wrong fallback)
+#   5. set -gu resets to the psmux default
 #   6. Config file doesn't leave orphaned window-status-format overrides
 #
-# tmux defaults (from options-table.c):
+# psmux defaults:
 #   status-left:                "[#S] "
 #   window-status-format:       "#I:#W#{?window_flags,#{window_flags}, }"
 #   window-status-current-format: "#I:#W#{?window_flags,#{window_flags}, }"
@@ -51,9 +51,9 @@ Start-Sleep -Seconds 4
 $expected_wsf = '#I:#W#{?window_flags,#{window_flags}, }'
 
 # ===================================================================
-# TEST 1: Default window-status-format matches tmux
+# TEST 1: Default window-status-format
 # ===================================================================
-Write-Test "1: Default window-status-format matches tmux"
+Write-Test "1: Default window-status-format"
 $wsf = (& $PSMUX show-options -g -v window-status-format -t $SESSION 2>&1) | Out-String
 $wsf = $wsf.Trim()
 if ($wsf -eq $expected_wsf) {
@@ -63,9 +63,9 @@ if ($wsf -eq $expected_wsf) {
 }
 
 # ===================================================================
-# TEST 2: Default window-status-current-format matches tmux
+# TEST 2: Default window-status-current-format
 # ===================================================================
-Write-Test "2: Default window-status-current-format matches tmux"
+Write-Test "2: Default window-status-current-format"
 $wscf = (& $PSMUX show-options -g -v window-status-current-format -t $SESSION 2>&1) | Out-String
 $wscf = $wscf.Trim()
 if ($wscf -eq $expected_wsf) {
@@ -205,9 +205,9 @@ if ($f1 -eq $f2) {
 }
 
 # ===================================================================
-# TEST 10: set -gu resets to tmux default (not wrong #I:#W#F)
+# TEST 10: set -gu resets to the psmux default
 # ===================================================================
-Write-Test "10: set -gu resets to tmux default"
+Write-Test "10: set -gu resets to the psmux default"
 & $PSMUX set-option -t $SESSION window-status-format 'CUSTOM' 2>&1 | Out-Null
 Start-Sleep -Milliseconds 500
 $custom = (& $PSMUX show-options -g -v window-status-format -t $SESSION 2>&1) | Out-String

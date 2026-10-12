@@ -337,12 +337,16 @@ pub fn restore_copy_state_from_pane(app: &mut AppState) {
 /// Call the `switch_fn` closure between save and restore to perform the
 /// actual focus change.
 pub fn switch_with_copy_save<F: FnOnce(&mut AppState)>(app: &mut AppState, switch_fn: F) {
+    let previous = crate::program_status::focused_identity(app);
     let was_copy = in_copy_mode(app);
     let had_prompt = copy_prompt_text(&app.mode).is_some();
     if was_copy {
         save_copy_state_to_pane(app);
     }
     switch_fn(app);
+    if crate::program_status::focused_identity(app) != previous {
+        crate::program_status::acknowledge_focused(app);
+    }
     // After switching, check if the new pane has copy state to restore.
     let win = &app.windows[app.active_idx];
     let new_pane_has_copy = active_pane(&win.root, &win.active_path)

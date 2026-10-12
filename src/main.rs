@@ -51,6 +51,7 @@ mod wsl_path;
 mod terminal_overrides;
 mod socket_path;
 mod environ;
+mod program_status;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;

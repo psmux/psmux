@@ -783,6 +783,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     if selected + 1 < tree_len { if let Mode::WindowChooser { selected: s, .. } = &mut app.mode { *s += 1; } }
                 }
                 KeyCode::Enter => {
+                    let previous = crate::program_status::focused_identity(app);
                     if let Mode::WindowChooser { selected: s, ref tree } = &app.mode {
                         let entry = &tree[*s];
                         if entry.is_current_session {
@@ -792,6 +793,9 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                                 if let Some(pos) = app.win_pos(wi) {
                                     app.last_window_idx = app.active_idx;
                                     app.active_idx = pos;
+                                    if crate::program_status::focused_identity(app) != previous {
+                                        crate::program_status::acknowledge_focused(app);
+                                    }
                                 }
                             }
                         } else {
@@ -1247,6 +1251,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             Ok(false)
         }
         Mode::PaneChooser { .. } => {
+            let previous = crate::program_status::focused_identity(app);
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => { app.mode = Mode::Passthrough; }
                 KeyCode::Char(d) if d.is_ascii_digit() => {
@@ -1254,6 +1259,9 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     if let Some((_, path)) = app.display_map.iter().find(|(n, _)| *n == choice) {
                         let win = &mut app.windows[app.active_idx];
                         win.active_path = path.clone();
+                        if crate::program_status::focused_identity(app) != previous {
+                            crate::program_status::acknowledge_focused(app);
+                        }
                     }
                     app.mode = Mode::Passthrough;
                 }
@@ -3606,10 +3614,14 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         for c in text.chars() {
             if c.is_ascii_digit() {
                 let idx = c.to_digit(10).unwrap() as usize;
+                let previous = crate::program_status::focused_identity(app);
                 if let Some((_, path)) = app.display_map.iter().find(|(d, _)| *d == idx) {
                     let path = path.clone();
                     if let Some(win) = app.windows.get_mut(app.active_idx) {
                         win.active_path = path;
+                    }
+                    if crate::program_status::focused_identity(app) != previous {
+                        crate::program_status::acknowledge_focused(app);
                     }
                 }
                 app.mode = Mode::Passthrough;

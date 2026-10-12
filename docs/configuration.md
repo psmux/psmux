@@ -239,8 +239,8 @@ Details worth knowing:
 | `popup-style` | Str | | Colours of the popup content area: cells the program leaves at the terminal default take them. `display-popup -s` overrides its colours for one popup |
 | `clock-mode-colour` | Str | | Colour of the `clock-mode` digits |
 | `clock-mode-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
-| `window-status-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Inactive tab format. Equivalent to tmux's `#I:#W#F`, written out so a flagless window still reserves one space |
-| `window-status-current-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Active tab format. Same shape as `window-status-format` |
+| `window-status-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Inactive tab format. See [program-attention opt-in](program-status.md#opt-in-to-attention-indicators) |
+| `window-status-current-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Active tab format. |
 | `window-status-separator` | Str | `" "` | Tab separator |
 | `window-status-style` | Str | | Inactive tab style |
 | `window-status-current-style` | Str | | Active tab style |
