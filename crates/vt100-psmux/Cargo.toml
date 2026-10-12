@@ -85,6 +85,14 @@ path = "tests/issue685_osc4_palette.rs"
 name = "issue749_emoji_clusters"
 path = "tests/issue749_emoji_clusters.rs"
 
+[[test]]
+name = "program_status"
+path = "tests/program_status.rs"
+
+[[test]]
+name = "query_detector"
+path = "tests/query_detector.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 

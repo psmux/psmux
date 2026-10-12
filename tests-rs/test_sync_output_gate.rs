@@ -186,6 +186,164 @@ fn sync_gate_finds_an_end_split_at_every_offset() {
 }
 
 #[test]
+fn sync_gate_shared_detection_releases_every_query_split() {
+    for (query, expected) in [
+        (&b"\x1b[c"[..], DeviceQuery::Da1),
+        (&b"\x1b[>c"[..], DeviceQuery::Da2),
+        (&b"\x1b[5n"[..], DeviceQuery::DsrStatus),
+        (&b"\x1b[?2026$p"[..], DeviceQuery::DecrqmPrivate(2026)),
+        (&b"\x1b[4$p"[..], DeviceQuery::DecrqmAnsi(4)),
+        (&b"\x1b]7501;?\x07"[..], DeviceQuery::ProgramStatus),
+        (&b"\x1b]7501;?\x1b\\"[..], DeviceQuery::ProgramStatus),
+    ] {
+        for cut in 0..=query.len() {
+            let mut detector = vt100::QueryDetector::default();
+            let mut gate = SyncGate::new();
+            let mut parser = vt100::Parser::default();
+            parser.screen_mut().capture_queries(true);
+            let t0 = Instant::now();
+            let held = cat(&[B, b"held\x1b]7501;state=blocked:app=test\x07"]);
+            assert!(!detector.scan(&held));
+            assert!(gate.feed(held, t0, false).is_empty());
+            assert!(parser.screen().program_status().get("").is_none());
+            let mut captured = Vec::new();
+            for batch in [&query[..cut], &query[cut..]] {
+                let flush = detector.scan(batch);
+                let released = gate.feed(batch.to_vec(), t0, flush);
+                parser.process(&released);
+                captured.extend(parser.screen_mut().take_queries());
+            }
+            assert_eq!(captured, vec![expected], "{query:?}, cut {cut}");
+            assert!(gate.is_open(), "a query must not close the update");
+            assert_eq!(parser.screen().contents(), "held");
+            assert_eq!(parser.screen().program_status().get("").unwrap().state, vt100::ProgramState::Blocked);
+            assert!(gate.feed(b"rest".to_vec(), t0, detector.scan(b"rest")).is_empty());
+            let released = gate.feed(E.to_vec(), t0, detector.scan(E));
+            parser.process(&released);
+            assert_eq!(parser.screen().contents(), "heldrest");
+            assert!(parser.screen_mut().take_queries().is_empty());
+            assert!(!gate.is_open());
+        }
+    }
+}
+
+#[test]
+fn sync_gate_keeps_paint_and_reports_held_until_a_real_query() {
+    let mut detector = vt100::QueryDetector::default();
+    let mut gate = SyncGate::new();
+    let mut parser = vt100::Parser::default();
+    parser.screen_mut().capture_queries(true);
+    let t0 = Instant::now();
+    for batch in [B, b"paint\x1b[31m", b"\x1b]2;7501;? [c\x07", b"\x1b]7501;state=done\x07"] {
+        assert!(!detector.scan(batch));
+        assert!(gate.feed(batch.to_vec(), t0, false).is_empty());
+    }
+    assert_eq!(parser.screen().contents(), "");
+    assert!(parser.screen().program_status().get("").is_none());
+    let query = b"\x1b[?2004h\x1b]7501;?\x07\x1b[c\x1b[?2026$p";
+    assert!(detector.scan(query));
+    let released = gate.feed(query.to_vec(), t0, true);
+    parser.process(&released);
+    let queries = parser.screen_mut().take_queries();
+    assert_eq!(queries, vec![DeviceQuery::ProgramStatus, DeviceQuery::Da1, DeviceQuery::DecrqmPrivate(2026)]);
+    let mut state = DecrqmState::from_screen(parser.screen());
+    state.synchronized_output = gate.is_open();
+    assert!(state.bracketed_paste);
+    let replies: String = queries.into_iter().map(|q| device_reply(q, &state)).collect();
+    assert_eq!(replies, format!("{}\x1b[?1;2c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY));
+    assert_eq!(parser.screen().program_status().get("").unwrap().state, vt100::ProgramState::Done);
+    assert!(!detector.scan(b""));
+    assert!(parser.screen_mut().take_queries().is_empty());
+}
+
+#[test]
+fn sync_gate_exit_drains_reports_before_expiring_transient_state() {
+    let mut gate = SyncGate::new();
+    let mut parser = vt100::Parser::default();
+    let reports = cat(&[B, b"\x1b]7501;state=done\x07\x1b]7501;state=blocked:id=child\x07"]);
+    assert!(gate.feed(reports, Instant::now(), false).is_empty());
+    assert!(parser.screen().program_status().get("").is_none());
+    parser.process(&gate.take_all());
+    assert!(parser.screen().program_status().get("child").is_some());
+    parser.screen_mut().program_status_mut().expire();
+    assert_eq!(parser.screen().program_status().get("").unwrap().state, vt100::ProgramState::Done);
+    assert!(parser.screen().program_status().get("child").is_none());
+}
+
+#[test]
+fn parser_thread_answers_queries_before_an_open_update_times_out() {
+    struct Output {
+        batches: std::sync::mpsc::Receiver<Vec<u8>>,
+        current: std::io::Cursor<Vec<u8>>,
+    }
+    impl std::io::Read for Output {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.current.position() as usize == self.current.get_ref().len() {
+                match self.batches.recv() {
+                    Ok(batch) => self.current = std::io::Cursor::new(batch),
+                    Err(_) => return Ok(0),
+                }
+            }
+            std::io::Read::read(&mut self.current, buf)
+        }
+    }
+    let pane_id = usize::MAX - 7501;
+    assert!(crate::types::take_device_replies(pane_id).is_none());
+    let (send, receive) = std::sync::mpsc::channel();
+    let parser = Arc::new(Mutex::new(vt100::Parser::default()));
+    spawn_reader_thread(
+        Box::new(Output { batches: receive, current: std::io::Cursor::new(Vec::new()) }),
+        parser.clone(), Default::default(), Default::default(),
+        Default::default(), Default::default(), Default::default(),
+        Default::default(), pane_id, None,
+    );
+    let start = Instant::now();
+    send.send(cat(&[B, b"paint\x1b]7501;state=blocked\x07\x1b]7501;?\x07\x1b[c\x1b[?2026$p"])).unwrap();
+    let mut reply = Vec::new();
+    let expected = format!("{}\x1b[?1;2c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY).into_bytes();
+    while reply.len() < expected.len() && start.elapsed() < SYNC_TIMEOUT / 2 {
+        if let Some(bytes) = crate::types::take_device_replies(pane_id) { reply.extend(bytes); }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(reply, expected, "a program waiting on replies must not wait for the sync timeout");
+    assert_eq!(parser.lock().unwrap().screen().contents(), "paint");
+    assert_eq!(parser.lock().unwrap().screen().program_status().get("").unwrap().state, vt100::ProgramState::Blocked);
+    drop(send);
+    let exit = Instant::now();
+    while parser.lock().unwrap().screen().program_status().get("").is_some() && exit.elapsed() < Duration::from_secs(2) {
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(parser.lock().unwrap().screen().program_status().get("").is_none());
+    assert!(crate::types::take_device_replies(pane_id).is_none());
+}
+
+#[test]
+fn sync_gate_shared_detection_flood_stays_linear() {
+    let mut detector = vt100::QueryDetector::default();
+    let mut gate = SyncGate::new();
+    let t0 = Instant::now();
+    assert!(!detector.scan(B));
+    assert!(gate.feed(B.to_vec(), t0, false).is_empty());
+    let chunk = vec![b'x'; 16 * 1024];
+    let chunks = (SYNC_MAX_HELD / chunk.len()) - 1;
+    let quarter = chunks / 4;
+    let mut first = Duration::ZERO;
+    let mut last = Duration::ZERO;
+    let start = Instant::now();
+    for n in 0..chunks {
+        let s = Instant::now();
+        assert!(!detector.scan(&chunk));
+        assert!(gate.feed(chunk.clone(), t0, false).is_empty());
+        if n < quarter { first += s.elapsed(); }
+        if n >= chunks - quarter { last += s.elapsed(); }
+    }
+    let took = start.elapsed();
+    eprintln!("shared detector + gate held {} bytes in {:?} (first {:?}, last {:?})", chunks * chunk.len(), took, first, last);
+    assert!(last < first * 3 + Duration::from_millis(30), "holding must remain linear: first {first:?}, last {last:?}");
+    assert!(took < Duration::from_secs(5), "shared detection and holding took {took:?}");
+}
+
+#[test]
 fn sync_gate_ignores_other_private_modes_that_share_the_prefix() {
     let mut g = SyncGate::new();
     let other = b"\x1b[?20260h\x1b[?2026$p".to_vec();

@@ -141,6 +141,9 @@ pub struct Screen {
     /// 3=indeterminate,4=warning} and value ∈ 0..=100. `None` until first set;
     /// stays `Some` after that so a clear (state=0) is also forwarded.
     osc94_progress: Option<(u8, u8)>,
+    program_status: crate::ProgramStatuses,
+    capture_queries: bool,
+    pending_queries: Vec<crate::TerminalQuery>,
 
     /// Pending OSC 52 clipboard payload emitted by the child process inside
     /// this pane.  Format: `Some((selector_bytes, base64_payload))`.  The
@@ -236,6 +239,9 @@ impl Screen {
             osc_title: String::new(),
             osc7_path: None,
             osc94_progress: None,
+            program_status: crate::ProgramStatuses::default(),
+            capture_queries: false,
+            pending_queries: Vec::new(),
             osc52_clipboard: None,
             hyperlinks: Vec::new(),
             osc_shell_command: None,
@@ -324,7 +330,10 @@ impl Screen {
         let palette = self.palette.take();
         let palette_generation = self.palette_generation;
         let allow_alternate_screen = self.allow_alternate_screen;
+        let mut program_status = std::mem::take(&mut self.program_status);
+        program_status.clear();
         *self = Self::new(size, scrollback_len);
+        self.program_status = program_status;
         self.grid.put_scrollback(history);
         self.hyperlinks = hyperlinks;
         self.palette = palette;
@@ -960,6 +969,31 @@ impl Screen {
                 self.osc7_path = Some(path.to_string());
             }
         }
+    }
+
+    /// Live OSC 7501 records, independent of the active terminal grid.
+    pub fn program_status(&self) -> &crate::ProgramStatuses {
+        &self.program_status
+    }
+
+    /// Mutable records for acknowledgement and attached-process exit cleanup.
+    pub fn program_status_mut(&mut self) -> &mut crate::ProgramStatuses {
+        &mut self.program_status
+    }
+
+    /// Enable ordered query capture. The host must drain queries after processing.
+    pub fn capture_queries(&mut self, enabled: bool) {
+        self.capture_queries = enabled;
+        if !enabled { self.pending_queries.clear(); }
+    }
+
+    /// Drain queries in parser dispatch order. Snapshots do not capture queries.
+    pub fn take_queries(&mut self) -> Vec<crate::TerminalQuery> {
+        std::mem::take(&mut self.pending_queries)
+    }
+
+    pub(crate) fn query(&mut self, query: crate::TerminalQuery) {
+        if self.capture_queries { self.pending_queries.push(query); }
     }
 
     /// Returns the most recent OSC 9;4 progress indicator state, if any.
@@ -1695,7 +1729,14 @@ impl Screen {
 
     // ESC c
     pub(crate) fn ris(&mut self) {
+        let mut statuses = std::mem::take(&mut self.program_status);
+        statuses.clear();
+        let queries = std::mem::take(&mut self.pending_queries);
+        let capture = self.capture_queries;
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+        self.program_status = statuses;
+        self.pending_queries = queries;
+        self.capture_queries = capture;
     }
 
     // csi codes

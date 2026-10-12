@@ -3854,23 +3854,11 @@ impl XtversionScanner {
 // `CSI 6 n` is answered by the CPR responder (`CprScanner` plus
 // `helpers::drain_cpr_pending`, which reports the pane's real cursor), and
 // `CSI ? 996 n` is answered by the colour path.  Answering either a second
-// time here would hand the asking program a duplicate reply, so the scanner
-// deliberately skips both.
+// time here would hand the asking program a duplicate reply, so ordered
+// query capture deliberately skips both.
 
 /// A device query psmux answers itself when the console host forwards it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeviceQuery {
-    /// `CSI c` or `CSI 0 c` — primary device attributes.
-    Da1,
-    /// `CSI > c` or `CSI > 0 c` — secondary device attributes.
-    Da2,
-    /// `CSI 5 n` — device status report ("are you ok").
-    DsrStatus,
-    /// `CSI ? Ps $ p` — DECRQM for a private (DEC) mode.
-    DecrqmPrivate(u16),
-    /// `CSI Ps $ p` — DECRQM for an ANSI mode.
-    DecrqmAnsi(u16),
-}
+pub(crate) use vt100::TerminalQuery as DeviceQuery;
 
 /// The pane screen state a DECRQM answer depends on.
 ///
@@ -3940,10 +3928,11 @@ fn decrqm_private_value(mode: u16, st: &DecrqmState) -> u8 {
 /// input.c:1637-1649), so every mode reports 0, "not recognised".
 fn decrqm_ansi_value(_mode: u16) -> u8 { 0 }
 
-/// The exact bytes tmux would send for `q`.  Empty when the query draws no
-/// reply, which is tmux's `if (m > 0)` guard on both DECRQM arms.
+/// Fixed OSC 7501 capability reply or tmux-compatible device reply.
+/// Empty for a zero-mode DECRQM, matching tmux's `if (m > 0)` guard.
 pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     match q {
+        DeviceQuery::ProgramStatus => vt100::PROGRAM_STATUS_REPLY.to_string(),
         DeviceQuery::Da1 => "\x1b[?1;2c".to_string(),
         DeviceQuery::Da2 => "\x1b[>84;0;0c".to_string(),
         DeviceQuery::DsrStatus => "\x1b[0n".to_string(),
@@ -3957,146 +3946,28 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     }
 }
 
-/// The first parameter of a CSI parameter list, `None` when it is absent.
-/// xterm and tmux both default an absent parameter to 0.
-fn csi_first_param(params: &[u8]) -> Option<u16> {
-    let first = match params.iter().position(|&c| c == b';') {
-        Some(p) => &params[..p],
-        None => params,
-    };
-    if first.is_empty() { return None; }
-    let mut v: u32 = 0;
-    for &c in first {
-        if !c.is_ascii_digit() { return None; }
-        v = v * 10 + u32::from(c - b'0');
-        if v > u32::from(u16::MAX) { return None; }
-    }
-    u16::try_from(v).ok()
-}
-
-/// Collect every device query in `data` that starts before `max_start` and
-/// ends past `min_end`, in the order they appear.
-///
-/// The two cuts are what let the boundary rescan below report exactly the
-/// queries that straddle a batch boundary: one that ended in the previous
-/// batch was answered then, and one that fits entirely inside the new batch
-/// was already collected by the batch pass, so the boundary pass asks for
-/// "started in the tail, finished in the batch" and nothing else.
-fn scan_device_queries_window(
-    data: &[u8],
-    min_end: usize,
-    max_start: usize,
-    out: &mut Vec<DeviceQuery>,
-) {
-    if !data.contains(&0x1b) { return; }
-    let mut i = 0;
-    while i + 2 < data.len() {
-        if data[i] != 0x1b || data[i + 1] != b'[' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 2;
-        let private = if matches!(data[j], b'?' | b'>' | b'<' | b'=') {
-            let m = data[j];
-            j += 1;
-            Some(m)
-        } else {
-            None
-        };
-        let params_start = j;
-        while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
-            j += 1;
-        }
-        let params = &data[params_start..j];
-        // One intermediate byte is all these queries use: `$` in DECRQM.
-        let intermediate = if j < data.len() && (0x20..=0x2f).contains(&data[j]) {
-            let b = data[j];
-            j += 1;
-            Some(b)
-        } else {
-            None
-        };
-        if j >= data.len() {
-            // Truncated at the edge of the batch: everything from here on is
-            // parameter bytes, so there is no later ESC to find.
-            return;
-        }
-        let end = j + 1;
-        if end > min_end && i < max_start {
-            let first = csi_first_param(params);
-            match (data[j], private, intermediate) {
-                // DA1 / DA2.  A non-zero parameter is not a request to report,
-                // so it stays unanswered, exactly as tmux's
-                // `input_get(ictx, 0, 0, 0)` switch does.
-                (b'c', None, None) if matches!(first, None | Some(0)) => out.push(DeviceQuery::Da1),
-                (b'c', Some(b'>'), None) if matches!(first, None | Some(0)) => {
-                    out.push(DeviceQuery::Da2)
-                }
-                // DSR.  5 is ours; 6 belongs to the CPR responder, which knows
-                // the cursor, and answering it here as well would double up.
-                (b'n', None, None) if first == Some(5) => out.push(DeviceQuery::DsrStatus),
-                // DECRQM.  `CSI ? 996 n` is the colour path's, not this one,
-                // and it is an `n` with a `?`, so it never reaches here anyway.
-                (b'p', Some(b'?'), Some(b'$')) => {
-                    if let Some(m) = first { out.push(DeviceQuery::DecrqmPrivate(m)); }
-                }
-                (b'p', None, Some(b'$')) => {
-                    if let Some(m) = first { out.push(DeviceQuery::DecrqmAnsi(m)); }
-                }
-                _ => {}
-            }
-        }
-        i = params_start;
-    }
-}
-
-/// `scan_device_queries_window` over a whole batch.
+// Test adapter exercises the same query capture used by the parser thread.
 #[cfg(test)]
 pub(crate) fn scan_device_queries(data: &[u8]) -> Vec<DeviceQuery> {
-    let mut out = Vec::new();
-    scan_device_queries_window(data, 0, usize::MAX, &mut out);
-    out
+    DeviceQueryScanner::new().scan(data)
 }
 
-/// Detects device queries split across two reads, the same way `CprScanner`
-/// does for ESC[6n.  Without it a `ESC[` that ends one batch and a `c` that
-/// starts the next would leave the asking program, or the console host itself,
-/// waiting out its whole timeout.
+#[cfg(test)]
 pub(crate) struct DeviceQueryScanner {
-    tail: Vec<u8>,
+    parser: vt100::Parser,
 }
 
+#[cfg(test)]
 impl DeviceQueryScanner {
-    /// One less than the longest query worth carrying.  `ESC [ ? 1 0 0 6 $ p`
-    /// is nine bytes and a longer mode number only costs a couple more.
-    const KEEP: usize = 15;
-
     pub(crate) fn new() -> Self {
-        Self { tail: Vec::with_capacity(Self::KEEP) }
+        let mut parser = vt100::Parser::default();
+        parser.screen_mut().capture_queries(true);
+        Self { parser }
     }
 
     pub(crate) fn scan(&mut self, batch: &[u8]) -> Vec<DeviceQuery> {
-        let mut out = Vec::new();
-        if !self.tail.is_empty() {
-            let mut boundary = self.tail.clone();
-            let tail_len = boundary.len();
-            boundary.extend_from_slice(&batch[..batch.len().min(Self::KEEP)]);
-            // Started in the carried tail, finished in this batch.  Anything
-            // that ended in the tail was answered last batch, and anything
-            // that starts in the batch is the batch pass's to find, so the two
-            // passes partition the queries instead of overlapping.
-            scan_device_queries_window(&boundary, tail_len, tail_len, &mut out);
-        }
-        scan_device_queries_window(batch, 0, usize::MAX, &mut out);
-        if batch.len() >= Self::KEEP {
-            self.tail.clear();
-            self.tail.extend_from_slice(&batch[batch.len() - Self::KEEP..]);
-        } else {
-            self.tail.extend_from_slice(batch);
-            let excess = self.tail.len().saturating_sub(Self::KEEP);
-            self.tail.drain(..excess);
-        }
-        out
+        self.parser.process(batch);
+        self.parser.screen_mut().take_queries()
     }
 }
 
@@ -4466,6 +4337,7 @@ pub fn spawn_reader_thread(
     // ── Parser thread: coalesces staged bytes, processes under one lock ──
     thread::spawn(move || {
         let mut cpr_scanner = CprScanner::new();
+        let mut query_detector = vt100::QueryDetector::default();
         // Issue #597: DA1/DA2/DSR/DECRQM are answered from THIS thread, not
         // the reader thread the XTVERSION and colour answers live on, because
         // a DECRQM answer has to report the pane's mode state as of the bytes
@@ -4474,7 +4346,9 @@ pub fn spawn_reader_thread(
         // latency that pushed XTVERSION into the reader thread does not bite
         // either: a console host's opening `ESC[1t ESC[c` is 31 bytes, far
         // under ECHO_CHUNK_MAX, so it skips the coalescing wait entirely.
-        let mut device_scanner = DeviceQueryScanner::new();
+        if let Ok(mut parser) = term_reader.lock() {
+            parser.screen_mut().capture_queries(true);
+        }
         // Issue #685: the palette generation last mirrored into
         // `types::PANE_PALETTES`.  A fresh parser starts at 0 with an empty
         // palette, so a pane id reused by respawn-pane withdraws whatever the
@@ -4502,6 +4376,9 @@ pub fn spawn_reader_thread(
                                 dv_writer.fetch_add(1, Ordering::Release);
                                 crate::types::PTY_DATA_READY.store(true, Ordering::Release);
                             }
+                            parser.screen_mut().program_status_mut().expire();
+                            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                            crate::types::wake_server_loop();
                             if parser.screen().alternate_screen() {
                                 parser.process(b"\x1b[?25h\x1b[?1049l");
                                 cursor_shape.store(0, Ordering::Release);
@@ -4572,8 +4449,8 @@ pub fn spawn_reader_thread(
             // update first, so the gate must not sit on the question for its
             // one second timeout (PR #781).  A query releases what is held.
             let has_cpr_query = cpr_scanner.scan(&bytes);
-            let device_queries = device_scanner.scan(&bytes);
-            let flush = has_cpr_query || !device_queries.is_empty();
+            let has_reply_request = query_detector.scan(&bytes);
+            let flush = has_cpr_query || has_reply_request;
             let bytes = sync_gate.feed(bytes, Instant::now(), flush);
             if bytes.is_empty() { continue; }
 
@@ -4583,6 +4460,7 @@ pub fn spawn_reader_thread(
                 cursor_shape.store(shape, Ordering::Release);
             }
             let rmcup = scan_rmcup(&bytes);
+            let mut device_queries = Vec::new();
 
             // Issue #502 diagnostic: capture the exact pre-parse byte stream
             // when PSMUX_PANE_RAW=1. Off by default, one atomic load when off.
@@ -4594,6 +4472,7 @@ pub fn spawn_reader_thread(
             let mut decrqm_state: Option<DecrqmState> = None;
             if let Ok(mut parser) = term_reader.lock() {
                 parser.process(&bytes);
+                device_queries = parser.screen_mut().take_queries();
                 if !device_queries.is_empty() {
                     let mut st = DecrqmState::from_screen(parser.screen());
                     st.synchronized_output = sync_gate.is_open();

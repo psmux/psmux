@@ -94,6 +94,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         _ignore: bool,
         c: char,
     ) {
+        if let Some(query) = crate::queries::csi_query(params, intermediates, _ignore, c) {
+            self.screen.query(query);
+        }
         let unhandled = |screen: &mut crate::screen::Screen| {
             self.callbacks.unhandled_csi(
                 screen,
@@ -207,6 +210,10 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
+        if let Some(query) = crate::queries::osc_query(params) {
+            self.screen.query(query);
+            return;
+        }
         match params {
             [b"0", s] => {
                 self.callbacks.set_window_icon_name(&mut self.screen, s);
@@ -298,6 +305,14 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 }
                 self.screen.set_path_literal(&cwd);
             }
+            [b"7501", body @ ..] => {
+                // vte excludes OSC/ST and semicolon separators from params.
+                let sequence_len = 2 + params.iter().map(|p| p.len()).sum::<usize>()
+                    + params.len().saturating_sub(1) + if _bel_terminated { 1 } else { 2 };
+                if sequence_len <= 4096 {
+                    self.screen.program_status_mut().report(&body.join(&b';'));
+                }
+            }
             [b"9999", ..] => {
                 self.screen.squelch_cleared = true;
             }
@@ -355,6 +370,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // Extras (k=i, cl=line, aid=...) are optional kitty/ghostty
             // parameters; we ignore them via `..`.
             [b"133", b"A", ..] => {
+                self.screen.program_status_mut().expire();
                 self.screen.set_shell_command(None);
             }
             // 133;C with cmdline_url= parameter (kitty's fish integration).

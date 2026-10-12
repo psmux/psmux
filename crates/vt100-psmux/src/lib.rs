@@ -59,6 +59,8 @@ mod grid;
 mod palette;
 mod parser;
 mod perform;
+mod program_status;
+mod queries;
 mod row;
 mod screen;
 mod term;
@@ -69,6 +71,8 @@ pub use callbacks::Callbacks;
 pub use cell::Cell;
 pub use palette::{parse_palette_index, parse_x11_colour, ColourPalette};
 pub use parser::Parser;
+pub use queries::QueryDetector;
+pub use program_status::{ProgramKind, ProgramState, ProgramStatus, ProgramStatuses, TerminalQuery, PROGRAM_STATUS_REPLY};
 pub use screen::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 pub use width::{
     char_width, clear_codepoint_widths, has_overrides, parse_entry as parse_codepoint_width_entry,
