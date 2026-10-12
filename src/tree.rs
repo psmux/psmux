@@ -591,6 +591,9 @@ pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (O
                         status.success(),
                     );
                     if keep {
+                        if let Ok(mut parser) = p.live_parser().lock() {
+                            parser.screen_mut().program_status_mut().expire();
+                        }
                         p.dead = true;
                         (Some(Node::Leaf(p)), 1)
                     } else {

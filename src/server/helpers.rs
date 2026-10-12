@@ -459,6 +459,8 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
             bell: w.bell_flag,
             last: i == app.last_window_idx,
             tab_text: tab,
+            ps_attention: crate::program_status::window_attention(w),
+            ps_panes: crate::program_status::window_records(w),
             idx: app.win_display_index(i),
             ws_style: owned("window-status-style"),
             wsc_style: owned("window-status-current-style"),
@@ -469,6 +471,19 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
     }
     serde_json::to_string(&v)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))
+}
+
+/// Refresh cached tabs/records when live status changes without structural changes.
+pub(crate) fn refresh_program_status_tabs(
+    app: &AppState,
+    cached_version: &mut u64,
+    cached_windows: &mut String,
+) -> io::Result<bool> {
+    let version = crate::program_status::version(app);
+    if version == *cached_version { return Ok(false); }
+    *cached_windows = list_windows_json_with_tabs(app)?;
+    *cached_version = version;
+    Ok(true)
 }
 
 /// Sum data_version counters across all panes in the active window.
@@ -500,7 +515,7 @@ pub(crate) fn window_name_check_due(
 }
 
 pub(crate) fn combined_data_version(app: &AppState) -> u64 {
-    let mut v = 0u64;
+    let mut v = crate::program_status::version(app);
     fn walk(node: &Node, v: &mut u64) {
         match node {
             Node::Leaf(p) => {
