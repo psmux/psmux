@@ -34,10 +34,13 @@ fn test_generate_list_clients() {
         floating_focus: None,
     };
     app.windows.push(win);
+    // One row per registered client, tmux's LIST_CLIENTS_TEMPLATE (#724); the
+    // made up `/dev/pts/0` row is gone (discussion #776).
+    app.register_client(1, false);
     let output = generate_list_clients(&app);
     assert!(output.contains("test_session"), "should contain session name");
-    assert!(output.contains("(utf8)"), "should contain encoding");
-    assert!(output.contains("shell"), "should contain window name");
+    assert!(output.starts_with("/dev/pts/1:"), "row names the registered client: {output:?}");
+    assert!(!output.contains("/dev/pts/0:"), "no made up client: {output:?}");
 }
 
 #[test]
@@ -139,6 +142,7 @@ fn test_list_panes_command_prompt_sets_popup() {
 #[test]
 fn test_list_clients_command_prompt_sets_popup() {
     let mut app = mock_app_with_window();
+    app.register_client(1, false);
     app.mode = Mode::CommandPrompt { input: "list-clients".to_string(), cursor: 12 };
     execute_command_prompt(&mut app).unwrap();
     match &app.mode {

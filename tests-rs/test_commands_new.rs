@@ -314,19 +314,22 @@ fn list_clients_output_has_session_and_window_info() {
     let mut app = mock_app_with_windows(&["editor", "term"]);
     app.active_idx = 1;
     app.session_name = "my_project".to_string();
+    app.register_client(1, false);
     execute_command_string(&mut app, "list-clients").unwrap();
     let (cmd, out) = extract_popup(&app);
     assert_eq!(cmd, "list-clients");
+    // tmux's LIST_CLIENTS_TEMPLATE: client name, session, size, terminal and
+    // flags. It has no window name and no "(utf8)"; those came from the made
+    // up row this used to print (discussion #776).
     assert!(out.contains("my_project"), "must contain session name");
-    assert!(out.contains("term"), "must contain active window name");
-    assert!(out.contains("(utf8)"), "must contain encoding marker");
-    assert!(out.contains("/dev/pts/"), "must contain pseudo-terminal path");
+    assert!(out.contains("/dev/pts/1:"), "must name the registered client");
 }
 
 #[test]
 fn lsc_alias_matches_list_clients() {
     let mut app = mock_app_with_window();
     app.session_name = "s1".to_string();
+    app.register_client(1, false);
     execute_command_string(&mut app, "lsc").unwrap();
     let (_, out) = extract_popup(&app);
     assert!(out.contains("s1"), "lsc should show session name");
@@ -629,6 +632,7 @@ fn rename_session_changes_session_name() {
     execute_command_string(&mut app, "rename-session production").unwrap();
     assert_eq!(app.session_name, "production");
     // Verify list-clients reflects the new name
+    app.register_client(1, false);
     execute_command_string(&mut app, "list-clients").unwrap();
     let (_, out) = extract_popup(&app);
     assert!(out.contains("production"), "list-clients should use new session name");
@@ -970,10 +974,10 @@ fn has_session_is_noop() {
 }
 
 #[test]
-fn choose_client_is_noop() {
+fn choose_client_opens_the_client_list() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "choose-client").unwrap();
-    assert!(matches!(app.mode, Mode::Passthrough));
+    assert!(matches!(&app.mode, Mode::PopupMode { command, .. } if command == "choose-client"));
 }
 
 #[test]
@@ -1471,11 +1475,12 @@ fn workflow_complex_command_sequence_via_prompt() {
     // Rename session via prompt
     run_via_prompt(&mut app, "rename-session my_project");
     assert_eq!(app.session_name, "my_project");
-    // Verify list-clients shows updated session and window
+    // Verify list-clients shows the updated session (tmux's client row has
+    // no window name, so the renamed window is checked above instead)
+    app.register_client(1, false);
     run_via_prompt(&mut app, "list-clients");
     let (_, out) = extract_popup(&app);
     assert!(out.contains("my_project"), "should show renamed session");
-    assert!(out.contains("renamed_aux"), "should show current (renamed) window");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

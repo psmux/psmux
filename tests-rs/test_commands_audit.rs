@@ -472,12 +472,17 @@ fn suspendc_alias_shows_not_available() {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn choose_client_shows_single_client_message() {
+fn choose_client_lists_the_attached_clients() {
+    // psmux takes several clients, so the old "single-client model" status
+    // line was wrong (discussion #776); the client list is shown instead, as
+    // the wire path does.
     let mut app = mock_app_with_window();
+    app.register_client(1, false);
     execute_command_string(&mut app, "choose-client").unwrap();
-    let msg = extract_status_message(&app);
-    assert!(msg.contains("single-client") || msg.contains("only client"),
-        "choose-client should show single-client feedback, got: {}", msg);
+    let (cmd, out) = extract_popup(&app);
+    assert_eq!(cmd, "choose-client");
+    assert!(out.contains("/dev/pts/1:"), "choose-client should list the client, got: {}", out);
+    assert!(app.status_message.as_ref().map_or(true, |m| !m.0.contains("single-client")));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

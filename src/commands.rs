@@ -391,13 +391,12 @@ fn generate_list_panes(app: &AppState) -> String {
     output
 }
 
-/// Generate list-clients output from AppState.
+/// Generate list-clients output from AppState: one row per registered client,
+/// the same rows `CtrlReq::ListClients` answers over the wire (#724). This used
+/// to print a single made up `/dev/pts/0` row whatever was attached
+/// (discussion #776).
 fn generate_list_clients(app: &AppState) -> String {
-    format!("/dev/pts/0: {}: {} [{}x{}] (utf8)\n",
-        app.session_name,
-        app.windows[app.active_idx].name,
-        app.client_area.width,
-        app.client_area.height)
+    crate::format::format_list_clients(app, crate::format::default_list_clients_format(), None)
 }
 
 /// Generate show-hooks output from AppState.
@@ -3157,7 +3156,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             app.status_message = Some(("suspend: not available on Windows".to_string(), Instant::now(), None));
         }
         "choose-client" => {
-            app.status_message = Some(("choose-client: single-client model (you are the only client)".to_string(), Instant::now(), None));
+            // psmux has no client mode yet; show the attached clients, as the
+            // wire path does (`ShowTextPopup("choose-client", ...)`). The old
+            // status line claimed a single client model, which psmux is not:
+            // every client is in `client_registry` (discussion #776).
+            let output = generate_list_clients(app);
+            show_output_popup(app, "choose-client", output);
         }
         "customize-mode" => {
             // tmux 3.2+ customize-mode: interactive options editor
@@ -3460,3 +3464,7 @@ mod test_issue725_join_pane_focus;
 #[cfg(test)]
 #[path = "../tests-rs/test_cross_session_source_targets.rs"]
 mod test_cross_session_source_targets;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_disc776_in_process_clients.rs"]
+mod test_disc776_in_process_clients;
