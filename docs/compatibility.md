@@ -105,13 +105,16 @@ Multiple commands can be chained with `;` on a single line, matching tmux behavi
 bind-key M-s split-window -h \; select-pane -L
 ```
 
-From the command line, a `;` or `\;` given as its own argument separates commands the same way. The whole list goes to the server over one connection and runs in order; the first command that fails ends it, and its error is printed with exit status 1:
+From the command line, a `;` or `\;` given as its own argument separates commands the same way. The commands run in order; the first command that fails (including an unknown command) ends the list, and its error is printed with exit status 1:
 
 ```powershell
 psmux select-pane -t work ';' set-option -t work @ready yes
+psmux new-session -d -s dev ';' split-window -h ';' select-layout even-horizontal
 ```
 
-The list goes to the session the first command names. `bind-key`, `set-hook`, `if-shell`, `confirm-before`, `command-prompt`, `display-menu`, `run-shell`, `start-server`, `new-session` and `attach-session` still take the whole line as their own arguments.
+Commands that stay on the session the first command was routed to go to its server over one connection. A command that names another session (or a `%N`, `@N` or `$N` id, whose owner the CLI looks up), and commands that work on the client or across every session (`list-sessions`, `kill-server`, `has-session`, `kill-session`, `run-shell`, `if-shell`, `switch-client`, `detach-client`), run as their own invocation, exactly as they do alone. After `new-session`, the rest of the list runs on the session it created, before the client attaches. `bind-key`, `set-hook`, `confirm-before`, `command-prompt`, `display-menu`, `start-server` and `attach-session` still take the whole line as their own arguments.
+
+Unlike tmux, which parses the whole list before running any of it, commands before an unknown command have already run when it is reported.
 
 ### Run Shell Output
 

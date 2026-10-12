@@ -620,27 +620,23 @@ pub fn split_command_queue<S: AsRef<str>>(args: &[S]) -> Vec<Vec<String>> {
 /// Only a lone `;` or `\;` argument separates, the same whole-token rule
 /// [`crate::config::split_chained_commands_pub`] applies to the line the
 /// server reads; an argument that merely ends in `;` stays data, as it always
-/// has on this route. Commands whose own arguments carry a command list
-/// (`bind-key x a \; b` binds both), that run on the client (`run-shell`,
-/// `start-server` with its own queue, #734), or that need a server the list
-/// cannot be sent to yet (`new-session`) or never hand control back (an
-/// attaching client) keep their whole argv.
+/// has on this route. Commands that hand their arguments, separators and
+/// all, to the server's own splitter (`bind-key`, `set-hook` and the
+/// prompts), that run their own queue (`start-server`, #734), or that never
+/// hand control back (an attaching client) keep their whole argv.
+/// `new-session`, `run-shell` and `if-shell` are split: the caller runs them
+/// through their own arm first (see [`command_list_runs_alone`]).
 pub fn split_cli_command_list<S: AsRef<str>>(
     argv: &[S],
 ) -> Option<(Vec<String>, Vec<Vec<String>>)> {
     let command = argv.first()?.as_ref();
     let keeps_whole_line = matches!(
         command,
-        // The arguments after the key, hook or prompt are themselves a
-        // command list that runs later, not now.
+        // The server splits these lines itself, as it always has.
         "bind-key" | "bind" | "set-hook" | "confirm-before" | "confirm"
-        | "if-shell" | "if" | "command-prompt" | "display-menu" | "menu"
-        // The CLI runs the shell itself and exits with its status.
-        | "run-shell" | "run"
+        | "command-prompt" | "display-menu" | "menu"
         // Runs its own queue against the server it starts (#734).
         | "start-server" | "start" | "warmup"
-        // Creates the server the list would have to go to.
-        | "new-session" | "new"
         // An attaching client does not come back until it detaches.
         | "attach-session" | "attach" | "at" | "a" | "server"
     );
@@ -684,6 +680,86 @@ pub fn command_list_wire_line(first: &[String], queued: &[Vec<String>]) -> Strin
         })
         .collect::<Vec<_>>()
         .join(" ; ")
+}
+
+/// Commands of a CLI command list that run as their own invocation of the
+/// CLI rather than on the connection of the session the list is routed to:
+/// their arm does its work on the client or across every server of the
+/// namespace (`list-sessions`, `kill-server`, `has-session`, `kill-session`,
+/// `run-shell`, `if-shell`'s condition), routes in its own way
+/// (`switch-client`, `detach-client`), or creates or attaches a session.
+/// Sent down one session's connection instead, `ls` listed that session
+/// alone and `kill-server` ended only it.
+pub fn command_list_runs_alone(command: &str) -> bool {
+    matches!(
+        command,
+        "list-sessions" | "ls" | "kill-server" | "has-session" | "has"
+        | "kill-session" | "kill-ses" | "run-shell" | "run" | "if-shell" | "if"
+        | "new-session" | "new" | "attach-session" | "attach" | "at" | "a"
+        | "start-server" | "start" | "warmup" | "switch-client" | "switchc"
+        | "detach-client" | "detach" | "server"
+    )
+}
+
+/// The values a command's `-t` and `-s` flags name, spelled apart (`-t x`),
+/// attached (`-tx`) or ending a cluster (`-dt x`). Scanning stops at `--`.
+/// Reading too much is harmless: the caller only uses these to decide that a
+/// command must be routed on its own.
+pub fn command_list_target_values(command: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut i = 1;
+    while i < command.len() {
+        let arg = command[i].as_str();
+        if arg == "--" {
+            break;
+        }
+        if let Some(letters) = arg.strip_prefix('-') {
+            if let Some(at) = letters.find(|c| c == 't' || c == 's') {
+                let rest = &letters[at + 1..];
+                if rest.is_empty() {
+                    if let Some(value) = command.get(i + 1) {
+                        values.push(value.clone());
+                    }
+                    i += 1;
+                } else {
+                    values.push(rest.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    values
+}
+
+/// Whether a later command of a CLI command list can go down the same
+/// connection as the commands before it, to the session `routed_base` (a
+/// registry base name) the list is routed to.
+///
+/// psmux runs one server per session, so a command naming another session
+/// sent down this connection acted on THIS one: `set -t x @a 1 \; set -t y
+/// @b 2` set both on x, and `send-keys -t y ...` typed into x. Anything that
+/// names a session other than this one, an id that may live elsewhere
+/// (`%N`, `@N`, `$N`: the CLI resolves their owner, #627), a command outside
+/// the tmux catalog (whose CLI arm decides if it exists), or a command that
+/// runs alone ([`command_list_runs_alone`]) is not shared.
+pub fn command_list_shares_session(command: &[String], ns: Option<&str>, routed_base: &str) -> bool {
+    let Some(name) = command.first() else { return false };
+    if command_list_runs_alone(name) || !crate::server::connection::is_catalog_command(name) {
+        return false;
+    }
+    command_list_target_values(command).iter().all(|value| {
+        let value = value.trim_start_matches('=');
+        if value.is_empty() || value.starts_with(':') || value.starts_with('.') {
+            return true;
+        }
+        if value.starts_with(['%', '@', '$']) {
+            return false;
+        }
+        match parse_target(value).session {
+            Some(session) => crate::session::same_session_identity(ns, &session, routed_base),
+            None => true,
+        }
+    })
 }
 
 /// Split a command list's reply into what its commands printed, verbatim,

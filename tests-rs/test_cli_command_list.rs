@@ -103,8 +103,6 @@ fn commands_that_carry_a_command_list_keep_their_whole_argv() {
         &["bind", "x", "split-window", ";", "select-pane", "-D"][..],
         &["set-hook", "-g", "after-new-window", "display", "a", "\\;", "display", "b"][..],
         &["confirm-before", "kill-window", "\\;", "display", "b"][..],
-        &["if-shell", "true", "display a", ";", "display", "b"][..],
-        &["run-shell", "echo a", ";", "display", "b"][..],
         &["start-server", ";", "set", "-g", "exit-empty", "off"][..],
         &["attach", "-t", "p", ";", "display", "b"][..],
     ] {
@@ -113,10 +111,76 @@ fn commands_that_carry_a_command_list_keep_their_whole_argv() {
 }
 
 #[test]
-fn new_session_keeps_its_whole_argv() {
-    // The session it creates is the server the list would have to go to.
-    assert_eq!(split(&["new-session", "-s", "q", ";", "new-window"]), None);
-    assert_eq!(split(&["new-session", "-d", "-s", "q", ";", "new-window", "-t", "q"]), None);
+fn new_session_run_shell_and_if_shell_are_split() {
+    // Each runs through its own arm first; the rest of the list follows.
+    assert_eq!(
+        split(&["new-session", "-d", "-s", "q", ";", "new-window", "-t", "q"]),
+        Some((v(&["new-session", "-d", "-s", "q"]), vec![v(&["new-window", "-t", "q"])]))
+    );
+    assert_eq!(
+        split(&["if-shell", "true", "display a", "\\;", "set", "@b", "1"]),
+        Some((v(&["if-shell", "true", "display a"]), vec![v(&["set", "@b", "1"])]))
+    );
+    assert_eq!(
+        split(&["run-shell", "echo a", ";", "display", "b"]),
+        Some((v(&["run-shell", "echo a"]), vec![v(&["display", "b"])]))
+    );
+}
+
+// Which commands share the routed session's connection.
+
+#[test]
+fn target_values_are_read_spelled_apart_attached_and_clustered() {
+    assert_eq!(command_list_target_values(&v(&["set", "-t", "x", "@a", "1"])), v(&["x"]));
+    assert_eq!(command_list_target_values(&v(&["display", "-tx:1", "-p", "hi"])), v(&["x:1"]));
+    assert_eq!(command_list_target_values(&v(&["join-pane", "-dh", "-s", "y:1", "-t", "x"])), v(&["y:1", "x"]));
+    assert_eq!(command_list_target_values(&v(&["neww", "-dt", "y"])), v(&["y"]));
+    assert!(command_list_target_values(&v(&["send-keys", "--", "-t", "y"])).is_empty());
+}
+
+#[test]
+fn a_command_on_the_routed_session_shares_its_connection() {
+    for argv in [
+        &["set-option", "@a", "1"][..],
+        &["set-option", "-t", "x", "@a", "1"][..],
+        &["set-option", "-t", "=x", "@a", "1"][..],
+        &["display-message", "-t", "x:1.0", "-p", "hi"][..],
+        &["select-window", "-t", ":2"][..],
+        &["select-pane", "-t", ".1"][..],
+        &["list-windows"][..],
+    ] {
+        assert!(command_list_shares_session(&v(argv), None, "x"), "{:?}", argv);
+    }
+    // The routed base carries the -L namespace; a target names the short name.
+    assert!(command_list_shares_session(&v(&["set", "-t", "x", "@a", "1"]), Some("ns"), "ns__x"));
+}
+
+#[test]
+fn a_command_that_leaves_the_routed_session_is_routed_alone() {
+    for argv in [
+        // Another session: on this connection it acted on x (set, send-keys,
+        // new-window all landed in the wrong session).
+        &["set-option", "-t", "y", "@a", "1"][..],
+        &["send-keys", "-t", "y:0", "echo", "Enter"][..],
+        &["new-window", "-dt", "y"][..],
+        // Ids whose owner only the CLI resolves (#627).
+        &["select-pane", "-t", "%3"][..],
+        &["select-window", "-t", "@2"][..],
+        &["display", "-t", "$1", "-p", "x"][..],
+        // Client side or namespace wide work.
+        &["ls"][..],
+        &["list-sessions"][..],
+        &["kill-server"][..],
+        &["has-session", "-t", "x"][..],
+        &["kill-session", "-t", "x"][..],
+        &["run-shell", "echo hi"][..],
+        &["if-shell", "true", "display a"][..],
+        &["switch-client", "-t", "x"][..],
+        // Not in the tmux catalog: its CLI arm decides whether it exists.
+        &["bogus-command"][..],
+    ] {
+        assert!(!command_list_shares_session(&v(argv), None, "x"), "{:?}", argv);
+    }
 }
 
 // ─── the line the list goes to the server as ────────────────────────────────

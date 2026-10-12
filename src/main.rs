@@ -744,36 +744,124 @@ fn session_holding_client(ns: Option<&str>, spec: &str) -> Option<String> {
 /// cut to its first command, and the one line the whole list goes to the
 /// server as. `None` dispatches `args` whole, as before. Control mode reads
 /// its commands from stdin and keeps its argv.
-fn split_command_list_args(args: &[String]) -> Option<(Vec<String>, String)> {
+fn split_command_list_args(args: &[String]) -> Option<(Vec<String>, CommandList)> {
     let index = process_command_index(args)?;
     if args[1..index].iter().any(|a| a == "-C" || a == "-CC") {
         return None;
     }
     let (first, queued) = crate::cli::split_cli_command_list(&args[index..])?;
-    let line = crate::cli::command_list_wire_line(&first, &queued);
     let mut cut = args[..index].to_vec();
-    cut.extend(first);
-    Some((cut, line))
+    cut.extend(first.iter().cloned());
+    let mut commands = vec![first];
+    commands.extend(queued);
+    Some((
+        cut,
+        CommandList {
+            commands,
+            globals: args[1..index].to_vec(),
+            target_session: env::var_os("PSMUX_TARGET_SESSION"),
+            target_full: env::var_os("PSMUX_TARGET_FULL"),
+        },
+    ))
 }
 
-/// Run a command list on the server over one connection, routed by its first
-/// command. The server's connection loop splits the line and runs the
-/// commands in order, stopping at the first that fails, so the commands go
-/// out back to back instead of one client invocation each. What they print
-/// goes to stdout, their errors to stderr, and any error is exit 1, as in
-/// tmux.
-fn run_command_list(line: String) -> io::Result<()> {
-    let reply = send_control_with_response(format!("{}\n", line))?;
-    let (out, errors) = crate::cli::command_list_reply(&reply);
-    io::stdout().write_all(out.as_bytes())?;
-    io::stdout().flush()?;
-    if errors.is_empty() {
-        return Ok(());
+/// A CLI command list, every command (the first included), with what running
+/// one of them as its own invocation needs: the global flags (`-L ns`, ...)
+/// and the routing variables as this process found them, before the first
+/// command's routing rewrote them.
+struct CommandList {
+    commands: Vec<Vec<String>>,
+    globals: Vec<String>,
+    target_session: Option<std::ffi::OsString>,
+    target_full: Option<std::ffi::OsString>,
+}
+
+/// Run `commands` of a list after the session `routed_base` was chosen for
+/// them: the leading run that stays on that session goes down ONE connection
+/// as one line (the server's connection loop runs them in order and stops at
+/// the first that fails), and every command from the first that leaves it
+/// ([`crate::cli::command_list_shares_session`]) runs as its own invocation
+/// of this binary, with its own routing and client side arm, as the CLI runs
+/// it alone. `first_is_routed`: `commands[0]` is the command this process
+/// already routed to `routed_base`. What the commands print goes to stdout,
+/// their errors to stderr. Returns the exit status: 0, or that of the first
+/// command that failed, after which nothing else runs (tmux cmd-queue.c).
+fn run_command_list_on(
+    list: &CommandList,
+    commands: &[Vec<String>],
+    routed_base: &str,
+    first_is_routed: bool,
+    ns: Option<&str>,
+) -> i32 {
+    let mut shared = usize::from(first_is_routed && !commands.is_empty());
+    while shared < commands.len()
+        && crate::cli::command_list_shares_session(&commands[shared], ns, routed_base)
+    {
+        shared += 1;
     }
-    for error in errors {
-        eprintln!("psmux: {}", error);
+    if shared > 0 {
+        let line = crate::cli::command_list_wire_line(&commands[0], &commands[1..shared]);
+        let reply = match send_control_with_response(format!("{}\n", line)) {
+            Ok(reply) => reply,
+            Err(e) => {
+                eprintln!("psmux: {}", e);
+                return 1;
+            }
+        };
+        let (out, errors) = crate::cli::command_list_reply(&reply);
+        let _ = io::stdout().write_all(out.as_bytes());
+        let _ = io::stdout().flush();
+        if !errors.is_empty() {
+            for error in errors {
+                eprintln!("psmux: {}", error);
+            }
+            return 1;
+        }
     }
-    std::process::exit(1);
+    for command in &commands[shared..] {
+        let status = run_list_command_alone(list, command);
+        if status != 0 {
+            return status;
+        }
+    }
+    0
+}
+
+/// The commands after a `new-session` in a CLI command list, run on the
+/// session it created (or, with `-A`, found): `session_base` is its registry
+/// base. A `-t` new-session's group target is not their default target.
+/// Returns the exit status (0 when there is no list).
+fn run_new_session_list(list: Option<&CommandList>, session_base: &str, ns: Option<&str>) -> i32 {
+    let Some(list) = list else { return 0 };
+    env::set_var("PSMUX_TARGET_SESSION", session_base);
+    env::remove_var("PSMUX_TARGET_FULL");
+    run_command_list_on(list, &list.commands[1..], session_base, false, ns)
+}
+
+/// One command of a list as its own invocation of this binary: the same
+/// global flags, the routing variables this process started with, and the
+/// terminal's stdio, so it behaves exactly as `psmux <command>` would.
+fn run_list_command_alone(list: &CommandList, command: &[String]) -> i32 {
+    let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
+    let mut child = std::process::Command::new(exe);
+    child.args(&list.globals).args(command);
+    for (key, value) in [
+        ("PSMUX_TARGET_SESSION", &list.target_session),
+        ("PSMUX_TARGET_FULL", &list.target_full),
+    ] {
+        match value {
+            Some(v) => { child.env(key, v); }
+            None => { child.env_remove(key); }
+        }
+    }
+    let _ = io::stdout().flush();
+    match child.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("psmux: {}", e);
+            1
+        }
+    }
 }
 
 fn main() {
@@ -1047,9 +1135,25 @@ fn run_main() -> io::Result<()> {
     // decides routing and the client side target check; the whole list goes
     // to the server as one line just before dispatch (run_command_list).
     let (args, command_list) = match split_command_list_args(&args) {
-        Some((first, line)) => (first, Some(line)),
+        Some((first, list)) => (first, Some(list)),
         None => (args, None),
     };
+    // A list led by a command that runs alone (`ls \; ...`, `run-shell ...
+    // \; ...`) runs command by command, each its own invocation, before this
+    // process routes anything. new-session runs its own arm and then the rest
+    // on the session it made (see the new-session arm).
+    if let Some(list) = &command_list {
+        let first = list.commands[0][0].as_str();
+        if crate::cli::command_list_runs_alone(first) && !matches!(first, "new-session" | "new") {
+            for command in &list.commands {
+                let status = run_list_command_alone(list, command);
+                if status != 0 {
+                    std::process::exit(status);
+                }
+            }
+            return Ok(());
+        }
+    }
 
     // Issue #635: a value-taking flag with NO value must be rejected before
     // anything else happens, exactly as tmux's arguments.c does. This must be
@@ -1339,8 +1443,14 @@ fn run_main() -> io::Result<()> {
 
     // A command list goes to the server whole, past the first command's arm,
     // which would rebuild the request from its own flags and drop the rest.
-    if let Some(line) = command_list {
-        return run_command_list(line);
+    // Commands that leave the session it was routed to run on their own.
+    if let Some(list) = &command_list {
+        if !matches!(cmd, "new-session" | "new") {
+            let routed = env::var("PSMUX_TARGET_SESSION").unwrap_or_else(|_| "default".to_string());
+            std::process::exit(run_command_list_on(
+                list, &list.commands, &routed, true, l_socket_name.as_deref(),
+            ));
+        }
     }
 
     // Handle help and version flags first
@@ -2037,6 +2147,8 @@ fn run_main() -> io::Result<()> {
                             // -A flag: attach to existing session instead of erroring
                             env::set_var("PSMUX_SESSION_NAME", &port_file_base);
                             env::set_var("PSMUX_REMOTE_ATTACH", "1");
+                            // The rest of a command list runs on it first.
+                            let _ = run_new_session_list(command_list.as_ref(), &port_file_base, l_socket_name.as_deref());
                             // Skip server creation, jump straight to attach
                             // (handled at the bottom of this match block)
                         } else {
@@ -2467,6 +2579,10 @@ fn run_main() -> io::Result<()> {
                     }
                 }
 
+                // `new-session -d -s x \; split-window`: the rest of the list
+                // runs on the session just made, as in tmux, after -P's line
+                // and before attaching. It used to become the new pane's shell
+                // command, which failed at once and took the session with it.
                 if detached {
                     // The readiness wait above already confirmed the initial
                     // window exists. If -P, print the pane info before returning.
@@ -2486,8 +2602,15 @@ fn run_main() -> io::Result<()> {
                             Err(_) => {}
                         }
                     }
+                    let list_status = run_new_session_list(command_list.as_ref(), &port_file_base, l_socket_name.as_deref());
+                    if list_status != 0 {
+                        std::process::exit(list_status);
+                    }
                     return Ok(());
                 } else {
+                    // The client attaches whatever the list did, as tmux's
+                    // does (it is attached before the rest of the list runs).
+                    let _ = run_new_session_list(command_list.as_ref(), &port_file_base, l_socket_name.as_deref());
                     // User wants attached session - set env vars to attach
                     env::set_var("PSMUX_SESSION_NAME", &port_file_base);
                     env::set_var("PSMUX_REMOTE_ATTACH", "1");

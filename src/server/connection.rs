@@ -147,6 +147,14 @@ pub(crate) fn is_error_reply(text: &str) -> bool {
     text.starts_with("ERROR")
 }
 
+/// Whether `name` is a tmux command or alias in the [`TMUX_COMMANDS`] catalog.
+pub(crate) fn is_catalog_command(name: &str) -> bool {
+    TMUX_COMMANDS.iter().any(|entry| match entry.split_once(" (") {
+        Some((command, alias)) => command == name || alias.trim_end_matches(')') == name,
+        None => *entry == name,
+    })
+}
+
 /// Expand a `set-option -F` value as a format before it is stored.
 ///
 /// tmux's set-option takes `-F` and runs the value through format_expand before
@@ -5479,7 +5487,16 @@ match cmd {
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
-    _ => {}
+    _ => {
+        // A name no arm knows did nothing at all, silently, and the list
+        // went on (`set @a 1 ; bogus ; set @b 2` set both at exit 0). tmux
+        // refuses an unknown command ("unknown command: bogus") and runs
+        // none of the list after it; the reply's ERROR ends the list here.
+        if !persistent && in_command_list && !is_catalog_command(cmd) {
+            let _ = writeln!(write_stream, "ERROR: unknown command: {}", cmd);
+            let _ = write_stream.flush();
+        }
+    }
 }
 }
     // Process pending chained commands before reading from socket. A command
