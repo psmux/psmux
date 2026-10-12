@@ -191,18 +191,22 @@ so muscle memory carries over.
 
 | Key | Action |
 |-----|--------|
-| `Up` / `k` / `h` | Move selection up |
-| `Down` / `j` / `l` | Move selection down |
+| `Up` / `k` / `C-p` | Move selection up |
+| `Down` / `j` / `C-n` | Move selection down |
+| `Left` / `h` / `-` | choose-tree: collapse the selected row (or its parent). choose-session: move up |
+| `Right` / `l` / `+` | choose-tree: expand the selected row. choose-session: move down |
 | `g` / `Home` | Jump to first entry |
 | `G` / `End` | Jump to last entry |
-| `PageUp` / `PageDown` | Move selection by 10 rows |
-| `1`..`9`, `0` | Append digit to the jump buffer (Enter consumes it) |
+| `PageUp` / `PageDown` / `C-b` / `C-f` | Move selection by one page (the height of the list) |
+| `0`..`9`, `M-a`.. | choose-tree: jump to that line and switch at once |
+| `1`..`9`, `0` | choose-session: append digit to the jump buffer (Enter consumes it) |
 | `Backspace` | Edit the jump buffer |
-| `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty) |
+| `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty). A window or pane of another session switches to that session on that window or pane |
 | `f` | Enter session-name filter mode (choose-session only) |
 | `p` | Toggle live preview |
 | `x` | Kill the highlighted entry (session in choose-session, window in choose-tree), with confirmation |
 | `Esc` | Answer a pending kill question with no; otherwise clear an active session filter; otherwise close the chooser |
+| `q` / `C-g` | Close the chooser (`q` types into an active session filter instead) |
 
 In the session picker, `f` starts filter mode, which matches session names
 case-insensitively as you type. `Backspace` edits the filter. `Esc` with filter
@@ -214,8 +218,9 @@ filter text closes the picker.
 cancels, including `Enter`, which inside a chooser is the key that activates a
 row. The chooser stays open behind the question either way.
 
-`q` does **not** close these two choosers. Every printable key other than the ones above is
-swallowed so it cannot leak into the focused pane, and `q` falls into that group. Use `Esc`.
+`q` closes these choosers as it closes every tmux mode. Every other printable key not listed
+above is swallowed so it cannot leak into the focused pane. The pane's cursor is hidden while a
+chooser is open, as tmux hides it for every mode tree mode.
 
 ### Buffer Chooser (choose-buffer)
 
@@ -227,12 +232,13 @@ Open with `Prefix + =`.
 | `Down` / `j` / `l` | Move selection down |
 | `g` / `Home` | Jump to first buffer |
 | `G` / `End` | Jump to last buffer |
-| `PageUp` / `PageDown` | Move selection by 10 rows |
+| `C-p` / `C-n` | Move selection up / down |
+| `PageUp` / `PageDown` / `C-b` / `C-f` | Move selection by one page (the height of the list) |
 | `1`..`9`, `0` | Append digit to the jump buffer |
 | `Backspace` | Edit the jump buffer |
 | `Enter` | Paste the selected buffer (or the jump buffer index if non-empty) |
 | `d` / `Delete` | Delete the selected buffer and stay open |
-| `Esc` / `q` | Close the chooser |
+| `Esc` / `q` / `C-g` | Close the chooser |
 
 ### Keys Viewer (list-keys)
 

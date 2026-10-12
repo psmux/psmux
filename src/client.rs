@@ -447,6 +447,18 @@ pub(crate) fn chooser_kill_confirmed(code: KeyCode) -> bool {
     matches!(code, KeyCode::Char('y') | KeyCode::Char('Y'))
 }
 
+/// Make a window or pane current in ANOTHER session's server before the
+/// client switches to it, so choosing a row of that session in the tree lands
+/// on that row (discussion #776). `focus` is one `focus-window <id>` or
+/// `focus-pane <id>` line. Written on an authenticated connection of its own
+/// and closed, so the server runs it before the switching client attaches.
+fn chooser_focus_in_session(session: &str, focus: &str) {
+    let Ok(port_str) = std::fs::read_to_string(crate::paths::port_file(session)) else { return };
+    let Ok(port) = port_str.trim().parse::<u16>() else { return };
+    let key = read_session_key(session).unwrap_or_default();
+    let _ = crate::session::send_auth_cmd(&format!("127.0.0.1:{}", port), key.trim(), focus.as_bytes());
+}
+
 /// What the tree chooser's kill question names. Its rows are built as
 /// `"  2: bash* (1 panes)"`, and tmux's own question carries the window index
 /// alone, `"Kill window 2? "` (`window-tree.c:1295`), so the part in front of
@@ -3114,6 +3126,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut tree_vis_map: Vec<usize> = Vec::new();
     let mut tree_selected: usize = 0;
     let mut tree_scroll: usize = 0;
+    // How many list rows each chooser drew on its last frame. tmux pages by
+    // `mtd->height`, the list height (mode-tree.c:1318-1333), so Page Up and
+    // Page Down read these instead of a fixed 10 (discussion #776).
+    let mut tree_page_h: usize = 10;
+    let mut session_page_h: usize = 10;
+    let mut buffer_page_h: usize = 10;
     let mut buffer_chooser = false;
     let mut buffer_entries: Vec<(usize, usize, String)> = Vec::new();  // (index, byte_len, preview)
     let mut buffer_selected: usize = 0;
@@ -5045,24 +5063,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         tree_all.push((true, usize::MAX, 0,
                                             format!("{}: {} windows{}", sess_name, nw, attached),
                                             sess_name.clone()));
-                                        if is_current {
-                                            for (wid, wname, active, panes, disp) in wins.iter() {
-                                                let marker = if *active { "*" } else { "" };
-                                                if *active { active_tree_row = Some(tree_all.len()); }
-                                                tree_all.push((true, *wid, 0,
-                                                    format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
-                                                    sess_name.clone()));
-                                                for (pid, ptitle) in panes {
-                                                    tree_all.push((false, *wid, *pid,
-                                                        format!("    {}", ptitle),
-                                                        sess_name.clone()));
-                                                }
-                                            }
-                                        } else {
-                                            for (wid, wname, active, panes, disp) in wins.iter() {
-                                                let marker = if *active { "*" } else { "" };
-                                                tree_all.push((true, *wid, 0,
-                                                    format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
+                                        // Every session's windows carry their panes, as
+                                        // tmux's window_tree_build_window builds pane items
+                                        // for every window of every session. Only the
+                                        // current session's rows used to get them, so
+                                        // another session's windows had nothing to expand
+                                        // (discussion #776, note 3).
+                                        for (wid, wname, active, panes, disp) in wins.iter() {
+                                            let marker = if *active { "*" } else { "" };
+                                            if *active && is_current { active_tree_row = Some(tree_all.len()); }
+                                            tree_all.push((true, *wid, 0,
+                                                format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
+                                                sess_name.clone()));
+                                            for (pid, ptitle) in panes {
+                                                tree_all.push((false, *wid, *pid,
+                                                    format!("    {}", ptitle),
                                                     sess_name.clone()));
                                             }
                                         }
@@ -5349,6 +5364,36 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     }
                                 }
                             }
+                            // tmux `mode_tree_key` aliases the choosers did not
+                            // know (discussion #776): `q` and `C-g` exit every
+                            // mode (mode-tree.c:1289-1293), `C-p`/`C-n`/`C-b`/`C-f`
+                            // move like Up/Down/PageUp/PageDown (:1301, :1307,
+                            // :1319, :1327), and in the tree, whose rows have
+                            // depth, `h`/`-` collapse and `l`/`+` expand like
+                            // Left/Right (:1390-1412). Each alias becomes the key
+                            // the chooser already handles. A session filter
+                            // being typed keeps its printable keys.
+                            let mut chooser_exit = false;
+                            let filter_typing = session_chooser
+                                && session_filter_active
+                                && !key.modifiers.contains(KeyModifiers::CONTROL);
+                            if (tree_chooser || session_chooser || buffer_chooser)
+                                && chooser_kill.is_none()
+                                && !filter_typing
+                                && effective_code == key.code
+                            {
+                                use crate::choose_tree::ModeKey;
+                                match crate::choose_tree::mode_tree_alias(key.code, key.modifiers, tree_chooser) {
+                                    Some(ModeKey::Exit) => chooser_exit = true,
+                                    Some(ModeKey::Up) => effective_code = KeyCode::Up,
+                                    Some(ModeKey::Down) => effective_code = KeyCode::Down,
+                                    Some(ModeKey::PageUp) => effective_code = KeyCode::PageUp,
+                                    Some(ModeKey::PageDown) => effective_code = KeyCode::PageDown,
+                                    Some(ModeKey::Collapse) => effective_code = KeyCode::Left,
+                                    Some(ModeKey::Expand) => effective_code = KeyCode::Right,
+                                    None => {}
+                                }
+                            }
                             match effective_code {
                                 // A chooser's kill question takes the very next key, as
                                 // tmux's prompt does: it is set with PROMPT_SINGLE, so it
@@ -5462,6 +5507,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         }
                                     }
                                 }
+                                // `q` or `C-g`: the mode exits, as Escape does.
+                                _ if chooser_exit => {
+                                    tree_chooser = false;
+                                    session_chooser = false;
+                                    session_filter_active = false;
+                                    session_filter.clear();
+                                    session_num_buffer.clear();
+                                    buffer_chooser = false;
+                                    buffer_num_buffer.clear();
+                                    selection_changed = true;
+                                }
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => {
                                     let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
@@ -5497,10 +5553,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('G') if session_chooser => {
                                     session_selected = session_filtered_indices(&session_entries, &session_filter).len().saturating_sub(1);
                                 }
-                                KeyCode::PageUp if session_chooser => { session_selected = session_selected.saturating_sub(10); }
+                                KeyCode::PageUp if session_chooser => { session_selected = crate::choose_tree::page_up(session_selected, session_page_h); }
                                 KeyCode::PageDown if session_chooser => {
-                                    let last = session_filtered_indices(&session_entries, &session_filter).len().saturating_sub(1);
-                                    session_selected = (session_selected + 10).min(last);
+                                    let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                    session_selected = crate::choose_tree::page_down(session_selected, visible_len, session_page_h);
                                 }
                                 KeyCode::Home if session_chooser => { session_selected = 0; }
                                 KeyCode::End if session_chooser => {
@@ -5577,8 +5633,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // KEYC_LEFT and KEYC_RIGHT arms of tmux's mode_tree_key.
                                 // Left on an already collapsed row climbs to the parent and
                                 // collapses that; Right on an expanded row just steps down.
-                                // h/j/k/l stay plain cursor movement (issue #259), which is
-                                // what tmux itself does whenever line->flat holds.
+                                // `h`/`-` and `l`/`+` arrive here too, rewritten by
+                                // choose_tree::mode_tree_alias above, because tmux puts them
+                                // in the same arms (mode-tree.c:1390-1412, discussion #776).
                                 KeyCode::Left if tree_chooser => {
                                     let kinds = tree_row_kinds(&tree_all);
                                     let model = tree_vis_map.get(tree_selected).copied();
@@ -5609,16 +5666,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                                 KeyCode::Up if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
                                 KeyCode::Down if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
-                                // hjkl parity with tmux mode-tree (issue #259): h/k = up, j/l = down
-                                // for flat lists. g/G map to Home/End.
+                                // k/j move (issue #259); h/l are the Left/Right arms above.
+                                // g/G map to Home/End.
                                 KeyCode::Char('k') if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
                                 KeyCode::Char('j') if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
-                                KeyCode::Char('h') if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
-                                KeyCode::Char('l') if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
                                 KeyCode::Char('g') if tree_chooser => { tree_selected = 0; }
                                 KeyCode::Char('G') if tree_chooser => { tree_selected = tree_entries.len().saturating_sub(1); }
-                                KeyCode::PageUp if tree_chooser => { tree_selected = tree_selected.saturating_sub(10); }
-                                KeyCode::PageDown if tree_chooser => { tree_selected = (tree_selected + 10).min(tree_entries.len().saturating_sub(1)); }
+                                KeyCode::PageUp if tree_chooser => { tree_selected = crate::choose_tree::page_up(tree_selected, tree_page_h); }
+                                KeyCode::PageDown if tree_chooser => { tree_selected = crate::choose_tree::page_down(tree_selected, tree_entries.len(), tree_page_h); }
                                 KeyCode::Home if tree_chooser => { tree_selected = 0; }
                                 KeyCode::End if tree_chooser => { tree_selected = tree_entries.len().saturating_sub(1); }
                                 KeyCode::Enter if tree_chooser => {
@@ -5645,7 +5700,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             }
                                             tree_chooser = false;
                                         } else if *sess_name != current_session {
-                                            // Window/pane in another session: switch to that session
+                                            // Window/pane in another session: make the row the
+                                            // current window (and pane) of that session, then
+                                            // switch to it. tmux runs `switch-client -t` with
+                                            // the row's own target (window_tree_get_target),
+                                            // so the client lands on the window that was
+                                            // chosen, not on whatever that session had active.
+                                            let focus = if *is_win {
+                                                format!("focus-window {}\n", wid)
+                                            } else {
+                                                format!("focus-pane {}\n", pid)
+                                            };
+                                            chooser_focus_in_session(sess_name, &focus);
                                             cmd_batch.push("client-detach\n".into());
                                             env::set_var("PSMUX_SWITCH_TO", sess_name);
                                             quit = true;
@@ -5705,8 +5771,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('l') if buffer_chooser => { if buffer_selected + 1 < buffer_entries.len() { buffer_selected += 1; } }
                                 KeyCode::Char('g') if buffer_chooser => { buffer_selected = 0; }
                                 KeyCode::Char('G') if buffer_chooser => { buffer_selected = buffer_entries.len().saturating_sub(1); }
-                                KeyCode::PageUp if buffer_chooser => { buffer_selected = buffer_selected.saturating_sub(10); }
-                                KeyCode::PageDown if buffer_chooser => { buffer_selected = (buffer_selected + 10).min(buffer_entries.len().saturating_sub(1)); }
+                                KeyCode::PageUp if buffer_chooser => { buffer_selected = crate::choose_tree::page_up(buffer_selected, buffer_page_h); }
+                                KeyCode::PageDown if buffer_chooser => { buffer_selected = crate::choose_tree::page_down(buffer_selected, buffer_entries.len(), buffer_page_h); }
                                 KeyCode::Home if buffer_chooser => { buffer_selected = 0; }
                                 KeyCode::End if buffer_chooser => { buffer_selected = buffer_entries.len().saturating_sub(1); }
                                 KeyCode::Enter if buffer_chooser => {
@@ -8083,6 +8149,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // Reserve rows for the active jump and filter indicators.
                 let reserved = buffer_rows as usize;
                 let visible_h = (list_area.height as usize).saturating_sub(reserved);
+                session_page_h = visible_h;
                 if visible_h > 0 && session_selected >= session_scroll + visible_h {
                     session_scroll = session_selected.saturating_sub(visible_h - 1);
                 }
@@ -8293,6 +8360,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 } else { None };
 
                 let visible_h = (list_area.height as usize).saturating_sub(buffer_rows as usize);
+                tree_page_h = visible_h;
                 if visible_h > 0 && tree_selected >= tree_scroll + visible_h {
                     tree_scroll = tree_selected.saturating_sub(visible_h - 1);
                 }
@@ -8443,6 +8511,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
                 let visible_h = (inner.height as usize).saturating_sub(buffer_rows as usize);
+                buffer_page_h = visible_h;
                 if visible_h > 0 && buffer_selected >= buffer_scroll + visible_h {
                     buffer_scroll = buffer_selected.saturating_sub(visible_h - 1);
                 }
@@ -9280,6 +9349,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // as the status message plus the offset of its cursor, and
                 // the draw above turned that into a position.
                 prompt_cursor_pos
+            } else if tree_chooser || session_chooser || buffer_chooser {
+                // A chooser is a mode over the pane, and tmux turns the
+                // cursor off for every mode tree mode when it starts
+                // (`(*s)->mode &= ~MODE_CURSOR;`, mode-tree.c:536 in 3.7b).
+                // The pane's cursor used to stay lit under the list
+                // (discussion #776).
+                None
             } else if let Some(float_cursor) = focused_float_cursor(content_chunk, &srv_floats) {
                 // A focused floating pane is the active pane, so the cursor
                 // goes inside it (#767). It used to fall through to the tiled

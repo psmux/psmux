@@ -69,6 +69,8 @@
 
 use std::collections::HashSet;
 
+use crossterm::event::{KeyCode, KeyModifiers};
+
 /// What a row in the flat chooser list represents. psmux stores rows as
 /// `(is_win, win_id, pane_id, label, session)`, where a session header is
 /// `is_win == true` with `win_id == usize::MAX`.
@@ -278,6 +280,80 @@ pub fn has_children(kinds: &[RowKind], idx: usize) -> bool {
     matches!(kinds.get(idx + 1), Some(next) if depth(*next) > d)
 }
 
+/// tmux `mode_tree_key`, `KEYC_PPAGE` / `C-b` (mode-tree.c:1318-1325 in 3.7b):
+///
+/// ```text
+/// for (i = 0; i < mtd->height; i++) {
+///         if (mtd->current == 0)
+///                 break;
+///         mode_tree_up(mtd, 1);
+/// }
+/// ```
+///
+/// A page is the height of the list as drawn, not a fixed count, so a tall
+/// chooser pages further than a short one (discussion #776).
+pub fn page_up(current: usize, height: usize) -> usize {
+    current.saturating_sub(height)
+}
+
+/// tmux `mode_tree_key`, `KEYC_NPAGE` / `C-f` (mode-tree.c:1326-1333): down
+/// by the list height, stopping on the last line.
+pub fn page_down(current: usize, len: usize, height: usize) -> usize {
+    current.saturating_add(height).min(len.saturating_sub(1))
+}
+
+/// A key `mode_tree_key` gives a meaning that psmux's choosers spell with a
+/// different key. Each one is turned into the key the chooser already
+/// handles, so the alias and the original can never drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeKey {
+    /// `q`, `C-g` (and Escape, `C-[`): `return (1)`, the mode exits.
+    Exit,
+    /// `C-p`, as Up.
+    Up,
+    /// `C-n`, as Down.
+    Down,
+    /// `C-b`, as Page Up.
+    PageUp,
+    /// `C-f`, as Page Down.
+    PageDown,
+    /// `h` and `-` in a tree, as Left (collapse).
+    Collapse,
+    /// `l` and `+` in a tree, as Right (expand).
+    Expand,
+}
+
+/// Resolve a key to its `mode_tree_key` meaning when psmux spells that
+/// meaning differently (mode-tree.c:1288-1412 in 3.7b). `tree` is true for
+/// the tree chooser, whose rows have depth; the session and buffer choosers
+/// are flat lists, where tmux's `line->flat` makes `h`/`l` plain movement,
+/// which those choosers already do, so `h`, `l`, `+` and `-` are left alone
+/// there.
+///
+/// Returns `None` for every key the chooser already handles itself.
+pub fn mode_tree_alias(code: KeyCode, mods: KeyModifiers, tree: bool) -> Option<ModeKey> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT);
+    let plain = !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT);
+    match code {
+        KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
+            'g' => Some(ModeKey::Exit),
+            'p' => Some(ModeKey::Up),
+            'n' => Some(ModeKey::Down),
+            'b' => Some(ModeKey::PageUp),
+            'f' => Some(ModeKey::PageDown),
+            _ => None,
+        },
+        KeyCode::Char('q') if plain => Some(ModeKey::Exit),
+        KeyCode::Char('h') | KeyCode::Char('-') if plain && tree => Some(ModeKey::Collapse),
+        KeyCode::Char('l') | KeyCode::Char('+') if plain && tree => Some(ModeKey::Expand),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests-rs/test_issue625_choose_tree_lines.rs"]
 mod tests_issue625_choose_tree_lines;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_disc776_chooser_parity.rs"]
+mod tests_disc776_chooser_parity;
