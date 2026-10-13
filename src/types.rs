@@ -3514,7 +3514,9 @@ pub enum CtrlReq {
     /// so `-g` was dropped on the floor and a plain `-w` printed every name
     /// including the ones the window does not own (#648, #655).
     ShowWindowOptionsFor(mpsc::Sender<String>, String, crate::server::options::WindowListing),
-    SourceFile(String),
+    /// `(path, done)`: `done` is dropped once the file has run, which is how a
+    /// one-shot `source-file` knows when to answer (#734 follow up).
+    SourceFile(String, Option<mpsc::Sender<()>>),
     /// Expand `#{...}` format variables against the live server state and send
     /// the result back: `(format_string, reply)`.
     ///

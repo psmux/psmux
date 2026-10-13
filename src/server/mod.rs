@@ -887,7 +887,7 @@ fn drain_plugin_req(
                 }
             }
         }
-        CtrlReq::SourceFile(path) => {
+        CtrlReq::SourceFile(path, _done) => {
             app.defaults_suppressed = false;
             app.key_tables.clear();
             crate::config::populate_default_bindings(app);
@@ -6085,7 +6085,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     let _ = resp.send(output);
                 }
-                CtrlReq::SourceFile(path) => {
+                CtrlReq::SourceFile(path, done) => {
+                    // `done` is dropped at the end of this arm, after the
+                    // file has run: that is the one-shot source-file's answer.
+                    let _done = done;
                     // Reset binding state so config reload gets a clean slate.
                     // If the config has unbind-key -a, it will re-set the flag.
                     app.defaults_suppressed = false;

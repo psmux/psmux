@@ -63,6 +63,22 @@ fn run_cli_new_session(args: &[&str]) -> String {
     }
 }
 
+/// What a one-shot detached `new-session` sends back. Alone on its connection
+/// it keeps the historical `OK` for a plain success (raw socket callers read
+/// exactly that). Inside a command list (an `if-shell` branch such as
+/// `new-session -d -s x ; display-message -p done`) that placeholder would be
+/// printed to the user ahead of the next command's output, and tmux prints
+/// nothing for a `new-session -d` without `-P` (cmd-new-session.c prints only
+/// under -P), so it is dropped there. A `-P` report and an `ERROR:` line pass
+/// through either way.
+pub(crate) fn one_shot_new_session_reply(out: String, in_command_list: bool) -> String {
+    if in_command_list && out == "OK\n" {
+        String::new()
+    } else {
+        out
+    }
+}
+
 /// The write side of a client connection: one logical reply, one send.
 ///
 /// The default `Write::write_fmt` hands every piece of a format string to
@@ -1967,7 +1983,12 @@ loop {
     let effective_line: String;
     if sub_cmds.len() > 1 {
         effective_line = sub_cmds[0].clone();
-        pending_chain.extend(sub_cmds.into_iter().skip(1));
+        // Ahead of whatever is already queued: a line that splits here while
+        // a list is pending is an `if-shell` branch fed back below, and tmux
+        // inserts a branch's commands right after the if-shell item
+        // (cmd-if-shell.c cmdq_insert_after), before the rest of the list.
+        // Appended, `if-shell C 'a ; b' ; c` ran a, c, b.
+        pending_chain.splice(0..0, sub_cmds.into_iter().skip(1));
     } else {
         effective_line = line.trim().to_string();
     }
@@ -4275,7 +4296,19 @@ match cmd {
                 } else {
                     path.to_string()
                 };
-                let _ = tx.send(CtrlReq::SourceFile(source_spec));
+                // A one-shot source-file answers once the file has run, as
+                // tmux's does: cmd-source-file.c returns CMD_RETURN_WAIT and
+                // the item continues only when the inserted commands are done
+                // (cmd_source_file_done, :131), and the client exits after
+                // that. It used to answer at once while the server went on
+                // running the file (if-shell conditions are shells), so the
+                // caller's next query queued behind the whole file and timed
+                // out on a loaded machine (#734 follow up, side findings 2B).
+                let (done_tx, done_rx) = mpsc::channel::<()>();
+                let waiter = (!persistent).then_some(done_tx);
+                let _ = tx.send(CtrlReq::SourceFile(source_spec, waiter));
+                // Disconnected once the server loop drops the sender.
+                let _ = done_rx.recv();
             }
         }
     }
@@ -5124,6 +5157,17 @@ match cmd {
             };
             let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
             if let Some(chosen) = cmd_to_run {
+                if !pending_chain.is_empty() {
+                    // Inside a list the branch goes to the FRONT of what is
+                    // queued, as tmux inserts it right after the if-shell item
+                    // (cmd-if-shell.c:100 and :169, cmdq_insert_after). Put in
+                    // `line`, the top of the loop took the next queued command
+                    // over it, so `if-shell C 'a ; b' ; c` ran only c (#734
+                    // follow up).
+                    pending_chain.insert(0, chosen.to_string());
+                    line.clear();
+                    continue;
+                }
                 // Feed the chosen command back into the line buffer so the
                 // main dispatch loop processes it as a regular command.
                 line.clear();
@@ -5226,10 +5270,21 @@ match cmd {
                 // server it reached), the warm claim, a held server's claim
                 // (#734: the session lands in the empty server the caller
                 // already identified), and the `-P`/`-F` report.
+                //
+                // The rest of its command list runs after it (#734 follow
+                // up): this arm used to `break` unconditionally, so in
+                // `new-session -d -P ; display-message -p CREATED` the marker
+                // never ran. tmux runs every command of a list in order and
+                // stops only at one that fails (cmd-queue.c cmdq_next and
+                // cmdq_remove_group); a failure here is an `ERROR:` reply,
+                // which clears the list at the top of the loop.
                 let out = run_cli_new_session(&args);
-                let _ = write!(write_stream, "{}", out);
-                let _ = write_stream.flush();
-                break;
+                let out = one_shot_new_session_reply(out, in_command_list);
+                if !out.is_empty() {
+                    let _ = write!(write_stream, "{}", out);
+                    let _ = write_stream.flush();
+                }
+                if pending_chain.is_empty() { break; }
             } else {
 
             let ns = crate::server::server_namespace();
@@ -6554,7 +6609,7 @@ fn dispatch_control_command(
         }
         "source-file" | "source" => {
             if let Some(path) = args.first() {
-                let _ = tx.send(CtrlReq::SourceFile(path.trim_matches('"').to_string()));
+                let _ = tx.send(CtrlReq::SourceFile(path.trim_matches('"').to_string(), None));
             }
             let _ = resp_tx.send(String::new());
             true
@@ -6946,3 +7001,7 @@ mod tests_client_read_timeout;
 #[cfg(test)]
 #[path = "../../tests-rs/test_reply_stream_error.rs"]
 mod tests_reply_stream_error;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue734_followup_new_session_reply.rs"]
+mod tests_issue734_followup_new_session_reply;
