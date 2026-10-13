@@ -182,6 +182,12 @@ psmux display-popup -E "git log --oneline -20"
 
 # Keep popup open after command finishes
 psmux display-popup -K "echo done"
+
+# Title the frame, pick its lines and colours (tmux flags)
+psmux display-popup -T "Logs" -b rounded -S "fg=#3b434d" -s "bg=colour235" "Get-Content app.log -Wait"
+
+# No frame: the command draws its own and gets the whole 80x24 area
+psmux display-popup -B -E -w 80 -h 24 "lazygit"
 ```
 
 ## Menus

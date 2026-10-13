@@ -233,9 +233,9 @@ Details worth knowing:
 | `copy-mode-mark-style` | Str | `bg=red,fg=black` | Style of the line marked with `X` (set-mark); the marked cell has its colours swapped |
 | `window-style` | Str | | Style applied to the contents of panes that are not the active pane (tmux `options-table.c` wording), and the fallback for the active pane; fills only cells whose colour is the terminal default. Also accepts `dim=N` (0 to 100 percent) |
 | `window-active-style` | Str | | Style applied to the contents of the active pane; each of `fg` and `bg` falls back to `window-style` when this option does not name it. Explicit application colours always win. Also accepts `dim=N` |
-| `popup-border-style` | Str | `fg=yellow` | Border style of `display-popup` overlays |
-| `popup-border-lines` | Str | `single` | Popup border glyph set: `single`, `double`, `heavy`, `rounded` |
-| `popup-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
+| `popup-border-style` | Str | `fg=yellow` | Border style of `display-popup` overlays. `display-popup -S` overrides its colours for one popup |
+| `popup-border-lines` | Str | `single` | Popup border glyph set: `single`, `double`, `heavy`, `simple`, `rounded`, `padded`, `none`. `display-popup -b` overrides it for one popup, `-B` draws no border |
+| `popup-style` | Str | | Colours of the popup content area: cells the program leaves at the terminal default take them. `display-popup -s` overrides its colours for one popup |
 | `clock-mode-colour` | Str | | Colour of the `clock-mode` digits |
 | `clock-mode-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
 | `window-status-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Inactive tab format. Equivalent to tmux's `#I:#W#F`, written out so a flagless window still reserves one space |
@@ -487,9 +487,9 @@ set -g window-style "bg=colour52,dim=40"
 set -g window-active-style "bg=colour52"
 ```
 
-`popup-border-lines` accepts `single` (the default), `double`, `heavy` and `rounded`. The values `none` and `simple` are accepted but render as plain single lines, because a popup always draws a border.
+`popup-border-lines` accepts the tmux set: `single` (the default), `double`, `heavy`, `simple` (`+`, `-` and `|`), `rounded`, `padded` (blank cells) and `none`. With `none`, or `display-popup -B`, the popup has no frame and its command gets the whole `-w` by `-h` area. As in tmux, only the colours of `popup-border-style` and `popup-style` are used, a popup has no title unless `display-popup -T` gives one, and the `-S` and `-s` flags of `display-popup` win over the options for that popup.
 
-> **Note:** `popup-style` and `clock-mode-style` are accepted and stored but never read. See [Accepted but Not Functional](#accepted-but-not-functional).
+> **Note:** `clock-mode-style` is accepted and stored but never read. See [Accepted but Not Functional](#accepted-but-not-functional).
 
 ### Bell
 
@@ -910,7 +910,6 @@ setting that was never wired up.
 |---|---|
 | `lock-after-time` | Accepted and stored. Session locking is not implemented, so the timer never runs. `lock-client`, `lock-server` and `lock-session` exist as commands but nothing locks on a timer |
 | `lock-command` | Accepted and stored. Never read, for the same reason |
-| `popup-style` | Accepted and stored. Popup borders are styled by `popup-border-style`; the popup body itself is not styled yet |
 | `clock-mode-style` | Accepted and stored. Use `clock-mode-colour`, which is read |
 
 Setting any of these produces no warning, because the values are stored verbatim in the user options

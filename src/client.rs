@@ -662,14 +662,7 @@ pub(crate) fn pane_content_inner(area: Rect, border_status: &str, border_format:
 /// agree on it to the cell, or the cursor lands off the popup it belongs to
 /// (#507), so both call this instead of recomputing the geometry.
 pub(crate) fn popup_overlay_rect(content_chunk: Rect, want_w: u16, want_h: u16) -> Rect {
-    let w = want_w.min(content_chunk.width.saturating_sub(2));
-    let h = want_h.min(content_chunk.height.saturating_sub(2));
-    Rect {
-        x: content_chunk.x + (content_chunk.width.saturating_sub(w)) / 2,
-        y: content_chunk.y + (content_chunk.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    }
+    crate::popup::popup_rect(content_chunk, want_w, want_h)
 }
 
 /// Screen position of a PTY popup's cursor, given the popup-inner cursor cell
@@ -685,19 +678,31 @@ pub(crate) fn popup_cursor_screen_pos(
     scroll: u16,
     cursor: (u16, u16),
 ) -> Option<(u16, u16)> {
+    popup_cursor_screen_pos_framed(content_chunk, want_w, want_h, scroll, cursor, true)
+}
+
+/// [`popup_cursor_screen_pos`] for a popup drawn with or without a border
+/// (`display-popup -B` puts the content at the popup's own origin, #792).
+pub(crate) fn popup_cursor_screen_pos_framed(
+    content_chunk: Rect,
+    want_w: u16,
+    want_h: u16,
+    scroll: u16,
+    cursor: (u16, u16),
+    has_border: bool,
+) -> Option<(u16, u16)> {
     let (cc, cr) = cursor;
     let popup_area = popup_overlay_rect(content_chunk, want_w, want_h);
-    let inner_w = popup_area.width.saturating_sub(2);
-    let inner_h = popup_area.height.saturating_sub(2);
-    if inner_w == 0 || inner_h == 0 {
+    let inner = crate::popup::popup_inner_rect(popup_area, has_border);
+    if inner.width == 0 || inner.height == 0 {
         return None;
     }
     // Same scroll offset the popup paragraph is drawn with.
     let row = cr.checked_sub(scroll)?;
-    if row >= inner_h || cc >= inner_w {
+    if row >= inner.height || cc >= inner.width {
         return None;
     }
-    Some((popup_area.x + 1 + cc, popup_area.y + 1 + row))
+    Some((inner.x + cc, inner.y + row))
 }
 
 fn collect_leaves<'a>(node: &'a LayoutJson, area: Rect, out: &mut Vec<PaneLeaf<'a>>) {
@@ -3315,7 +3320,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     #[allow(unused_assignments)]
     let mut srv_popup_active = false;
     #[allow(unused_assignments)]
-    let mut srv_popup_command = String::new();
+    // The frame the server resolved for the open popup (#792).
+    let mut srv_popup_frame = crate::popup::PopupFrame::new("", "single", crate::popup::DEFAULT_POPUP_BORDER_STYLE, "");
     #[allow(unused_assignments)]
     let mut srv_popup_width: u16 = 80;
     #[allow(unused_assignments)]
@@ -3637,6 +3643,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         popup_active: bool,
         #[serde(default)]
         popup_command: Option<String>,
+        /// Popup frame (#792): title, border line set, border style and
+        /// content style, resolved by the server (crate::popup::popup_frame_wire).
+        #[serde(default)]
+        popup_title: String,
+        #[serde(default)]
+        popup_border_lines: Option<String>,
+        #[serde(default)]
+        popup_border_style: Option<String>,
+        #[serde(default)]
+        popup_style: String,
         #[serde(default)]
         popup_width: Option<u16>,
         #[serde(default)]
@@ -7611,7 +7627,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Server-side overlay state (update persistent variables)
         srv_floats = state.floats;
         srv_popup_active = state.popup_active;
-        srv_popup_command = state.popup_command.unwrap_or_default();
+        srv_popup_frame = crate::popup::PopupFrame::new(
+            &state.popup_title,
+            state.popup_border_lines.as_deref().unwrap_or("single"),
+            state.popup_border_style.as_deref().unwrap_or(crate::popup::DEFAULT_POPUP_BORDER_STYLE),
+            &state.popup_style,
+        );
         srv_popup_width = state.popup_width.unwrap_or(80);
         srv_popup_height = state.popup_height.unwrap_or(24);
         srv_popup_lines = state.popup_lines;
@@ -9087,21 +9108,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
             // ── Server-side overlay rendering ────────────────────────
             if srv_popup_active {
+                // One frame implementation for every renderer (#792): the
+                // server resolved title, border lines and styles; draw_popup
+                // draws them exactly as render_popup_overlay does.
                 let popup_area = popup_overlay_rect(content_chunk, srv_popup_width, srv_popup_height);
-                let w = popup_area.width;
-                // Cut by display columns on a char boundary: a byte cut of a
-                // non ASCII command panicked the client (#712 audit).
-                let title = if srv_popup_command.is_empty() { "Popup".to_string() } else {
-                    let max_title = (w as usize).saturating_sub(4);
-                    if unicode_width::UnicodeWidthStr::width(srv_popup_command.as_str()) > max_title {
-                        format!("{}...", crate::util::str_prefix_within_cols(&srv_popup_command, max_title.saturating_sub(3)))
-                    } else { srv_popup_command.clone() }
-                };
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title(title);
-                let inner_w = w.saturating_sub(2);
+                let inner_w = crate::popup::popup_inner_rect(popup_area, srv_popup_frame.has_border()).width;
                 let mut lines: Vec<Line<'static>> = Vec::new();
                 if !srv_popup_rows.is_empty() {
                     // Render with full color/style data from popup_rows (#154)
@@ -9114,9 +9125,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         lines.push(Line::from(line_str.clone()));
                     }
                 }
-                let para = Paragraph::new(Text::from(lines)).block(block).scroll((srv_popup_scroll, 0));
-                f.render_widget(Clear, popup_area);
-                f.render_widget(para, popup_area);
+                crate::popup::draw_popup(f.buffer_mut(), popup_area, &srv_popup_frame, Text::from(lines), srv_popup_scroll);
             }
             if srv_confirm_active {
                 let overlay = Block::default().borders(Borders::ALL).title("confirm");
@@ -9368,7 +9377,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             // like it had no cursor at all (#507).
             let cursor_visible = if srv_popup_active && srv_popup_has_pty {
                 srv_popup_cursor.and_then(|c| {
-                    popup_cursor_screen_pos(content_chunk, srv_popup_width, srv_popup_height, srv_popup_scroll, c)
+                    popup_cursor_screen_pos_framed(content_chunk, srv_popup_width, srv_popup_height, srv_popup_scroll, c, srv_popup_frame.has_border())
                 })
             } else if command_input || window_idx_input || status_prompt_open || renaming {
                 // An open prompt owns the cursor, and the pane only gets it

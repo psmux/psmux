@@ -5383,6 +5383,12 @@ fn run_main() -> io::Result<()> {
             }
             // display-popup - Display a popup window
             "display-popup" | "popup" => {
+                // A bad -b (or a flag missing its value) fails here at exit 1
+                // with tmux's wording instead of being sent and dropped (#792).
+                if let Err(e) = crate::popup::parse_display_popup_args(cmd_args.get(1..).unwrap_or(&[])) {
+                    eprintln!("psmux: {}", e);
+                    std::process::exit(1);
+                }
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
                     crate::util::quote_arg_if_needed(s)
                 }).collect();

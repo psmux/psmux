@@ -48,7 +48,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `display-menu` | `menu` | `T:x:y:` | CLI, SRV, CFG |
 | `display-message` | `display` | `pFd:I:t:` | CLI, SRV, CFG, CTL |
 | `display-panes` | `displayp` | none | CLI, SRV, CFG |
-| `display-popup` | `popup` | `EKc:d:h:w:` | CLI, SRV, CFG |
+| `display-popup` | `popup` | `BCEKNkb:c:d:e:h:s:S:t:T:w:x:y:` | CLI, SRV, CFG |
 | `dump-layout` | *(none)* | none | SRV |
 | `dump-state` | `dump` | none | CLI, SRV, CTL |
 | `find-window` | `findw` | none that take effect | CLI, SRV, CFG |
@@ -535,8 +535,9 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - Menu items follow as `<label> <key> <command>` triples.
 
 **display-popup** (`popup`)
-- Boolean: `-E` (close when the command exits, which is already the default), `-K` (keep the popup open after the command exits)
-- Value: `-w` (width, cells or a percentage), `-h` (height), `-d` or `-c` (start directory)
+- Boolean: `-E` (close when the command exits, which is already the default), `-K` (keep the popup open after the command exits), `-B` (no border: the command gets the whole `-w` by `-h` area), `-C` (close the open popup)
+- Value: `-w` (width, cells or a percentage), `-h` (height), `-d` or `-c` (start directory), `-T` (frame title, expanded as a format; without it the frame has no title), `-b` (border lines, any `popup-border-lines` value), `-S` (border style, over `popup-border-style`), `-s` (content style, over `popup-style`), `-e VAR=value` (environment for the popup command)
+- Consumed and ignored: `-t`, `-x`, `-y`, `-k`, `-N`. The flags end at the first argument that is not a flag (or at `--`), so the command keeps its own flags, and one token may carry several flags (`-BE`).
 
 **confirm-before** (`confirm`)
 - Value: `-p` (prompt text)

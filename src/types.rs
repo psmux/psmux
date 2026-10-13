@@ -1329,6 +1329,9 @@ pub enum Mode {
         popup_pane: Option<Pane>,
         /// Scroll offset for static text popups (lines from top)
         scroll_offset: u16,
+        /// Frame title, border lines and styles (#792). Every renderer reads
+        /// the frame through `crate::popup::popup_frame_for`.
+        look: crate::popup::PopupLook,
     },
     /// Confirmation prompt before command
     ConfirmMode { 
@@ -3745,7 +3748,9 @@ pub enum CtrlReq {
     WaitFor(String, WaitForOp),
     DisplayMenu(String, Option<i16>, Option<i16>),
     DisplayMenuDirect(Menu),
-    DisplayPopup(String, String, String, bool, Option<String>),
+    /// Parsed `display-popup` arguments and whether the popup closes when its
+    /// command exits.
+    DisplayPopup(crate::popup::DisplayPopupArgs, bool),
     ConfirmBefore(String, String),
     ClockMode,
     ResizePaneAbsolute(String, u16),

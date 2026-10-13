@@ -7403,59 +7403,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                     }
                 }
-                CtrlReq::DisplayPopup(command, width_spec, height_spec, close_on_exit, start_dir) => {
-                    // Resolve percentage dimensions against terminal area (#154)
-                    let term_w = app.last_window_area.width;
-                    let term_h = app.last_window_area.height;
-                    let width = parse_popup_dim(&width_spec, term_w, 80);
-                    let height = parse_popup_dim(&height_spec, term_h, 24);
-                    // Expand format variables in start_dir (e.g. #{pane_current_path})
-                    let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                    // No server chdir here: the pane's start directory is handed to the
-                    // shell alone, never to the ConPTY host. See the #630 note on
-                    // CtrlReq::NewWindow above.
-                    // Spawn the popup as a real PTY-backed Pane. An EMPTY command
-                    // means "run an interactive shell" (tmux parity, issue #351):
-                    // create_popup_pane() launches the shell as a REPL in that case.
-                    let inner_h = height.saturating_sub(2);
-                    let inner_w = width.saturating_sub(2);
-                    let pane_result = crate::popup::create_popup_pane(
-                        &command,
-                        start_dir.as_deref(),
-                        inner_h,
-                        inner_w,
-                        app.next_pane_id,
-                        &app.session_name,
-                        &app.environment,
-                        &app.env_scopes.child_removals(&app.environment),
-                        app.host_colors.as_ref(),
-                    );
-
-                    if pane_result.is_some() {
-                        app.mode = Mode::PopupMode {
-                            command: command.clone(),
-                            output: String::new(),
-                            process: None,
-                            width,
-                            height,
-                            close_on_exit,
-                            popup_pane: pane_result,
-                            scroll_offset: 0,
-                        };
-                    } else {
-                        // PTY spawn failed — fall back to a static, closable popup
-                        // so the user is never stuck with a blank, unresponsive box.
-                        app.mode = Mode::PopupMode {
-                            command: command.clone(),
-                            output: "Failed to start popup shell. Press 'q' or Escape to close\n".to_string(),
-                            process: None,
-                            width,
-                            height,
-                            close_on_exit: true,
-                            popup_pane: None,
-                            scroll_offset: 0,
-                        };
-                    }
+                CtrlReq::DisplayPopup(req, close_on_exit) => {
+                    // Percentages resolve against the terminal area (#154), -T
+                    // and -d expand as formats (e.g. #{pane_current_path}), and
+                    // the PTY child is sized to the content area of the frame
+                    // it is drawn in (full size with -B, #792). No server chdir:
+                    // the start directory is handed to the shell alone (#630).
+                    // An EMPTY command runs an interactive shell (#351).
+                    let area = (app.last_window_area.width, app.last_window_area.height);
+                    let session_name = app.session_name.clone();
+                    crate::popup::open_display_popup(&mut app, req, area, close_on_exit, true, &session_name);
                     state_dirty = true;
                 }
                 CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, empty, resp } => {
@@ -7879,6 +7836,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
                     let height = (lines.len() as u16 + 2).max(5);
                     app.mode = Mode::PopupMode {
+                        look: crate::popup::PopupLook::titled(&title),
                         command: title,
                         output: content,
                         process: None,
@@ -7911,6 +7869,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
                         let height = (lines.len() as u16 + 2).max(5);
                         app.mode = Mode::PopupMode {
+                            look: crate::popup::PopupLook::titled("show-prompt-history"),
                             command: "show-prompt-history".to_string(),
                             output: content,
                             process: None,
@@ -8283,6 +8242,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
                     let height = (lines.len() as u16 + 2).max(5);
                     app.mode = Mode::PopupMode {
+                        look: crate::popup::PopupLook::titled(&title),
                         command: title,
                         output: text,
                         process: None,
