@@ -2012,6 +2012,15 @@ pub struct AppState {
     /// A runtime source-file of THIS file is a config reload and starts from
     /// the default bindings; any other file only adds, as in tmux.
     pub startup_config_file: Option<String>,
+    /// tmux's click timer (server-client.c click_timer): the pane, the cell
+    /// of the last left press in it, how many presses so far (1 or 2) and
+    /// when the timer runs out. A second press inside the window is
+    /// SecondClick1Pane; a third is TripleClick1Pane; the timer running out
+    /// after a second press is DoubleClick1Pane.
+    pub click_state: Option<(usize, (i16, i16), u8, std::time::Instant)>,
+    /// When the built-in double / triple click finishes (tmux's
+    /// `run -d0.3 ; send -X copy-pipe-and-cancel`): copy and leave copy mode.
+    pub click_finish_at: Option<std::time::Instant>,
     /// Panes extracted for cross-session forwarding, keyed by forward_id.
     /// The source server keeps these alive so the real ConPTY continues running.
     pub forwarded_panes: HashMap<u64, ForwardedPane>,
@@ -2995,6 +3004,8 @@ impl AppState {
             copy_mode_defaults_unbound: std::collections::HashSet::new(),
             last_mouse_event: None,
             startup_config_file: None,
+            click_state: None,
+            click_finish_at: None,
             forwarded_panes: HashMap::new(),
             next_forward_id: 1,
         }

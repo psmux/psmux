@@ -3039,6 +3039,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // #559: run alert detection on a 1s cadence independent of clients so
         // monitor-silence/monitor-activity/bell flags fire in detached
         // sessions too (scripts read them via list-windows #{window_flags}).
+        // tmux's click timer (DoubleClick1Pane after the double click
+        // window) and the built-in multi click finish.
+        if (app.click_state.is_some() || app.click_finish_at.is_some())
+            && crate::window_ops::click_timer_tick(&mut app)
+        {
+            state_dirty = true;
+            meta_dirty = true;
+        }
         if last_alert_check.elapsed() >= Duration::from_secs(1) {
             last_alert_check = Instant::now();
             let alert_hooks = helpers::check_window_activity(&mut app);
@@ -4290,7 +4298,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // pointer 60 times across a pane running nvim drove 24 full
                 // client redraws, against 0 while idle.  With this gate and the
                 // client-side one in client.rs it is 1, the same as idle.
-                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); handle_pane_mouse(&mut app, pane_id, button, col, row, press); if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
+                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); handle_pane_mouse(&mut app, pane_id, button, col, row, press); if button == 0 && press { crate::window_ops::note_pane_press(&mut app, pane_id, col, row); } if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 CtrlReq::CopyDragBegin(cid, pane_id, a_col, a_row, c_col, c_row, rect_sel) => { if app.mouse_enabled { app.latest_client_id = Some(cid); copy_drag_begin(&mut app, pane_id, a_col, a_row, c_col, c_row, rect_sel); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::StatusWheel(cid, up, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_status_wheel(&mut app, up, mods); state_dirty = true; meta_dirty = true; } }
                 CtrlReq::MouseKey(cid, name, target, col, row, btn) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_mouse_key(&mut app, &name, &target, col, row, btn); state_dirty = true; meta_dirty = true; } }

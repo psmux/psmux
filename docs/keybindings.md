@@ -700,7 +700,17 @@ the right button (`MouseDown3Pane`) follow the same rules: while a key keeps its
 psmux behaves exactly as before; a binding (with or without `C-` / `M-`) runs instead; unbound,
 the event goes to the program only if it asked for the mouse. A binding to tmux's own default
 command for a key (`bind -n MouseDrag1Border resize-pane -M`, `bind -n MouseDown1Status
-switch-client -t=`) keeps psmux's built-in behaviour. Double and triple clicks are not routed yet.
+switch-client -t=`) keeps psmux's built-in behaviour.
+
+Double and triple clicks follow tmux's click timer: a second left press within 300 ms of the
+first is `SecondClick1Pane` (no default), a third within 300 ms of the second is
+`TripleClick1Pane`, and when the 300 ms run out after a second press it is `DoubleClick1Pane`.
+The defaults are tmux's: a double click selects the word under the pointer and a triple click the
+line, enter copy mode for it, show it for 0.3 s, copy it (paste buffer and Windows clipboard) and
+leave copy mode; over a program that asked for the mouse the program gets the clicks instead, and
+with `pwsh-mouse-selection` on psmux's own word and line selection is used. The status line has
+`SecondClick1Status`, `DoubleClick1Status` and `TripleClick1Status` with no default. The window is
+300 ms as in tmux, which has no option for it (`KEYC_CLICK_TIMEOUT`).
 
 ### Right click paste in programs that track the mouse
 

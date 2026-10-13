@@ -1394,6 +1394,12 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
+    // The release of the press that made a built-in double / triple click:
+    // tmux's MouseUp1Pane has no binding, so the word / line selection it
+    // just made stays until the 0.3s copy.
+    if app.click_finish_at.is_some() {
+        return;
+    }
     if app.mode.in_copy() {
         // The release cell, kept for the #199 click guard only.  It must not
         // become the selection endpoint: tmux's `window_copy_drag_release`
@@ -1832,6 +1838,9 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 app.copy_mouse_down_cell = None;
                 scroll_copy_down(app, 1 + ((row - max_r) as usize / 2).min(4));
             }
+        } else if button == 0 && !press && app.click_finish_at.is_some() {
+            // The release of a built-in double / triple click: the selection
+            // it made stays (see remote_mouse_up).
         } else if button == 0 && !press {
             // Left release: finalize the drag.  The endpoint is NOT moved to
             // the release cell.  tmux's `window_copy_drag_release` only clears
@@ -2283,8 +2292,14 @@ pub fn handle_mouse_key(app: &mut AppState, name: &str, target: &str, col: i16, 
     let Some(key) = crate::mouse_keys::parse(name) else { return };
     let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
     mouse_log(&format!("handle_mouse_key: {} target={} -> {:?}", name, target, dispatch));
+    let pane_for_clicks = target.strip_prefix('%').and_then(|s| s.parse::<usize>().ok());
+    if btn == 0 && name.ends_with("MouseDown1Pane") {
+        if let Some(p) = pane_for_clicks {
+            note_pane_press(app, p, col, row);
+        }
+    }
     if let crate::mouse_keys::Dispatch::User(cmd) = dispatch {
-        let pane_id = target.strip_prefix('%').and_then(|s| s.parse::<usize>().ok());
+        let pane_id = pane_for_clicks;
         app.last_mouse_event = pane_id.map(|p| (p, btn, true, Some((col, row)), std::time::Instant::now()));
         run_mouse_binding_to(app, target, &cmd);
     }
@@ -2294,6 +2309,10 @@ pub fn handle_mouse_key(app: &mut AppState, name: &str, target: &str, col: i16, 
 /// forward_key does: only a program that asked for the mouse gets it, and
 /// psmux itself does nothing (no focus change, no selection).
 pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press: bool, at: Option<(i16, i16)>) {
+    if btn == 0 && press {
+        let (c, r) = at.unwrap_or((0, 0));
+        note_pane_press(app, pane_id, c, r);
+    }
     let win_name = app.windows.get(app.active_idx).map(|w| w.name.clone()).unwrap_or_default();
     let Some(pane) = crate::tree::find_pane_mut_by_id_global(app, pane_id) else { return };
     let wants = if btn & 64 != 0 { pane_wheel_forward(pane) } else { pane_wants_click(pane) };
@@ -2305,6 +2324,98 @@ pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press:
     inject_mouse_combined(pane, col, row, btn, press, 0, flags, &win_name);
 }
 
+/// tmux's click timer for a left press in a pane (server-client.c
+/// server_client_check_mouse and server_client_click_timer). Called for every
+/// left press psmux sees in a pane. A press inside the double click window
+/// after a first one is SecondClick1Pane; a third is TripleClick1Pane, run at
+/// once; the window running out after a second press is DoubleClick1Pane
+/// (`click_timer_tick`).
+pub fn note_pane_press(app: &mut AppState, pane_id: usize, col: i16, row: i16) {
+    let now = std::time::Instant::now();
+    let window = std::time::Duration::from_millis(crate::mouse_keys::CLICK_TIMEOUT_MS);
+    match app.click_state {
+        Some((p, _, 1, deadline)) if p == pane_id && now < deadline => {
+            app.click_state = Some((pane_id, (col, row), 2, now + window));
+            let key = crate::mouse_keys::key(crate::mouse_keys::EV_SECOND_CLICK, 1, crate::mouse_keys::LOC_PANE, crossterm::event::KeyModifiers::NONE);
+            if let crate::mouse_keys::Dispatch::User(cmd) = crate::mouse_keys::resolve(app, key, app.mode.in_copy()) {
+                app.last_mouse_event = Some((pane_id, 0, true, Some((col, row)), now));
+                run_mouse_binding(app, pane_id, &cmd);
+            }
+        }
+        Some((p, _, 2, deadline)) if p == pane_id && now < deadline => {
+            app.click_state = None;
+            multi_click(app, false, pane_id, col, row);
+        }
+        _ => {
+            app.click_state = Some((pane_id, (col, row), 1, now + window));
+        }
+    }
+}
+
+/// The click timer and the built-in multi click finish, from the server loop.
+/// Returns true when it changed something (a frame is owed).
+pub fn click_timer_tick(app: &mut AppState) -> bool {
+    let now = std::time::Instant::now();
+    let mut acted = false;
+    if let Some((pane_id, (col, row), count, deadline)) = app.click_state {
+        if now >= deadline {
+            app.click_state = None;
+            if count == 2 {
+                multi_click(app, true, pane_id, col, row);
+                acted = true;
+            }
+        }
+    }
+    if let Some(at) = app.click_finish_at {
+        if now >= at {
+            app.click_finish_at = None;
+            if app.mode.in_copy() {
+                let _ = crate::server::run_send_keys_x(app, "copy-pipe-and-cancel", 1);
+            }
+            acted = true;
+        }
+    }
+    acted
+}
+
+/// DoubleClick1Pane (`double`) or TripleClick1Pane, resolved like tmux. The
+/// built-in is tmux's default: in copy mode select the word / line under the
+/// pointer, show it for 0.3s, copy and leave; outside copy mode the same after
+/// entering copy mode, unless the program has the mouse (it already got the
+/// presses: tmux's `send -M`) or pwsh-mouse-selection does its own word and
+/// line selection in the client.
+fn multi_click(app: &mut AppState, double: bool, pane_id: usize, col: i16, row: i16) {
+    let ev = if double { crate::mouse_keys::EV_DOUBLE_CLICK } else { crate::mouse_keys::EV_TRIPLE_CLICK };
+    let key = crate::mouse_keys::key(ev, 1, crate::mouse_keys::LOC_PANE, crossterm::event::KeyModifiers::NONE);
+    let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
+    mouse_log(&format!("multi_click: double={} pane={} at=({},{}) -> {:?}", double, pane_id, col, row, dispatch));
+    match dispatch {
+        crate::mouse_keys::Dispatch::User(cmd) => {
+            app.last_mouse_event = Some((pane_id, 0, true, Some((col, row)), std::time::Instant::now()));
+            run_mouse_binding(app, pane_id, &cmd);
+        }
+        crate::mouse_keys::Dispatch::Builtin => {
+            if !app.mode.in_copy() {
+                if app.pwsh_mouse_selection {
+                    return;
+                }
+                let wants = crate::tree::find_pane_mut_by_id_global(app, pane_id).map_or(false, |p| pane_wants_click(p));
+                if wants {
+                    return;
+                }
+                focus_pane_by_id(app, pane_id);
+                enter_copy_mode(app);
+            }
+            // Put the copy cursor on the clicked cell (the press path maps the
+            // pointer through the pane and the line number gutter).
+            handle_pane_mouse(app, pane_id, 0, col, row, true);
+            app.copy_mouse_down_cell = None;
+            let _ = crate::server::run_send_keys_x(app, if double { "select-word" } else { "select-line" }, 1);
+            app.click_finish_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
+        }
+        crate::mouse_keys::Dispatch::Forward | crate::mouse_keys::Dispatch::Drop => {}
+    }
+}
 /// Run a user mouse binding's command for the pane the event happened in.
 /// The command line goes the route a keyboard binding takes, to the server's
 /// command parser (brace blocks, `\;` chains, if-shell, send-keys -M), with

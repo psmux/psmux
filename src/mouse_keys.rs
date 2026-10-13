@@ -37,6 +37,11 @@ const LOCATIONS: &[&str] = &[
 pub const EV_MOUSE_DOWN: usize = 0;
 pub const EV_MOUSE_DRAG: usize = 2;
 pub const EV_MOUSE_DRAG_END: usize = 3;
+pub const EV_SECOND_CLICK: usize = 4;
+/// tmux KEYC_CLICK_TIMEOUT (tmux.h): the double click window, a constant in
+/// tmux (no option, measured: `show -g double-click-time` is an invalid option
+/// in tmux 3.4).
+pub const CLICK_TIMEOUT_MS: u64 = 300;
 pub const EV_DOUBLE_CLICK: usize = 5;
 pub const EV_TRIPLE_CLICK: usize = 6;
 pub const EV_WHEEL_UP: usize = 7;
@@ -183,6 +188,8 @@ pub const ROOT_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("MouseDown3Pane", "if-shell -F -t = \"#{mouse_any_flag}\" { select-pane -t = ; send-keys -M } { paste-buffer }"),
     ("MouseDown1Pane", "select-pane -t = \\; send-keys -M"),
     ("MouseDrag1Pane", "if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -M }"),
+    ("DoubleClick1Pane", "select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"),
+    ("TripleClick1Pane", "select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -H ; send-keys -X select-line ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"),
 ];
 pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "select-pane \\; send-keys -X -N 3 scroll-up"),
@@ -190,6 +197,8 @@ pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
     ("MouseDown1Pane", "select-pane"),
     ("MouseDrag1Pane", "select-pane \\; send-keys -X begin-selection"),
+    ("DoubleClick1Pane", "select-pane \\; send-keys -X select-word \\; run-shell -d 0.3 \\; send-keys -X copy-pipe-and-cancel"),
+    ("TripleClick1Pane", "select-pane \\; send-keys -X select-line \\; run-shell -d 0.3 \\; send-keys -X copy-pipe-and-cancel"),
 ];
 
 /// tmux's own default commands for keys psmux handles with a built-in
@@ -213,6 +222,12 @@ const DEFAULT_EQUIVALENTS: &[(&str, &str, &str)] = &[
     ("copy-mode-vi", "MouseDown1Pane", "select-pane"),
     ("copy-mode", "MouseDrag1Pane", "select-pane ; send-keys -X begin-selection"),
     ("copy-mode-vi", "MouseDrag1Pane", "select-pane ; send-keys -X begin-selection"),
+    ("root", "DoubleClick1Pane", "select-pane -t = ; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"),
+    ("root", "TripleClick1Pane", "select-pane -t = ; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -H ; send-keys -X select-line ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"),
+    ("copy-mode", "DoubleClick1Pane", "select-pane ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel"),
+    ("copy-mode-vi", "DoubleClick1Pane", "select-pane ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel"),
+    ("copy-mode", "TripleClick1Pane", "select-pane ; send-keys -X select-line ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel"),
+    ("copy-mode-vi", "TripleClick1Pane", "select-pane ; send-keys -X select-line ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel"),
 ];
 
 /// A command line in one spelling for comparing defaults: whitespace runs
@@ -240,6 +255,8 @@ fn canonical_word(tok: &str) -> Vec<String> {
         "\\;" => vec![";".into()],
         "send" => vec!["send-keys".into()],
         "if" => vec!["if-shell".into()],
+        "run" => vec!["run-shell".into()],
+        "-d0.3" => vec!["-d".into(), "0.3".into()],
         "selectp" => vec!["select-pane".into()],
         "-t=" => vec!["-t".into(), "=".into()],
         other => vec![other.to_string()],
@@ -270,6 +287,15 @@ pub const CLIENT_ROUTED: &[&str] = &[
     "MouseDrag1Pane",
 ];
 
+/// Status line multi clicks: tmux has no default for them, so the client
+/// only hears about one that is BOUND (an unbound one does nothing there:
+/// there is no pane under the pointer to hand it to).
+pub const CLIENT_ROUTED_STATUS_CLICKS: &[&str] = &[
+    "SecondClick1Status",
+    "DoubleClick1Status",
+    "TripleClick1Status",
+];
+
 /// One letter per dispatch, for the client: B built-in, U user binding,
 /// F unbound in root (to the program if it wants the mouse), D dropped.
 fn dispatch_code(d: &Dispatch) -> char {
@@ -292,6 +318,12 @@ pub fn client_overrides(app: &crate::types::AppState) -> String {
         let c = dispatch_code(&resolve(app, k, true));
         if r != 'B' || c != 'B' {
             parts.push(format!("\"{}\":\"{}{}\"", name, r, c));
+        }
+    }
+    for name in CLIENT_ROUTED_STATUS_CLICKS {
+        let Some(k) = parse(name) else { continue };
+        if let Dispatch::User(_) = resolve(app, k, false) {
+            parts.push(format!("\"{}\":\"UU\"", name));
         }
     }
     // A routed key bound WITH modifiers (`bind -n M-MouseDown3Pane ...`):

@@ -51,7 +51,7 @@ $NS   = "mkb-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
 $SESS = "mkb"
 
 function P { & $PSMUX -L $NS @args 2>&1 }
-function Wire([string]$line) {
+function Wire([string]$line, [switch]$Fast) {
     $port = [int](Get-Content (Join-Path $DATA "${NS}__${SESS}.port") -Raw).Trim()
     $key  = (Get-Content (Join-Path $DATA "${NS}__${SESS}.key") -Raw).Trim()
     $c = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $port)
@@ -63,7 +63,7 @@ function Wire([string]$line) {
         $buf = New-Object byte[] 256
         try { [void]$s.Read($buf, 0, 256) } catch {}
     } finally { $c.Close() }
-    Start-Sleep -Milliseconds 250
+    if (-not $Fast) { Start-Sleep -Milliseconds 250 }
 }
 function PaneId { ((P display -p '#{pane_id}') -join '').TrimStart('%') }
 function Wheel([string]$dir, [int]$mask = 0, [string]$pane = $null) {
@@ -75,6 +75,8 @@ function Opt($n) { ((P show -gv $n) -join '').Trim() }
 function Cancel { P send-keys -X cancel | Out-Null; Start-Sleep -Milliseconds 250 }
 function Keys { P list-keys | Out-String }
 
+# Copies in this suite reach the Windows clipboard: keep the user's.
+$suiteClip = Get-Clipboard -Raw
 try {
     P new-session -d -s $SESS -x 120 -y 30 | Out-Null
     Start-Sleep 3
@@ -187,7 +189,28 @@ try {
         $top = (P show-buffer) -join ''
         Check ($top -eq 'MKBCLIP796') "refresh-client -l makes the clipboard the top buffer" "top buffer [$top]"
     } finally { if ($null -ne $savedClip) { Set-Clipboard -Value $savedClip } }
+
+    Write-Head "double and triple click (tmux click timer)"
+    P select-window -t 0 | Out-Null; Start-Sleep -Milliseconds 300
+    P send-keys -t $SESS 'cls; 1..20 | % { "alpha$_ beta$_ gamma$_" }' Enter | Out-Null
+    Start-Sleep 3
+    $pid1 = ((P display -p '#{pane_id}') -join '').TrimStart('%')
+    # Presses well inside the 300 ms double click window.
+    function Press { Wire "pane-mouse $pid1 0 9 5 M" -Fast; Wire "pane-mouse $pid1 0 9 5 m" -Fast }
+    P set-buffer MARK | Out-Null
+    Press; Press; Start-Sleep -Milliseconds 900
+    $w = (P show-buffer) -join ''
+    Check ($w -match '^beta\d+$') "double click selects and copies the word" "buffer [$w]"
+    P set-buffer MARK | Out-Null
+    Press; Press; Press; Start-Sleep -Milliseconds 900
+    $l = ((P show-buffer) -join ' ').Trim()
+    Check ($l -match '^alpha\d+ beta\d+ gamma\d+$') "triple click selects and copies the line" "buffer [$l]"
+    P bind -n DoubleClick1Pane set -g '@dc' hit | Out-Null
+    P set-buffer MARK | Out-Null
+    Press; Press; Start-Sleep -Milliseconds 900
+    Check ((Opt '@dc') -eq 'hit' -and ((P show-buffer) -join '') -eq 'MARK') "a DoubleClick1Pane binding runs instead" "@dc=[$(Opt '@dc')] buffer [$((P show-buffer) -join '')]"
 } finally {
+    if ($null -ne $suiteClip) { Set-Clipboard -Value $suiteClip }
     P kill-server | Out-Null
     Start-Sleep 1
     if ($ownData) { Remove-Item -Recurse -Force $DATA -EA SilentlyContinue }

@@ -4004,6 +4004,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // pane-relative, drag handed to copy mode yet). The whole gesture then
     // goes through the key tables instead of the client selection.
     let mut pane_gesture: Option<(usize, Rect, char, char, (i16, i16), bool)> = None;
+    // tmux's click timer for the status line, used only while a
+    // Second/Double/TripleClick1Status binding exists: (presses so far, the
+    // window's end, target, col, row).
+    let mut status_clicks: Option<(u8, Instant, String, u16, u16)> = None;
     // The copy-mode line number mode and scrollback size the frames are being
     // painted with, which is what the gutter width is computed from. Kept out
     // here because a copy-mode release re-reports a cell the server gave as a
@@ -6892,6 +6896,32 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     // tmux MouseDown1Status: built in, select the
                                     // window clicked; a user binding runs with that
                                     // window as `-t =`; unbound, nothing.
+                                    // Status line multi clicks, when one is bound
+                                    // (tmux server_client_check_mouse).
+                                    if mouse_overrides.keys().any(|k| k.ends_with("Click1Status")) {
+                                        let target = clicked_tab
+                                            .filter(|i| client_window_indices.contains(i))
+                                            .map(|i| format!(":{}", i))
+                                            .unwrap_or_else(|| ":".to_string());
+                                        let now = Instant::now();
+                                        let window = Duration::from_millis(crate::mouse_keys::CLICK_TIMEOUT_MS);
+                                        let send = |name: &str, batch: &mut Vec<String>| {
+                                            if mouse_route(&mouse_overrides, name, client_copy_mode) == 'U' {
+                                                batch.push(format!("mouse-key {} {} {} {} 0\n", name, target, me.column, me.row));
+                                            }
+                                        };
+                                        status_clicks = match status_clicks.take() {
+                                            Some((1, end, ..)) if now < end => {
+                                                send("SecondClick1Status", &mut cmd_batch);
+                                                Some((2, now + window, target.clone(), me.column, me.row))
+                                            }
+                                            Some((2, end, ..)) if now < end => {
+                                                send("TripleClick1Status", &mut cmd_batch);
+                                                None
+                                            }
+                                            _ => Some((1, now + window, target.clone(), me.column, me.row)),
+                                        };
+                                    }
                                     let status_name = routed_name(&mouse_overrides, "MouseDown1Status", me.modifiers);
                                     match mouse_route(&mouse_overrides, &status_name, client_copy_mode) {
                                         'B' => {
@@ -7974,6 +8004,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             #[cfg(windows)]
             if ime_was_open { crate::platform::ime_restore(); ime_was_open = false; }
             cmd_batch.push("prefix-end\n".into());
+        }
+
+        // tmux's click timer ran out after a second status line press:
+        // DoubleClick1Status.
+        if let Some((count, end, ref target, col, row)) = status_clicks {
+            if Instant::now() >= end {
+                if count == 2 && mouse_route(&mouse_overrides, "DoubleClick1Status", client_copy_mode) == 'U' {
+                    cmd_batch.push(format!("mouse-key DoubleClick1Status {} {} {} 0\n", target, col, row));
+                }
+                status_clicks = None;
+            }
         }
 
         // ── Copy-mode drag auto-scroll repeat ──────────────────────────

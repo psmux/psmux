@@ -310,3 +310,71 @@ fn a_modified_routed_key_is_reported_by_its_full_name() {
         Dispatch::User("refresh-client -l \\; paste-buffer -p".into())
     );
 }
+
+// ── tmux's click timer (server-client.c click_timer, KEYC_CLICK_TIMEOUT) ──
+
+fn opt(app: &crate::types::AppState, name: &str) -> Option<String> {
+    app.user_options.get(name).cloned()
+}
+
+#[test]
+fn multi_click_defaults_follow_tmux() {
+    let app = app();
+    for (n, copy) in [("DoubleClick1Pane", false), ("TripleClick1Pane", false), ("DoubleClick1Pane", true), ("TripleClick1Pane", true)] {
+        assert_eq!(resolve(&app, parse(n).unwrap(), copy), Dispatch::Builtin, "{} copy={}", n, copy);
+    }
+    // SecondClick has no default in tmux.
+    assert_eq!(resolve(&app, parse("SecondClick1Pane").unwrap(), false), Dispatch::Forward);
+    let rows = list_keys_entries(&app);
+    assert!(rows.iter().any(|(t, k, c, _)| t == "copy-mode-vi" && k == "TripleClick1Pane" && c.contains("select-line")));
+    assert!(rows.iter().any(|(t, k, c, _)| t == "root" && k == "DoubleClick1Pane" && c.contains("select-word")));
+    assert_eq!(CLICK_TIMEOUT_MS, 300);
+}
+
+#[test]
+fn second_then_double_after_the_timer() {
+    let mut app = app();
+    parse_config_content(&mut app, "bind -n SecondClick1Pane set -g @sc hit\nbind -n DoubleClick1Pane set -g @dc hit\nbind -n TripleClick1Pane set -g @tc hit");
+    crate::window_ops::note_pane_press(&mut app, 4, 3, 2);
+    assert_eq!(opt(&app, "@sc"), None, "one press is MouseDown1Pane only");
+    crate::window_ops::note_pane_press(&mut app, 4, 3, 2);
+    assert_eq!(opt(&app, "@sc").as_deref(), Some("hit"), "the second press is SecondClick1Pane");
+    assert_eq!(opt(&app, "@dc"), None, "DoubleClick waits for the timer");
+    // The timer runs out.
+    if let Some(s) = app.click_state.as_mut() { s.3 = std::time::Instant::now() - std::time::Duration::from_millis(1); }
+    assert!(crate::window_ops::click_timer_tick(&mut app));
+    assert_eq!(opt(&app, "@dc").as_deref(), Some("hit"));
+    assert_eq!(opt(&app, "@tc"), None);
+    assert!(app.click_state.is_none());
+}
+
+#[test]
+fn a_third_press_is_triple_and_no_double() {
+    let mut app = app();
+    parse_config_content(&mut app, "bind -n DoubleClick1Pane set -g @dc hit\nbind -n TripleClick1Pane set -g @tc hit");
+    for _ in 0..3 { crate::window_ops::note_pane_press(&mut app, 4, 3, 2); }
+    assert_eq!(opt(&app, "@tc").as_deref(), Some("hit"));
+    assert!(app.click_state.is_none());
+    assert!(!crate::window_ops::click_timer_tick(&mut app));
+    assert_eq!(opt(&app, "@dc"), None);
+}
+
+#[test]
+fn presses_outside_the_window_or_in_another_pane_start_over() {
+    let mut app = app();
+    parse_config_content(&mut app, "bind -n SecondClick1Pane set -g @sc hit");
+    crate::window_ops::note_pane_press(&mut app, 4, 3, 2);
+    crate::window_ops::note_pane_press(&mut app, 5, 3, 2);
+    assert_eq!(opt(&app, "@sc"), None, "another pane");
+    if let Some(s) = app.click_state.as_mut() { s.3 = std::time::Instant::now() - std::time::Duration::from_millis(1); }
+    crate::window_ops::note_pane_press(&mut app, 5, 3, 2);
+    assert_eq!(opt(&app, "@sc"), None, "after the window");
+}
+
+#[test]
+fn status_multi_clicks_reach_the_client_only_when_bound() {
+    let mut app = app();
+    assert_eq!(client_overrides(&app), "{}");
+    parse_config_content(&mut app, "bind -n DoubleClick1Status display hi");
+    assert_eq!(client_overrides(&app), r#"{"DoubleClick1Status":"UU"}"#);
+}
