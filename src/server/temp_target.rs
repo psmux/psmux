@@ -39,6 +39,29 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
         };
         return Err(format!("can't find window: {}", spec));
     };
+    if t.pane_check_only {
+        // The command resolves the pane itself, floating panes included, so
+        // only answer whether it exists. A floating pane's position follows
+        // the tiled panes (#767), as #{pane_index} numbers it.
+        if let Some(p) = t.pane {
+            let found = if t.pane_is_id {
+                crate::tree::find_pane_by_id_global(app, p).is_some()
+                    || app.windows.iter().any(|w| w.floating.iter().any(|fp| fp.id == p))
+            } else {
+                let w = &app.windows[idx];
+                p < crate::tree::pane_paths(&w.root).len() + w.floating.len()
+            };
+            if !found {
+                let spec = if t.pane_is_id { format!("%{}", p) } else { p.to_string() };
+                return Err(format!("can't find pane: {}", spec));
+            }
+        }
+        return Ok(TempTarget {
+            win: if has_win { Some(app.windows[idx].id) } else { None },
+            win_is_id: has_win,
+            ..Default::default()
+        });
+    }
     let pane_id: Option<usize> = match t.pane {
         Some(p) if t.pane_is_id => {
             if crate::tree::find_pane_by_id_global(app, p).is_none() {
@@ -63,7 +86,7 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
         win_name: None,
         pane: pane_id,
         pane_is_id: pane_id.is_some(),
-        session: None,
+        ..Default::default()
     })
 }
 

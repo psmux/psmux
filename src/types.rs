@@ -3037,6 +3037,13 @@ pub struct TempTarget {
     /// server must get tmux's "can't find session", never act on its own
     /// panes. Always None in a resolved target.
     pub session: Option<String>,
+    /// The pane part is checked for existence only (a floating pane counts)
+    /// and is NOT part of the resolved target: the command resolves the
+    /// pane itself (display-message, capture-pane and kill-pane by %id,
+    /// select-pane). Without the check those commands fell back to the
+    /// active pane, or did nothing, at exit 0 for a pane that does not exist
+    /// (issue #793 follow up). Always false in a resolved target.
+    pub pane_check_only: bool,
 }
 
 impl TempTarget {
@@ -3050,6 +3057,7 @@ impl TempTarget {
             pane: pt.pane,
             pane_is_id: pt.pane_is_id,
             session: None,
+            pane_check_only: false,
         }
     }
 

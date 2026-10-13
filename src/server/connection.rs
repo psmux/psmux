@@ -329,6 +329,27 @@ pub(crate) fn explicit_target_session(cmd: &str, raw_target: Option<&str>) -> Op
     parse_target(raw).session.filter(|s| !s.is_empty())
 }
 
+/// Commands that resolve the pane of their `-t` themselves, so the generic
+/// temporary focus leaves the pane alone, but whose pane must still exist.
+///
+/// display-message expands its format for the named pane (by %id across
+/// windows, #332, or by index, #113), and capture-pane and kill-pane by %id
+/// look the id up on their own. A pane that does not exist used to give the
+/// ACTIVE pane's values (`display-message -p -t %99` printed `%1`), an empty
+/// capture, or a kill of nothing, all at exit 0 over TCP and control mode
+/// (issue #793 follow up). The CLI already refused them client side.
+pub(crate) fn pane_checked_not_focused(cmd: &str, pane_is_id: bool) -> bool {
+    matches!(cmd, "display-message" | "display")
+        || (pane_is_id && matches!(cmd, "capture-pane" | "capturep" | "kill-pane" | "killp"))
+}
+
+/// tmux's CMD_FIND_CANFAIL commands whose own work does not need the target
+/// (cmd-run-shell.c, cmd-if-shell.c, cmd-source-file.c): a target that names
+/// nothing is not an error, the command runs without one.
+pub(crate) fn target_can_fail(cmd: &str) -> bool {
+    matches!(cmd, "run-shell" | "run" | "if-shell" | "if" | "source-file" | "source")
+}
+
 /// SetPaneOption/ShowPaneOptions resolve only "" (the active pane) and bare
 /// "%N"/"N" pane ids. set-option keeps its -t in the argument list for the
 /// shared parser (unlike every other command, whose -t without_outer_target
@@ -1757,6 +1778,23 @@ if control_echo || control_noecho {
                     focus_err = Some(e);
                 }
             }
+            // select-pane -t %99 was a silent %end here (issue #793 follow
+            // up). Existence only, so a floating pane still passes.
+            let has_target = ctrl_target_win.is_some() || ctrl_target_win_name.is_some() || ctrl_target_pane.is_some();
+            if focus_err.is_none() && has_target && matches!(cmd_name, "select-pane" | "selectp") {
+                let spec = crate::types::TempTarget {
+                    win: ctrl_target_win,
+                    win_is_id: ctrl_target_win_is_id,
+                    win_name: ctrl_target_win_name.clone(),
+                    pane: ctrl_target_pane,
+                    pane_is_id: ctrl_pane_is_id,
+                    pane_check_only: true,
+                    ..Default::default()
+                };
+                if let Err(e) = validate_target(&tx_ctrl, spec) {
+                    focus_err = Some(e);
+                }
+            }
         }
         if focus_err.is_none() {
             if is_focus_cmd && matches!(cmd_name, "select-pane" | "selectp") {
@@ -1815,14 +1853,17 @@ if control_echo || control_noecho {
                     || ctrl_target_win_name.is_some())
                     && !skip_target_focus;
                 let want_pane = ctrl_target_pane.is_some() && !skip_pane_focus;
-                if want_win || want_pane || ctrl_target_session.is_some() {
+                let check_pane = ctrl_target_pane.is_some() && !want_pane
+                    && pane_checked_not_focused(cmd_name, ctrl_pane_is_id);
+                if want_win || want_pane || check_pane || ctrl_target_session.is_some() {
                     let spec = crate::types::TempTarget {
                         win: if want_win { ctrl_target_win } else { None },
                         win_is_id: ctrl_target_win_is_id,
                         win_name: if want_win { ctrl_target_win_name.clone() } else { None },
-                        pane: if want_pane { ctrl_target_pane } else { None },
+                        pane: if want_pane || check_pane { ctrl_target_pane } else { None },
                         pane_is_id: ctrl_pane_is_id,
                         session: ctrl_target_session.clone(),
+                        pane_check_only: check_pane,
                     };
                     match validate_target(&tx_ctrl, spec) {
                         // A session-only check resolves to no window or pane:
@@ -1831,6 +1872,8 @@ if control_echo || control_noecho {
                             ctrl_command_target = Some(resolved)
                         }
                         Ok(_) => {}
+                        // tmux CMD_FIND_CANFAIL: the command runs, with no target.
+                        Err(_) if target_can_fail(cmd_name) => {}
                         Err(e) => focus_err = Some(e),
                     }
                 }
@@ -2268,15 +2311,20 @@ if is_focus_cmd {
     // CLI (cli_validate_window_pane_target); one inside a list did not, and
     // its request has no reply. Check it here so a target that names nothing
     // is tmux's "can't find pane" and ends the list.
+    // Alone on a raw TCP line it was not checked by anyone (issue #793 follow
+    // up): `select-pane -t %99` answered nothing at all and did nothing. The
+    // pane part is checked for existence only, so a floating pane still
+    // passes and select_pane_requests keeps owning the selection.
     let has_target = target_win.is_some() || target_win_name.is_some() || target_pane.is_some();
-    if selectp_owns_target && !persistent && in_command_list && has_target {
+    if selectp_owns_target && !persistent && has_target {
         let spec = crate::types::TempTarget {
             win: target_win,
             win_is_id: target_win_is_id,
             win_name: target_win_name.clone(),
             pane: target_pane,
             pane_is_id,
-            session: None,
+            pane_check_only: true,
+            ..Default::default()
         };
         if let Err(e) = validate_target(&tx, spec) {
             let _ = writeln!(write_stream, "ERROR: {}", e);
@@ -2321,20 +2369,36 @@ if is_focus_cmd {
     // its requests interleave with anyone else's.
     let want_win = (target_win.is_some() || target_win_name.is_some()) && !skip_target_focus;
     let want_pane = target_pane.is_some() && !skip_pane_focus && targeted_kill_pane_id.is_none();
-    if want_win || want_pane || target_session.is_some() {
+    let check_pane = target_pane.is_some() && !want_pane && pane_checked_not_focused(cmd, pane_is_id);
+    if want_win || want_pane || check_pane || target_session.is_some() {
         let spec = crate::types::TempTarget {
             win: if want_win { target_win } else { None },
             win_is_id: target_win_is_id,
             win_name: if want_win { target_win_name.clone() } else { None },
-            pane: if want_pane { target_pane } else { None },
+            pane: if want_pane || check_pane { target_pane } else { None },
             pane_is_id,
             session: target_session.clone(),
+            pane_check_only: check_pane,
         };
         match validate_target(&tx, spec) {
             // A session-only check resolves to no window or pane: the
             // command then acts on the real focus, as it always did.
             Ok(resolved) if resolved.win.is_none() && resolved.pane.is_none() => {}
             Ok(resolved) => command_target = Some(resolved),
+            // tmux CMD_FIND_CANFAIL: the command runs, with no target. The
+            // commands it queues (an if-shell branch, a sourced file) run
+            // with no target either, so a TARGET line naming nothing must
+            // not follow them down the list: the CLI sends `if-shell -t %99
+            // ... 'display -p yes'` as TARGET %99 plus the command, and the
+            // branch's display-message would otherwise be refused for %99.
+            Err(_) if target_can_fail(cmd) => {
+                global_target_win = None;
+                global_target_win_is_id = false;
+                global_target_win_name = None;
+                global_target_pane = None;
+                global_pane_is_id = false;
+                global_raw_target = None;
+            }
             Err(e) => {
                 // Unresolvable target: report (tmux: "can't find window: X",
                 // exit 1, zero side effects) and skip the command entirely.
@@ -3533,7 +3597,7 @@ match cmd {
             win_name: target_win_name.clone(),
             pane: target_pane,
             pane_is_id,
-            session: None,
+            session: None, pane_check_only: false,
         };
         // No -t window: a bare integer is the target window (legacy compat).
         if dst.win.is_none() && dst.win_name.is_none() && !dst.pane_is_id {
@@ -3658,7 +3722,7 @@ match cmd {
                 Some(spec) => crate::types::TempTarget::from_parsed(&parse_target(spec)),
                 None => crate::types::TempTarget {
                     win: target_win, win_is_id: target_win_is_id, win_name: target_win_name.clone(),
-                    pane: target_pane, pane_is_id, session: None,
+                    pane: target_pane, pane_is_id, session: None, pane_check_only: false,
                 },
             };
             // Read screen base64 data from remaining args/payload

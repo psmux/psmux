@@ -1269,7 +1269,7 @@ fn input_toggle_temp_target(raw_target: Option<&str>) -> Option<crate::types::Te
             win_name: pt.window_name,
             pane: pt.pane,
             pane_is_id: pt.pane_is_id,
-            session: None,
+            session: None, pane_check_only: false,
         }
     })
 }

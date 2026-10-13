@@ -132,11 +132,11 @@ fn validation_resolves_to_stable_ids() {
     let app = app();
     // s:0.1 -> %2 (the active window's second pane)
     let r = resolve_temp_target(&app, &pane_index(1)).unwrap();
-    assert_eq!(r, TempTarget { win: None, win_is_id: false, win_name: None, pane: Some(2), pane_is_id: true, session: None });
+    assert_eq!(r, TempTarget { win: None, win_is_id: false, win_name: None, pane: Some(2), pane_is_id: true, session: None, pane_check_only: false });
     assert!(r.is_resolved());
     // s:1 -> @11, no pane part (the window's active pane when it runs)
     let r = resolve_temp_target(&app, &window_index(1)).unwrap();
-    assert_eq!(r, TempTarget { win: Some(11), win_is_id: true, win_name: None, pane: None, pane_is_id: false, session: None });
+    assert_eq!(r, TempTarget { win: Some(11), win_is_id: true, win_name: None, pane: None, pane_is_id: false, session: None, pane_check_only: false });
     // s:other.0 -> @11 + %4
     let t = TempTarget { win_name: Some("other".into()), pane: Some(0), ..Default::default() };
     let r = resolve_temp_target(&app, &t).unwrap();
@@ -331,5 +331,72 @@ fn issue793_which_targets_carry_a_session_to_check() {
                 "move-window", "link-window", "join-pane", "move-pane", "swap-window", "swap-pane",
                 "set-option", "refresh-client", "display-panes"] {
         assert_eq!(explicit_target_session(cmd, t), None, "{cmd}");
+    }
+}
+
+// Issue #793 follow up: commands that resolve the pane of their -t themselves
+// (display-message, capture-pane and kill-pane by %id, select-pane) skipped
+// validation, so a pane that does not exist gave the ACTIVE pane's values
+// (`display-message -p -t %99` printed `%1`), an empty capture, or nothing,
+// all at exit 0 over TCP and control mode. tmux: "can't find pane: %99".
+
+fn check_only(pane: usize, is_id: bool) -> TempTarget {
+    TempTarget { pane: Some(pane), pane_is_id: is_id, pane_check_only: true, ..Default::default() }
+}
+
+fn add_float(app: &mut AppState, win: usize, id: usize) {
+    app.windows[win].floating.push(crate::types::FloatingPane {
+        pane: make_pane(id),
+        x: 0, y: 0, w: 10, h: 5,
+        border: String::new(),
+        id,
+        title: String::new(),
+        position: None,
+    });
+}
+
+#[test]
+fn issue793_check_only_pane_must_exist() {
+    let mut app = app();
+    add_float(&mut app, 1, 9);
+    assert_eq!(resolve_temp_target(&app, &check_only(99, true)).unwrap_err(), "can't find pane: %99");
+    assert_eq!(resolve_temp_target(&app, &check_only(7, false)).unwrap_err(), "can't find pane: 7");
+    // A tiled pane in another window and a floating pane both exist; the
+    // pane is not part of the resolved target (the command resolves it).
+    for t in [check_only(4, true), check_only(9, true), check_only(2, false)] {
+        let r = resolve_temp_target(&app, &t).unwrap();
+        assert_eq!((r.win, r.pane, r.pane_check_only), (None, None, false), "{t:?}");
+    }
+    // A floating pane's index follows the tiled ones, as #{pane_index} does:
+    // window 1 has %4 at 0 and the float %9 at 1.
+    let t = TempTarget { win: Some(1), pane: Some(1), pane_check_only: true, ..Default::default() };
+    assert_eq!(resolve_temp_target(&app, &t).unwrap().win, Some(11));
+    let t = TempTarget { win: Some(1), pane: Some(2), pane_check_only: true, ..Default::default() };
+    assert_eq!(resolve_temp_target(&app, &t).unwrap_err(), "can't find pane: 2");
+    // The window part is still resolved and still fails first.
+    let t = TempTarget { win: Some(9), pane: Some(0), pane_check_only: true, ..Default::default() };
+    assert_eq!(resolve_temp_target(&app, &t).unwrap_err(), "can't find window: 9");
+    assert_eq!(active(&app), (0, 1));
+}
+
+#[test]
+fn issue793_which_commands_check_or_can_fail() {
+    use crate::server::connection::{pane_checked_not_focused, target_can_fail};
+    assert!(pane_checked_not_focused("display-message", false));
+    assert!(pane_checked_not_focused("display", true));
+    assert!(pane_checked_not_focused("capture-pane", true));
+    assert!(pane_checked_not_focused("kill-pane", true));
+    assert!(pane_checked_not_focused("killp", true));
+    // By index those two take the ordinary focused route.
+    assert!(!pane_checked_not_focused("capture-pane", false));
+    assert!(!pane_checked_not_focused("kill-pane", false));
+    // swap-pane resolves and reports its own target.
+    assert!(!pane_checked_not_focused("swap-pane", true));
+    // tmux CMD_FIND_CANFAIL commands that run without a target.
+    for c in ["run-shell", "run", "if-shell", "if", "source-file", "source"] {
+        assert!(target_can_fail(c), "{c}");
+    }
+    for c in ["display-message", "send-keys", "set-option", "kill-pane"] {
+        assert!(!target_can_fail(c), "{c}");
     }
 }

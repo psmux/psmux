@@ -1436,7 +1436,14 @@ fn run_main() -> io::Result<()> {
         // window at exit 0.
         | "split-window" | "splitw" | "split-pane" | "splitp"
         | "select-layout" | "selectl" | "next-layout" | "nextl"
-        | "previous-layout" | "prevl")
+        | "previous-layout" | "prevl"
+        // Issue #793 follow up: these four go to the server fire and forget,
+        // so the server's "can't find pane/window" never reached the caller
+        // and `copy-mode -t %99` or `rotate-window -t s:9` exited 0 having
+        // done nothing. tmux refuses all four (CMD_FIND_PANE/WINDOW, no
+        // CANFAIL).
+        | "rotate-window" | "rotatew" | "resize-window" | "resizew"
+        | "copy-mode" | "send-prefix")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref());
     }
@@ -4727,9 +4734,19 @@ fn run_main() -> io::Result<()> {
                     // process used to run it verbatim: `if-shell 'guard
                     // #{pid}'` handed the guard the literal `#{pid}` (issue
                     // #734 follow up).
-                    if !format_mode && cond.contains('#') {
+                    // `-F` with a -t goes whole to the server too (issue #793
+                    // follow up): its -t is tmux's CMD_FIND_CANFAIL, which the
+                    // server honours, while expanding the format here sent a
+                    // targeted display-message that a missing pane refuses,
+                    // and that refusal text then counted as a true condition.
+                    // The -t itself was peeled off into PSMUX_TARGET_FULL (the
+                    // TARGET line) before this arm ran.
+                    let has_target = target.is_some()
+                        || std::env::var("PSMUX_TARGET_FULL").is_ok_and(|t| !t.is_empty());
+                    if (!format_mode && cond.contains('#')) || (format_mode && has_target) {
                         let mut line = String::from("if-shell");
                         if background { line.push_str(" -b"); }
+                        if format_mode { line.push_str(" -F"); }
                         if let Some(t) = &target {
                             line.push_str(" -t ");
                             line.push_str(&crate::util::quote_arg(t));
