@@ -25,6 +25,11 @@ const VT_ENV_VARS: &[&str] = &[
     "TERMINAL_EMULATOR",
     "TERM_PROGRAM",
     "WEZTERM_PANE",
+    // Alacritty's signal, and the explicit opt in. Cleared too, so the
+    // baseline holds when the suite runs from an Alacritty window, which sets
+    // ALACRITTY_LOG for every child.
+    "ALACRITTY_LOG",
+    "PSMUX_VT_INPUT",
 ];
 
 fn with_clean_vt_env<T>(setup: impl FnOnce(), f: impl FnOnce() -> T) -> T {

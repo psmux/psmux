@@ -344,6 +344,16 @@ pub fn needs_vt_input() -> bool {
         // env vars it always sets and route it through the VT input path.
         || std::env::var("TERM_PROGRAM").map_or(false, |v| v == "WezTerm")
         || std::env::var_os("WEZTERM_PANE").is_some()
+        // Alacritty on Windows (#787) is the same kind of host: it writes keys
+        // to the ConPTY as VT bytes and has no win32-input-mode. On the console
+        // route conhost turns its Ctrl+J (0x0a) into Ctrl+Enter, so a C-j prefix
+        // never arms (the VT parser reads 0x0a as C-j, #642), and the colour
+        // query drain gets no settle window, so the torn tail of a late reply
+        // reaches the pane as `55` and Alt+\ (#646). Alacritty sets no
+        // TERM_PROGRAM. The variable it always sets on Windows is
+        // ALACRITTY_LOG (alacritty/src/logging.rs:204, v0.17.0), since
+        // ALACRITTY_WINDOW_ID is set on Unix only.
+        || std::env::var_os("ALACRITTY_LOG").is_some()
 }
 
 /// `PSMUX_VT_INPUT=1` puts the client on the VT input route on any host
@@ -3020,6 +3030,10 @@ mod tests_windows10_ssh_mouse;
 #[cfg(test)]
 #[path = "../tests-rs/test_pr468_wezterm_vt_input.rs"]
 mod tests_pr468_wezterm_vt_input;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue787_alacritty_vt_input.rs"]
+mod tests_issue787_alacritty_vt_input;
 
 #[cfg(test)]
 #[cfg(windows)]
