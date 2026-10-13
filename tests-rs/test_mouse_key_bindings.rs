@@ -297,3 +297,16 @@ fn border_and_right_button_are_client_routed() {
     let o = client_overrides(&app);
     assert!(o.contains(r#""MouseDown3Pane":"FD""#) && o.contains(r#""MouseDrag1Border":"UU""#), "{}", o);
 }
+
+#[test]
+fn a_modified_routed_key_is_reported_by_its_full_name() {
+    let mut app = app();
+    parse_config_content(&mut app, "bind -n M-MouseDown3Pane { refresh-client -l ; paste-buffer -p }");
+    let o = client_overrides(&app);
+    assert!(o.contains(r#""M-MouseDown3Pane":"UU""#), "{}", o);
+    assert!(!o.contains(r#""MouseDown3Pane""#), "the plain key keeps its default: {}", o);
+    assert_eq!(
+        resolve(&app, parse("M-MouseDown3Pane").unwrap(), false),
+        Dispatch::User("refresh-client -l \\; paste-buffer -p".into())
+    );
+}

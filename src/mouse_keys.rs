@@ -294,6 +294,26 @@ pub fn client_overrides(app: &crate::types::AppState) -> String {
             parts.push(format!("\"{}\":\"{}{}\"", name, r, c));
         }
     }
+    // A routed key bound WITH modifiers (`bind -n M-MouseDown3Pane ...`):
+    // the client looks those up by their full name before the plain one.
+    let mut seen: Vec<(KeyCode, KeyModifiers)> = Vec::new();
+    for table in ["root", "copy-mode", "copy-mode-vi"] {
+        let Some(binds) = app.key_tables.get(table) else { continue };
+        for b in binds {
+            let KeyCode::Char(ch) = b.key.0 else { continue };
+            if b.key.1.is_empty() || seen.contains(&b.key) {
+                continue;
+            }
+            let Some(base) = name(ch) else { continue };
+            if !CLIENT_ROUTED.contains(&base.as_str()) {
+                continue;
+            }
+            seen.push(b.key);
+            let r = dispatch_code(&resolve(app, b.key, false));
+            let c = dispatch_code(&resolve(app, b.key, true));
+            parts.push(format!("\"{}\":\"{}{}\"", crate::config::format_key_binding(&b.key), r, c));
+        }
+    }
     format!("{{{}}}", parts.join(","))
 }
 

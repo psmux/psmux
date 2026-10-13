@@ -178,6 +178,15 @@ try {
     Check ($k -match "-T root F9 set -g @c1 yes \\; set -g @c2 yes") "multi line block becomes a command list" "F9 line missing"
     Check ($k -match "-T root F10 if -F '#\{pane_in_mode\}' \{ set -g @d in \} \{ set -g @d out \}") "nested blocks stay one command" "F10 line missing"
     Check (-not ($out -match 'unknown command')) "no unknown command warnings" "warnings: $out"
+
+    Write-Head "refresh-client -l reads the Windows clipboard into a buffer (#796)"
+    $savedClip = Get-Clipboard -Raw
+    try {
+        Set-Clipboard -Value "MKBCLIP796"
+        P refresh-client -l | Out-Null
+        $top = (P show-buffer) -join ''
+        Check ($top -eq 'MKBCLIP796') "refresh-client -l makes the clipboard the top buffer" "top buffer [$top]"
+    } finally { if ($null -ne $savedClip) { Set-Clipboard -Value $savedClip } }
 } finally {
     P kill-server | Out-Null
     Start-Sleep 1

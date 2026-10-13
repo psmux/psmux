@@ -5004,6 +5004,19 @@ match cmd {
                 let _ = writeln!(write_stream, "ERROR: refresh-client {}: not a control client", flag);
                 let _ = write_stream.flush();
             }
+        } else if args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('l')) {
+            // tmux refresh-client -l: ask the client's terminal for its
+            // clipboard (OSC 52) and store the answer as a new paste buffer
+            // (cmd-refresh-client.c tty_clipboard_query). psmux's client is
+            // on this desktop, so the Windows clipboard is read directly and
+            // the buffer exists before the next command runs, which makes
+            // `refresh-client -l ; paste-buffer -p` paste the clipboard
+            // (#796).
+            if let Some(text) = crate::clipboard::read_from_system_clipboard() {
+                if !text.is_empty() {
+                    let _ = tx.send(CtrlReq::SetBuffer(text));
+                }
+            }
         } else {
             let _ = tx.send(CtrlReq::RefreshClient);
         }

@@ -3416,6 +3416,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             .and_then(|s| s.chars().nth(if in_copy { 1 } else { 0 }))
             .unwrap_or('B')
     };
+    // The key name a mouse event is looked up by: with modifiers held and a
+    // binding for the modified name (`M-MouseDown3Pane`), that name; else the
+    // plain one, whose built-in behaviour has always ignored modifiers.
+    let routed_name = |m: &std::collections::HashMap<String, String>, base: &str, mods: KeyModifiers| -> String {
+        if m.is_empty() || mods.is_empty() {
+            return base.to_string();
+        }
+        let mut n = String::new();
+        if mods.contains(KeyModifiers::CONTROL) { n.push_str("C-"); }
+        if mods.contains(KeyModifiers::ALT) { n.push_str("M-"); }
+        if mods.contains(KeyModifiers::SHIFT) { n.push_str("S-"); }
+        n.push_str(base);
+        if m.contains_key(&n) { n } else { base.to_string() }
+    };
     // When false, Ctrl+V is forwarded to the child app instead of being
     // intercepted for paste detection.
     #[cfg(windows)]
@@ -6878,7 +6892,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     // tmux MouseDown1Status: built in, select the
                                     // window clicked; a user binding runs with that
                                     // window as `-t =`; unbound, nothing.
-                                    match mouse_route(&mouse_overrides, "MouseDown1Status", client_copy_mode) {
+                                    let status_name = routed_name(&mouse_overrides, "MouseDown1Status", me.modifiers);
+                                    match mouse_route(&mouse_overrides, &status_name, client_copy_mode) {
                                         'B' => {
                                             if let Some(idx) = clicked_tab {
                                                 // client_tab_positions stores the true display
@@ -6895,8 +6910,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 .filter(|i| client_window_indices.contains(i))
                                                 .map(|i| format!(":{}", i))
                                                 .unwrap_or_else(|| ":".to_string());
-                                            cmd_batch.push(format!("mouse-key MouseDown1Status {} {} {} 0\n",
-                                                target, me.column, me.row));
+                                            cmd_batch.push(format!("mouse-key {} {} {} {} 0\n",
+                                                status_name, target, me.column, me.row));
                                         }
                                         _ => {}
                                     }
@@ -6947,8 +6962,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         // tmux MouseDown1Pane / MouseDrag1Pane: with both at
                                         // their built-in default the code below runs as it
                                         // always has; otherwise the gesture is routed.
-                                        let down_route = mouse_route(&mouse_overrides, "MouseDown1Pane", client_copy_mode);
-                                        let drag_route = mouse_route(&mouse_overrides, "MouseDrag1Pane", client_copy_mode);
+                                        let down_name = routed_name(&mouse_overrides, "MouseDown1Pane", me.modifiers);
+                                        let drag_name = routed_name(&mouse_overrides, "MouseDrag1Pane", me.modifiers);
+                                        let down_route = mouse_route(&mouse_overrides, &down_name, client_copy_mode);
+                                        let drag_route = mouse_route(&mouse_overrides, &drag_name, client_copy_mode);
                                         let routed = (down_route != 'B' || drag_route != 'B')
                                             .then_some(clicked_pane).flatten();
 
@@ -6963,7 +6980,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     cmd_batch.push(format!("select-pane -t %{}\n", pane_id));
                                                     cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", pane_id, rel_col, rel_row));
                                                 }
-                                                'U' => cmd_batch.push(format!("mouse-key MouseDown1Pane %{} {} {} 0\n", pane_id, rel_col, rel_row)),
+                                                'U' => cmd_batch.push(format!("mouse-key {} %{} {} {} 0\n", down_name, pane_id, rel_col, rel_row)),
                                                 'F' => cmd_batch.push(format!("mouse-forward {} 0 {} {} M\n", pane_id, rel_col, rel_row)),
                                                 _ => {}
                                             }
@@ -7150,7 +7167,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // tmux MouseDown3Pane: psmux's built-in right
                                 // click below while the default is in place;
                                 // otherwise the table decides.
-                                let route3 = mouse_route(&mouse_overrides, "MouseDown3Pane", client_copy_mode);
+                                let name3 = routed_name(&mouse_overrides, "MouseDown3Pane", me.modifiers);
+                                let route3 = mouse_route(&mouse_overrides, &name3, client_copy_mode);
                                 if route3 != 'B' {
                                     if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                         r.contains(ratatui::layout::Position { x: me.column, y: me.row })
@@ -7158,7 +7176,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         let rel_col = me.column as i16 - pane_rect.x as i16;
                                         let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
                                         match route3 {
-                                            'U' => cmd_batch.push(format!("mouse-key MouseDown3Pane %{} {} {} 2\n", pane_id, rel_col, rel_row)),
+                                            'U' => cmd_batch.push(format!("mouse-key {} %{} {} {} 2\n", name3, pane_id, rel_col, rel_row)),
                                             'F' => cmd_batch.push(format!("mouse-forward {} 2 {} {} M\n", pane_id, rel_col, rel_row)),
                                             _ => {}
                                         }
@@ -7248,7 +7266,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             *in_copy_drag = true;
                                             cmd_batch.push(format!("pane-mouse {} 32 {} {} M\n", pane_id, rel_col, rel_row));
                                         }
-                                        'U' => cmd_batch.push(format!("mouse-key MouseDrag1Pane %{} {} {} 32\n", pane_id, rel_col, rel_row)),
+                                        'U' => cmd_batch.push(format!("mouse-key {} %{} {} {} 32\n",
+                                            routed_name(&mouse_overrides, "MouseDrag1Pane", me.modifiers), pane_id, rel_col, rel_row)),
                                         'F' => cmd_batch.push(format!("mouse-forward {} 32 {} {} M\n", pane_id, rel_col, rel_row)),
                                         _ => {}
                                     }
@@ -7593,7 +7612,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // With MouseDown3Pane unbound the press went to the
                                 // program (tmux forward_key); so does the release
                                 // (MouseUp3Pane, unbound by default in tmux too).
-                                if mouse_route(&mouse_overrides, "MouseDown3Pane", client_copy_mode) == 'F' {
+                                if mouse_route(&mouse_overrides, &routed_name(&mouse_overrides, "MouseDown3Pane", me.modifiers), client_copy_mode) == 'F' {
                                     if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                         r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                     }) {

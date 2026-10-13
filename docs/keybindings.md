@@ -694,9 +694,34 @@ or `S-` when a modifier is held, and it is looked up the way tmux looks it up: i
 | The wheel over the status line | `WheelUpStatus` / `WheelDownStatus`, `previous-window` / `next-window` by default as in tmux; bind or unbind them like any key |
 | The end of a drag (`MouseDragEnd1Pane` in `copy-mode` / `copy-mode-vi`) | The default copies and leaves copy mode. `unbind -T copy-mode-vi MouseDragEnd1Pane` keeps the selection in copy mode after the drag, and a binding (`send -X copy-selection-no-clear`, ...) runs instead. A drag at the shell prompt follows it too: with the default changed, the drag ends in copy mode, as in tmux |
 
-Clicks, the start of a drag, double and triple clicks, border drags and the right button still
-use psmux's built-in mouse handling; binding those names is accepted and listed but does not
-change what they do yet.
+The press and drag of the left button in a pane (`MouseDown1Pane`, `MouseDrag1Pane`), a drag
+on a pane separator (`MouseDrag1Border`), a click on the status line (`MouseDown1Status`) and
+the right button (`MouseDown3Pane`) follow the same rules: while a key keeps its built-in default
+psmux behaves exactly as before; a binding (with or without `C-` / `M-`) runs instead; unbound,
+the event goes to the program only if it asked for the mouse. A binding to tmux's own default
+command for a key (`bind -n MouseDrag1Border resize-pane -M`, `bind -n MouseDown1Status
+switch-client -t=`) keeps psmux's built-in behaviour. Double and triple clicks are not routed yet.
+
+### Right click paste in programs that track the mouse
+
+A program that turns on mouse reporting (Claude Code, OpenCode, vim with `mouse=a`) receives the
+right click itself, as in tmux, so psmux's right click paste does not happen there. To paste the
+Windows clipboard on a right click everywhere, through the bracketed paste route the program
+expects ([#796](https://github.com/psmux/psmux/issues/796)):
+
+```tmux
+bind -n MouseDown3Pane { refresh-client -l ; paste-buffer -p }
+```
+
+or keep the plain right click and paste on Alt+right click:
+
+```tmux
+bind -n M-MouseDown3Pane { refresh-client -l ; paste-buffer -p }
+```
+
+`refresh-client -l` stores the Windows clipboard as a new paste buffer (tmux asks the terminal for
+its clipboard; psmux reads it directly, so it is there before `paste-buffer` runs), and
+`paste-buffer -p` wraps it in bracketed paste markers when the program asked for them.
 
 A binding's command list can be written as a tmux brace block, on one line or several:
 
