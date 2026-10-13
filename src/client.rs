@@ -3985,6 +3985,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // default: the dispatch letter (U runs the binding on every drag motion,
     // F / D do nothing), until the release.
     let mut border_drag_route: Option<char> = None;
+    // A left press in a pane while MouseDown1Pane or MouseDrag1Pane lost its
+    // built-in default: (pane, rect, press route, drag route, press cell
+    // pane-relative, drag handed to copy mode yet). The whole gesture then
+    // goes through the key tables instead of the client selection.
+    let mut pane_gesture: Option<(usize, Rect, char, char, (i16, i16), bool)> = None;
     // The copy-mode line number mode and scrollback size the frames are being
     // painted with, which is what the gutter width is computed from. Kept out
     // here because a copy-mode release re-reports a cell the server gave as a
@@ -6939,8 +6944,40 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         let clicked_pane = client_pane_rects.iter().find(|(_, rect)| {
                                             rect.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                         });
+                                        // tmux MouseDown1Pane / MouseDrag1Pane: with both at
+                                        // their built-in default the code below runs as it
+                                        // always has; otherwise the gesture is routed.
+                                        let down_route = mouse_route(&mouse_overrides, "MouseDown1Pane", client_copy_mode);
+                                        let drag_route = mouse_route(&mouse_overrides, "MouseDrag1Pane", client_copy_mode);
+                                        let routed = (down_route != 'B' || drag_route != 'B')
+                                            .then_some(clicked_pane).flatten();
 
-                                        if let Some(&(pane_id, pane_rect)) = clicked_pane {
+                                        if let Some(&(pane_id, pane_rect)) = routed {
+                                            let rel_col = me.column as i16 - pane_rect.x as i16;
+                                            let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
+                                            match down_route {
+                                                // The built-in press: focus, then the copy
+                                                // cursor (copy mode) or the program (if it
+                                                // wants the mouse), as the server decides.
+                                                'B' => {
+                                                    cmd_batch.push(format!("select-pane -t %{}\n", pane_id));
+                                                    cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", pane_id, rel_col, rel_row));
+                                                }
+                                                'U' => cmd_batch.push(format!("mouse-key MouseDown1Pane %{} {} {} 0\n", pane_id, rel_col, rel_row)),
+                                                'F' => cmd_batch.push(format!("mouse-forward {} 0 {} {} M\n", pane_id, rel_col, rel_row)),
+                                                _ => {}
+                                            }
+                                            pane_gesture = Some((pane_id, pane_rect, down_route, drag_route, (rel_col, rel_row), false));
+                                            deferred_left_click = None;
+                                            copy_mode_drag_pending = None;
+                                            rsel_start = None;
+                                            rsel_end = None;
+                                            rsel_pane_rect = None;
+                                            rsel_pane_id = None;
+                                            rsel_block = false;
+                                            rsel_dragged = false;
+                                            selection_changed = true;
+                                        } else if let Some(&(pane_id, pane_rect)) = clicked_pane {
                                             cmd_batch.push(format!("select-pane -t %{}\n", pane_id));
                                             let rel_col = me.column as i16 - pane_rect.x as i16;
                                             let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
@@ -7194,7 +7231,28 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
-                                if let Some(route) = border_drag_route {
+                                if let Some((pane_id, pane_rect, _down, drag_route, anchor, in_copy_drag)) = pane_gesture.as_mut() {
+                                    let inner = pane_content_inner(*pane_rect, &client_border_status, &client_border_format);
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = me.row as i16 - inner.y as i16;
+                                    match *drag_route {
+                                        // The built-in drag: a copy-mode selection
+                                        // (tmux MouseDrag1Pane -> copy-mode -M, or
+                                        // begin-selection in copy mode).
+                                        'B' => {
+                                            if !client_copy_mode && !*in_copy_drag {
+                                                cmd_batch.push(format!("copy-drag-begin {} {} {} {} {}\n",
+                                                    pane_id, anchor.0, anchor.1, rel_col, rel_row));
+                                                client_copy_mode = true;
+                                            }
+                                            *in_copy_drag = true;
+                                            cmd_batch.push(format!("pane-mouse {} 32 {} {} M\n", pane_id, rel_col, rel_row));
+                                        }
+                                        'U' => cmd_batch.push(format!("mouse-key MouseDrag1Pane %{} {} {} 32\n", pane_id, rel_col, rel_row)),
+                                        'F' => cmd_batch.push(format!("mouse-forward {} 32 {} {} M\n", pane_id, rel_col, rel_row)),
+                                        _ => {}
+                                    }
+                                } else if let Some(route) = border_drag_route {
                                     if route == 'U' {
                                         cmd_batch.push(format!("mouse-key MouseDrag1Border : {} {} 32\n", me.column, me.row));
                                     }
@@ -7343,7 +7401,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                             MouseEventKind::Drag(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if border_drag_route.take().is_some() {
+                                if let Some((pane_id, pane_rect, down_route, drag_route, _, in_copy_drag)) = pane_gesture.take() {
+                                    let inner = pane_content_inner(pane_rect, &client_border_status, &client_border_format);
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = me.row as i16 - inner.y as i16;
+                                    deferred_left_click = None;
+                                    if in_copy_drag || (client_copy_mode && down_route == 'B') {
+                                        // The end of a copy-mode drag: the server looks
+                                        // up MouseDragEnd1Pane.
+                                        cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n", pane_id, rel_col, rel_row));
+                                    } else if down_route == 'F' || drag_route == 'F' || down_route == 'B' {
+                                        // Unbound (or the built-in press): the release
+                                        // goes to the program if it wants the mouse.
+                                        cmd_batch.push(format!("mouse-forward {} 0 {} {} m\n", pane_id, rel_col.max(0), rel_row.max(0)));
+                                    }
+                                } else if border_drag_route.take().is_some() {
                                     deferred_left_click = None;
                                 } else if border_drag {
                                     deferred_left_click = None;

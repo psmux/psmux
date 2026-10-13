@@ -181,11 +181,15 @@ pub const ROOT_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     // otherwise copy the client selection or paste the clipboard (tmux's
     // default opens a menu).
     ("MouseDown3Pane", "if-shell -F -t = \"#{mouse_any_flag}\" { select-pane -t = ; send-keys -M } { paste-buffer }"),
+    ("MouseDown1Pane", "select-pane -t = \\; send-keys -M"),
+    ("MouseDrag1Pane", "if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -M }"),
 ];
 pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "select-pane \\; send-keys -X -N 3 scroll-up"),
     ("WheelDownPane", "select-pane \\; send-keys -X -N 3 scroll-down"),
     ("MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
+    ("MouseDown1Pane", "select-pane"),
+    ("MouseDrag1Pane", "select-pane \\; send-keys -X begin-selection"),
 ];
 
 /// tmux's own default commands for keys psmux handles with a built-in
@@ -205,13 +209,18 @@ const DEFAULT_EQUIVALENTS: &[(&str, &str, &str)] = &[
     ("root", "WheelDownStatus", "next-window"),
     ("copy-mode", "MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
     ("copy-mode-vi", "MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
+    ("copy-mode", "MouseDown1Pane", "select-pane"),
+    ("copy-mode-vi", "MouseDown1Pane", "select-pane"),
+    ("copy-mode", "MouseDrag1Pane", "select-pane ; send-keys -X begin-selection"),
+    ("copy-mode-vi", "MouseDrag1Pane", "select-pane ; send-keys -X begin-selection"),
 ];
 
 /// A command line in one spelling for comparing defaults: whitespace runs
 /// folded, `send` / `if` / `selectp` spelled out, `-t=` as `-t =`, `\;` as
-/// `;`, single quotes as double.
+/// `;`, quotes dropped.
 fn canonical_command(cmd: &str) -> String {
-    let cmd = cmd.replace('\'', "\"");
+    // Quotes dropped: the CLI route passes a format like #{...} unquoted.
+    let cmd = cmd.replace(['\'', '"'], "");
     let mut out: Vec<String> = Vec::new();
     for tok in cmd.split_whitespace() {
         // `a;` ends a command like a separate `;` (but `\;` at the end of a
@@ -257,6 +266,8 @@ pub const CLIENT_ROUTED: &[&str] = &[
     "MouseDown1Status",
     "MouseDrag1Border",
     "MouseDown3Pane",
+    "MouseDown1Pane",
+    "MouseDrag1Pane",
 ];
 
 /// One letter per dispatch, for the client: B built-in, U user binding,
@@ -320,8 +331,19 @@ pub fn resolve(app: &crate::types::AppState, key: (KeyCode, KeyModifiers), in_co
             // WheelUpPane would send -M, and a pane in copy mode takes no
             // mouse keys that way (copy mode has no mode->key in tmux's
             // window-copy.c, so window_pane_key drops it).
-            if table == "root" && in_copy && key == wheel_pane_key(true, KeyModifiers::NONE) {
-                return Dispatch::Drop;
+            if table == "root" && in_copy {
+                // Reached root from a copy-mode table. tmux's root defaults
+                // for these send the event to the pane (`send -M`), which a
+                // pane in copy mode does not take; MouseDown1Pane's also
+                // selects the pane first.
+                if key == wheel_pane_key(true, KeyModifiers::NONE)
+                    || parse("MouseDrag1Pane") == Some(key)
+                {
+                    return Dispatch::Drop;
+                }
+                if parse("MouseDown1Pane") == Some(key) {
+                    return Dispatch::User("select-pane -t =".into());
+                }
             }
             return Dispatch::Builtin;
         }
