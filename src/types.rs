@@ -1820,6 +1820,11 @@ pub struct AppState {
     /// Stored separately from `environment` so they are NOT passed as
     /// shell environment variables to child panes (#105).
     pub user_options: std::collections::HashMap<String, String>,
+    /// User options in tmux's GLOBAL window table (`set -gw @name`), which
+    /// every window inherits from before the session chain is consulted
+    /// (format.c format_find). A window's own `@name` lives in
+    /// `Window::window_options`.
+    pub global_window_user_options: std::collections::HashMap<String, String>,
     /// Tracks which options have been explicitly set by the user or config.
     /// Used by set-option -o (only-if-unset) to distinguish defaults from
     /// explicitly configured values.
@@ -2928,6 +2933,7 @@ impl AppState {
             environment: std::collections::HashMap::new(),
             env_scopes: crate::environ::EnvScopes::default(),
             user_options: std::collections::HashMap::new(),
+            global_window_user_options: std::collections::HashMap::new(),
             user_set_options: std::collections::HashSet::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),

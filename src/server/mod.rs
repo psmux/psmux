@@ -857,8 +857,7 @@ fn drain_plugin_req(
             let _ = resp.send(val);
         }
         CtrlReq::ShowWindowOptionValue(resp, name, target) => {
-            let index = crate::server::options::resolve_option_target_window(app, &target).ok();
-            let val = crate::server::options::get_window_option_value_for(app, &name, index);
+            let val = crate::server::options::window_option_value_for_target(app, &name, &target);
             let _ = resp.send(val);
         }
         CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
@@ -7727,8 +7726,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(val);
                 }
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
-                    let index = crate::server::options::resolve_option_target_window(&app, &target).ok();
-                    let val = crate::server::options::get_window_option_value_for(&app, &name, index);
+                    let val = crate::server::options::window_option_value_for_target(&app, &name, &target);
                     let _ = resp.send(val);
                 }
                 CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {

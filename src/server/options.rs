@@ -94,16 +94,38 @@ pub(crate) fn is_window_option(name: &str) -> bool {
 /// session option. psmux follows the same rule, so `-w` on a session or server
 /// option keeps behaving exactly as it did.
 ///
-/// User options (`@...`) are deliberately NOT included. tmux gives them the
-/// scope of the flags because they carry no table entry, but every psmux read
-/// of an `@` name goes through the session-wide `user_options` map — the
-/// format expander (`#{@k}`), the pane `@mouse-force` latch, the plugin drain —
-/// and none of those has a window to resolve against. Scoping the WRITE
-/// without the reads would store the value where nothing could ever find it,
-/// which is the silent no-op #580 exists to prevent. `set -wg @k v` and
-/// `set -g @k v` therefore remain the way to set one.
+/// User options (`@...`) carry no table entry, so tmux gives them the scope of
+/// the FLAGS: `setw @k v` / `set -w @k v` store on the target window's own
+/// table (options_scope_from_flags), where `show-options -w` lists them and
+/// `#{@k}` finds them for that window's panes. They used to land in the
+/// session store, so `show -w` came back empty and every window saw the value
+/// (#795 follow up). The format expander resolves `@` names through the
+/// window now ([`pane_user_option`]), so the write has a reader.
 pub(crate) fn is_window_scoped_write(name: &str) -> bool {
-    is_window_option(name)
+    is_window_option(name) || name.starts_with('@')
+}
+
+/// The `target` spelling [`apply_set_window_option`] and
+/// [`window_option_value_for_target`] read as tmux's `global_w_options` table
+/// rather than one window: `set -gw @k v` and `show -gw @k`. Only user options
+/// live there; a catalog window option at `-gw` keeps using the typed global
+/// store it always has. Not a target a user can type.
+pub(crate) const GLOBAL_WINDOW_TABLE: &str = "\u{1}global-window";
+
+/// Does `set-option` with these flags write a user option to the GLOBAL window
+/// table (`set -gw @k`, `setw -g @k`)?
+pub(crate) fn is_global_window_user_write(window_flag: bool, global_flag: bool, name: &str) -> bool {
+    window_flag && global_flag && name.starts_with('@')
+}
+
+/// `show-options -w [-g] <name>` for one target: the global window table for
+/// [`GLOBAL_WINDOW_TABLE`], the resolved window otherwise.
+pub(crate) fn window_option_value_for_target(app: &AppState, name: &str, target: &str) -> String {
+    if target == GLOBAL_WINDOW_TABLE {
+        return app.global_window_user_options.get(name).cloned().unwrap_or_default();
+    }
+    let index = resolve_option_target_window(app, target).ok();
+    get_window_option_value_for(app, name, index)
 }
 
 /// Resolve a raw `-t` target to the position of an existing window.
@@ -263,6 +285,25 @@ pub(crate) fn apply_set_window_option(
     only_if_unset: bool,
     quiet: bool,
 ) -> String {
+    if target == GLOBAL_WINDOW_TABLE {
+        // `set -gw @k`: tmux's global_w_options table, which every window's
+        // own table inherits from.
+        let store = &mut app.global_window_user_options;
+        if unset {
+            store.remove(option);
+            return String::new();
+        }
+        if only_if_unset && store.contains_key(option) {
+            return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
+        }
+        let value = if append {
+            format!("{}{}", store.get(option).map(String::as_str).unwrap_or(""), value)
+        } else {
+            value.to_string()
+        };
+        store.insert(option.to_string(), value);
+        return String::new();
+    }
     let index = match resolve_option_target_window(app, target) {
         Ok(index) => index,
         Err(error) => return format!("ERROR: {}", error),
@@ -288,7 +329,11 @@ pub(crate) fn apply_set_window_option(
         }
         return format!("ERROR: already set: {}", option);
     }
-    let value = if append {
+    let value = if append && option.starts_with('@') {
+        // A user option appends to what THIS window stores (tmux reads the
+        // target table with options_get_only for a user option).
+        format!("{}{}", window_local_option(app, index, option).unwrap_or(""), value)
+    } else if append {
         format!("{}{}", resolve_window_option(app, index, option), value)
     } else {
         value.to_string()
@@ -540,6 +585,12 @@ pub(crate) fn get_window_option_value_for(
     name: &str,
     target_window: Option<usize>,
 ) -> String {
+    if name.starts_with('@') {
+        // tmux answers `show -w @k` from the window's own table only
+        // (options_get_only): nothing when the window does not store it.
+        let idx = target_window.unwrap_or(app.active_idx);
+        return window_local_option(app, idx, name).unwrap_or("").to_string();
+    }
     if !is_window_option(name) {
         return String::new();
     }
@@ -633,6 +684,34 @@ pub(crate) fn render_window_options_for(
             if inherited { "*" } else { "" },
             get_window_option_value_for(app, name, Some(idx)),
         ));
+    }
+    // User options after the table ones, sorted by name like tmux's option
+    // tree: the global window table's for `-wg`, the window's own for `-w`.
+    let sorted = |map: &std::collections::HashMap<String, String>| {
+        let mut entries: Vec<(String, String)> = map
+            .iter()
+            .filter(|(name, _)| name.starts_with('@'))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        entries.sort();
+        entries
+    };
+    let push = |output: &mut String, name: &str, marker: &str, value: &str| {
+        output.push_str(&format!("{}{} {}\n", name, marker, crate::util::quote_arg_if_needed(value)));
+    };
+    if listing == WindowListing::Global {
+        for (name, value) in sorted(&app.global_window_user_options) {
+            push(&mut output, &name, "", &value);
+        }
+        return output;
+    }
+    // `-A` adds nothing here: tmux's cmd_show_options_all walks the table
+    // entries for inheritance and then only the chosen table's OWN user
+    // options (measured on 3.4: `set -gw @w x; show -wA` prints no @w line).
+    if let Some(window) = app.windows.get(idx) {
+        for (name, value) in sorted(&window.window_options) {
+            push(&mut output, &name, "", &value);
+        }
     }
     output
 }
@@ -1253,19 +1332,25 @@ pub(crate) fn apply_set_pane_option(
 
 /// A pane's own value for a user option, then the value it inherits.
 ///
-/// tmux resolves `#{@name}` for a pane through pane, window, session and
-/// global tables (format.c format_find falls through to `options_get` on the
-/// pane's options, whose parent chain is the window's, then the session's,
-/// then the global ones). psmux keeps every non pane `@name` in one store
-/// (`user_options`; a psmux server holds one session and `-w @name` lands
-/// there too, see [`is_window_scoped_write`]), so the chain here is the pane
-/// first, then that store.
+/// tmux resolves `#{@name}` for a pane through its options table, whose parent
+/// chain is the window's table and then `global_w_options`, and only then
+/// through the session's table and `global_s_options` (format.c format_find).
+/// psmux keeps the same order: the pane, the window (`setw @name`), the global
+/// window table (`set -gw @name`), then `user_options`, which holds both the
+/// session and the global session values (a psmux server holds one session).
 pub(crate) fn pane_user_option(
     app: &AppState,
+    window: Option<&crate::types::Window>,
     pane: Option<&crate::types::Pane>,
     name: &str,
 ) -> Option<String> {
     if let Some(value) = pane.and_then(|p| p.pane_options.get(name)) {
+        return Some(value.clone());
+    }
+    if let Some(value) = window.and_then(|w| w.window_options.get(name)) {
+        return Some(value.clone());
+    }
+    if let Some(value) = app.global_window_user_options.get(name) {
         return Some(value.clone());
     }
     app.user_options.get(name).cloned()
@@ -1407,6 +1492,10 @@ mod tests_issue728_pane_user_options;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue648_window_scoped_options.rs"]
 mod tests_issue648_window_scoped_options;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue795_followup_scope.rs"]
+mod tests_issue795_followup_scope;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue655_show_options_window_listing.rs"]

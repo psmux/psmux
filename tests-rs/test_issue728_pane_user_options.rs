@@ -417,10 +417,10 @@ fn display_message_for_the_active_pane_uses_its_value() {
 fn pane_helper_chain_is_pane_then_store() {
     let mut app = app_with_windows(&[&[1]]);
     app.user_options.insert("@x".to_string(), "G".to_string());
-    assert_eq!(pane_user_option(&app, None, "@x").as_deref(), Some("G"));
+    assert_eq!(pane_user_option(&app, None, None, "@x").as_deref(), Some("G"));
     set(&mut app, "%1", "@x", "P");
     let pane = crate::tree::get_nth_pane(&app.windows[0].root, 0);
-    assert_eq!(pane_user_option(&app, pane, "@x").as_deref(), Some("P"));
+    assert_eq!(pane_user_option(&app, None, pane, "@x").as_deref(), Some("P"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────

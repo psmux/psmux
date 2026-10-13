@@ -1263,7 +1263,9 @@ pub fn lookup_option_pub(name: &str, app: &AppState) -> Option<String> {
 
 fn lookup_option(name: &str, app: &AppState) -> Option<String> {
     if name.starts_with('@') {
-        return app.user_options.get(name).cloned();
+        // No window in hand: the global window table, then the session chain
+        // (format.c format_find with no pane).
+        return crate::server::options::pane_user_option(app, None, None, name);
     }
     match name {
         "status-left" => Some(app.status_left.clone()),
@@ -2523,7 +2525,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         // format_find reads `@name` through the pane's options table, whose
         // parent chain is the window, the session and the global tables.
         _ if var.starts_with('@') => {
-            crate::server::options::pane_user_option(app, target_pane(), var)
+            crate::server::options::pane_user_option(app, Some(win), target_pane(), var)
                 .unwrap_or_else(|| UNKNOWN_VAR.to_string())
         }
         // Anything else: try as option, then report "not a variable at all".

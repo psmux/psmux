@@ -3952,6 +3952,13 @@ fn run_main() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 }
+                // tmux refuses a flag display-message does not have
+                // ("unknown flag -x", rc 1) rather than printing it as text;
+                // `display -p -- -x` is the way to print one (#795 follow up).
+                if let Some(flag) = crate::cli::unknown_flag("display-message", &cmd_args[1..]) {
+                    eprintln!("psmux: display-message: unknown flag -{}", flag);
+                    std::process::exit(1);
+                }
                 let mut message: Vec<String> = Vec::new();
                 let mut target: Option<String> = None;
                 let mut client: Option<String> = None;

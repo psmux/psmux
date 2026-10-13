@@ -1460,6 +1460,7 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
 
     let mut i = 1;
     let mut is_global = false;
+    let mut global_flag = false;    // -g itself (is_global also covers -s)
     let mut format_expand = false;  // -F: expand format strings in value
     let mut only_if_unset = false;  // -o: only set if not already set
     let mut append_mode = false;    // -a: append to current value
@@ -1472,7 +1473,7 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     while i < toks.len() {
         let p = toks[i].1.as_str();
         if p.starts_with('-') {
-            if p.contains('g') { is_global = true; }
+            if p.contains('g') { is_global = true; global_flag = true; }
             // -s is tmux's server scope (#618). psmux keeps a single option
             // store, so it resolves to the global one, exactly like -g. A
             // config carrying `set -s default-terminal xterm-256color` (or the
@@ -1543,6 +1544,30 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
         }
         let reply = crate::server::options::apply_set_pane_option(
             app, &target, key, &value, unset_mode, append_mode, only_if_unset, quiet,
+        );
+        if let Some(error) = reply.strip_prefix("ERROR: ") {
+            warn_config(app, error.to_string());
+        }
+        return;
+    }
+
+    // `set -gw @k` / `setw -g @k` writes tmux's global window table, which
+    // every window inherits from (#795 follow up).
+    if crate::server::options::is_global_window_user_write(window_scope, global_flag, key) {
+        let value = if format_expand && !raw_value.is_empty() {
+            crate::format::expand_format(&raw_value, app)
+        } else {
+            raw_value.clone()
+        };
+        let reply = crate::server::options::apply_set_window_option(
+            app,
+            crate::server::options::GLOBAL_WINDOW_TABLE,
+            key,
+            &value,
+            unset_mode,
+            append_mode,
+            only_if_unset,
+            quiet,
         );
         if let Some(error) = reply.strip_prefix("ERROR: ") {
             warn_config(app, error.to_string());

@@ -307,6 +307,51 @@ pub fn validate_flag_arguments<S: AsRef<str>>(command: &str, args: &[S]) -> Resu
     Ok(())
 }
 
+/// The first flag letter in `args` (the tokens after the command name) that
+/// `command`'s template does not declare, read the way tmux's args_parse
+/// reads them: only the flag region counts (it ends at `--`, a bare `-` and
+/// the first operand), a value-taking letter ends its cluster and takes the
+/// rest of the token or the next token. tmux refuses such a command with
+/// "unknown flag -X"; psmux used to print the token as message text
+/// (`display -p -x hello` printed `-x hello`). `None` for a command the table
+/// does not know.
+pub fn unknown_flag<S: AsRef<str>>(command: &str, args: &[S]) -> Option<char> {
+    let template = args_template(command)?;
+    let extra = psmux_extra_flags(command);
+    let known = |flag: char| flag.is_ascii_alphanumeric() && (template.contains(flag) || extra.contains(flag));
+    let kind_of = |flag: char| match flag_value_kind(template, flag) {
+        FlagValue::None => flag_value_kind(extra, flag),
+        kind => kind,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_ref();
+        if !token.starts_with('-') || token == "-" || token == "--" {
+            return None;
+        }
+        i += 1;
+        let letters: Vec<char> = token.chars().skip(1).collect();
+        for (k, &flag) in letters.iter().enumerate() {
+            if !known(flag) {
+                return Some(flag);
+            }
+            let kind = kind_of(flag);
+            if kind == FlagValue::None {
+                continue;
+            }
+            if k + 1 == letters.len() {
+                if let Some(next) = args.get(i).map(|a| a.as_ref()) {
+                    if !(kind == FlagValue::Optional && looks_like_another_flag(next)) {
+                        i += 1;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    None
+}
+
 /// Same check for a whole command LINE (command name first), used by the
 /// config-file and key-binding routes where the command arrives as a string.
 pub fn validate_command_line_flags<S: AsRef<str>>(tokens: &[S]) -> Result<(), String> {

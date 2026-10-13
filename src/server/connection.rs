@@ -3752,6 +3752,14 @@ match cmd {
         if !persistent && pending_chain.is_empty() { break; }
     }
     "display-message" | "display" => {
+        // A flag display-message does not have is refused like tmux
+        // ("unknown flag -x"), not printed as message text (#795 follow up).
+        if let Some(flag) = crate::cli::unknown_flag("display-message", &args) {
+            let _ = write!(write_stream, "ERROR: unknown flag -{}\n", flag);
+            let _ = write_stream.flush();
+            if !persistent && pending_chain.is_empty() { break; }
+            continue;
+        }
         // Parse tmux-like display-message flags without dropping message text.
         let mut print_stdout = false;
         let mut parts: Vec<&str> = Vec::new();
@@ -4363,10 +4371,22 @@ match cmd {
             && non_flag_args
                 .first()
                 .is_some_and(|name| crate::server::options::is_window_scoped_write(name));
-        if window_option {
-            let raw_target = set_target
-                .map(|t| t.trim_matches('"').to_string())
-                .unwrap_or_default();
+        // `set -gw @k` writes tmux's global window table (#795 follow up).
+        let global_window_user = non_flag_args.first().is_some_and(|name| {
+            crate::server::options::is_global_window_user_write(
+                flag_chars.contains('w') || matches!(cmd, "set-window-option" | "setw"),
+                flag_chars.contains('g'),
+                name,
+            )
+        }) && !pane_scope;
+        if window_option || global_window_user {
+            let raw_target = if global_window_user {
+                crate::server::options::GLOBAL_WINDOW_TABLE.to_string()
+            } else {
+                set_target
+                    .map(|t| t.trim_matches('"').to_string())
+                    .unwrap_or_default()
+            };
             let option = non_flag_args[0].to_string();
             let value = if has_u {
                 String::new()
@@ -4617,6 +4637,13 @@ match cmd {
                 // options_scope_from_name (options.c:1046-1056).
                 if window_scope && !has_g {
                     let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name.to_string(), target_window.clone()));
+                } else if window_scope && name.starts_with('@') {
+                    // `show -gw @k`: the global window table's user option.
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(
+                        rtx,
+                        name.to_string(),
+                        crate::server::options::GLOBAL_WINDOW_TABLE.to_string(),
+                    ));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
                 }
@@ -6129,6 +6156,10 @@ fn dispatch_control_command(
             true
         }
         "display-message" | "display" => {
+            if let Some(flag) = crate::cli::unknown_flag("display-message", args) {
+                let _ = resp_tx.send(format!("ERROR: unknown flag -{}", flag));
+                return true;
+            }
             let print_mode = args.iter().any(|a| *a == "-p");
             let raw_fmt = args.last().map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
             let fmt = if raw_fmt.is_empty() {
@@ -6533,14 +6564,27 @@ fn dispatch_control_command(
             // option table. Same rule as the one-shot route: only a name the
             // catalog marks window scope, or a user option, is scoped that way.
             let window_scope = (flag_chars.contains('w') || window_command) && !global;
-            if window_scope
-                && positional
-                    .first()
-                    .is_some_and(|name| crate::server::options::is_window_scoped_write(name))
+            // `set -gw @k` writes tmux's global window table (#795 follow up).
+            let global_window_user = positional.first().is_some_and(|name| {
+                crate::server::options::is_global_window_user_write(
+                    flag_chars.contains('w') || window_command,
+                    flag_chars.contains('g'),
+                    name,
+                )
+            });
+            if global_window_user
+                || (window_scope
+                    && positional
+                        .first()
+                        .is_some_and(|name| crate::server::options::is_window_scoped_write(name)))
             {
-                let raw_target = set_target
-                    .map(|t| t.trim_matches('"').to_string())
-                    .unwrap_or_default();
+                let raw_target = if global_window_user {
+                    crate::server::options::GLOBAL_WINDOW_TABLE.to_string()
+                } else {
+                    set_target
+                        .map(|t| t.trim_matches('"').to_string())
+                        .unwrap_or_default()
+                };
                 let option = positional[0].to_string();
                 let value = if unset {
                     String::new()
@@ -6708,6 +6752,13 @@ fn dispatch_control_command(
                 // own store (#655).
                 if window_scope2 && !combined_has2('g') {
                     let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name, target_window2.clone()));
+                } else if window_scope2 && name.starts_with('@') {
+                    // `show -gw @k`: the global window table's user option.
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(
+                        rtx,
+                        name,
+                        crate::server::options::GLOBAL_WINDOW_TABLE.to_string(),
+                    ));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
                 }

@@ -552,7 +552,7 @@ fn only_catalog_window_names_are_window_scoped_writes() {
     for name in ["status-left", "prefix", "escape-time", "mouse", "pane-border-style"] {
         assert!(!is_window_scoped_write(name), "{} must stay where it was", name);
     }
-    // User options keep the one session-wide map every `@` READER uses; see the
-    // note on is_window_scoped_write.
-    assert!(!is_window_scoped_write("@mouse-force"));
+    // User options take the scope of the flags, as in tmux: `setw @k` is the
+    // window's own (#795 follow up); `#{@k}` resolves through the window.
+    assert!(is_window_scoped_write("@mouse-force"));
 }
