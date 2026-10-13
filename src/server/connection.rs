@@ -2606,7 +2606,7 @@ match cmd {
     }
     "next-window" | "next" => { let _ = tx.send(CtrlReq::NextWindow); }
     "previous-window" | "prev" => { let _ = tx.send(CtrlReq::PrevWindow); }
-    "rename-window" | "renamew" => { if let Some(name) = args.get(0) { let _ = tx.send(CtrlReq::RenameWindow((*name).to_string())); } }
+    "rename-window" | "renamew" => { if let Some(name) = crate::cli::first_operand("rename-window", &args) { let _ = tx.send(CtrlReq::RenameWindow(name.to_string())); } }
     "list-windows" | "lsw" => {
         // Extract -F format if provided (supports -F val and -Fval)
         let fmt = extract_flag_value(&args, "-F");
@@ -3027,8 +3027,8 @@ match cmd {
         }
     }
     "rename-session" | "rename" => {
-        if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
-            let _ = tx.send(CtrlReq::RenameSession((*name).to_string()));
+        if let Some(name) = crate::cli::first_operand("rename-session", &args) {
+            let _ = tx.send(CtrlReq::RenameSession(name.to_string()));
         }
     }
     "claim-session" => {

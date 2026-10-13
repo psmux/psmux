@@ -192,13 +192,19 @@ pub fn parse_args(args: &str) -> PromptArgs {
 /// tmux's `cmd_template_replace` (cmd.c:849): put `s` where the template says.
 ///
 /// `%idx` (and `%idx%`) is replaced every time it appears; `%%` (and `%%%`) only
-/// the first time, as in tmux. `%%` assumes it sits inside single quotes and
-/// `%%%` / `%idx%` inside double quotes, so a quote in the typed text cannot end
-/// the argument early. tmux escapes a single quote as `'\''`; psmux's command
-/// parser keeps a backslash outside quotes literal (it is the Windows path
-/// separator), so the same quote is written `'"'"'`, which parses to the same
-/// character. Inside double quotes psmux only unescapes `\"` and `\\`, so those
-/// are the only characters escaped there.
+/// the first time, as in tmux. `%%%` / `%idx%` are the double quoted spellings:
+/// tmux escapes the typed text for a double quoted string there, and psmux,
+/// whose parser only unescapes `\"` and `\\` inside double quotes, escapes those
+/// two.
+///
+/// Plain `%%` / `%idx` go in as typed, as tmux's do (cmd.c:841, `quoted` is
+/// only set by the third `%`), so the command parser sees exactly what tmux's
+/// parser sees: `rename-window "%%"` keeps a typed `'`, an unquoted `%%` splits
+/// on a typed space. One deliberate difference: where the placeholder sits
+/// inside single quotes in the template, a typed `'` is written `'"'"'` so it
+/// survives instead of ending the argument (tmux drops it). That escape applies
+/// only inside single quotes; written unconditionally it turned `it's` into
+/// `it"'s` for an unquoted or double quoted `%%`.
 pub fn template_replace(template: &str, s: &str, idx: usize) -> String {
     #[derive(PartialEq)]
     enum Q { None, Single, Double }
@@ -208,23 +214,42 @@ pub fn template_replace(template: &str, s: &str, idx: usize) -> String {
     let chars: Vec<char> = template.chars().collect();
     let mut out = String::with_capacity(template.len() + s.len());
     let mut replaced = false;
+    // Where the template itself is, quote wise, so a placeholder knows
+    // whether it sits inside single quotes. Only the template's own characters
+    // move this; the typed text never does.
+    let mut in_single = false;
+    let mut in_double = false;
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
         i += 1;
         if ch != '%' {
+            if ch == '\\' && in_double {
+                out.push(ch);
+                if let Some(&escaped) = chars.get(i) {
+                    out.push(escaped);
+                    i += 1;
+                }
+                continue;
+            }
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+            } else if ch == '"' && !in_single {
+                in_double = !in_double;
+            }
             out.push(ch);
             continue;
         }
         let next = chars.get(i).copied();
+        let plain = if in_single { Q::Single } else { Q::None };
         let quote;
         if next.map_or(false, |d| ('1'..='9').contains(&d) && (d as usize - '0' as usize) == idx) {
             i += 1;
-            quote = if chars.get(i) == Some(&'%') { i += 1; Q::Double } else { Q::None };
+            quote = if chars.get(i) == Some(&'%') { i += 1; Q::Double } else { plain };
         } else if next == Some('%') && !replaced {
             replaced = true;
             i += 1;
-            quote = if chars.get(i) == Some(&'%') { i += 1; Q::Double } else { Q::Single };
+            quote = if chars.get(i) == Some(&'%') { i += 1; Q::Double } else { plain };
         } else {
             out.push('%');
             continue;
@@ -355,6 +380,31 @@ fn close(app: &mut AppState) {
     app.copy_search_history_pos = None;
 }
 
+/// The name a `-k` prompt answers with: tmux's `key_string_lookup_key`
+/// (key-string.c:327, called at status.c:1439). Keys reach the prompt under
+/// the client's send-key names (`left`, `pageup`, `insert`, `f1`, `btab`, a
+/// space as ' '), which are the same keys under other spellings, so each is
+/// read as a key and written back the way tmux writes it: the modifiers as
+/// `C-`, `M-`, `S-` in that order, then the first name key-string.c's table
+/// gives the key (`Left`, `PPage`, `NPage`, `IC`, `DC`, `F1`, `BTab`, `Space`,
+/// `Tab`, `Enter`, `Escape`, `BSpace`). A name psmux cannot read as a key is
+/// passed on unchanged.
+pub fn key_string(name: &str) -> String {
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        // One typed character is that key. parse_key_name trims its input,
+        // which would read a space as no key at all.
+        return crate::config::format_key_binding(&(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+    match crate::config::parse_key_name(name) {
+        Some(key) => crate::config::format_key_binding(&key),
+        None => name.to_string(),
+    }
+}
+
 /// Feed one key to the open prompt.
 pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
     let Mode::CopyCommandPrompt(ref mut p) = app.mode else {
@@ -362,11 +412,11 @@ pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
     };
     if p.key {
         let name = match key {
-            PromptKey::Char(c) => c.to_string(),
+            PromptKey::Char(c) => key_string(&c.to_string()),
             PromptKey::Enter => "Enter".to_string(),
             PromptKey::Escape => "Escape".to_string(),
             PromptKey::Backspace => "BSpace".to_string(),
-            PromptKey::Named(n) => n.to_string(),
+            PromptKey::Named(n) => key_string(n),
         };
         p.input = name;
         accept(app);
