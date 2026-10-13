@@ -7110,7 +7110,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         .unwrap_or(false)
                                 } else { false };
 
-                                if tui_active {
+                                // tmux MouseDown3Pane: psmux's built-in right
+                                // click below while the default is in place;
+                                // otherwise the table decides.
+                                let route3 = mouse_route(&mouse_overrides, "MouseDown3Pane", client_copy_mode);
+                                if route3 != 'B' {
+                                    if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                        r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                    }) {
+                                        let rel_col = me.column as i16 - pane_rect.x as i16;
+                                        let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
+                                        match route3 {
+                                            'U' => cmd_batch.push(format!("mouse-key MouseDown3Pane %{} {} {} 2\n", pane_id, rel_col, rel_row)),
+                                            'F' => cmd_batch.push(format!("mouse-forward {} 2 {} {} M\n", pane_id, rel_col, rel_row)),
+                                            _ => {}
+                                        }
+                                    }
+                                } else if tui_active {
                                     // Forward right-click as pane-relative mouse event
                                     if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                         r.contains(ratatui::layout::Position { x: me.column, y: me.row })
@@ -7501,7 +7517,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 copy_drag_last = None;
                                 copy_drag_repeat_at = None;
                             }
-                            MouseEventKind::Up(MouseButton::Right) => {}
+                            MouseEventKind::Up(MouseButton::Right) => {
+                                // With MouseDown3Pane unbound the press went to the
+                                // program (tmux forward_key); so does the release
+                                // (MouseUp3Pane, unbound by default in tmux too).
+                                if mouse_route(&mouse_overrides, "MouseDown3Pane", client_copy_mode) == 'F' {
+                                    if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                        r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                    }) {
+                                        let rel_col = me.column as i16 - pane_rect.x as i16;
+                                        let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
+                                        cmd_batch.push(format!("mouse-forward {} 2 {} {} m\n", pane_id, rel_col, rel_row));
+                                    }
+                                }
+                            }
                             MouseEventKind::Up(MouseButton::Middle) => {}
                             MouseEventKind::Moved => {
                                 // A bare motion event means the left button is no longer

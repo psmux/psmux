@@ -285,3 +285,15 @@ fn a_binding_to_tmux_default_command_keeps_the_built_in() {
     parse_config_content(&mut app, "bind -n MouseDrag1Border resize-pane -Z");
     assert_eq!(resolve(&app, parse("MouseDrag1Border").unwrap(), false), Dispatch::User("resize-pane -Z".into()));
 }
+
+#[test]
+fn border_and_right_button_are_client_routed() {
+    let mut app = app();
+    for (k, cmd) in [("MouseDrag1Border", "resize-pane -M"), ("MouseDown3Pane", "paste-buffer")] {
+        assert!(CLIENT_ROUTED.contains(&k));
+        assert!(list_keys_entries(&app).iter().any(|(t, n, c, _)| t == "root" && n == k && c.contains(cmd)), "{} listed", k);
+    }
+    parse_config_content(&mut app, "unbind -n MouseDown3Pane\nbind -n MouseDrag1Border display x");
+    let o = client_overrides(&app);
+    assert!(o.contains(r#""MouseDown3Pane":"FD""#) && o.contains(r#""MouseDrag1Border":"UU""#), "{}", o);
+}

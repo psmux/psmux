@@ -177,6 +177,10 @@ pub const ROOT_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelDownStatus", "next-window"),
     ("MouseDown1Status", "select-window -t ="),
     ("MouseDrag1Border", "resize-pane -M"),
+    // psmux's right click: the program gets it when it wants the mouse,
+    // otherwise copy the client selection or paste the clipboard (tmux's
+    // default opens a menu).
+    ("MouseDown3Pane", "if-shell -F -t = \"#{mouse_any_flag}\" { select-pane -t = ; send-keys -M } { paste-buffer }"),
 ];
 pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "select-pane \\; send-keys -X -N 3 scroll-up"),
@@ -252,6 +256,7 @@ fn is_default_equivalent(table: &str, key: (KeyCode, KeyModifiers), cmd: &str) -
 pub const CLIENT_ROUTED: &[&str] = &[
     "MouseDown1Status",
     "MouseDrag1Border",
+    "MouseDown3Pane",
 ];
 
 /// One letter per dispatch, for the client: B built-in, U user binding,
