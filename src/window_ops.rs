@@ -2276,12 +2276,46 @@ pub fn handle_status_wheel(app: &mut AppState, up: bool, mods: u8) {
         crate::mouse_keys::Dispatch::Forward | crate::mouse_keys::Dispatch::Drop => {}
     }
 }
+/// A client routed mouse key (`mouse_keys::CLIENT_ROUTED`) that the client
+/// sent because it has a user binding. Resolved again here, so a binding
+/// changed in between is honoured; only a user binding runs.
+pub fn handle_mouse_key(app: &mut AppState, name: &str, target: &str, col: i16, row: i16, btn: u8) {
+    let Some(key) = crate::mouse_keys::parse(name) else { return };
+    let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
+    mouse_log(&format!("handle_mouse_key: {} target={} -> {:?}", name, target, dispatch));
+    if let crate::mouse_keys::Dispatch::User(cmd) = dispatch {
+        let pane_id = target.strip_prefix('%').and_then(|s| s.parse::<usize>().ok());
+        app.last_mouse_event = pane_id.map(|p| (p, btn, true, Some((col, row)), std::time::Instant::now()));
+        run_mouse_binding_to(app, target, &cmd);
+    }
+}
+
+/// An unbound root mouse key, handed to the pane's program the way tmux's
+/// forward_key does: only a program that asked for the mouse gets it, and
+/// psmux itself does nothing (no focus change, no selection).
+pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press: bool, at: Option<(i16, i16)>) {
+    let win_name = app.windows.get(app.active_idx).map(|w| w.name.clone()).unwrap_or_default();
+    let Some(pane) = crate::tree::find_pane_mut_by_id_global(app, pane_id) else { return };
+    let wants = if btn & 64 != 0 { pane_wheel_forward(pane) } else { pane_wants_click(pane) };
+    if !wants {
+        return;
+    }
+    let (col, row) = at.unwrap_or((5, 5));
+    let flags = if btn & 64 != 0 { mouse_inject::MOUSE_WHEELED } else if btn & 32 != 0 { mouse_inject::MOUSE_MOVED } else { 0 };
+    inject_mouse_combined(pane, col, row, btn, press, 0, flags, &win_name);
+}
+
 /// Run a user mouse binding's command for the pane the event happened in.
 /// The command line goes the route a keyboard binding takes, to the server's
 /// command parser (brace blocks, `\;` chains, if-shell, send-keys -M), with
 /// `-t =`, `-t=` and `{mouse}` pointed at the pane.
 pub(crate) fn run_mouse_binding(app: &mut AppState, pane_id: usize, cmd: &str) {
-    let cmd = crate::mouse_keys::resolve_mouse_targets(cmd, pane_id);
+    run_mouse_binding_to(app, &format!("%{}", pane_id), cmd);
+}
+
+/// `run_mouse_binding` with the mouse target spelled out (`%N` or `:N`).
+pub(crate) fn run_mouse_binding_to(app: &mut AppState, target: &str, cmd: &str) {
+    let cmd = crate::mouse_keys::resolve_mouse_targets_to(cmd, target);
     match app.control_port {
         Some(port) => {
             let _ = crate::session::send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);

@@ -159,10 +159,8 @@ fn list_keys_with_empty_tables_lists_only_the_copy_mode_keys() {
     assert!(
         out.lines().all(|l| l.starts_with("bind-key -T copy-mode ")
             || l.starts_with("bind-key -T copy-mode-vi ")
-            || l.starts_with("bind-key -T root WheelUpPane ")
-            || l.starts_with("bind-key -T root WheelUpStatus ")
-            || l.starts_with("bind-key -T root WheelDownStatus ")),
-        "only copy-mode tables and the root wheel default expected, got:\n{}", out
+            || crate::mouse_keys::ROOT_MOUSE_DEFAULTS.iter().any(|(k, _)| l.starts_with(&format!("bind-key -T root {} ", k)))),
+        "only copy-mode tables and the built-in root mouse defaults expected, got:\n{}", out
     );
 }
 

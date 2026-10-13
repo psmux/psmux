@@ -175,12 +175,48 @@ pub const ROOT_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -e }"),
     ("WheelUpStatus", "previous-window"),
     ("WheelDownStatus", "next-window"),
+    ("MouseDown1Status", "select-window -t ="),
 ];
 pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "select-pane \\; send-keys -X -N 3 scroll-up"),
     ("WheelDownPane", "select-pane \\; send-keys -X -N 3 scroll-down"),
     ("MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
 ];
+
+/// Mouse keys whose built-in behaviour lives in the client (it hit-tests the
+/// status line, borders and panes itself). The server tells the client which
+/// of them no longer have their built-in default (`client_overrides`), and
+/// the client sends those to the server as `mouse-key` instead of acting.
+pub const CLIENT_ROUTED: &[&str] = &[
+    "MouseDown1Status",
+];
+
+/// One letter per dispatch, for the client: B built-in, U user binding,
+/// F unbound in root (to the program if it wants the mouse), D dropped.
+fn dispatch_code(d: &Dispatch) -> char {
+    match d {
+        Dispatch::Builtin => 'B',
+        Dispatch::User(_) => 'U',
+        Dispatch::Forward => 'F',
+        Dispatch::Drop => 'D',
+    }
+}
+
+/// The client routed keys that do not have their built-in default, as a JSON
+/// object `{"Name": "<root><copy>"}` (two dispatch letters: outside and inside
+/// copy mode). Empty with no mouse key rebound or unbound, the common case.
+pub fn client_overrides(app: &crate::types::AppState) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for name in CLIENT_ROUTED {
+        let Some(k) = parse(name) else { continue };
+        let r = dispatch_code(&resolve(app, k, false));
+        let c = dispatch_code(&resolve(app, k, true));
+        if r != 'B' || c != 'B' {
+            parts.push(format!("\"{}\":\"{}{}\"", name, r, c));
+        }
+    }
+    format!("{{{}}}", parts.join(","))
+}
 
 /// What a mouse key does, resolved the way tmux's server_client_key_callback
 /// walks its tables: the copy-mode table first while the pane is in copy mode,
@@ -226,7 +262,13 @@ pub fn resolve(app: &crate::types::AppState, key: (KeyCode, KeyModifiers), in_co
 /// `{mouse}` to the pane the mouse event happened in; psmux commands take a
 /// pane id there instead.
 pub fn resolve_mouse_targets(cmd: &str, pane_id: usize) -> String {
-    let target = format!("%{}", pane_id);
+    resolve_mouse_targets_to(cmd, &format!("%{}", pane_id))
+}
+
+/// `resolve_mouse_targets` with any target spelling: a pane `%N` for a pane
+/// event, a window `:N` for a status line event.
+pub fn resolve_mouse_targets_to(cmd: &str, target: &str) -> String {
+    let target = target.to_string();
     let mut out = String::with_capacity(cmd.len() + 8);
     let mut prev_was_t = false;
     // Whitespace separated words, rebuilt as written. A word can carry quote,

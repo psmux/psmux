@@ -3344,6 +3344,12 @@ pub enum CtrlReq {
     SendMouse(u64),
     /// A wheel notch over the status line: client, up, tmux modifier mask.
     StatusWheel(u64, bool, u8),
+    /// A client routed mouse key with a user binding: client, key name,
+    /// target (`%pane` / `:window`), col, row, SGR button.
+    MouseKey(u64, String, String, i16, i16, u8),
+    /// An unbound root mouse key handed to the pane's program: client, pane,
+    /// SGR button, col, row, press.
+    MouseForward(u64, usize, u8, i16, i16, bool),
     /// Hand a normal-mode client-side drag selection off to server-side copy
     /// mode because the pointer crossed the pane's top edge — or, when the
     /// view is direct-scrolled (scroll-enter-copy-mode off, #193), its

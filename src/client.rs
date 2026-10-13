@@ -3408,6 +3408,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // leave) in the copy-mode table; when it does not, a client-side drag
     // selection ends in server copy mode so the binding decides.
     let mut drag_end_default: bool = true;
+    // Client routed mouse keys that are not their built-in default.
+    let mut mouse_overrides: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // B built-in (or absent), U user binding, F to the program, D nothing.
+    let mouse_route = |m: &std::collections::HashMap<String, String>, name: &str, in_copy: bool| -> char {
+        m.get(name)
+            .and_then(|s| s.chars().nth(if in_copy { 1 } else { 0 }))
+            .unwrap_or('B')
+    };
     // When false, Ctrl+V is forwarded to the child app instead of being
     // intercepted for paste detection.
     #[cfg(windows)]
@@ -3732,6 +3740,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// server: true).
         #[serde(default = "default_true_drag_end")]
         drag_end_default: bool,
+        /// Client routed mouse keys that lost their built-in default:
+        /// name -> two dispatch letters (outside / inside copy mode), see
+        /// mouse_keys::client_overrides. Empty from an older server.
+        #[serde(default)]
+        mouse_overrides: std::collections::HashMap<String, String>,
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
@@ -6853,14 +6866,30 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             break;
                                         }
                                     }
-                                    if let Some(idx) = clicked_tab {
-                                        // client_tab_positions stores the true display
-                                        // index (honors gaps from renumber-windows off).
-                                        // A range naming a window that does not exist
-                                        // is ignored, matching tmux.
-                                        if client_window_indices.contains(&idx) {
-                                            cmd_batch.push(format!("select-window -t :{}\n", idx));
+                                    // tmux MouseDown1Status: built in, select the
+                                    // window clicked; a user binding runs with that
+                                    // window as `-t =`; unbound, nothing.
+                                    match mouse_route(&mouse_overrides, "MouseDown1Status", client_copy_mode) {
+                                        'B' => {
+                                            if let Some(idx) = clicked_tab {
+                                                // client_tab_positions stores the true display
+                                                // index (honors gaps from renumber-windows off).
+                                                // A range naming a window that does not exist
+                                                // is ignored, matching tmux.
+                                                if client_window_indices.contains(&idx) {
+                                                    cmd_batch.push(format!("select-window -t :{}\n", idx));
+                                                }
+                                            }
                                         }
+                                        'U' => {
+                                            let target = clicked_tab
+                                                .filter(|i| client_window_indices.contains(i))
+                                                .map(|i| format!(":{}", i))
+                                                .unwrap_or_else(|| ":".to_string());
+                                            cmd_batch.push(format!("mouse-key MouseDown1Status {} {} {} 0\n",
+                                                target, me.column, me.row));
+                                        }
+                                        _ => {}
                                     }
                                 } else {
                                     // Border detection
@@ -8176,6 +8205,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         mouse_drag_enter_copy_mode = state.mouse_drag_enter_copy_mode;
         ctrl_wheel_zoom = state.ctrl_wheel_zoom;
         drag_end_default = state.drag_end_default;
+        if mouse_overrides != state.mouse_overrides { mouse_overrides.clone_from(&state.mouse_overrides); }
         client_copy_ln = (
             crate::copy_line_numbers::CopyLnMode::parse(
                 state.copy_mode_line_numbers.as_deref()

@@ -2990,6 +2990,30 @@ match cmd {
             }
         }
     }
+    "mouse-key" => {
+        // mouse-key NAME TARGET COL ROW BTN: a client routed mouse key that
+        // has a user binding (mouse_keys::client_overrides). TARGET is the
+        // mouse target as `%pane` or `:window`.
+        if args.len() >= 5 {
+            let col = args[2].parse::<i16>().unwrap_or(0);
+            let row = args[3].parse::<i16>().unwrap_or(0);
+            let btn = args.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let _ = tx.send(CtrlReq::MouseKey(client_id, args[0].to_string(), args[1].to_string(), col, row, btn));
+        }
+    }
+    "mouse-forward" => {
+        // mouse-forward PANE BTN COL ROW M|m: an unbound root mouse key, for
+        // the program in the pane only if it asked for the mouse (tmux
+        // forward_key). No focus change.
+        if args.len() >= 5 {
+            if let (Ok(pane_id), Ok(btn), Ok(col), Ok(row)) = (
+                args[0].parse::<usize>(), args[1].parse::<u8>(),
+                args[2].parse::<i16>(), args[3].parse::<i16>()
+            ) {
+                let _ = tx.send(CtrlReq::MouseForward(client_id, pane_id, btn, col, row, args[4] != "m"));
+            }
+        }
+    }
     "pane-scroll" => {
         // pane-scroll PANE_ID up|down [COL ROW]
         // COL/ROW are the pointer's pane-relative 0-based position.  They are

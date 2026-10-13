@@ -249,3 +249,21 @@ fn status_wheel_defaults_follow_tmux() {
     parse_config_content(&mut app, "bind -n WheelDownStatus select-window -t 0");
     assert_eq!(resolve(&app, down, false), Dispatch::User("select-window -t 0".into()));
 }
+
+#[test]
+fn client_routed_keys_report_only_changes() {
+    let mut app = app();
+    assert_eq!(client_overrides(&app), "{}", "nothing changed: nothing sent");
+    assert!(list_keys_entries(&app).iter().any(|(t, k, c, _)| t == "root" && k == "MouseDown1Status" && c == "select-window -t ="));
+    parse_config_content(&mut app, "bind -n MouseDown1Status set -g @st hit");
+    assert_eq!(client_overrides(&app), r#"{"MouseDown1Status":"UU"}"#);
+    parse_config_content(&mut app, "unbind -n MouseDown1Status");
+    assert_eq!(client_overrides(&app), r#"{"MouseDown1Status":"FD"}"#);
+    populate_default_bindings(&mut app);
+    assert_eq!(client_overrides(&app), "{}");
+}
+
+#[test]
+fn a_status_target_is_a_window() {
+    assert_eq!(resolve_mouse_targets_to("select-window -t =", ":2"), "select-window -t :2");
+}
