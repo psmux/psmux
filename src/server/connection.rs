@@ -2583,7 +2583,10 @@ match cmd {
                     (Some(col), Some(row)) => Some((col, row)),
                     _ => None,
                 };
-                let _ = tx.send(CtrlReq::PaneScroll(client_id, pane_id, up, at));
+                // The held modifiers as tmux's mouse mask, absent from an
+                // older client (no modifier).
+                let mods = args.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+                let _ = tx.send(CtrlReq::PaneScroll(client_id, pane_id, up, at, mods));
             }
         }
     }
@@ -2752,6 +2755,9 @@ match cmd {
         let paste_mode = flag_has('p');
         let has_x = flag_has('X');
         let hex_mode = flag_has('H');
+        // tmux send-keys -M: forward the mouse event of the running mouse
+        // binding (see window_ops::send_mouse_event). It sends no keys.
+        let mouse_mode = flag_has('M');
         // Parse -N <count> for repeat (look for any cluster ending in 'N')
         let mut repeat_count: usize = 1;
         if let Some(n_pos) = args.iter().enumerate().position(|(i, a)| !is_marker(i) && !past_opts(i) && a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
@@ -2759,7 +2765,9 @@ match cmd {
                 repeat_count = count_str.parse::<usize>().unwrap_or(1).max(1);
             }
         }
-        if hex_mode {
+        if mouse_mode {
+            let _ = tx.send(CtrlReq::SendMouse(client_id));
+        } else if hex_mode {
             // tmux `send-keys -H`: every operand is one hexadecimal BYTE value.
             // tmux tags these keys KEYC_LITERAL and writes them to the pty as
             // single bytes ("can't be more than 8 bits"), so this is a byte

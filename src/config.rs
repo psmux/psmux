@@ -188,22 +188,27 @@ pub fn populate_default_bindings(app: &mut AppState) {
     }
 }
 
-/// The built-in copy-mode keys of `table`, parsed once: normalised key, the
-/// key name as `list-keys` prints it, and the `send-keys -X` command. Empty
-/// for any table that is not `copy-mode` or `copy-mode-vi`.
+/// The built-in keys of `table` that psmux handles itself, parsed once:
+/// normalised key, the key name as `list-keys` prints it, and the command it
+/// lists. For `copy-mode` / `copy-mode-vi` that is the copy-mode keys plus
+/// the copy-mode wheel; for `root` the built-in mouse bindings
+/// (`mouse_keys::ROOT_MOUSE_DEFAULTS`). Empty for any other table.
 pub fn copy_mode_default_keys(table: &str) -> &'static [((KeyCode, KeyModifiers), &'static str, &'static str)] {
     use std::sync::OnceLock;
     type Parsed = Vec<((KeyCode, KeyModifiers), &'static str, &'static str)>;
-    fn parse(list: &'static [(&'static str, &'static str)]) -> Parsed {
-        list.iter()
+    fn parse(lists: &[&'static [(&'static str, &'static str)]]) -> Parsed {
+        lists.iter()
+            .flat_map(|l| l.iter())
             .filter_map(|(k, c)| parse_key_name(k).map(|key| (normalize_key_for_binding(key), *k, *c)))
             .collect()
     }
     static VI: OnceLock<Parsed> = OnceLock::new();
     static EMACS: OnceLock<Parsed> = OnceLock::new();
+    static ROOT: OnceLock<Parsed> = OnceLock::new();
     match table {
-        "copy-mode-vi" => VI.get_or_init(|| parse(crate::help::COPY_MODE_VI_DEFAULTS)),
-        "copy-mode" => EMACS.get_or_init(|| parse(crate::help::COPY_MODE_EMACS_DEFAULTS)),
+        "copy-mode-vi" => VI.get_or_init(|| parse(&[crate::help::COPY_MODE_VI_DEFAULTS, crate::mouse_keys::COPY_MODE_MOUSE_DEFAULTS])),
+        "copy-mode" => EMACS.get_or_init(|| parse(&[crate::help::COPY_MODE_EMACS_DEFAULTS, crate::mouse_keys::COPY_MODE_MOUSE_DEFAULTS])),
+        "root" => ROOT.get_or_init(|| parse(&[crate::mouse_keys::ROOT_MOUSE_DEFAULTS])),
         _ => &[],
     }
 }
@@ -263,7 +268,7 @@ pub fn list_keys_entries(app: &AppState) -> Vec<(String, String, String, bool)> 
             ));
         }
     }
-    for table in ["copy-mode", "copy-mode-vi"] {
+    for table in ["root", "copy-mode", "copy-mode-vi"] {
         let user = app.key_tables.get(table);
         for (key, name, cmd) in copy_mode_default_keys(table) {
             if user.map_or(false, |b| b.iter().any(|b| b.key == *key)) { continue; }
@@ -2410,6 +2415,11 @@ pub fn fold_nul_to_ctrl_space(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModi
 /// NUL (`C-2` / `C-Space`) is folded first so that a binding registered as
 /// `C-2` and one registered as `C-Space` resolve to the same tuple (#504).
 pub fn normalize_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModifiers) {
+    // A mouse key keeps every modifier: S-WheelUpPane and C-M-WheelUpPane are
+    // distinct tmux keys, and none of the keyboard folds below apply to them.
+    if crate::mouse_keys::is_mouse_key(&key) {
+        return key;
+    }
     let key = fold_nul_to_ctrl_space(key);
     match key.0 {
         KeyCode::Char(c) => {
@@ -2477,6 +2487,11 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     } else {
         name
     };
+
+    // tmux mouse keys (WheelUpPane, C-MouseDown1Status, ...): see mouse_keys.
+    if let Some(key) = crate::mouse_keys::parse(name) {
+        return Some(key);
+    }
 
     // ── Extract all modifier prefixes (C-, M-, S-) then resolve the base key ──
     // This supports arbitrary combinations: C-Tab, C-S-Tab, C-M-S-Up, etc.
@@ -2770,6 +2785,9 @@ pub fn source_file(app: &mut AppState, path: &str) {
 /// Parse a key string like "C-a", "M-x", "F1", "Space" into (KeyCode, KeyModifiers)
 pub fn parse_key_string(key: &str) -> Option<(KeyCode, KeyModifiers)> {
     let key = key.trim();
+    if let Some(mouse) = crate::mouse_keys::parse(key) {
+        return Some(mouse);
+    }
     let mut mods = KeyModifiers::empty();
     let mut key_part = key;
     
@@ -2860,6 +2878,9 @@ pub fn format_key_binding(key: &(KeyCode, KeyModifiers)) -> String {
     }
     
     let key_str = match keycode {
+        KeyCode::Char(c) if crate::mouse_keys::is_mouse_char(*c) => {
+            crate::mouse_keys::name(*c).unwrap_or_else(|| "?".to_string())
+        }
         KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Enter => "Enter".to_string(),

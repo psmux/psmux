@@ -149,15 +149,18 @@ fn showb_alias_same_as_show_buffer() {
 #[test]
 fn list_keys_with_empty_tables_lists_only_the_copy_mode_keys() {
     // The built-in copy-mode keys are listed like tmux lists its copy-mode
-    // tables (key-bindings.c), so empty key tables leave just those.
+    // tables (key-bindings.c), so empty key tables leave just those, plus the
+    // built-in root mouse binding (WheelUpPane), which tmux lists too.
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "list-keys").unwrap();
     let (cmd, out) = extract_popup(&app);
     assert_eq!(cmd, "list-keys");
     assert!(!out.trim().is_empty());
     assert!(
-        out.lines().all(|l| l.starts_with("bind-key -T copy-mode ") || l.starts_with("bind-key -T copy-mode-vi ")),
-        "only copy-mode tables expected, got:\n{}", out
+        out.lines().all(|l| l.starts_with("bind-key -T copy-mode ")
+            || l.starts_with("bind-key -T copy-mode-vi ")
+            || l.starts_with("bind-key -T root WheelUpPane ")),
+        "only copy-mode tables and the root wheel default expected, got:\n{}", out
     );
 }
 

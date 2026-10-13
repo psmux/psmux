@@ -2189,6 +2189,101 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     }
 }
 
+/// A wheel notch over a pane, as the tmux key `WheelUpPane` /
+/// `WheelDownPane` with the held modifiers (`mods` is tmux's mouse mask).
+///
+/// The key is looked up the way tmux's server_client_key_callback does it
+/// (see `mouse_keys::resolve`): a user binding runs its command with the
+/// mouse pane as `-t =` / `{mouse}`; a built-in default binding runs psmux's
+/// own wheel handler (`handle_pane_scroll`), unchanged; an unbound key in
+/// root goes to the pane only if its program asked for mouse reports, and an
+/// unbound key in copy mode does nothing.
+pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Option<(i16, i16)>, mods: u8) {
+    if !app.mouse_enabled || matches!(app.mode, Mode::PopupMode { .. }) {
+        return handle_pane_scroll(app, pane_id, up, at);
+    }
+    let mods = crate::mouse_keys::mods_from_mask(mods);
+    let key = crate::mouse_keys::wheel_pane_key(up, mods);
+    let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
+    mouse_log(&format!("handle_pane_wheel: pane={} up={} mods={:?} -> {:?}", pane_id, up, mods, dispatch));
+    match dispatch {
+        crate::mouse_keys::Dispatch::Builtin => handle_pane_scroll(app, pane_id, up, at),
+        // An unmodified notch down with no root binding is what psmux's own
+        // handler already treats as "not a copy-mode entry": the program gets
+        // it when it asked for the mouse, plus psmux's scrollback extras
+        // (scroll-enter-copy-mode off, more.com).  Keep that exactly.
+        crate::mouse_keys::Dispatch::Forward if !up && mods.is_empty() => handle_pane_scroll(app, pane_id, up, at),
+        crate::mouse_keys::Dispatch::Forward => {
+            focus_pane_by_id(app, pane_id);
+            forward_wheel_to_active_pane(app, up, at, mods);
+        }
+        crate::mouse_keys::Dispatch::Drop => {}
+        crate::mouse_keys::Dispatch::User(cmd) => {
+            // psmux's wheel has always focused the pane under the pointer;
+            // keep that so untargeted commands in the binding act on it.
+            focus_pane_by_id(app, pane_id);
+            app.last_mouse_event = Some((pane_id, up, at, mods, std::time::Instant::now()));
+            let cmd = crate::mouse_keys::resolve_mouse_targets(
+                &crate::mouse_keys::unwrap_command_block(&cmd), pane_id);
+            // The same route a keyboard binding takes: the command line goes
+            // to the server's command parser (brace blocks, `\;` chains,
+            // if-shell, send-keys -M), not the reduced in-process executor.
+            match app.control_port {
+                Some(port) => {
+                    let _ = crate::session::send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+                }
+                None => {
+                    let _ = crate::commands::execute_command_string(app, &cmd);
+                }
+            }
+        }
+    }
+}
+
+/// `send-keys -M`: hand the mouse event of the running mouse binding to its
+/// pane, as tmux does (cmd-send-keys.c -> window_pane_key).  A pane in copy
+/// mode takes nothing this way (tmux's copy mode has no mode->key, so
+/// window_pane_key drops it); otherwise the event reaches the program only if
+/// it asked for mouse reports.
+pub fn send_mouse_event(app: &mut AppState) {
+    let Some((pane_id, up, at, mods, when)) = app.last_mouse_event else { return };
+    if when.elapsed() > std::time::Duration::from_secs(5) || app.mode.in_copy() {
+        return;
+    }
+    focus_pane_by_id(app, pane_id);
+    forward_wheel_to_active_pane(app, up, at, mods);
+}
+
+fn focus_pane_by_id(app: &mut AppState, pane_id: usize) {
+    let win = &mut app.windows[app.active_idx];
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, app.last_window_area, &mut rects);
+    for (path, _area) in &rects {
+        if crate::tree::get_active_pane_id(&win.root, path) == Some(pane_id) {
+            win.active_path = path.clone();
+            break;
+        }
+    }
+}
+
+/// tmux input_key_mouse for a wheel event: an SGR report with the modifier
+/// bits, written only to a program that enabled mouse reporting.
+fn forward_wheel_to_active_pane(app: &mut AppState, up: bool, at: Option<(i16, i16)>, mods: crossterm::event::KeyModifiers) {
+    let win = &mut app.windows[app.active_idx];
+    let win_name = win.name.clone();
+    let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return };
+    if !pane_wheel_forward(pane) {
+        mouse_log("  -> unbound wheel key, pane has no mouse reporting: nothing (tmux parity)");
+        return;
+    }
+    let sgr_btn: u8 = (if up { 64 } else { 65 }) + crate::mouse_keys::sgr_mod_bits(mods);
+    let wheel_delta: i16 = if up { 120 } else { -120 };
+    let button_state = ((wheel_delta as i32) << 16) as u32;
+    let (col, row) = at.unwrap_or((5, 5));
+    inject_mouse_combined(pane, col, row, sgr_btn, true,
+        button_state, mouse_inject::MOUSE_WHEELED, &win_name);
+}
+
 /// Set split sizes at a given tree path during border drag.
 pub fn handle_split_set_sizes(app: &mut AppState, path: &[usize], sizes: &[u16]) {
     let win = &mut app.windows[app.active_idx];

@@ -7196,7 +7196,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
                                     let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
-                                    cmd_batch.push(format!("pane-scroll {} up {} {}\n", pane_id, rel_col, rel_row));
+                                    // The held modifiers travel as tmux's mouse mask so the server
+                                    // can look up C-WheelUpPane and friends.
+                                    cmd_batch.push(format!("pane-scroll {} up {} {} {}\n", pane_id, rel_col, rel_row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers)));
                                 } else {
                                     cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row));
                                 }
@@ -7211,7 +7214,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
                                     let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
-                                    cmd_batch.push(format!("pane-scroll {} down {} {}\n", pane_id, rel_col, rel_row));
+                                    cmd_batch.push(format!("pane-scroll {} down {} {} {}\n", pane_id, rel_col, rel_row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers)));
                                 } else {
                                     cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row));
                                 }
