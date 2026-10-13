@@ -1845,8 +1845,9 @@ pub enum PromptEdit {
 /// prompt editor (prompt.c `prompt_key`, the `process_key` switch) that has a
 /// meaning here: Left, Right, Home, End and their emacs spellings C-b, C-f,
 /// C-a, C-e, Backspace and Delete at the cursor, C-u clears, C-k cuts to the
-/// end, C-w cuts the word before the cursor, and Space inserts a space, which
-/// arrives as a key of its own and used to be dropped (discussion #694).
+/// end, C-w cuts the word before the cursor, C-t transposes the characters at
+/// the cursor, and Space inserts a space, which arrives as a key of its own and
+/// used to be dropped (discussion #694).
 pub fn prompt_edit(input: &mut String, back: &mut usize, key: &str) -> PromptEdit {
     let mut chars: Vec<char> = input.chars().collect();
     let len = chars.len();
@@ -1873,6 +1874,19 @@ pub fn prompt_edit(input: &mut String, back: &mut usize, key: &str) -> PromptEdi
             while start > 0 && chars[start - 1] == ' ' { start -= 1; }
             while start > 0 && chars[start - 1] != ' ' { start -= 1; }
             chars.drain(start..idx);
+            PromptEdit::Edited
+        }
+        // tmux steps the cursor right first unless it is at the end, so inside
+        // the line the characters either side of the cursor change places and
+        // at the end the last two do. The cursor ends after the pair. At the
+        // start, or with fewer than two characters, nothing changes
+        // (status.c:1649 to :1661).
+        "c-t" => {
+            let at = if idx < len { idx + 1 } else { idx };
+            if at >= 2 {
+                chars.swap(at - 2, at - 1);
+                b = len - at;
+            }
             PromptEdit::Edited
         }
         "up" | "c-p" => PromptEdit::HistoryUp,
@@ -2886,3 +2900,7 @@ mod test_issue746_status_prompt_cursor;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue753_copy_redraw.rs"]
 mod test_issue753_copy_redraw;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue785_prompt_transpose.rs"]
+mod test_issue785_prompt_transpose;
