@@ -701,7 +701,10 @@ pub(crate) fn parse_decrqss_cursor_style(buf: &[u8]) -> Option<u8> {
 /// `needs_vt_input()` is exactly the population where DA1 was measured arriving
 /// first: WezTerm (via `TERM_PROGRAM` / `WEZTERM_PANE`), JediTerm, SSH.  Should
 /// another host turn out to answer DA1 first, widen this on a measurement of
-/// that host, not on a hunch.
+/// that host, not on a hunch.  Alacritty (via `ALACRITTY_LOG`) joined on one:
+/// under Alacritty 0.17.0 without the window, the client's input pump read the
+/// tail of a reply, `55` and `ESC \`, 8ms after it started, and typed it into
+/// the pane.
 ///
 /// 75ms, not the 30ms the report proposed: the DA1 reply lands within 2ms, so a
 /// 30ms window closes at ~31ms and still lost the race to the 26ms to 40ms
