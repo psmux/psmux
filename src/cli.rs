@@ -333,6 +333,37 @@ pub fn flag_takes_value(command: &str, flag: char) -> bool {
     kind != FlagValue::None
 }
 
+/// The first operand of `command` in `args` (the tokens after the command
+/// name), read the way tmux's getopt reads them (arguments.c:207): flags end at
+/// `--`, at a bare `-` or at the first token that does not start with `-`, a
+/// value-taking flag consumes the rest of its token or the token after it, and
+/// one token can carry several flags.
+///
+/// `rename-window -- '%%'` is the shape that needs it: tmux names the window
+/// after the operand, where reading the first token named it `--`.
+pub fn first_operand<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i];
+        if token == "--" {
+            return args.get(i + 1).copied();
+        }
+        let Some(rest) = token.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            return Some(token);
+        };
+        for (at, flag) in rest.char_indices() {
+            if flag_takes_value(command, flag) {
+                if at + flag.len_utf8() == rest.len() {
+                    i += 1;
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Split clustered short flags into one token per flag, as tmux's getopt
 /// reads them: `-dt %1` becomes `-d -t %1`, and `-t%1` becomes `-t %1`.
 ///

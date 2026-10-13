@@ -339,6 +339,11 @@ struct CommandPromptSpec {
     initial: String,
     label: Option<String>,
     template: Option<String>,
+    /// `-k`: the next key answers the prompt with its NAME
+    /// (PROMPT_KEY, status.c:1438).
+    key: bool,
+    /// `-1`: the next character answers the prompt (PROMPT_SINGLE).
+    single: bool,
 }
 
 /// Parse the arguments of a `command-prompt` binding — everything after the
@@ -379,6 +384,11 @@ fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
         // left the prompt headed after the template instead.
         for (at, flag) in rest.char_indices() {
             if !crate::cli::flag_takes_value("command-prompt", flag) {
+                match flag {
+                    'k' => spec.key = true,
+                    '1' => spec.single = true,
+                    _ => {}
+                }
                 continue;
             }
             let glued = &rest[at + flag.len_utf8()..];
@@ -496,6 +506,26 @@ pub(crate) fn tree_rebuild_visible(
     let map = crate::choose_tree::visible_lines(&kinds, collapsed);
     let rows = map.iter().map(|&i| all[i].clone()).collect();
     (rows, map)
+}
+
+/// The name a `command-prompt -k` prompt answers with, as tmux's
+/// `key_string_lookup_key` writes it (key-string.c:327): modifiers as `C-`,
+/// `M-`, `S-`, then the table name (`Left`, `PPage`, `NPage`, `IC`, `DC`,
+/// `F1`, `BTab`, `Space`, `BSpace`, `Escape`, `Enter`, `Tab`). Shift is part of
+/// a character (`A`, not `S-a`) and of BTab, and an AltGr character is the
+/// character, as the console reports AltGr as Ctrl+Alt.
+pub(crate) fn prompt_key_answer_name(code: KeyCode, mods: KeyModifiers) -> String {
+    let mut mods = mods;
+    if let KeyCode::Char(c) = code {
+        if is_altgr_char(c, mods) {
+            mods = KeyModifiers::NONE;
+        }
+    }
+    if matches!(code, KeyCode::Char(_) | KeyCode::BackTab) {
+        mods.remove(KeyModifiers::SHIFT);
+    }
+    let mods = mods & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
+    crate::config::format_key_binding(&(code, mods))
 }
 
 /// Build a send-key name with modifier prefix (e.g. "C-Left", "S-Right", "C-S-Up").
@@ -3109,6 +3139,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Template for command-prompt -I '#W' 'rename-window "%%"' style bindings.
     // When set, Enter substitutes %% with user input and executes the template.
     let mut command_template: Option<String> = None;
+    // `command-prompt -k` / `-1`: the next key, or character, answers the
+    // prompt on its own (status.c:1438 to :1470). Set on every open.
+    let mut command_key_answer = false;
+    let mut command_single = false;
     // Custom prompt label from command-prompt -p 'prompt:'
     let mut command_prompt_label: Option<String> = None;
     // Track active window name from last dump-state for #W expansion
@@ -4630,7 +4664,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                         }
-                        else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
+                        // A `-k` prompt is answered by Escape like any other
+                        // key ("Escape", status.c:1438), so it is left to the
+                        // prompt's own arm.
+                        else if matches!(key.code, KeyCode::Esc) && ((command_input && !command_key_answer) || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
                             if chooser_kill.is_some() {
                                 // Escape answers a chooser's kill question with
                                 // "no" and leaves the chooser open, which is
@@ -4874,6 +4911,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     command_back = 0;
                                     command_template = spec.template;
                                     command_prompt_label = spec.label;
+                                    command_key_answer = spec.key;
+                                    command_single = spec.single;
                                 } else if cmd == "list-keys" {
                                     keys_viewer_scroll = 0;
                                     let user_binds: Vec<(bool, String, String, String)> = synced_bindings
@@ -4990,7 +5029,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // because the `.` fallback below sets one and
                                 // this table is read before the first state dump
                                 // has a chance to rebuild either prompt.
-                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; }
+                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; command_key_answer = false; command_single = false; }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
                                 // Same command as the PREFIX_DEFAULTS entry for
                                 // `.`, so the key is not dead for the moment
@@ -5002,6 +5041,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     command_history_idx = command_history.len();
                                     command_template = Some("move-window -t '%%'".into());
                                     command_prompt_label = Some("(move-window)".into());
+                                    command_key_answer = false;
+                                    command_single = false;
                                 }
                                 KeyCode::Char('w') => { do_choose_tree = true; }
                                 KeyCode::Char('s') => { do_choose_session = true; }
@@ -5927,6 +5968,44 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // fail this guard and reach the AltGr arm below,
                                 // which hands the character to the PANE, so the
                                 // character never arrived in the prompt at all.
+                                // `-k` and `-1`: the prompt is answered by the
+                                // next key (its name) or the next character,
+                                // before any editing (status.c:1438 to :1470).
+                                // Both used to be dropped by the flag parser, so
+                                // the prompt waited for Enter and ran with
+                                // whatever had been typed.
+                                _ if command_input && (command_key_answer || command_single) => {
+                                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                                    let answer: Option<String> = if command_key_answer {
+                                        Some(prompt_key_answer_name(key.code, key.modifiers))
+                                    } else {
+                                        match key.code {
+                                            KeyCode::Char(c) if !ctrl || is_altgr_char(c, key.modifiers) => Some(c.to_string()),
+                                            KeyCode::Enter => Some(String::new()),
+                                            _ => None,
+                                        }
+                                    };
+                                    let cancel = !command_key_answer
+                                        && (key.code == KeyCode::Esc
+                                            || (ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('g'))));
+                                    if let Some(answer) = answer.as_ref() {
+                                        let final_cmd = match command_template {
+                                            Some(ref tmpl) => tmpl.replace("%%", answer),
+                                            None => answer.clone(),
+                                        };
+                                        let sub_cmds = crate::config::split_chained_commands_pub(&final_cmd);
+                                        cmd_batch.extend(binding_wire_lines(&sub_cmds));
+                                    }
+                                    if answer.is_some() || cancel {
+                                        command_input = false;
+                                        command_back = 0;
+                                        command_template = None;
+                                        command_prompt_label = None;
+                                        command_key_answer = false;
+                                        command_single = false;
+                                        selection_changed = true;
+                                    }
+                                }
                                 KeyCode::Char(c) if command_input
                                     && (!key.modifiers.contains(KeyModifiers::CONTROL)
                                         || is_altgr_char(c, key.modifiers))
@@ -10495,6 +10574,10 @@ mod test_switch_client_target_routing;
 #[cfg(test)]
 #[path = "../tests-rs/test_prefix_dot_move_window.rs"]
 mod test_prefix_dot_move_window;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue789_followup_client_prompt.rs"]
+mod test_issue789_followup_client_prompt;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue658_idle_dump_floor.rs"]

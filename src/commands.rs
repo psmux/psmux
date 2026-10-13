@@ -1524,8 +1524,19 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
     execute_command_string_single(app, cmd)
 }
 
+/// Join parsed arguments back into a line that parses to the same arguments.
+fn requote(args: &[&str]) -> String {
+    args.iter().map(|a| crate::util::quote_arg_if_needed(a)).collect::<Vec<_>>().join(" ")
+}
+
 fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    // Quotes group and are removed here, as tmux's command parser does and as
+    // the server's own command line handler (connection.rs) already does. A
+    // whitespace split kept them: a copy mode prompt's `rename-window '%%'`
+    // named the window `'TEST'`, quotes included, and `'a b'` became `'a`
+    // (#789 follow up). Arms that hand `cmd` on whole are unaffected.
+    let tokens = parse_command_line(cmd);
+    let parts: Vec<&str> = tokens.iter().map(String::as_str).collect();
     if parts.is_empty() { return Ok(()); }
 
     // Issue #635: this is the route menus, hooks, confirm dialogs, the command
@@ -1767,7 +1778,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "rename-window" | "renamew" => {
-            if let Some(name) = parts.get(1) {
+            if let Some(name) = crate::cli::first_operand("rename-window", &parts[1..]) {
                 // tmux parity (#552): the argument is a format, expanded
                 // against the window being renamed (cmd-rename-window.c uses
                 // format_single_from_target), so `rename-window
@@ -1837,7 +1848,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             app.mode = Mode::PaneChooser { opened_at: Instant::now() };
         }
         "confirm-before" | "confirm" => {
-            let rest = parts[1..].join(" ");
+            // Quoted again where needed: the command is parsed a second time
+            // when it runs.
+            let rest = requote(&parts[1..]);
             app.mode = Mode::ConfirmMode {
                 prompt: format!("Run '{}'?", rest),
                 command: rest,
@@ -1845,7 +1858,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             };
         }
         "display-menu" | "menu" => {
-            let rest = parts[1..].join(" ");
+            // parse_menu_definition reads quoted items, so they are quoted again.
+            let rest = requote(&parts[1..]);
             let menu = parse_menu_definition(&rest, None, None);
             if !menu.items.is_empty() {
                 app.mode = Mode::MenuMode { menu };
@@ -1976,8 +1990,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let empty = parts.iter().any(|p| *p == "-E");
                 let kill = parts.iter().any(|p| *p == "-k") || empty;
                 // Honor `-- <shell-command>` (issue #399).
+                // The shell command is taken from the raw line, so its own
+                // quoting (a path with spaces) reaches the shell untouched.
                 let command = parts.iter().position(|p| *p == "--")
-                    .map(|i| parts[i + 1..].join(" "))
+                    .and_then(|_| cmd.find(" -- ").map(|at| cmd[at + 4..].to_string()))
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
                 let env_sets = crate::server::connection::env_flag_values(&parts);
@@ -2151,7 +2167,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // handled by caller to set quit flag
         }
         "rename-session" => {
-            if let Some(name) = parts.get(1) {
+            if let Some(name) = crate::cli::first_operand("rename-session", &parts[1..]) {
                 app.session_name = name.to_string();
                 // Forward to server so external queries see the new session name
                 if let Some(port) = app.control_port {

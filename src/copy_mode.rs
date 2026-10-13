@@ -2910,3 +2910,7 @@ mod test_issue785_prompt_transpose;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue789_copy_prompt_editor.rs"]
 mod test_issue789_copy_prompt_editor;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue789_followup_keys_quotes.rs"]
+mod test_issue789_followup_keys_quotes;
