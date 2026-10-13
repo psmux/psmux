@@ -427,6 +427,7 @@ fn generate_show_options(app: &AppState) -> String {
     output.push_str(&format!("mouse {}\n", if app.mouse_enabled { "on" } else { "off" }));
     output.push_str(&format!("scroll-enter-copy-mode {}\n", if app.scroll_enter_copy_mode { "on" } else { "off" }));
     output.push_str(&format!("mouse-drag-enter-copy-mode {}\n", if app.mouse_drag_enter_copy_mode { "on" } else { "off" }));
+    output.push_str(&format!("ctrl-wheel-zoom {}\n", if app.ctrl_wheel_zoom { "on" } else { "off" }));
     output.push_str(&format!("choose-tree-preview {}\n", if app.choose_tree_preview { "on" } else { "off" }));
     output.push_str(&format!("status {}\n", if app.status_visible { "on" } else { "off" }));
     output.push_str(&format!("status-position {}\n", app.status_position));

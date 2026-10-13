@@ -3227,6 +3227,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // mouse-drag-enter-copy-mode (mirror of the server option): a drag
     // enters copy mode instead of painting the client-side overlay.
     let mut mouse_drag_enter_copy_mode: bool = false;
+    // ctrl-wheel-zoom (mirror of the server option, default off): Ctrl+Wheel
+    // is handed back to the hosting Windows Terminal as its font zoom key.
+    let mut ctrl_wheel_zoom: bool = false;
     // When false, Ctrl+V is forwarded to the child app instead of being
     // intercepted for paste detection.
     #[cfg(windows)]
@@ -3542,6 +3545,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// instead of painting the client-side selection overlay.
         #[serde(default)]
         mouse_drag_enter_copy_mode: bool,
+        /// ctrl-wheel-zoom option (mirror of the server-side field).
+        #[serde(default)]
+        ctrl_wheel_zoom: bool,
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
@@ -6476,7 +6482,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // reporting is on; give it back as its zoom key.
                         // Anything else, or no foreground Windows Terminal,
                         // falls through unchanged.
-                        if crate::platform::terminal_zoom::wheel_zoom_direction(&me)
+                        if ctrl_wheel_zoom
+                            && crate::platform::terminal_zoom::wheel_zoom_direction(&me)
                             .map_or(false, crate::platform::terminal_zoom::request)
                         {
                             _pending_evt = input.try_read()?;
@@ -7780,6 +7787,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
         scroll_enter_copy_mode = state.scroll_enter_copy_mode;
         mouse_drag_enter_copy_mode = state.mouse_drag_enter_copy_mode;
+        ctrl_wheel_zoom = state.ctrl_wheel_zoom;
         client_copy_ln = (
             crate::copy_line_numbers::CopyLnMode::parse(
                 state.copy_mode_line_numbers.as_deref()

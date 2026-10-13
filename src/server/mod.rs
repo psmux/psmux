@@ -3794,7 +3794,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         None => "null",
                     };
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"bold_is_bright\":{}}}",
+                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"ctrl_wheel_zoom\":{},\"bold_is_bright\":{}}}",
                         layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                         matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
@@ -3809,6 +3809,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.choose_tree_preview,
                         app.scroll_enter_copy_mode,
                         app.mouse_drag_enter_copy_mode,
+                        app.ctrl_wheel_zoom,
                         app.bold_is_bright,
                     ));
                     // #633 follow up: a malformed buffer here used to be a quiet
@@ -5955,6 +5956,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("mouse {}\n", if app.mouse_enabled { "on" } else { "off" }));
                     output.push_str(&format!("scroll-enter-copy-mode {}\n", if app.scroll_enter_copy_mode { "on" } else { "off" }));
                     output.push_str(&format!("mouse-drag-enter-copy-mode {}\n", if app.mouse_drag_enter_copy_mode { "on" } else { "off" }));
+                    output.push_str(&format!("ctrl-wheel-zoom {}\n", if app.ctrl_wheel_zoom { "on" } else { "off" }));
                     output.push_str(&format!("pwsh-mouse-selection {}\n", if app.pwsh_mouse_selection { "on" } else { "off" }));
                     output.push_str(&format!("mouse-selection {}\n", if app.mouse_selection { "on" } else { "off" }));
                     output.push_str(&format!("mouse-selection-force {}\n", if app.mouse_selection_force { "on" } else { "off" }));
@@ -8381,7 +8383,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 None => "null",
             };
             let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"bold_is_bright\":{}}}",
+                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"ctrl_wheel_zoom\":{},\"bold_is_bright\":{}}}",
                 layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                 matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
@@ -8395,6 +8397,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.choose_tree_preview,
                 app.scroll_enter_copy_mode,
                 app.mouse_drag_enter_copy_mode,
+                app.ctrl_wheel_zoom,
                 app.bold_is_bright,
             ));
             // #633 follow up: a malformed buffer here used to be a quiet

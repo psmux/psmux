@@ -225,6 +225,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "repeat-time", scope: Session, option_type: Number(RepeatTime), default: "500", description: "Repeat timeout for prefix keys in ms" },
     OptionDef { name: "mouse", scope: Session, option_type: Boolean, default: "on", description: "Enable mouse support" },
     OptionDef { name: "scroll-enter-copy-mode", scope: Session, option_type: Boolean, default: "on", description: "Enter copy mode on mouse scroll up at shell prompt" },
+    OptionDef { name: "ctrl-wheel-zoom", scope: Session, option_type: Boolean, default: "off", description: "Windows Terminal only: Ctrl+Wheel zooms the terminal font instead of scrolling the pane (psmux specific)" },
     OptionDef { name: "mouse-drag-enter-copy-mode", scope: Session, option_type: Boolean, default: "off", description: "Enter copy mode and select there on a left drag in a pane that does not track the mouse (tmux's MouseDrag1Pane -> copy-mode -M)" },
     OptionDef { name: "pwsh-mouse-selection", scope: Session, option_type: Boolean, default: "off", description: "Windows 11 PowerShell-style drag selection (pane-aware, right-click to copy, word/line multi-click)" },
     OptionDef { name: "mouse-selection", scope: Session, option_type: Boolean, default: "on", description: "Enable psmux's client-side drag-selection overlay. Set to off so apps inside a pane (opencode, etc.) can implement their own mouse selection without psmux drawing on top." },

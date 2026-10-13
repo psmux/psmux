@@ -43,6 +43,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "mouse" => "off",
         "scroll-enter-copy-mode" => "off",
         "mouse-drag-enter-copy-mode" => "on",
+        "ctrl-wheel-zoom" => "on",
         "pwsh-mouse-selection" => "on",
         "mouse-selection" => "off",
         "mouse-selection-force" => "on",

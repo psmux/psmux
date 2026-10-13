@@ -1478,6 +1478,11 @@ pub struct AppState {
     /// the client-side selection overlay.  Default: off (keep the
     /// client-side selection, which copies on release).
     pub mouse_drag_enter_copy_mode: bool,
+    /// ctrl-wheel-zoom: when on, a wheel notch with exactly Ctrl held in a
+    /// client hosted by Windows Terminal is handed back to that terminal as
+    /// its font zoom key instead of scrolling the pane.  psmux specific, no
+    /// tmux equivalent.  Default: off.
+    pub ctrl_wheel_zoom: bool,
     /// pwsh-mouse-selection: when on, client-side drag selection behaves like
     /// Windows 11 PowerShell — pane-aware clipping, no copy-on-release (copy
     /// only on right-click), word/line selection on double/triple-click.
@@ -2709,6 +2714,7 @@ impl AppState {
                 .filter(|hc| hc.has_any() || hc.dark.is_some()),
             scroll_enter_copy_mode: true,
             mouse_drag_enter_copy_mode: false,
+            ctrl_wheel_zoom: false,
             pwsh_mouse_selection: false,
             mouse_selection: true,
             mouse_selection_force: false,
