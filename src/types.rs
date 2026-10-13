@@ -1962,6 +1962,11 @@ pub struct AppState {
     /// Transient status-bar message from display-message (without -p).
     /// Tuple of (message_text, timestamp_when_set, optional per_message_duration_ms).
     pub status_message: Option<(String, std::time::Instant, Option<u64>)>,
+    /// The timestamp of a `display-message -N` status message: key presses
+    /// leave THAT message up until its delay expires (cmd-display-message.c
+    /// Nflag -> status_message_set ignore_keys). Compared against the
+    /// message's own Instant so any later message is not affected.
+    pub status_message_ignore_keys: Option<std::time::Instant>,
     /// Whether warm pane/server pre-spawning is enabled (default: on).
     /// When off, new sessions/windows always cold-spawn a fresh shell.
     pub warm_enabled: bool,
@@ -2987,6 +2992,7 @@ impl AppState {
             last_mouse_x: 0,
             last_mouse_y: 0,
             status_message: None,
+            status_message_ignore_keys: None,
             warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
             allow_alternate_screen: true,
             warm_pane: WarmPool::new(default_warm_pool_size()),
@@ -3167,6 +3173,17 @@ impl TempTarget {
             && (self.pane.is_none() || self.pane_is_id)
             && (self.win.is_some() || self.pane.is_some())
     }
+}
+
+/// The display-message flags the server loop itself has to honour
+/// (cmd-display-message.c). `-a`, `-v` and `-p` are applied by the command
+/// handler around the request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayFlags {
+    /// `-l`: the message is shown unchanged, no format expansion.
+    pub literal: bool,
+    /// `-N`: key presses do not close the message; only its delay does.
+    pub ignore_keys: bool,
 }
 
 pub enum CtrlReq {
@@ -3493,9 +3510,9 @@ pub enum CtrlReq {
     /// Delete a named buffer by name
     DeleteNamedBuffer(String),
     PasteBufferAt(usize),
-    DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool, Option<u64>, Option<ClientSel>),  // resp, format, target_pane_idx, set_status_bar, duration_override_ms, -c client
+    DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool, Option<u64>, Option<ClientSel>, DisplayFlags),  // resp, format, target_pane_idx, set_status_bar, duration_override_ms, -c client, -l/-N
     /// Like DisplayMessage but resolves -t %N pane ID instead of position. (Issue #332.)
-    DisplayMessageById(mpsc::Sender<String>, String, usize, bool, Option<u64>, Option<ClientSel>),  // resp, format, pane_id, set_status_bar, duration_override_ms, -c client
+    DisplayMessageById(mpsc::Sender<String>, String, usize, bool, Option<u64>, Option<ClientSel>, DisplayFlags),  // resp, format, pane_id, set_status_bar, duration_override_ms, -c client, -l/-N
     LastWindow,
     /// `last-pane` / `select-pane -l`.
     ///
@@ -3900,6 +3917,16 @@ pub enum CtrlReq {
     /// `-n NAME` windows, #266) and every option in the window's own store
     /// (#648) — are reported instead of the global one.
     ShowWindowOptionValue(mpsc::Sender<String>, String, String),
+    /// Look up one user option (`@name`) in the table `show-options` picked,
+    /// answering whether it is SET (an empty value is set) and whether the
+    /// value was inherited, so `show @unset` can say "invalid option" like
+    /// tmux. Fields: reply, name, raw `-t` target, table.
+    UserOptionLookup(
+        mpsc::Sender<Option<(String, bool)>>,
+        String,
+        String,
+        crate::server::options::UserOptionTable,
+    ),
     ChooseBuffer(mpsc::Sender<String>),
     ServerInfo(mpsc::Sender<String>),
     SendPrefix,

@@ -352,6 +352,132 @@ pub fn unknown_flag<S: AsRef<str>>(command: &str, args: &[S]) -> Option<char> {
     None
 }
 
+/// `display-message` arguments read the way tmux's args_parse reads them with
+/// the template `aCc:d:lINpt:F:v` (cmd-display-message.c).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DisplayMessageArgs {
+    /// `-a`: list the format variables and their values.
+    pub list_all: bool,
+    /// `-C`: keep updating the pane while the message shows (psmux never
+    /// freezes a pane for a message, so this is what it always does).
+    pub no_freeze: bool,
+    /// `-I`: forward stdin to an empty pane.
+    pub input: bool,
+    /// `-l`: print the message unchanged, no format expansion.
+    pub literal: bool,
+    /// `-N`: key presses do not close the message.
+    pub ignore_keys: bool,
+    /// `-p`: print to stdout instead of the status line.
+    pub print: bool,
+    /// `-v`: log the format expansion.
+    pub verbose: bool,
+    pub client: Option<String>,
+    pub delay: Option<String>,
+    pub target: Option<String>,
+    /// `-F format`: the template given as a flag instead of an argument.
+    pub format: Option<String>,
+    /// The operands. tmux takes at most one; psmux has always joined extra
+    /// words with a space, which is kept.
+    pub message: Vec<String>,
+}
+
+impl DisplayMessageArgs {
+    /// The template to expand: the argument, else `-F`, else `None` for the
+    /// default (cmd-display-message.c: `template = args_string(args, 0)` /
+    /// `args_get(args, 'F')`).
+    pub fn template(&self) -> Option<String> {
+        if !self.message.is_empty() {
+            Some(self.message.join(" "))
+        } else {
+            self.format.clone()
+        }
+    }
+}
+
+/// Parse `display-message` arguments (everything after the command name).
+/// Errors are tmux's: "unknown flag -X", "-X expects an argument", and "only
+/// one of -F or argument must be given".
+pub fn parse_display_message_args<S: AsRef<str>>(args: &[S]) -> Result<DisplayMessageArgs, String> {
+    if let Some(flag) = unknown_flag("display-message", args) {
+        return Err(format!("unknown flag -{}", flag));
+    }
+    validate_flag_arguments("display-message", args)?;
+    let mut out = DisplayMessageArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_ref();
+        if token == "--" {
+            i += 1;
+            break;
+        }
+        if !token.starts_with('-') || token == "-" {
+            break;
+        }
+        i += 1;
+        let body = &token[1..];
+        for (pos, flag) in body.char_indices() {
+            let rest = &body[pos + flag.len_utf8()..];
+            let mut take_value = || -> String {
+                if !rest.is_empty() {
+                    rest.to_string()
+                } else {
+                    let v = args.get(i).map(|a| a.as_ref().to_string()).unwrap_or_default();
+                    i += 1;
+                    v
+                }
+            };
+            match flag {
+                'a' => out.list_all = true,
+                'C' => out.no_freeze = true,
+                'I' => out.input = true,
+                'l' => out.literal = true,
+                'N' => out.ignore_keys = true,
+                'p' => out.print = true,
+                'v' => out.verbose = true,
+                'c' => { out.client = Some(take_value()); break; }
+                'd' => { out.delay = Some(take_value()); break; }
+                't' => { out.target = Some(take_value()); break; }
+                'F' => { out.format = Some(take_value()); break; }
+                _ => {}
+            }
+        }
+    }
+    out.message = args[i.min(args.len())..].iter().map(|a| a.as_ref().to_string()).collect();
+    if out.format.is_some() && !out.message.is_empty() {
+        return Err("only one of -F or argument must be given".to_string());
+    }
+    Ok(out)
+}
+
+/// The format variables `display-message -a` lists, sorted like tmux's: the
+/// names tmux 3.4 prints for `display -p -a` (measured) that psmux's format
+/// expander also knows. Each is printed as `name=value`.
+pub const DISPLAY_ALL_VARIABLES: &[&str] = &[
+    "alternate_on", "alternate_saved_x", "alternate_saved_y", "command", "config_files",
+    "cursor_character", "cursor_flag", "cursor_x", "cursor_y", "history_bytes", "history_limit",
+    "history_size", "host", "host_short", "insert_flag", "keypad_cursor_flag", "keypad_flag",
+    "mouse_all_flag", "mouse_any_flag", "mouse_button_flag", "mouse_sgr_flag",
+    "mouse_standard_flag", "mouse_utf8_flag", "origin_flag", "pane_active", "pane_at_bottom",
+    "pane_at_left", "pane_at_right", "pane_at_top", "pane_bg", "pane_bottom",
+    "pane_current_command", "pane_current_path", "pane_dead", "pane_fg", "pane_format",
+    "pane_height", "pane_id", "pane_in_mode", "pane_index", "pane_input_off", "pane_last",
+    "pane_left", "pane_marked", "pane_marked_set", "pane_path", "pane_pid", "pane_pipe",
+    "pane_right", "pane_search_string", "pane_start_command", "pane_start_path",
+    "pane_synchronized", "pane_tabs", "pane_title", "pane_top", "pane_tty",
+    "pane_unseen_changes", "pane_width", "pid", "scroll_region_lower", "scroll_region_upper",
+    "server_sessions", "session_activity", "session_alerts", "session_attached",
+    "session_created", "session_format", "session_grouped", "session_id",
+    "session_last_attached", "session_many_attached", "session_name", "session_path",
+    "session_stack", "session_windows", "socket_path", "start_time", "user", "version",
+    "window_active", "window_activity", "window_activity_flag", "window_bell_flag",
+    "window_cell_height", "window_cell_width", "window_end_flag", "window_flags",
+    "window_format", "window_height", "window_id", "window_index", "window_last_flag",
+    "window_layout", "window_linked", "window_linked_sessions", "window_linked_sessions_list",
+    "window_name", "window_panes", "window_raw_flags", "window_silence_flag",
+    "window_stack_index", "window_start_flag", "window_visible_layout", "window_width",
+    "window_zoomed_flag", "wrap_flag",
+];
+
 /// Same check for a whole command LINE (command name first), used by the
 /// config-file and key-binding routes where the command arrives as a string.
 pub fn validate_command_line_flags<S: AsRef<str>>(tokens: &[S]) -> Result<(), String> {

@@ -25,6 +25,20 @@ pub(crate) fn collect_pane_paths_server(
     }
 }
 
+/// A key press closes the status message, as in tmux, unless that message was
+/// shown with `display-message -N` (status_message_set ignore_keys): then it
+/// stays until its delay expires.
+pub(crate) fn clear_status_message_on_key(app: &mut AppState) {
+    let sticky = match (&app.status_message, app.status_message_ignore_keys) {
+        (Some((_, shown_at, _)), Some(ignore_from)) => *shown_at == ignore_from,
+        _ => false,
+    };
+    if !sticky {
+        app.status_message = None;
+        app.status_message_ignore_keys = None;
+    }
+}
+
 /// The session's default key table: tmux `server_client_get_key_table`, the
 /// `key-table` session option, root when unset or empty. A client goes back to
 /// it after every key, and a key not bound in it is passed to the pane.

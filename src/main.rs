@@ -3952,77 +3952,24 @@ fn run_main() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 }
-                // tmux refuses a flag display-message does not have
-                // ("unknown flag -x", rc 1) rather than printing it as text;
-                // `display -p -- -x` is the way to print one (#795 follow up).
-                if let Some(flag) = crate::cli::unknown_flag("display-message", &cmd_args[1..]) {
-                    eprintln!("psmux: display-message: unknown flag -{}", flag);
-                    std::process::exit(1);
-                }
-                let mut message: Vec<String> = Vec::new();
-                let mut target: Option<String> = None;
-                let mut client: Option<String> = None;
-                let mut print_to_stdout = false;
-                let mut duration_ms: Option<u64> = None;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    // `--` ends the options: what follows is the message, so
-                    // `display -p -- -tfoo` prints `-tfoo` (issue #795; the
-                    // `--` used to be printed as part of the message).
-                    if cmd_args[i] == "--" && message.is_empty() {
-                        message.extend(cmd_args[i + 1..].iter().map(|s| s.to_string()));
-                        break;
+                // Every tmux flag (`aCc:d:lINpt:F:v`) is parsed as a flag and
+                // an unknown one is refused ("unknown flag -x", rc 1) rather
+                // than printed as message text; `display -p -- -x` is the way
+                // to print one (#795 follow up).
+                let parsed = match crate::cli::parse_display_message_args(&cmd_args[1..]) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        eprintln!("psmux: display-message: {}", error);
+                        std::process::exit(1);
                     }
-                    match cmd_args[i].as_str() {
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                target = Some(t.to_string());
-                                i += 1;
-                            }
-                        }
-                        // -c target-client (issue #724). It used to land in the
-                        // message text, so `-c /dev/pts/4` printed itself.
-                        "-c" => {
-                            if let Some(c) = cmd_args.get(i + 1) {
-                                client = Some(c.to_string());
-                                i += 1;
-                            }
-                        }
-                        "-p" => { print_to_stdout = true; }
-                        "-d" => {
-                            if let Some(val) = cmd_args.get(i + 1) {
-                                duration_ms = val.parse::<u64>().ok();
-                            }
-                            i += 1;
-                        }
-                        "-I" => { i += 1; } // consume -I <input>, skip value
-                        // POSIX cluster ending in value-taking flag: -pt <target>
-                        a if a.len() > 2
-                            && a.starts_with('-')
-                            && !a.starts_with("--")
-                            && {
-                                let last = a.chars().last().unwrap_or(' ');
-                                matches!(last, 't' | 'd' | 'I' | 'c')
-                                    && a[1..a.len()-1].chars().all(|c| matches!(c, 'p'))
-                            } =>
-                        {
-                            let last = a.chars().last().unwrap();
-                            if a.contains('p') { print_to_stdout = true; }
-                            if let Some(val) = cmd_args.get(i + 1) {
-                                match last {
-                                    't' => { target = Some(val.to_string()); }
-                                    'c' => { client = Some(val.to_string()); }
-                                    'd' => { duration_ms = val.parse::<u64>().ok(); }
-                                    _ => {}
-                                }
-                                i += 1;
-                            }
-                        }
-                        s => { message.push(s.to_string()); }
-                    }
-                    i += 1;
-                }
-                let msg = message.join(" ");
+                };
+                let target = parsed.target.clone();
+                let client = parsed.client.clone();
+                // `-a` and `-v` print to the caller, so the reply is awaited
+                // the same way `-p` is.
+                let print_to_stdout = parsed.print || parsed.list_all || parsed.verbose;
+                let duration_ms: Option<u64> = parsed.delay.as_deref().and_then(|d| d.parse::<u64>().ok());
+                let msg = parsed.template().unwrap_or_default();
                 let mut cmd = "display-message".to_string();
                 if let Some(ref c) = client {
                     // With no target, the format describes the named client's
@@ -4040,8 +3987,17 @@ fn run_main() -> io::Result<()> {
                     cmd.push_str(&format!(" -c {}", crate::util::quote_arg(c)));
                 }
                 if let Some(t) = target { cmd.push_str(&format!(" -t {}", t)); }
-                if print_to_stdout { cmd.push_str(" -p"); }
+                if parsed.print { cmd.push_str(" -p"); }
                 if let Some(d) = duration_ms { cmd.push_str(&format!(" -d {}", d)); }
+                for (on, flag) in [
+                    (parsed.list_all, " -a"),
+                    (parsed.no_freeze, " -C"),
+                    (parsed.literal, " -l"),
+                    (parsed.ignore_keys, " -N"),
+                    (parsed.verbose, " -v"),
+                ] {
+                    if on { cmd.push_str(flag); }
+                }
                 // Quote the message to preserve literal whitespace (tabs etc)
                 // that would otherwise be split by the server's command parser.
                 // `--` first, so a message that starts with `-` reaches the

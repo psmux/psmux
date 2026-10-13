@@ -264,7 +264,7 @@ fn if_shell_condition(
         if target_failed {
             let _ = tx.send(CtrlReq::ExpandFormatNoTarget(condition.to_string(), rtx));
         } else {
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None, client));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None, client, Default::default()));
         }
         let expanded = rrx.recv().unwrap_or_default();
         return !expanded.is_empty() && expanded != "0";
@@ -1239,7 +1239,7 @@ fn new_pane_print_text(id_text: String, format: Option<&str>, send: impl Fn(Ctrl
         return id_text;
     };
     let (rtx, rrx) = mpsc::channel::<String>();
-    send(CtrlReq::DisplayMessageById(rtx, fmt.to_string(), id, false, None, None));
+    send(CtrlReq::DisplayMessageById(rtx, fmt.to_string(), id, false, None, None, Default::default()));
     rrx.recv_timeout(Duration::from_secs(2)).unwrap_or(id_text)
 }
 
@@ -3743,70 +3743,62 @@ match cmd {
     "display-message" | "display" => {
         // A flag display-message does not have is refused like tmux
         // ("unknown flag -x"), not printed as message text (#795 follow up).
-        if let Some(flag) = crate::cli::unknown_flag("display-message", &args) {
-            let _ = write!(write_stream, "ERROR: unknown flag -{}\n", flag);
-            let _ = write_stream.flush();
-            if !persistent && pending_chain.is_empty() { break; }
-            continue;
-        }
-        // Parse tmux-like display-message flags without dropping message text.
-        let mut print_stdout = false;
-        let mut parts: Vec<&str> = Vec::new();
-        let mut end_of_opts = false;
-        let mut duration_ms: Option<u64> = None;
-        let mut client_sel: Option<crate::types::ClientSel> = None;
-        let mut i = 0;
-        while i < args.len() {
-            let a = args[i];
-            if end_of_opts {
-                parts.push(a);
-                i += 1;
+        // Every tmux flag is parsed as a flag (`aCc:d:lINpt:F:v`), never
+        // printed as message text (#795 follow up).
+        let parsed = match crate::cli::parse_display_message_args(&args) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let _ = write!(write_stream, "ERROR: {}\n", error);
+                let _ = write_stream.flush();
+                if !persistent && pending_chain.is_empty() { break; }
                 continue;
             }
-            match a {
-                "--" => { end_of_opts = true; }
-                "-p" => { print_stdout = true; }
-                "-F" => { /* format mode */ }
-                "-d" => {
-                    if i + 1 < args.len() {
-                        duration_ms = args[i + 1].parse::<u64>().ok();
-                    }
-                    i += 1;
-                }
-                // -c target-client (issue #724): the client the client_*
-                // variables describe. It used to fall into the message text.
-                "-c" => {
-                    if let Some(c) = args.get(i + 1) {
-                        client_sel = Some(crate::types::ClientSel::Name(c.to_string()));
-                    }
-                    i += 1;
-                }
-                "-I" => { i += 1; }
-                _ if a.starts_with('-') => { parts.push(a); }
-                _ => parts.push(a),
-            }
-            i += 1;
-        }
-
-        let fmt = if parts.is_empty() {
-            crate::commands::DISPLAY_MESSAGE_DEFAULT_FMT.to_string()
-        } else {
-            parts.join(" ")
         };
+        // `-a` prints the variable list to the caller like `-p` does
+        // (cmd-display-message.c format_each -> cmdq_print).
+        let print_stdout = parsed.print || parsed.list_all;
+        let duration_ms: Option<u64> = parsed.delay.as_deref().and_then(|d| d.parse::<u64>().ok());
+        // -c target-client (issue #724): the client the client_* variables
+        // describe.
+        let client_sel = parsed.client.clone().map(crate::types::ClientSel::Name);
+        let flags = crate::types::DisplayFlags {
+            literal: parsed.literal && !parsed.list_all,
+            ignore_keys: parsed.ignore_keys,
+        };
+        let fmt = if parsed.list_all {
+            crate::cli::DISPLAY_ALL_VARIABLES
+                .iter()
+                .map(|name| format!("{}=#{{{}}}", name, name))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            parsed.template().unwrap_or_else(|| crate::commands::DISPLAY_MESSAGE_DEFAULT_FMT.to_string())
+        };
+        // `-v` logs the expansion before the result (FORMAT_VERBOSE).
+        let verbose_template = (parsed.verbose && !parsed.list_all && !parsed.literal).then(|| fmt.clone());
         // Pass target pane index for PANE_POS_OVERRIDE (#113).
         // Bare %N (pane_is_id=true) goes through DisplayMessageById which
         // resolves the pane ID globally across windows (#332).
         let (rtx, rrx) = mpsc::channel::<String>();
         if pane_is_id {
             if let Some(pid) = target_pane {
-                let _ = tx.send(CtrlReq::DisplayMessageById(rtx, fmt, pid, !print_stdout, duration_ms, client_sel));
+                let _ = tx.send(CtrlReq::DisplayMessageById(rtx, fmt, pid, !print_stdout, duration_ms, client_sel, flags));
             } else {
-                let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, None, !print_stdout, duration_ms, client_sel));
+                let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, None, !print_stdout, duration_ms, client_sel, flags));
             }
         } else {
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane, !print_stdout, duration_ms, client_sel));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane, !print_stdout, duration_ms, client_sel, flags));
         }
         if let Ok(text) = rrx.recv() {
+            if let Some(template) = &verbose_template {
+                let trace = crate::util::display_verbose_trace(template, &text);
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("display-message".to_string(), trace));
+                } else {
+                    let _ = write!(write_stream, "{}", trace);
+                    let _ = write_stream.flush();
+                }
+            }
             if print_stdout {
                 // #647 (WIN-03): tmux prints `display-message -p` through
                 // server_client_print(tc, 0, evb) (cmd-display-message.c:152),
@@ -4605,10 +4597,9 @@ match cmd {
             if !persistent && pending_chain.is_empty() { break; }
             continue;
         }
-        let opt_name: Option<&str> = args.iter()
-            .filter(|a| !a.starts_with('-'))
-            .copied()
-            .last();
+        // The operand read the way tmux's getopt reads it, so the `-t`
+        // value is never taken for an option name.
+        let opt_name: Option<&str> = crate::cli::first_operand("show-options", &args);
         // The RAW -t target (issue #266 — per-window options like
         // automatic-rename must answer for the explicitly targeted window;
         // #648 — the server resolves it, because keeping only the numeric
@@ -4617,7 +4608,42 @@ match cmd {
         let target_window: String = extract_flag_value(&args, "-t")
             .map(|t| t.trim_matches('"').to_string())
             .unwrap_or_default();
-        if has_v && opt_name.is_some() || (opt_name.is_some() && !has_q) {
+        // A user option is answered from the table the flags pick, and one
+        // that table does not hold is "invalid option: @name" at rc 1, which
+        // `-q` silences (cmd-show-options.c). It used to print the bare name
+        // at rc 0, and `-q` with a name printed the whole listing.
+        if let Some(name) = opt_name.filter(|n| n.starts_with('@')) {
+            let table = if !window_scope {
+                crate::server::options::UserOptionTable::Session
+            } else if has_g {
+                crate::server::options::UserOptionTable::GlobalWindow
+            } else {
+                crate::server::options::UserOptionTable::Window { inherited: has_a }
+            };
+            let (rtx, rrx) = mpsc::channel::<Option<(String, bool)>>();
+            let _ = tx.send(CtrlReq::UserOptionLookup(rtx, name.to_string(), target_window.clone(), table));
+            let found = rrx.recv_timeout(Duration::from_millis(2000)).ok().flatten();
+            let output = match found {
+                Some((value, inherited)) => {
+                    crate::server::options::render_user_option_line(name, &value, inherited, has_v)
+                }
+                None if has_q => String::new(),
+                None => format!("ERROR: invalid option: {}\n", name),
+            };
+            if !output.is_empty() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+                } else {
+                    let _ = write_stream.write_all(output.as_bytes());
+                    let _ = write_stream.flush();
+                }
+            }
+            if !persistent && pending_chain.is_empty() { break; }
+            continue;
+        }
+        // Any named query is a single-option query; `-q` only silences the
+        // error (it used to turn `show -q name` into the full listing).
+        if opt_name.is_some() {
             // Single-option query: show-options -v <name> or show <name>
             if let Some(name) = opt_name {
                 let (rtx, rrx) = mpsc::channel::<String>();
@@ -5629,7 +5655,7 @@ match cmd {
         let fmt = extract_flag_value(&args, "-F");
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false, None, None));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false, None, None, Default::default()));
             if let Ok(text) = rrx.recv() {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-sessions".to_string(), text));
@@ -6145,17 +6171,33 @@ fn dispatch_control_command(
             true
         }
         "display-message" | "display" => {
-            if let Some(flag) = crate::cli::unknown_flag("display-message", args) {
-                let _ = resp_tx.send(format!("ERROR: unknown flag -{}", flag));
-                return true;
-            }
-            let print_mode = args.iter().any(|a| *a == "-p");
-            let raw_fmt = args.last().map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
-            let fmt = if raw_fmt.is_empty() {
-                crate::commands::DISPLAY_MESSAGE_DEFAULT_FMT.to_string()
-            } else {
-                raw_fmt
+            // Same parse as the one-shot route: every tmux flag is a flag.
+            let parsed = match crate::cli::parse_display_message_args(args) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let _ = resp_tx.send(format!("ERROR: {}", error));
+                    return true;
+                }
             };
+            let print_mode = parsed.print || parsed.list_all;
+            let flags = crate::types::DisplayFlags {
+                literal: parsed.literal && !parsed.list_all,
+                ignore_keys: parsed.ignore_keys,
+            };
+            let fmt = if parsed.list_all {
+                crate::cli::DISPLAY_ALL_VARIABLES
+                    .iter()
+                    .map(|name| format!("{}=#{{{}}}", name, name))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                parsed
+                    .template()
+                    .map(|t| t.trim_matches('"').to_string())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| crate::commands::DISPLAY_MESSAGE_DEFAULT_FMT.to_string())
+            };
+            let verbose_template = (parsed.verbose && !parsed.list_all && !parsed.literal).then(|| fmt.clone());
             let target_pane_idx = if pane_is_id { None } else { target_pane };
             // A control client's current client is itself, and `-c` names
             // another one (issue #724).
@@ -6166,17 +6208,22 @@ fn dispatch_control_command(
             let (rtx, rrx) = mpsc::channel::<String>();
             if pane_is_id {
                 if let Some(pid) = target_pane {
-                    let _ = tx.send(CtrlReq::DisplayMessageById(rtx, fmt, pid, !print_mode, None, client));
+                    let _ = tx.send(CtrlReq::DisplayMessageById(rtx, fmt, pid, !print_mode, None, client, flags));
                 } else {
-                    let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None, client));
+                    let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None, client, flags));
                 }
             } else {
-                let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None, client));
+                let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode, None, client, flags));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 // Same visual encoding as the one-shot route above (#647).
-                let text = if print_mode { crate::util::visual_escape_message(&text) } else { text };
-                let _ = resp_tx.send(text);
+                let shown = if print_mode { crate::util::visual_escape_message(&text) } else { String::new() };
+                let reply = match &verbose_template {
+                    Some(template) => format!("{}{}", crate::util::display_verbose_trace(template, &text), shown),
+                    None if print_mode => shown,
+                    None => text,
+                };
+                let _ = resp_tx.send(reply.trim_end_matches('\n').to_string());
             }
             true
         }
@@ -6702,13 +6749,35 @@ fn dispatch_control_command(
             let window_scope2 = matches!(cmd, "show-window-options" | "showw" | "show-window-option") || combined_has2('w');
             // Server scope (#618), same narrowing as the one-shot handler above.
             let server_scope2 = combined_has2('s') && !window_scope2;
-            let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());
+            let opt_name = crate::cli::first_operand("show-options", args).map(|s| s.to_string());
             let has_opt_name = opt_name.is_some();
             // The RAW -t target, resolved server-side (#266, #648) — same as
             // the primary handler above.
             let target_window2: String = extract_flag_value(&args, "-t")
                 .map(|t| t.trim_matches('"').to_string())
                 .unwrap_or_default();
+            // A user option the chosen table does not hold is "invalid
+            // option" like tmux; `-q` silences it. Same as the one-shot route.
+            if let Some(name) = opt_name.as_deref().filter(|n| n.starts_with('@')) {
+                let table = if !window_scope2 {
+                    crate::server::options::UserOptionTable::Session
+                } else if combined_has2('g') {
+                    crate::server::options::UserOptionTable::GlobalWindow
+                } else {
+                    crate::server::options::UserOptionTable::Window { inherited: combined_has2('A') }
+                };
+                let (urtx, urrx) = mpsc::channel::<Option<(String, bool)>>();
+                let _ = tx.send(CtrlReq::UserOptionLookup(urtx, name.to_string(), target_window2.clone(), table));
+                let reply = match urrx.recv_timeout(Duration::from_millis(2000)).ok().flatten() {
+                    Some((value, inherited)) => crate::server::options::render_user_option_line(
+                        name, &value, inherited, value_only,
+                    ).trim_end_matches('\n').to_string(),
+                    None if combined_has2('q') => String::new(),
+                    None => format!("ERROR: invalid option: {}", name),
+                };
+                let _ = resp_tx.send(reply);
+                return true;
+            }
             if opt_name.is_none() && server_scope2 {
                 // Bare `show-options -s`: server options only (tmux parity).
                 let mut text = String::new();

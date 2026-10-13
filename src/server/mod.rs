@@ -860,6 +860,9 @@ fn drain_plugin_req(
             let val = crate::server::options::window_option_value_for_target(app, &name, &target);
             let _ = resp.send(val);
         }
+        CtrlReq::UserOptionLookup(resp, name, target, table) => {
+            let _ = resp.send(crate::server::options::lookup_user_option(app, &name, &target, table));
+        }
         CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
             let reply = crate::server::options::apply_set_window_option(
                 app, &target, &option, &value, unset, append, only_if_unset, quiet,
@@ -4114,7 +4117,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // after it, which also covers the one that opens or
                     // closes it.
                     let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
-                    app.status_message = None;
+                    crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_text(&mut app);
                     send_text_to_active(&mut app, &s)?;
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
@@ -4144,7 +4147,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // though no cell changed.
                     let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
                     crate::pty_trace::mark("g", 0, k.as_bytes());
-                    app.status_message = None;
+                    crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_key(&mut app, &k);
                     send_key_to_active(&mut app, &k)?;
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
@@ -5601,38 +5604,50 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms, client_sel) => {
+                CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms, client_sel, flags) => {
                     // Propagate OSC titles so #{pane_title} reflects latest state
                     helpers::propagate_osc_titles(&mut app);
                     // `-c` picks the client the client_* variables describe. A
                     // client tmux cannot find is not an error for this command
                     // (CMD_CLIENT_CANFAIL): the best client answers instead.
                     let client = client_sel.as_ref().and_then(|s| crate::format::resolve_client_sel(&app, s));
-                    let result = crate::format::with_format_client(client, || if let Some(pane_idx) = target_pane_idx {
-                        // -t targeting: evaluate format for the specific pane
-                        // using PANE_POS_OVERRIDE so #{pane_active} reflects
-                        // the REAL active pane, not the target (#113)
-                        crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pane_idx)
+                    let result = if flags.literal {
+                        fmt.clone()
                     } else {
-                        expand_format(&fmt, &app)
-                    });
+                        crate::format::with_format_client(client, || if let Some(pane_idx) = target_pane_idx {
+                            // -t targeting: evaluate format for the specific pane
+                            // using PANE_POS_OVERRIDE so #{pane_active} reflects
+                            // the REAL active pane, not the target (#113)
+                            crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pane_idx)
+                        } else {
+                            expand_format(&fmt, &app)
+                        })
+                    };
                     if set_status_bar {
-                        app.status_message = Some((result.clone(), Instant::now(), duration_ms));
+                        let shown_at = Instant::now();
+                        app.status_message = Some((result.clone(), shown_at, duration_ms));
+                        app.status_message_ignore_keys = flags.ignore_keys.then_some(shown_at);
                         state_dirty = true;
                     }
                     let _ = resp.send(result);
                 }
-                CtrlReq::DisplayMessageById(resp, fmt, pane_id, set_status_bar, duration_ms, client_sel) => {
+                CtrlReq::DisplayMessageById(resp, fmt, pane_id, set_status_bar, duration_ms, client_sel, flags) => {
                     // Bare %N pane targeting (#332) — resolve the pane ID
                     // globally across all windows and expand the format with
                     // PANE_POS_OVERRIDE pointing at it.
                     helpers::propagate_osc_titles(&mut app);
                     let client = client_sel.as_ref().and_then(|s| crate::format::resolve_client_sel(&app, s));
-                    let result = crate::format::with_format_client(client, || {
-                        crate::format::expand_format_for_pane_by_id(&fmt, &app, pane_id)
-                    });
+                    let result = if flags.literal {
+                        fmt.clone()
+                    } else {
+                        crate::format::with_format_client(client, || {
+                            crate::format::expand_format_for_pane_by_id(&fmt, &app, pane_id)
+                        })
+                    };
                     if set_status_bar {
-                        app.status_message = Some((result.clone(), Instant::now(), duration_ms));
+                        let shown_at = Instant::now();
+                        app.status_message = Some((result.clone(), shown_at, duration_ms));
+                        app.status_message_ignore_keys = flags.ignore_keys.then_some(shown_at);
                         state_dirty = true;
                     }
                     let _ = resp.send(result);
@@ -7728,6 +7743,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
                     let val = crate::server::options::window_option_value_for_target(&app, &name, &target);
                     let _ = resp.send(val);
+                }
+                CtrlReq::UserOptionLookup(resp, name, target, table) => {
+                    let _ = resp.send(crate::server::options::lookup_user_option(&app, &name, &target, table));
                 }
                 CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
                     let reply = crate::server::options::apply_set_window_option(

@@ -1524,6 +1524,17 @@ fn vis_encode(src: &str, escape_tab: bool, escape_nl: bool) -> String {
     out
 }
 
+/// The log `display-message -v` prints before its result. tmux's
+/// FORMAT_VERBOSE logs every step of the parse (format.c format_log); psmux
+/// logs the first and last of those lines, which are the template and the
+/// result exactly as tmux words them:
+///
+///   # expanding format: #{session_name}
+///   # result is: s
+pub fn display_verbose_trace(template: &str, result: &str) -> String {
+    format!("# expanding format: {}\n# result is: {}\n", template, result)
+}
+
 /// Encode a string the way tmux encodes the stdout of `display-message -p`.
 ///
 /// `display-message` prints through `server_client_print(tc, 0, evb)`

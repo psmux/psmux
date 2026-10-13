@@ -118,6 +118,63 @@ pub(crate) fn is_global_window_user_write(window_flag: bool, global_flag: bool, 
     window_flag && global_flag && name.starts_with('@')
 }
 
+/// Which table a `show-options <@name>` query reads (options_scope_from_flags).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum UserOptionTable {
+    /// No `-w`/`-p`: the session table (psmux's one `user_options` map, which
+    /// also holds the global session values).
+    Session,
+    /// `-w`: the target window's own table; with `-A` (`inherited`) its
+    /// parent, the global window table, too.
+    Window { inherited: bool },
+    /// `-wg`: the global window table.
+    GlobalWindow,
+}
+
+/// One user option as `show-options` sees it: `Some((value, inherited))` when
+/// the chosen table (or, for `-wA`, its parent) holds it, `None` when nothing
+/// does, which tmux reports as "invalid option: @name" (cmd-show-options.c
+/// cmd_show_options_exec: `if (o == NULL) ... invalid option`). An empty
+/// value is still SET (`set @k ''` then `show @k` prints `@k ''`).
+pub(crate) fn lookup_user_option(
+    app: &AppState,
+    name: &str,
+    target: &str,
+    table: UserOptionTable,
+) -> Option<(String, bool)> {
+    match table {
+        UserOptionTable::Session => app.user_options.get(name).map(|v| (v.clone(), false)),
+        UserOptionTable::GlobalWindow => {
+            app.global_window_user_options.get(name).map(|v| (v.clone(), false))
+        }
+        UserOptionTable::Window { inherited } => {
+            let index = resolve_option_target_window(app, target).ok()?;
+            if let Some(value) = window_local_option(app, index, name) {
+                return Some((value.to_string(), false));
+            }
+            if inherited {
+                return app.global_window_user_options.get(name).map(|v| (v.clone(), true));
+            }
+            None
+        }
+    }
+}
+
+/// The text `show-options` prints for one user option: `name value`, with a
+/// `*` on an inherited name and tmux's quoting (an empty value prints `''`),
+/// or the bare value with `-v`.
+pub(crate) fn render_user_option_line(name: &str, value: &str, inherited: bool, values_only: bool) -> String {
+    if values_only {
+        return format!("{}\n", value);
+    }
+    let shown = if value.is_empty() {
+        "''".to_string()
+    } else {
+        crate::util::quote_arg_if_needed(value)
+    };
+    format!("{}{} {}\n", name, if inherited { "*" } else { "" }, shown)
+}
+
 /// `show-options -w [-g] <name>` for one target: the global window table for
 /// [`GLOBAL_WINDOW_TABLE`], the resolved window otherwise.
 pub(crate) fn window_option_value_for_target(app: &AppState, name: &str, target: &str) -> String {

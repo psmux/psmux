@@ -137,6 +137,42 @@ if ($r.rc -eq 0 -and $r.out -eq 'a -x b') { Write-Pass "a message containing -x 
 $r = Px @('display-message', '-p', '-t', $S, '#S')
 if ($r.rc -eq 0 -and $r.out -eq $S) { Write-Pass "known flags still work" } else { Write-Fail "display -p -t S #S rc=$($r.rc) out=[$($r.out)]" }
 
+Write-Host "`n=== show-options on a user option nothing holds ===" -ForegroundColor Cyan
+foreach ($flags in @(@(), @('-v'), @('-g'), @('-w'), @('-wv'), @('-gw'), @('-p'), @('-A'))) {
+    $tgt = if ($flags -contains '-g' -or $flags -contains '-gw') { @() } else { @('-t', $S) }
+    $r = Px (@('show-options') + $flags + $tgt + @('@unset795'))
+    if ($r.rc -eq 1 -and $r.err -match 'invalid option: @unset795' -and $r.out -eq '') { Write-Pass "show $($flags -join ' ') @unset: invalid option rc 1" }
+    else { Write-Fail "show $($flags -join ' ') @unset rc=$($r.rc) out=[$($r.out)] err=[$($r.err)]" }
+    $q = Px (@('show-options', '-q') + $flags + $tgt + @('@unset795'))
+    if ($q.rc -eq 0 -and $q.out -eq '' -and $q.err -eq '') { Write-Pass "show -q $($flags -join ' ') @unset: silent rc 0" }
+    else { Write-Fail "show -q $($flags -join ' ') @unset rc=$($q.rc) out=[$($q.out)] err=[$($q.err)]" }
+}
+$null = Px @('set-option', '-t', $S, '@empty795', '')
+Check "show @empty (set to empty)" (Px @('show-options', '-t', $S, '@empty795')).out "@empty795 ''"
+$null = Px @('set-option', '-t', $S, '@k795', 'v')
+Check "show @k" (Px @('show-options', '-t', $S, '@k795')).out '@k795 v'
+Check "show -v @k" (Px @('show-options', '-v', '-t', $S, '@k795')).out 'v'
+$list = (Px @('show-options', '-t', $S)).out
+if ($list -match '(?m)^@k795 ' -and $list -match '(?m)^status ') { Write-Pass "show with no name still lists everything" } else { Write-Fail "show listing broken" }
+Check "show status (table option)" (Px @('show-options', '-t', $S, 'status')).out 'status on'
+
+Write-Host "`n=== display-message -l -v -a -N -C -F ===" -ForegroundColor Cyan
+$r = Px @('display-message', '-p', '-t', $S, '-l', '#{session_name} %H')
+Check "display -l prints the message unchanged" $r.out '#{session_name} %H'
+$r = Px @('display-message', '-p', '-t', $S, '-v', '#{session_name}')
+Check "display -v logs then prints" $r.out "# expanding format: #{session_name}`n# result is: $S`n$S"
+$r = Px @('display-message', '-p', '-t', $S, '-a')
+if ($r.rc -eq 0 -and $r.out -match "(?m)^session_name=$S$" -and $r.out -match '(?m)^window_index=\d+' -and $r.out -notmatch '(?m)^-a$') {
+    Write-Pass "display -a lists name=value pairs ($((($r.out) -split "`n").Count) lines)"
+} else { Write-Fail "display -a rc=$($r.rc) out=[$($r.out.Substring(0, [Math]::Min(200, $r.out.Length)))]" }
+Check "display -N is a flag" (Px @('display-message', '-p', '-t', $S, '-N', 'n')).out 'n'
+Check "display -C is a flag" (Px @('display-message', '-p', '-t', $S, '-C', 'c')).out 'c'
+Check "display -F format" (Px @('display-message', '-p', '-t', $S, '-F', '#{session_name}')).out $S
+$r = Px @('display-message', '-p', '-t', $S, '-F', '#S', 'extra')
+if ($r.rc -eq 1 -and $r.err -match 'only one of -F or argument must be given') { Write-Pass "-F with an argument refused" } else { Write-Fail "-F + arg rc=$($r.rc) out=[$($r.out)] err=[$($r.err)]" }
+$r = Px @('display-message', '-t', $S, '-N', '-d', '300', 'sticky')
+Check "display -N to the status line rc" $r.rc 0
+
 $null = Px @('kill-server')
 
 Write-Host "`n=== Results: $($script:TestsPassed) passed, $($script:TestsFailed) failed ===" -ForegroundColor Cyan

@@ -152,3 +152,115 @@ fn display_message_unknown_flags_are_refused_like_tmux() {
     assert_eq!(unknown_flag("display-message", &["-pt", "s", "-v", "hi"]), None);
     assert_eq!(unknown_flag("display-message", &["-d", "500", "-aCINlvF", "#S"]), None);
 }
+
+// ── show-options on a user option nothing holds (tmux 3.4 measured) ─────────
+//
+//     show -t s @unset      -> rc 1 "invalid option: @unset"  (-q: rc 0, silent)
+//     set -t s @empty ''    -> show @empty prints "@empty ''"
+//     set -gw @g x          -> show -w @g: invalid; show -wA @g: "@g* x"
+
+#[test]
+fn a_user_option_nothing_holds_is_not_found_in_any_table() {
+    let mut app = two_windows();
+    assert_eq!(lookup_user_option(&app, "@unset", "", UserOptionTable::Session), None);
+    assert_eq!(lookup_user_option(&app, "@unset", "s:0", UserOptionTable::Window { inherited: false }), None);
+    assert_eq!(lookup_user_option(&app, "@unset", "s:0", UserOptionTable::Window { inherited: true }), None);
+    assert_eq!(lookup_user_option(&app, "@unset", "", UserOptionTable::GlobalWindow), None);
+
+    app.user_options.insert("@empty".into(), String::new());
+    assert_eq!(
+        lookup_user_option(&app, "@empty", "", UserOptionTable::Session),
+        Some((String::new(), false)),
+        "an empty value is still set",
+    );
+    assert_eq!(render_user_option_line("@empty", "", false, false), "@empty ''\n");
+    assert_eq!(render_user_option_line("@empty", "", false, true), "\n");
+    assert_eq!(render_user_option_line("@k", "a b", false, false), "@k \"a b\"\n");
+
+    apply_set_window_option(&mut app, GLOBAL_WINDOW_TABLE, "@g", "x", false, false, false, false);
+    assert_eq!(lookup_user_option(&app, "@g", "s:0", UserOptionTable::Window { inherited: false }), None);
+    assert_eq!(
+        lookup_user_option(&app, "@g", "s:0", UserOptionTable::Window { inherited: true }),
+        Some(("x".to_string(), true)),
+    );
+    assert_eq!(render_user_option_line("@g", "x", true, false), "@g* x\n");
+    assert_eq!(lookup_user_option(&app, "@g", "", UserOptionTable::GlobalWindow), Some(("x".to_string(), false)));
+}
+
+// ── display-message flags (cmd-display-message.c, tmux 3.4 measured) ───────
+
+#[test]
+fn display_message_flags_are_flags_never_message_text() {
+    use crate::cli::parse_display_message_args;
+    let p = parse_display_message_args(&["-p", "-t", "s", "-l", "#{session_name} %H"]).unwrap();
+    assert!(p.print && p.literal);
+    assert_eq!(p.target.as_deref(), Some("s"));
+    assert_eq!(p.template().as_deref(), Some("#{session_name} %H"));
+
+    let p = parse_display_message_args(&["-pv", "#S"]).unwrap();
+    assert!(p.print && p.verbose);
+    let p = parse_display_message_args(&["-aCN", "-d", "500"]).unwrap();
+    assert!(p.list_all && p.no_freeze && p.ignore_keys);
+    assert_eq!(p.delay.as_deref(), Some("500"));
+    assert_eq!(p.template(), None);
+
+    // -F takes a value; -F and an argument together is tmux's error
+    let p = parse_display_message_args(&["-p", "-F", "#{session_name}"]).unwrap();
+    assert_eq!(p.template().as_deref(), Some("#{session_name}"));
+    let p = parse_display_message_args(&["-pF#S"]).unwrap();
+    assert_eq!(p.format.as_deref(), Some("#S"));
+    assert_eq!(
+        parse_display_message_args(&["-p", "-F", "#S", "extra"]).unwrap_err(),
+        "only one of -F or argument must be given",
+    );
+    assert_eq!(parse_display_message_args(&["-p", "-x", "hi"]).unwrap_err(), "unknown flag -x");
+    assert_eq!(parse_display_message_args(&["-p", "-t"]).unwrap_err(), "-t expects an argument");
+
+    // after -- and after the first operand everything is message
+    let p = parse_display_message_args(&["-p", "--", "-v", "-l"]).unwrap();
+    assert!(!p.verbose && !p.literal);
+    assert_eq!(p.template().as_deref(), Some("-v -l"));
+    let p = parse_display_message_args(&["-p", "a", "-l"]).unwrap();
+    assert!(!p.literal);
+    assert_eq!(p.template().as_deref(), Some("a -l"));
+}
+
+#[test]
+fn display_all_variables_are_sorted_and_unique() {
+    let vars = crate::cli::DISPLAY_ALL_VARIABLES;
+    assert!(vars.len() > 100);
+    assert!(vars.windows(2).all(|w| w[0] < w[1]), "sorted like tmux's -a listing");
+    for name in ["session_name", "window_index", "pane_id", "cursor_x", "pane_current_path"] {
+        assert!(vars.contains(&name), "{name}");
+    }
+}
+
+#[test]
+fn display_verbose_trace_brackets_the_result() {
+    assert_eq!(
+        crate::util::display_verbose_trace("#{session_name}", "s"),
+        "# expanding format: #{session_name}\n# result is: s\n",
+    );
+}
+
+#[test]
+fn a_key_press_closes_the_status_message_unless_it_was_shown_with_n() {
+    use crate::server::helpers::clear_status_message_on_key;
+    let mut app = two_windows();
+    let now = std::time::Instant::now();
+    app.status_message = Some(("plain".into(), now, None));
+    clear_status_message_on_key(&mut app);
+    assert!(app.status_message.is_none(), "a key closes an ordinary message");
+
+    let shown = std::time::Instant::now();
+    app.status_message = Some(("sticky".into(), shown, Some(5000)));
+    app.status_message_ignore_keys = Some(shown);
+    clear_status_message_on_key(&mut app);
+    assert_eq!(app.status_message.as_ref().map(|m| m.0.as_str()), Some("sticky"), "-N ignores keys");
+
+    // a later message is not sticky just because an earlier one was
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    app.status_message = Some(("later".into(), std::time::Instant::now(), None));
+    clear_status_message_on_key(&mut app);
+    assert!(app.status_message.is_none());
+}
