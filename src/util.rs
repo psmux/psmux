@@ -745,13 +745,30 @@ pub fn bind_key_wire_line<S: AsRef<str>>(argv: &[S]) -> String {
     }
     let tail_start = i + 1; // argv[i] is the key
     let single_tail = argv.len() == tail_start + 1;
-    argv.iter().enumerate().map(|(n, a)| {
+    let words: Vec<String> = argv.iter().enumerate().map(|(n, a)| {
         if n == 0 || (single_tail && n == tail_start) {
             a.to_string()
         } else {
             quote_arg_if_needed(a)
         }
-    }).collect::<Vec<String>>().join(" ")
+    }).collect();
+    if words.len() <= tail_start {
+        return words.join(" ");
+    }
+    // A bound command LIST (`bind x 'a; b'`, `bind x a \; b`) has to reach
+    // the server as one statement: bare on the wire, the server's line
+    // splitter cut it at the `;`, bound the first command and RAN the rest
+    // at once (tmux binds the whole list). A brace block keeps it together;
+    // bind_command_list unwraps it again on the server.
+    let head = words[..tail_start].join(" ");
+    let tail = words[tail_start..].join(" ");
+    let subs = crate::config::split_chained_commands_pub(&tail);
+    let balanced = crate::config::block_depth_map(&tail.chars().collect::<Vec<_>>()).is_some();
+    if subs.len() > 1 && balanced {
+        format!("{} {{ {} }}", head, subs.join(" ; "))
+    } else {
+        format!("{} {}", head, tail)
+    }
 }
 
 /// Parse the canonical tmux logging idiom `cat > <path>` / `cat >> <path>`
