@@ -1950,9 +1950,10 @@ pub struct AppState {
     /// built-in handlers consult this set to do the same, and `list-keys` leaves
     /// these keys out. Cleared whenever the default bindings are re-seeded.
     pub copy_mode_defaults_unbound: std::collections::HashSet<(String, (KeyCode, KeyModifiers))>,
-    /// The mouse event a user mouse binding is running for, so send-keys -M`n    /// in that binding can hand it to the pane: (pane id, wheel up, pointer
-    /// cell, modifiers, when).
-    pub last_mouse_event: Option<(usize, bool, Option<(i16, i16)>, KeyModifiers, std::time::Instant)>,
+    /// The mouse event a user mouse binding is running for, so `send-keys -M`
+    /// in that binding can hand it to the pane: (pane id, SGR button with
+    /// modifier bits, press, pointer cell, when).
+    pub last_mouse_event: Option<(usize, u8, bool, Option<(i16, i16)>, std::time::Instant)>,
     /// Panes extracted for cross-session forwarding, keyed by forward_id.
     /// The source server keeps these alive so the real ConPTY continues running.
     pub forwarded_panes: HashMap<u64, ForwardedPane>,
@@ -3254,6 +3255,8 @@ pub enum CtrlReq {
     /// send-keys -M: forward the mouse event that triggered the running
     /// mouse binding to its pane (tmux cmd-send-keys.c).
     SendMouse(u64),
+    /// A wheel notch over the status line: client, up, tmux modifier mask.
+    StatusWheel(u64, bool, u8),
     /// Hand a normal-mode client-side drag selection off to server-side copy
     /// mode because the pointer crossed the pane's top edge — or, when the
     /// view is direct-scrolled (scroll-enter-copy-mode off, #193), its

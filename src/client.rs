@@ -3269,6 +3269,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // ctrl-wheel-zoom (mirror of the server option, default off): Ctrl+Wheel
     // is handed back to the hosting Windows Terminal as its font zoom key.
     let mut ctrl_wheel_zoom: bool = false;
+    // Whether MouseDragEnd1Pane still has its built-in default (copy and
+    // leave) in the copy-mode table; when it does not, a client-side drag
+    // selection ends in server copy mode so the binding decides.
+    let mut drag_end_default: bool = true;
     // When false, Ctrl+V is forwarded to the child app instead of being
     // intercepted for paste detection.
     #[cfg(windows)]
@@ -3442,6 +3446,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     fn default_paste_detection() -> bool { true }
     fn default_mouse_selection() -> bool { true }
     fn default_scroll_enter_copy_mode() -> bool { true }
+    fn default_true_drag_end() -> bool { true }
 
     /// A single key binding synced from the server.
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -3588,6 +3593,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// ctrl-wheel-zoom option (mirror of the server-side field).
         #[serde(default)]
         ctrl_wheel_zoom: bool,
+        /// MouseDragEnd1Pane is its built-in default (absent from an older
+        /// server: true).
+        #[serde(default = "default_true_drag_end")]
+        drag_end_default: bool,
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
@@ -7083,6 +7092,38 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     cmd_batch.push(format!("split-resize-done\n"));
                                     border_drag = false;
                                     client_drag = None;
+                                } else if rsel_dragged && !drag_end_default
+                                    && rsel_start.is_some() && rsel_pane_rect.is_some() && rsel_pane_id.is_some()
+                                {
+                                    // MouseDragEnd1Pane is not the built-in copy and
+                                    // leave (unbound or rebound in the copy-mode
+                                    // table). In tmux this drag is a copy-mode
+                                    // selection (MouseDrag1Pane -> copy-mode -M), so
+                                    // hand it to server copy mode and report the
+                                    // release there: the binding decides, and
+                                    // unbound the selection stays.
+                                    let start = rsel_start.unwrap();
+                                    let pane_rect = rsel_pane_rect.unwrap();
+                                    let pane_id = rsel_pane_id.unwrap();
+                                    let end = if client_pwsh_selection {
+                                        rsel_end.unwrap_or((me.column, me.row))
+                                    } else {
+                                        (me.column, me.row)
+                                    };
+                                    let inner = pane_content_inner(pane_rect, &client_border_status, &client_border_format);
+                                    let (a_col, a_row) = (start.0 as i16 - pane_rect.x as i16, start.1 as i16 - inner.y as i16);
+                                    let (e_col, e_row) = (end.0 as i16 - pane_rect.x as i16, end.1 as i16 - inner.y as i16);
+                                    cmd_batch.push(format!("copy-drag-begin {} {} {} {} {}{}\n",
+                                        pane_id, a_col, a_row, e_col, e_row, if rsel_block { " b" } else { "" }));
+                                    cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n", pane_id, e_col, e_row));
+                                    rsel_start = None;
+                                    rsel_end = None;
+                                    rsel_pane_rect = None;
+                                    rsel_pane_id = None;
+                                    rsel_block = false;
+                                    rsel_dragged = false;
+                                    selection_changed = true;
+                                    deferred_left_click = None;
                                 } else if rsel_dragged {
                                     if client_pwsh_selection {
                                         // tmux-like copy-on-release for
@@ -7296,7 +7337,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     cmd_batch.push(format!("pane-scroll {} up {} {} {}\n", pane_id, rel_col, rel_row,
                                         crate::mouse_keys::sgr_mod_bits(me.modifiers)));
                                 } else {
-                                    cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row));
+                                    // Over the status line the server looks up
+                                    // WheelUpStatus; the trailing mask and `S` are
+                                    // ignored by an older server.
+                                    let on_status = client_status_rows > 0
+                                        && me.row >= client_status_row
+                                        && me.row < client_status_row.saturating_add(client_status_rows);
+                                    cmd_batch.push(format!("scroll-up {} {} {}{}\n", me.column, me.row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers), if on_status { " S" } else { "" }));
                                 }
                             }
                             MouseEventKind::ScrollDown => {
@@ -7312,7 +7360,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     cmd_batch.push(format!("pane-scroll {} down {} {} {}\n", pane_id, rel_col, rel_row,
                                         crate::mouse_keys::sgr_mod_bits(me.modifiers)));
                                 } else {
-                                    cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row));
+                                    let on_status = client_status_rows > 0
+                                        && me.row >= client_status_row
+                                        && me.row < client_status_row.saturating_add(client_status_rows);
+                                    cmd_batch.push(format!("scroll-down {} {} {}{}\n", me.column, me.row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers), if on_status { " S" } else { "" }));
                                 }
                             }
                             _ => {}
@@ -7892,6 +7944,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         scroll_enter_copy_mode = state.scroll_enter_copy_mode;
         mouse_drag_enter_copy_mode = state.mouse_drag_enter_copy_mode;
         ctrl_wheel_zoom = state.ctrl_wheel_zoom;
+        drag_end_default = state.drag_end_default;
         client_copy_ln = (
             crate::copy_line_numbers::CopyLnMode::parse(
                 state.copy_mode_line_numbers.as_deref()

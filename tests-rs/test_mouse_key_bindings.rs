@@ -208,3 +208,44 @@ fn resolving_a_wheel_key_is_cheap() {
     assert_eq!(builtin, n);
     assert!(per < std::time::Duration::from_micros(20), "resolve took {:?} per call", per);
 }
+
+#[test]
+fn drag_end_default_and_unbind() {
+    let mut app = app();
+    let end = drag_end_pane_key();
+    assert_eq!(format_key_binding(&end), "MouseDragEnd1Pane");
+    assert!(drag_end_is_default(&app));
+    assert_eq!(resolve(&app, end, true), Dispatch::Builtin);
+    assert!(list_keys_entries(&app).iter().any(|(t, k, c, _)| t == "copy-mode-vi" && k == "MouseDragEnd1Pane" && c.contains("copy-pipe-and-cancel")));
+    // mode-keys emacs: the copy-mode table decides.
+    parse_config_content(&mut app, "unbind -T copy-mode-vi MouseDragEnd1Pane");
+    assert!(drag_end_is_default(&app), "copy-mode-vi is not the active table under emacs keys");
+    app.mode_keys = "vi".into();
+    assert!(!drag_end_is_default(&app));
+    assert_eq!(resolve(&app, end, true), Dispatch::Drop, "unbound: the selection stays");
+    parse_config_content(&mut app, "bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-selection-no-clear");
+    assert!(!drag_end_is_default(&app));
+    assert_eq!(resolve(&app, end, true), Dispatch::User("send -X copy-selection-no-clear".into()));
+}
+
+#[test]
+fn status_wheel_defaults_follow_tmux() {
+    let mut app = app();
+    let up = key(EV_WHEEL_UP, 0, LOC_STATUS, KeyModifiers::NONE);
+    let down = key(EV_WHEEL_DOWN, 0, LOC_STATUS, KeyModifiers::NONE);
+    assert_eq!(format_key_binding(&up), "WheelUpStatus");
+    assert_eq!(resolve(&app, up, false), Dispatch::Builtin);
+    assert_eq!(resolve(&app, down, false), Dispatch::Builtin);
+    // In copy mode the copy-mode table has no status keys; root's default runs
+    // (it is not a send -M default like WheelUpPane).
+    assert_eq!(resolve(&app, up, true), Dispatch::Builtin);
+    // Modified: unbound, nothing.
+    assert_eq!(resolve(&app, key(EV_WHEEL_UP, 0, LOC_STATUS, KeyModifiers::CONTROL), false), Dispatch::Forward);
+    let rows = list_keys_entries(&app);
+    assert!(rows.iter().any(|(t, k, c, _)| t == "root" && k == "WheelUpStatus" && c == "previous-window"));
+    assert!(rows.iter().any(|(t, k, c, _)| t == "root" && k == "WheelDownStatus" && c == "next-window"));
+    parse_config_content(&mut app, "unbind -n WheelUpStatus");
+    assert_eq!(resolve(&app, up, false), Dispatch::Forward);
+    parse_config_content(&mut app, "bind -n WheelDownStatus select-window -t 0");
+    assert_eq!(resolve(&app, down, false), Dispatch::User("select-window -t 0".into()));
+}

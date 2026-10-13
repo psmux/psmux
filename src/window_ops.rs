@@ -1882,6 +1882,25 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // auto-scroll can park the release on the anchor's screen cell
             // while the selection spans many scrolled lines.
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
+                // The end of a drag is tmux's MouseDragEnd1Pane, looked up in
+                // the copy-mode table: the built-in default is the yank and
+                // cancel below (copy-pipe-and-cancel); a user binding runs
+                // instead; unbound, the selection simply stays (tmux: no
+                // binding, nothing happens), which is what
+                // `unbind -T copy-mode-vi MouseDragEnd1Pane` is for.
+                let key = crate::mouse_keys::drag_end_pane_key();
+                match crate::mouse_keys::resolve(app, key, true) {
+                    crate::mouse_keys::Dispatch::Builtin => {}
+                    crate::mouse_keys::Dispatch::User(cmd) => {
+                        app.last_mouse_event = Some((pane_id, 0, false, Some((col, row)), std::time::Instant::now()));
+                        run_mouse_binding(app, pane_id, &cmd);
+                        return;
+                    }
+                    crate::mouse_keys::Dispatch::Forward | crate::mouse_keys::Dispatch::Drop => {
+                        mouse_log("  -> MouseDragEnd1Pane unbound: selection kept");
+                        return;
+                    }
+                }
                 let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
                 let p_abs = p.0 as i64 - app.copy_pos_scroll_offset.unwrap_or(app.copy_scroll_offset) as i64;
                 if (a_abs, a.1) != (p_abs, p.1) {
@@ -2222,35 +2241,78 @@ pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Optio
             // psmux's wheel has always focused the pane under the pointer;
             // keep that so untargeted commands in the binding act on it.
             focus_pane_by_id(app, pane_id);
-            app.last_mouse_event = Some((pane_id, up, at, mods, std::time::Instant::now()));
-            let cmd = crate::mouse_keys::resolve_mouse_targets(&cmd, pane_id);
-            // The same route a keyboard binding takes: the command line goes
-            // to the server's command parser (brace blocks, `\;` chains,
-            // if-shell, send-keys -M), not the reduced in-process executor.
-            match app.control_port {
-                Some(port) => {
-                    let _ = crate::session::send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-                }
-                None => {
-                    let _ = crate::commands::execute_command_string(app, &cmd);
-                }
-            }
+            let btn = (if up { 64 } else { 65 }) + crate::mouse_keys::sgr_mod_bits(mods);
+            app.last_mouse_event = Some((pane_id, btn, true, at, std::time::Instant::now()));
+            run_mouse_binding(app, pane_id, &cmd);
         }
     }
 }
 
+/// A wheel notch over the status line: tmux's `WheelUpStatus` /
+/// `WheelDownStatus`, whose defaults are previous-window / next-window
+/// (key-bindings.c).  Unbound, nothing happens: there is no pane under the
+/// pointer to hand it to.
+pub fn handle_status_wheel(app: &mut AppState, up: bool, mods: u8) {
+    if matches!(app.mode, Mode::PopupMode { .. }) {
+        return;
+    }
+    let mods = crate::mouse_keys::mods_from_mask(mods);
+    let ev = if up { crate::mouse_keys::EV_WHEEL_UP } else { crate::mouse_keys::EV_WHEEL_DOWN };
+    let key = crate::mouse_keys::key(ev, 0, crate::mouse_keys::LOC_STATUS, mods);
+    let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
+    mouse_log(&format!("handle_status_wheel: up={} mods={:?} -> {:?}", up, mods, dispatch));
+    match dispatch {
+        crate::mouse_keys::Dispatch::Builtin => {
+            let _ = crate::commands::execute_command_string(app, if up { "previous-window" } else { "next-window" });
+        }
+        crate::mouse_keys::Dispatch::User(cmd) => {
+            let pane_id = {
+                let win = &app.windows[app.active_idx];
+                crate::tree::get_active_pane_id(&win.root, &win.active_path).unwrap_or(0)
+            };
+            app.last_mouse_event = None;
+            run_mouse_binding(app, pane_id, &cmd);
+        }
+        crate::mouse_keys::Dispatch::Forward | crate::mouse_keys::Dispatch::Drop => {}
+    }
+}
+/// Run a user mouse binding's command for the pane the event happened in.
+/// The command line goes the route a keyboard binding takes, to the server's
+/// command parser (brace blocks, `\;` chains, if-shell, send-keys -M), with
+/// `-t =`, `-t=` and `{mouse}` pointed at the pane.
+pub(crate) fn run_mouse_binding(app: &mut AppState, pane_id: usize, cmd: &str) {
+    let cmd = crate::mouse_keys::resolve_mouse_targets(cmd, pane_id);
+    match app.control_port {
+        Some(port) => {
+            let _ = crate::session::send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+        }
+        None => {
+            let _ = crate::commands::execute_command_string(app, &cmd);
+        }
+    }
+}
 /// `send-keys -M`: hand the mouse event of the running mouse binding to its
 /// pane, as tmux does (cmd-send-keys.c -> window_pane_key).  A pane in copy
 /// mode takes nothing this way (tmux's copy mode has no mode->key, so
 /// window_pane_key drops it); otherwise the event reaches the program only if
 /// it asked for mouse reports.
 pub fn send_mouse_event(app: &mut AppState) {
-    let Some((pane_id, up, at, mods, when)) = app.last_mouse_event else { return };
+    let Some((pane_id, btn, press, at, when)) = app.last_mouse_event else { return };
     if when.elapsed() > std::time::Duration::from_secs(5) || app.mode.in_copy() {
         return;
     }
     focus_pane_by_id(app, pane_id);
-    forward_wheel_to_active_pane(app, up, at, mods);
+    let win = &mut app.windows[app.active_idx];
+    let win_name = win.name.clone();
+    let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return };
+    // tmux input_key_mouse: a report only for a program that asked for one.
+    let wants = if btn & 64 != 0 { pane_wheel_forward(pane) } else { pane_wants_click(pane) };
+    if !wants {
+        return;
+    }
+    let (col, row) = at.unwrap_or((5, 5));
+    let flags = if btn & 64 != 0 { mouse_inject::MOUSE_WHEELED } else { 0 };
+    inject_mouse_combined(pane, col, row, btn, press, 0, flags, &win_name);
 }
 
 fn focus_pane_by_id(app: &mut AppState, pane_id: usize) {

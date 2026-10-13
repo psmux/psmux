@@ -135,6 +135,49 @@ try {
     Wheel down 0 $bottom
     $z = (P display -p '#{pane_id} #{window_zoomed_flag}') -join ''
     Check ($top -ne $bottom -and $z -eq "%$bottom 1") "resize-pane -Z -t = zooms the pane under the mouse" "top %$top bottom %$bottom got [$z]"
+    Write-Head "status line wheel: previous-window / next-window"
+    P new-window | Out-Null; P new-window | Out-Null; Start-Sleep 1
+    P select-window -t 1 | Out-Null; Start-Sleep -Milliseconds 300
+    $w0 = (P display -p '#{window_index}') -join ''
+    Wire "scroll-up 5 29 0 S"; $w1 = (P display -p '#{window_index}') -join ''
+    Wire "scroll-down 5 29 0 S"; $w2 = (P display -p '#{window_index}') -join ''
+    Check ($w0 -eq '1' -and $w1 -eq '0' -and $w2 -eq '1') "WheelUpStatus / WheelDownStatus switch windows" "windows $w0 -> $w1 -> $w2"
+    Check ((Keys) -match "-T root WheelUpStatus previous-window") "list-keys shows WheelUpStatus" "WheelUpStatus missing"
+    P unbind -n WheelUpStatus | Out-Null
+    Wire "scroll-up 5 29 0 S"; $w3 = (P display -p '#{window_index}') -join ''
+    Check ($w3 -eq '1') "unbound WheelUpStatus does nothing" "window $w3"
+    P select-window -t 0 | Out-Null; Start-Sleep -Milliseconds 300
+
+    Write-Head "end of a copy-mode drag: MouseDragEnd1Pane"
+    P set -g mode-keys emacs | Out-Null
+    $pid0 = ((P display -p '#{pane_id}') -join '').TrimStart('%')
+    function Drag {
+        P copy-mode | Out-Null; Start-Sleep -Milliseconds 300
+        Wire "pane-mouse $pid0 0 2 3 M"; Wire "pane-mouse $pid0 32 10 5 M"; Wire "pane-mouse $pid0 0 10 5 m"
+        (P display -p '#{pane_in_mode} #{selection_present}') -join ''
+    }
+    P set-buffer MARK | Out-Null
+    $a = Drag
+    Check ($a -match '^0' -and ((P show-buffer) -join '') -ne 'MARK') "default: copied and left copy mode" "state [$a] buffer [$((P show-buffer) -join '')]"
+    P unbind -T copy-mode MouseDragEnd1Pane | Out-Null
+    P set-buffer MARK | Out-Null
+    $b = Drag
+    Check ($b -eq '1 1' -and ((P show-buffer) -join '') -eq 'MARK') "unbound: the selection stays, nothing copied" "state [$b] buffer [$((P show-buffer) -join '')]"
+    Cancel
+    P bind -T copy-mode MouseDragEnd1Pane send -X copy-selection-and-cancel | Out-Null
+    P set-buffer MARK | Out-Null
+    $c2 = Drag
+    Check ($c2 -match '^0' -and ((P show-buffer) -join '') -ne 'MARK') "a user MouseDragEnd1Pane binding runs" "state [$c2] buffer [$((P show-buffer) -join '')]"
+
+    Write-Head "brace blocks in a binding (source-file)"
+    $conf = Join-Path $DATA "mkb_braces.conf"
+    [IO.File]::WriteAllText($conf, "bind -n F8 { set -g @b1 yes; set -g @b2 yes }`nbind -n F9 {`n  set -g @c1 yes`n  set -g @c2 yes`n}`nbind -n F10 { if -F '#{pane_in_mode}' { set -g @d in } { set -g @d out } }`n")
+    $out = (P source-file $conf) -join ' '
+    $k = Keys
+    Check ($k -match "-T root F8 set -g @b1 yes \\; set -g @b2 yes") "one line block becomes a command list" "F8 line missing:`n$k"
+    Check ($k -match "-T root F9 set -g @c1 yes \\; set -g @c2 yes") "multi line block becomes a command list" "F9 line missing"
+    Check ($k -match "-T root F10 if -F '#\{pane_in_mode\}' \{ set -g @d in \} \{ set -g @d out \}") "nested blocks stay one command" "F10 line missing"
+    Check (-not ($out -match 'unknown command')) "no unknown command warnings" "warnings: $out"
 } finally {
     P kill-server | Out-Null
     Start-Sleep 1

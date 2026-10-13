@@ -691,9 +691,23 @@ or `S-` when a modifier is held, and it is looked up the way tmux looks it up: i
 | `unbind -n WheelUpPane` | The key is gone, as in tmux: the wheel no longer enters copy mode, and only reaches a program that enabled mouse reporting |
 | A modified wheel (`C-WheelUpPane`) with nothing bound | As in tmux: a program with mouse reporting on gets it (with the Ctrl bit), a shell prompt gets nothing, copy mode ignores it |
 | `set -g ctrl-wheel-zoom on` | Ctrl+wheel in Windows Terminal zooms the font before any binding is consulted |
+| The wheel over the status line | `WheelUpStatus` / `WheelDownStatus`, `previous-window` / `next-window` by default as in tmux; bind or unbind them like any key |
+| The end of a drag (`MouseDragEnd1Pane` in `copy-mode` / `copy-mode-vi`) | The default copies and leaves copy mode. `unbind -T copy-mode-vi MouseDragEnd1Pane` keeps the selection in copy mode after the drag, and a binding (`send -X copy-selection-no-clear`, ...) runs instead. A drag at the shell prompt follows it too: with the default changed, the drag ends in copy mode, as in tmux |
 
-Clicks, drags and the status line still use psmux's built-in mouse handling; binding those
-names is accepted and listed but does not change what they do yet.
+Clicks, the start of a drag, double and triple clicks, border drags and the right button still
+use psmux's built-in mouse handling; binding those names is accepted and listed but does not
+change what they do yet.
+
+A binding's command list can be written as a tmux brace block, on one line or several:
+
+```
+bind -n F8 { set -g @a 1; set -g @b 2 }
+bind -n F9 {
+  if -F '#{pane_in_mode}' { send -X cancel } { copy-mode }
+}
+```
+
+`list-keys` prints the block as its command list (`set -g @a 1 \; set -g @b 2`).
 
 ### Extended keys from the host terminal
 

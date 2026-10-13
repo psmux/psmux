@@ -2684,12 +2684,22 @@ match cmd {
     "scroll-up" => {
         let x = args.get(0).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
         let y = args.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
-        let _ = tx.send(CtrlReq::ScrollUp(client_id, x, y));
+        if args.get(3).map_or(false, |a| *a == "S") {
+            let mods = args.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let _ = tx.send(CtrlReq::StatusWheel(client_id, true, mods));
+        } else {
+            let _ = tx.send(CtrlReq::ScrollUp(client_id, x, y));
+        }
     }
     "scroll-down" => {
         let x = args.get(0).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
         let y = args.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
-        let _ = tx.send(CtrlReq::ScrollDown(client_id, x, y));
+        if args.get(3).map_or(false, |a| *a == "S") {
+            let mods = args.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let _ = tx.send(CtrlReq::StatusWheel(client_id, false, mods));
+        } else {
+            let _ = tx.send(CtrlReq::ScrollDown(client_id, x, y));
+        }
     }
     "pane-mouse" => {
         // pane-mouse PANE_ID BUTTON COL ROW M|m

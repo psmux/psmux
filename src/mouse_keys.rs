@@ -34,9 +34,16 @@ const LOCATIONS: &[&str] = &[
     "ScrollbarUp", "ScrollbarSlider", "ScrollbarDown", "Border", "Empty",
 ];
 
+pub const EV_MOUSE_DOWN: usize = 0;
+pub const EV_MOUSE_DRAG: usize = 2;
+pub const EV_MOUSE_DRAG_END: usize = 3;
+pub const EV_DOUBLE_CLICK: usize = 5;
+pub const EV_TRIPLE_CLICK: usize = 6;
 pub const EV_WHEEL_UP: usize = 7;
 pub const EV_WHEEL_DOWN: usize = 8;
 pub const LOC_PANE: usize = 0;
+pub const LOC_STATUS: usize = 1;
+pub const LOC_BORDER: usize = 8;
 
 fn encode(event: usize, button: u32, location: usize) -> char {
     let code = ((event as u32 * 16 + button) * 16) + location as u32;
@@ -140,6 +147,24 @@ pub fn wheel_pane_key(up: bool, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
     (KeyCode::Char(encode(ev, 0, LOC_PANE)), mods)
 }
 
+/// A mouse key from its parts: event (EV_*), button (1 based, 0 for the wheel
+/// and motion events) and location (LOC_*).
+pub fn key(event: usize, button: u32, location: usize, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    (KeyCode::Char(encode(event, button, location)), mods)
+}
+
+/// `MouseDragEnd1Pane`: the end of a left drag over a pane.
+pub fn drag_end_pane_key() -> (KeyCode, KeyModifiers) {
+    key(EV_MOUSE_DRAG_END, 1, LOC_PANE, KeyModifiers::NONE)
+}
+
+/// Whether the end of a drag in copy mode still runs the built-in default
+/// (copy-pipe-and-cancel). The client asks so a drag it paints itself can be
+/// handed to copy mode when the user unbound or rebound MouseDragEnd1Pane.
+pub fn drag_end_is_default(app: &crate::types::AppState) -> bool {
+    resolve(app, drag_end_pane_key(), true) == Dispatch::Builtin
+}
+
 /// The built-in mouse bindings psmux dispatches itself, listed per table the
 /// way `list-keys` prints them.  The command text is tmux's default for the
 /// same key (key-bindings.c), with psmux's scroll amount; the behaviour behind
@@ -148,10 +173,13 @@ pub fn wheel_pane_key(up: bool, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
 /// mouse key does in tmux.
 pub const ROOT_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -e }"),
+    ("WheelUpStatus", "previous-window"),
+    ("WheelDownStatus", "next-window"),
 ];
 pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "select-pane \\; send-keys -X -N 3 scroll-up"),
     ("WheelDownPane", "select-pane \\; send-keys -X -N 3 scroll-down"),
+    ("MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
 ];
 
 /// What a mouse key does, resolved the way tmux's server_client_key_callback
@@ -184,7 +212,7 @@ pub fn resolve(app: &crate::types::AppState, key: (KeyCode, KeyModifiers), in_co
             // WheelUpPane would send -M, and a pane in copy mode takes no
             // mouse keys that way (copy mode has no mode->key in tmux's
             // window-copy.c, so window_pane_key drops it).
-            if table == "root" && in_copy {
+            if table == "root" && in_copy && key == wheel_pane_key(true, KeyModifiers::NONE) {
                 return Dispatch::Drop;
             }
             return Dispatch::Builtin;
