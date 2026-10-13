@@ -3899,7 +3899,7 @@ match cmd {
             // (cmd-bind-key.c), so a dangling value-taking flag refuses the
             // binding rather than arming a key that silently acts on the
             // default target when it is pressed.
-            let flag_error = crate::config::split_chained_commands_pub(&command)
+            let flag_error = crate::config::bind_command_list(&command)
                 .iter()
                 .find_map(|sub| {
                     let tokens = crate::commands::parse_command_line(sub);

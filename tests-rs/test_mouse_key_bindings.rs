@@ -187,20 +187,6 @@ fn modifier_mask_round_trips() {
 }
 
 #[test]
-fn a_brace_block_binding_is_unwrapped_into_a_chain() {
-    assert_eq!(
-        unwrap_command_block("{ if -F '#{pane_in_mode}' { send -M } { copy-mode -e } }"),
-        "if -F '#{pane_in_mode}' { send -M } { copy-mode -e }"
-    );
-    assert_eq!(unwrap_command_block("{ select-pane -t=; send -M }"), "select-pane -t= \\; send -M");
-    // Not one block: left alone.
-    assert_eq!(unwrap_command_block("{ a } { b }"), "{ a } { b }");
-    assert_eq!(unwrap_command_block("copy-mode -e"), "copy-mode -e");
-    // A brace inside quotes does not count.
-    assert_eq!(unwrap_command_block("{ display '}' }"), "display '}'");
-}
-
-#[test]
 fn resolving_a_wheel_key_is_cheap() {
     // The lookup runs once per wheel notch. With the defaults plus a config's
     // worth of user bindings it must stay far below anything measurable on a

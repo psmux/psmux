@@ -874,11 +874,11 @@ fn drain_plugin_req(
         CtrlReq::BindKey(table_name, key, command, repeat, note) => {
             if let Some(kc) = parse_key_string(&key) {
                 let kc = normalize_key_for_binding(kc);
-                let sub_cmds = crate::config::split_chained_commands_pub(&command);
+                let sub_cmds = crate::config::bind_command_list(&command);
                 let action = if sub_cmds.len() > 1 {
                     Some(Action::CommandChain(sub_cmds))
                 } else {
-                    parse_command_to_action(&command)
+                    sub_cmds.first().and_then(|c| parse_command_to_action(c))
                 };
                 if let Some(act) = action {
                     let table = app.key_tables.entry(table_name).or_default();
@@ -5727,11 +5727,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
                         // Support `\;` chaining in server-side bind-key
-                        let sub_cmds = crate::config::split_chained_commands_pub(&command);
+                        let sub_cmds = crate::config::bind_command_list(&command);
                         let action = if sub_cmds.len() > 1 {
                             Some(Action::CommandChain(sub_cmds))
                         } else {
-                            parse_command_to_action(&command)
+                            sub_cmds.first().and_then(|c| parse_command_to_action(c))
                         };
                         if let Some(act) = action {
                             let table = app.key_tables.entry(table_name).or_default();

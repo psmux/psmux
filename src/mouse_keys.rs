@@ -193,42 +193,6 @@ pub fn resolve(app: &crate::types::AppState, key: (KeyCode, KeyModifiers), in_co
     if mode_table.is_some() { Dispatch::Drop } else { Dispatch::Forward }
 }
 
-/// A binding written as a brace block, `bind -n WheelUpPane { cmd; cmd }`, is
-/// a command list in tmux; the braces only group it.  The server's line parser
-/// takes brace blocks as if-shell arguments but not as a whole line, so a
-/// block that wraps the entire binding is unwrapped into a `\;` chain.
-/// Anything else is returned unchanged.
-pub fn unwrap_command_block(cmd: &str) -> String {
-    let t = cmd.trim();
-    if !(t.starts_with('{') && t.ends_with('}')) {
-        return cmd.to_string();
-    }
-    // The opening brace must close at the very end (outside quotes), or this
-    // is `{ a } { b }` style text that is not one block.
-    let mut depth = 0i32;
-    let mut quote: Option<char> = None;
-    for (i, c) in t.char_indices() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None => match c {
-                '\'' | '"' => quote = Some(c),
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 && i + 1 != t.len() {
-                        return cmd.to_string();
-                    }
-                }
-                _ => {}
-            },
-        }
-    }
-    let inner = t[1..t.len() - 1].trim();
-    let subs = crate::config::split_chained_commands_pub(inner);
-    subs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" \\; ")
-}
-
 /// Point a bound command's mouse targets at `pane_id`.  tmux resolves `-t =`
 /// (also written `-t=`, or as the tail of a flag cluster like `-Ft=`) and
 /// `{mouse}` to the pane the mouse event happened in; psmux commands take a

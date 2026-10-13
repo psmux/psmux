@@ -422,6 +422,10 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
         lines.push((cont_start, continuation));
     }
 
+    // A command whose brace block spans several lines (`bind x {` ... `}`)
+    // is one statement in tmux's grammar; make it one line here.
+    let lines = join_brace_blocks(lines);
+
     // tmux's lexer reads `{` and `}` as tokens wherever they stand
     // (cmd-parse.y yylex), so `if-shell C { A } { B }` on one line and a
     // `} {` line between the two blocks are both valid. The collector below
@@ -610,6 +614,158 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
     // Clear the line context so a later single runtime command does not inherit
     // a stale `file:line:` prefix.
     app.config_warn_line = None;
+}
+
+/// The block brace depth before each character of `chars`, the way tmux's
+/// lexer reads block braces (cmd-parse.y yylex / yylex_token): outside
+/// quotes, a `{` at the start of a token opens a block, and a `}` closes one
+/// unless it closes a `#{...}` format. `None` when the braces do not balance
+/// (a `}` with no block open, or a block still open at the end), so callers
+/// fall back to reading the text without blocks, as psmux always did.
+pub(crate) fn block_depth_map(chars: &[char]) -> Option<Vec<u32>> {
+    let mut depths = Vec::with_capacity(chars.len());
+    let mut depth: u32 = 0;
+    let mut quote: Option<char> = None;
+    let mut format_depth = 0usize;
+    let mut at_token_start = true;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        depths.push(depth);
+        if let Some(q) = quote {
+            if c == '\\' && q == '"' && i + 1 < chars.len() {
+                depths.push(depth);
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            at_token_start = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                at_token_start = false;
+            }
+            '\\' => {
+                if i + 1 < chars.len() {
+                    depths.push(depth);
+                    i += 1;
+                }
+                at_token_start = false;
+            }
+            '#' if chars.get(i + 1) == Some(&'{') => {
+                depths.push(depth);
+                i += 1;
+                format_depth += 1;
+                at_token_start = false;
+            }
+            '}' if format_depth > 0 => {
+                format_depth -= 1;
+                at_token_start = false;
+            }
+            '{' if at_token_start => {
+                depth += 1;
+                at_token_start = true;
+            }
+            '}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                // The `}` itself sits outside the block it closes.
+                *depths.last_mut().unwrap() = depth;
+                at_token_start = true;
+            }
+            ';' => at_token_start = true,
+            c if c.is_whitespace() => at_token_start = true,
+            _ => at_token_start = false,
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(depths)
+}
+
+/// The inside of `text` when all of it is one brace block, `{ ... }`.
+fn whole_block_inner(text: &str) -> Option<&str> {
+    let t = text.trim();
+    if !t.starts_with('{') || !t.ends_with('}') {
+        return None;
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let depths = block_depth_map(&chars)?;
+    // Depth must stay above zero from the opening brace to the closing one.
+    if depths.iter().skip(1).take(chars.len().saturating_sub(2)).any(|&d| d == 0) {
+        return None;
+    }
+    Some(t[1..t.len() - 1].trim())
+}
+
+/// The command list of a key binding: `bind x a \; b`, `bind x 'a; b'` and
+/// tmux's block form `bind x { a; b }` (one line, or several lines joined by
+/// `join_brace_blocks`) all give `[a, b]`. Nested blocks stay inside their
+/// command (`if -F c { a } { b }` is one command).
+pub fn bind_command_list(command: &str) -> Vec<String> {
+    match whole_block_inner(command) {
+        Some(inner) => split_chained_commands(inner),
+        None => split_chained_commands(command),
+    }
+}
+
+/// Join the lines of a statement whose brace block spans several lines, as
+/// tmux's grammar does (`bind x {`, statements on their own lines, `}`),
+/// into one line: a newline between two statements becomes ` ; `, one after
+/// an opening brace or before a closing one a space. if-shell blocks keep
+/// their own collector below and are left alone, as are `%` directives and
+/// comments. A line is only a block opener when it ENDS with a block brace,
+/// so a key named `{` (`bind { swap-pane -U`, which psmux has always
+/// accepted) never swallows the lines after it.
+fn join_brace_blocks(lines: Vec<(usize, String)>) -> Vec<(usize, String)> {
+    let opens_block = |l: &str| -> bool {
+        let t = l.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with('%')
+            || t.starts_with('{') || t.starts_with('}')
+            || t.starts_with("if-shell ") || t.starts_with("if ")
+            || !t.ends_with('{')
+        {
+            return false;
+        }
+        // The trailing `{` must be a block brace that stays open.
+        let mut probe = t.to_string();
+        probe.push_str(" }");
+        let chars: Vec<char> = probe.chars().collect();
+        block_depth_map(&chars).is_some()
+    };
+    let mut out: Vec<(usize, String)> = Vec::with_capacity(lines.len());
+    let mut iter = lines.into_iter();
+    while let Some((lineno, line)) = iter.next() {
+        if !opens_block(&line) {
+            out.push((lineno, line));
+            continue;
+        }
+        let mut acc = line.trim().to_string();
+        for (_, next) in iter.by_ref() {
+            let p = next.trim();
+            if p.is_empty() || p.starts_with('#') {
+                continue;
+            }
+            let sep = if acc.ends_with('{') || p.starts_with('}') { " " } else { " ; " };
+            acc.push_str(sep);
+            acc.push_str(p);
+            let chars: Vec<char> = acc.chars().collect();
+            if block_depth_map(&chars).is_some() {
+                break;
+            }
+        }
+        out.push((lineno, acc));
+    }
+    out
 }
 
 /// Split a config line at its block braces, for the if-shell collector.
@@ -2076,6 +2232,11 @@ pub fn split_chained_commands_pub(command: &str) -> Vec<String> {
 /// a plain `set -g @v a;b`.
 fn split_chained_commands(command: &str) -> Vec<String> {
     let chars: Vec<char> = command.chars().collect();
+    // A `;` inside a brace block belongs to the block (`if -F c { a; b }` is
+    // one command, cmd-parse.y argument_statements). Unbalanced braces are
+    // read as before, with no blocks.
+    let depths = block_depth_map(&chars);
+    let at_top = |i: usize| depths.as_ref().map_or(true, |d| d[i] == 0);
     let mut commands: Vec<String> = Vec::new();
     let mut seg_start = 0usize;
     let mut in_single = false;
@@ -2094,7 +2255,7 @@ fn split_chained_commands(command: &str) -> Vec<String> {
         let c = chars[i];
 
         // Separator check first: only a standalone top-level `;` / `\;` token.
-        if !in_single && !in_double && (c == ';' || (c == '\\' && chars.get(i + 1) == Some(&';'))) {
+        if !in_single && !in_double && at_top(i) && (c == ';' || (c == '\\' && chars.get(i + 1) == Some(&';'))) {
             let sep_len = if c == ';' { 1 } else { 2 };
             let starts_token = i == 0 || chars[i - 1].is_whitespace();
             let ends_token = chars.get(i + sep_len).is_none_or(|n| n.is_whitespace());
@@ -2246,8 +2407,8 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
     let command = line[pos..].split_whitespace().collect::<Vec<_>>().join(" ");
     if command.is_empty() { return; }
     
-    // Split on `\;` or `;` to support command chaining (like tmux `bind x split-window \; select-pane -D`)
-    let sub_commands: Vec<String> = split_chained_commands(&command);
+    // The command list: `a \; b`, `'a; b'` and tmux's block form `{ a; b }`.
+    let sub_commands: Vec<String> = bind_command_list(&command);
 
     // Issue #635: tmux parses the bound command list at BIND time
     // (cmd-bind-key.c -> cmd_parse_from_arguments), so a dangling
@@ -2267,7 +2428,7 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
         let action = if sub_commands.len() > 1 {
             // Multiple chained commands
             Action::CommandChain(sub_commands)
-        } else if let Some(a) = parse_command_to_action(&command) {
+        } else if let Some(a) = sub_commands.first().and_then(|c| parse_command_to_action(c)) {
             a
         } else {
             return;
@@ -3260,6 +3421,10 @@ mod test_mouse_drag_enter_copy_mode;
 #[cfg(test)]
 #[path = "../tests-rs/test_ctrl_wheel_zoom_option.rs"]
 mod test_ctrl_wheel_zoom_option;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_bind_brace_blocks.rs"]
+mod test_bind_brace_blocks;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]

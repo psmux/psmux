@@ -2223,8 +2223,7 @@ pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Optio
             // keep that so untargeted commands in the binding act on it.
             focus_pane_by_id(app, pane_id);
             app.last_mouse_event = Some((pane_id, up, at, mods, std::time::Instant::now()));
-            let cmd = crate::mouse_keys::resolve_mouse_targets(
-                &crate::mouse_keys::unwrap_command_block(&cmd), pane_id);
+            let cmd = crate::mouse_keys::resolve_mouse_targets(&cmd, pane_id);
             // The same route a keyboard binding takes: the command line goes
             // to the server's command parser (brace blocks, `\;` chains,
             // if-shell, send-keys -M), not the reduced in-process executor.
