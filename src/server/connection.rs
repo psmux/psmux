@@ -3487,6 +3487,11 @@ match cmd {
                 // DIFFERENT command, not cosmetic damage.
                 hex_content = args.get(i + 1).copied();
                 i += 2;
+            } else if args[i] == "--" {
+                // End of options: the data follows even when it starts with
+                // `-` (issue #795: `set-buffer -- -x=foo` stored nothing).
+                content_parts.extend_from_slice(&args[i + 1..]);
+                break;
             } else if args[i].starts_with('-') {
                 i += 1; // skip unknown flags
             } else {

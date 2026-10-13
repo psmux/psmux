@@ -401,38 +401,198 @@ pub fn expand_flag_clusters<S: AsRef<str>>(command: &str, args: &[S]) -> Vec<Str
     out
 }
 
-/// Normalize `-x=VALUE` short-flag forms into `["-x", "VALUE"]`.
+/// Normalize `-x=VALUE` short-flag forms into `["-x", "VALUE"]`, in FLAG
+/// position only.
 ///
-/// tmux accepts both `-t VALUE` (space) and `-t=VALUE` (equals) for
-/// single-character flags.  psmux's parsers only handled the space form.
-/// This function expands the equals form so every downstream comparison
-/// (`arg == "-t"`, `args.windows(2)`, etc.) works without changes.
+/// psmux accepts `-t=VALUE` as a spelling of `-t VALUE` (issue #196:
+/// `has-session -t=NAME`).  The split applies only where tmux's `args_parse`
+/// would read a flag: the global options before the subcommand, and each
+/// command's flag region, which ends at `--`, at a bare `-`, or at the first
+/// operand (arguments.c).  A value-taking flag's own value is never touched
+/// either (`new-window -n -x=foo` names the window `-x=foo`).  Everything
+/// from the first operand on is data: `set @k -x=foo` stores `-x=foo`
+/// verbatim, as tmux does (issue #795; before it the value was rewritten to
+/// `-x foo` at rc 0).
 ///
-/// Rules:
+/// Shape of `args`: either argv (binary name first, then global flags, then
+/// the subcommand) or a command line whose first token is the command.  The
+/// first token is taken as the command when [`args_template`] knows it.
+///
+/// Token rules (unchanged from #196):
 ///   - Only tokens starting with a single `-` (not `--`) are split.
 ///   - The flag letter must be ASCII alphabetic (`-t=foo` yes, `-1=bar` no).
-///   - Long flags (`--name=value`) pass through unchanged.
-///   - Positional tokens without a leading `-` pass through unchanged.
-///   - Bare `-` and degenerate `-=` pass through unchanged.
+///   - Long flags (`--name=value`), bare `-` and degenerate `-=` pass through.
 pub fn normalize_flag_equals(args: Vec<String>) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    for arg in args {
-        // Must start with exactly one dash, followed by a single ASCII letter,
-        // then `=`, then at least one character of value.
-        if arg.len() >= 4
-            && arg.starts_with('-')
-            && !arg.starts_with("--")
-        {
-            let bytes = arg.as_bytes();
-            if bytes[1].is_ascii_alphabetic() && bytes[2] == b'=' {
-                out.push(format!("-{}", bytes[1] as char));
-                out.push(arg[3..].to_string());
+    normalize_argv_flags(args, true, false)
+}
+
+/// The flag letter of a `-X=value` token, when `token` has that shape.
+fn equals_flag_letter(token: &str) -> Option<char> {
+    let b = token.as_bytes();
+    (b.len() >= 4 && b[0] == b'-' && b[1].is_ascii_alphabetic() && b[2] == b'=')
+        .then(|| b[1] as char)
+}
+
+/// Does `token` end a command in an argv command list (`a \; b`)?  tmux's
+/// `cmd_parse_from_arguments` ends a command at an argument that ends in `;`
+/// unless the `;` is escaped (cmd-parse.y).  A lone `\;` is a separator too,
+/// as in [`split_command_queue`]: a Windows shell passes it through unchanged.
+fn ends_command(token: &str) -> bool {
+    token == "\\;" || (token.ends_with(';') && !token.ends_with("\\;"))
+}
+
+/// Shared walker for [`normalize_flag_equals`] and
+/// [`normalize_attached_target_flag`]: rewrites only flag-position tokens.
+fn normalize_argv_flags(args: Vec<String>, equals: bool, attached_t: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut i = 0;
+    // argv shape: a first token that is neither a flag nor a known command is
+    // the binary name.
+    if let Some(first) = args.first() {
+        if !first.starts_with('-') && args_template(first).is_none() {
+            out.push(first.clone());
+            i = 1;
+        }
+    }
+    // Global region: the flags before the subcommand.
+    while i < args.len() {
+        let tok = &args[i];
+        if !tok.starts_with('-') || tok == "-" {
+            break;
+        }
+        if tok == "--" {
+            out.push(tok.clone());
+            i += 1;
+            break;
+        }
+        i += 1;
+        if equals {
+            if let Some(c) = equals_flag_letter(tok) {
+                out.push(format!("-{}", c));
+                out.push(tok[3..].to_string());
                 continue;
             }
         }
-        out.push(arg);
+        out.push(tok.clone());
+        // A detached value of a value-taking global option is not the
+        // subcommand (`-L ns`).
+        if tok.len() == 2 && matches!(tok.as_bytes()[1], b'L' | b'f' | b'S' | b't') {
+            if let Some(v) = args.get(i) {
+                out.push(v.clone());
+                i += 1;
+            }
+        }
+    }
+    // Commands: each runs to the end of argv or to a `;` terminator.
+    while i < args.len() {
+        let command = args[i].clone();
+        out.push(command.clone());
+        i += 1;
+        if ends_command(&command) {
+            continue;
+        }
+        let end = args[i..]
+            .iter()
+            .position(|t| ends_command(t))
+            .map(|p| i + p + 1)
+            .unwrap_or(args.len());
+        normalize_command_flags(&command, &args[i..end], equals, attached_t, &mut out);
+        i = end;
     }
     out
+}
+
+/// Rewrite one command's flag region (`args` is everything after the command
+/// name, up to its terminator).  See [`normalize_flag_equals`].
+fn normalize_command_flags(
+    command: &str,
+    args: &[String],
+    equals: bool,
+    attached_t: bool,
+    out: &mut Vec<String>,
+) {
+    let Some(template) = args_template(command) else {
+        // A command the flag table does not know (user alias, typo): its
+        // operands cannot be told apart, so keep the #196 behaviour up to
+        // `--`.  The command itself errors as unknown anyway.
+        let mut literal = false;
+        for tok in args {
+            if tok == "--" {
+                literal = true;
+            }
+            if !literal {
+                if equals {
+                    if let Some(c) = equals_flag_letter(tok) {
+                        out.push(format!("-{}", c));
+                        out.push(tok[3..].to_string());
+                        continue;
+                    }
+                }
+                if attached_t && tok.len() > 2 && tok.starts_with("-t") && !tok.starts_with("--") {
+                    out.push("-t".to_string());
+                    out.push(tok[2..].to_string());
+                    continue;
+                }
+            }
+            out.push(tok.clone());
+        }
+        return;
+    };
+    let extra = psmux_extra_flags(command);
+    let kind_of = |flag: char| match flag_value_kind(template, flag) {
+        FlagValue::None => flag_value_kind(extra, flag),
+        kind => kind,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i].as_str();
+        if tok == "--" || tok == "-" || !tok.starts_with('-') {
+            break; // end of options, or the first operand: the rest is data
+        }
+        i += 1;
+        if equals {
+            // Only a value-taking letter is split: `-u=1` for a boolean `-u`
+            // (or a letter the command does not have) would otherwise turn
+            // into a flag plus a stray operand. Left whole, the command's
+            // parser sees the token as written.
+            if let Some(c) = equals_flag_letter(tok).filter(|c| kind_of(*c) != FlagValue::None) {
+                out.push(format!("-{}", c));
+                out.push(tok[3..].to_string());
+                continue;
+            }
+        }
+        if attached_t
+            && tok.len() > 2
+            && tok.starts_with("-t")
+            && !tok.starts_with("--")
+            && kind_of('t') != FlagValue::None
+        {
+            out.push("-t".to_string());
+            out.push(tok[2..].to_string());
+            continue;
+        }
+        out.push(tok.to_string());
+        // Walk the cluster: a value-taking letter ends it and takes the rest
+        // of the token, or the NEXT token verbatim (tmux consumes a required
+        // value whatever it looks like: `-n -x=foo` names a window `-x=foo`).
+        let rest = &tok[1..];
+        for (pos, flag) in rest.char_indices() {
+            let kind = kind_of(flag);
+            if kind == FlagValue::None {
+                continue;
+            }
+            if pos + flag.len_utf8() == rest.len() {
+                if let Some(next) = args.get(i) {
+                    if !(kind == FlagValue::Optional && looks_like_another_flag(next)) {
+                        out.push(next.clone());
+                        i += 1;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    out.extend(args[i..].iter().cloned());
 }
 
 /// Split tmux-style ATTACHED short-option arguments in the GLOBAL (pre
@@ -504,54 +664,21 @@ pub fn normalize_attached_global_args(args: Vec<String>) -> Vec<String> {
 ///
 /// tmux's command parser (arguments.c args_parse_flag_argument: the
 /// `if (*string != '\0')` branch) treats characters left attached after a
-/// value-taking flag letter as that flag's argument, for EVERY command.
-/// psmux's exact-match command parsers ignored such tokens, and the global
-/// routing fallback then picked the most recent session — reproduced:
-/// `kill-session -tvictimA` killed victimB.  `-t` is value-taking in every
-/// tmux and psmux command, so it is the one letter that can be rewritten
-/// generically without a per-command flag table (`-L`, `-T`, `-s`, ... are
-/// boolean in some commands and value-taking in others).
+/// value-taking flag letter as that flag's argument.  psmux's exact-match
+/// command parsers ignored such tokens, and the global routing fallback then
+/// picked the most recent session: `kill-session -tvictimA` killed victimB.
 ///
 /// Rules:
-///   - Only tokens after the first non-flag token (the subcommand) are
-///     candidates; the global region is `normalize_attached_global_args`'s
-///     job and is left alone here.
-///   - Rewriting stops at a literal `--`: everything after it is payload
-///     (send-keys literals, direct-exec argv), exactly like tmux.
-///   - Only `-t<value>` is split.  A bare `-t` (detached form) and every
-///     other flag pass through unchanged.
-///   - tmux parses a token like `-tfoo` as a target in every command, so
-///     this rewrite is parity even where the token was meant as text; the
-///     tmux-blessed way to pass literal `-t...` text is after `--`.
+///   - Only the command's FLAG REGION is rewritten, read from its tmux flag
+///     template: it ends at `--`, at a bare `-` and at the first operand, and
+///     a value-taking flag's value is skipped.  tmux's `args_parse` stops at
+///     the first operand too, so `set @k -tfoo` stores `-tfoo` and
+///     `send-keys -t a -- -tliteral` sends `-tliteral` (issue #795; this pass
+///     used to split every `-t...` token up to `--`).
+///   - The global region is `normalize_attached_global_args`'s job.
+///   - A bare `-t` (detached form) and every other flag pass through.
 pub fn normalize_attached_target_flag(args: Vec<String>) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    let mut seen_subcommand = false;
-    let mut seen_dashdash = false;
-    for (idx, arg) in args.into_iter().enumerate() {
-        if idx == 0 {
-            out.push(arg); // binary name
-            continue;
-        }
-        if arg == "--" {
-            seen_dashdash = true;
-            out.push(arg);
-            continue;
-        }
-        if !seen_subcommand {
-            if !arg.starts_with('-') || arg == "-" {
-                seen_subcommand = true;
-            }
-            out.push(arg);
-            continue;
-        }
-        if !seen_dashdash && arg.len() > 2 && arg.starts_with("-t") && !arg.starts_with("--") {
-            out.push("-t".to_string());
-            out.push(arg[2..].to_string());
-            continue;
-        }
-        out.push(arg);
-    }
-    out
+    normalize_argv_flags(args, false, true)
 }
 
 pub fn deferred_command_start<S: AsRef<str>>(command: &str, args: &[S]) -> Option<usize> {
@@ -814,22 +941,7 @@ pub fn command_list_reply(reply: &str) -> (String, Vec<String>) {
 /// Same as [`normalize_flag_equals`] but operates on `Vec<&str>`, returning
 /// owned strings (needed where the caller already has borrowed slices).
 pub fn normalize_flag_equals_borrowed(args: &[&str]) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    for arg in args {
-        if arg.len() >= 4
-            && arg.starts_with('-')
-            && !arg.starts_with("--")
-        {
-            let bytes = arg.as_bytes();
-            if bytes[1].is_ascii_alphabetic() && bytes[2] == b'=' {
-                out.push(format!("-{}", bytes[1] as char));
-                out.push(arg[3..].to_string());
-                continue;
-            }
-        }
-        out.push(arg.to_string());
-    }
-    out
+    normalize_flag_equals(args.iter().map(|a| a.to_string()).collect())
 }
 
 pub fn get_program_name() -> String {
@@ -1630,24 +1742,50 @@ pub(crate) fn parse_set_option_args<'a>(args: &[&'a str]) -> ParsedSetOptionArgs
                 continue;
             }
             if arg.starts_with('-') && arg.len() > 1 {
-                flag_chars.push_str(&arg[1..]);
-                if arg.contains('t') {
-                    match args.get(i + 1).copied() {
-                        Some(value) => target = Some(value),
-                        None => missing_target = true,
+                // `-t` ends its cluster and takes the rest of the token as
+                // the target (`-ts`, `-gtS`), or the next token when nothing
+                // is attached, as tmux's args_parse does. The attached form
+                // used to be read as more flag letters, with the NEXT token
+                // (the option name) taken as the target.
+                let body = &arg[1..];
+                match body.find('t') {
+                    Some(at) => {
+                        flag_chars.push_str(&body[..=at]);
+                        let attached = &body[at + 1..];
+                        if !attached.is_empty() {
+                            target = Some(attached);
+                            i += 1;
+                        } else {
+                            match args.get(i + 1).copied() {
+                                Some(value) => target = Some(value),
+                                None => missing_target = true,
+                            }
+                            i += 2;
+                        }
                     }
-                    i += 2;
-                } else {
-                    i += 1;
+                    None => {
+                        flag_chars.push_str(body);
+                        i += 1;
+                    }
                 }
                 continue;
             }
             parsing_flags = false;
-        } else if !literal_values && arg == "--" {
-            literal_values = true;
-            i += 1;
-            continue;
-        } else if !literal_values && arg == "-t" {
+        } else if !literal_values
+            && (arg == "--" || arg == "-t")
+            && !(positionals.len() == 1 && i + 1 == args.len())
+        {
+            // psmux extensions past the option name: `--` before more
+            // tokens escapes them, and `<name> <value> -t <target>` puts the
+            // target last. Both only fire on shapes tmux refuses as "too many
+            // arguments". A lone trailing `--` or `-t` right after the name
+            // is the VALUE, stored verbatim like tmux (`set @k --`, issue
+            // #795).
+            if arg == "--" {
+                literal_values = true;
+                i += 1;
+                continue;
+            }
             flag_chars.push('t');
             match args.get(i + 1).copied() {
                 Some(value) => target = Some(value),
@@ -1879,6 +2017,10 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue196_flag_equals.rs"]
 mod tests_issue196_flag_equals;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue795_literal_values.rs"]
+mod tests_issue795_literal_values;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue635_dangling_flag_value.rs"]

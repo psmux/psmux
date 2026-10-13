@@ -3674,15 +3674,11 @@ fn run_main() -> io::Result<()> {
             }
             // rename-session - Rename a session
             "rename-session" | "rename" => {
-                let mut new_name: Option<String> = None;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    if !cmd_args[i].starts_with('-') {
-                        new_name = Some(cmd_args[i].to_string());
-                        break;
-                    }
-                    i += 1;
-                }
+                // The operand read the way tmux's getopt reads it, so a name
+                // after `--` (`rename-session -- -x=foo`) is the name rather
+                // than skipped as a flag (issue #795).
+                let operand_args: Vec<&str> = cmd_args[1..].iter().map(|s| s.as_str()).collect();
+                let new_name = crate::cli::first_operand("rename-session", &operand_args).map(str::to_string);
                 if let Some(name) = new_name {
                     // tmux refuses a rename onto an existing session with
                     // `duplicate session: NAME` at exit 1. psmux wrote over the
@@ -3695,7 +3691,7 @@ fn run_main() -> io::Result<()> {
                             std::process::exit(1);
                         }
                     }
-                    send_control(format!("rename-session {}\n", crate::util::quote_arg(&name)))?;
+                    send_control(format!("rename-session -- {}\n", crate::util::quote_arg(&name)))?;
                 }
                 return Ok(());
             }
@@ -3836,6 +3832,12 @@ fn run_main() -> io::Result<()> {
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
+                        // End of options: the next token is the data even
+                        // when it starts with `-` (issue #795).
+                        "--" => {
+                            data = cmd_args.get(i + 1).map(|s| s.to_string());
+                            break;
+                        }
                         "-b" => {
                             if let Some(b) = cmd_args.get(i + 1) {
                                 buffer_name = Some(b.to_string());
@@ -3957,6 +3959,13 @@ fn run_main() -> io::Result<()> {
                 let mut duration_ms: Option<u64> = None;
                 let mut i = 1;
                 while i < cmd_args.len() {
+                    // `--` ends the options: what follows is the message, so
+                    // `display -p -- -tfoo` prints `-tfoo` (issue #795; the
+                    // `--` used to be printed as part of the message).
+                    if cmd_args[i] == "--" && message.is_empty() {
+                        message.extend(cmd_args[i + 1..].iter().map(|s| s.to_string()));
+                        break;
+                    }
                     match cmd_args[i].as_str() {
                         "-t" => {
                             if let Some(t) = cmd_args.get(i + 1) {
@@ -4028,7 +4037,13 @@ fn run_main() -> io::Result<()> {
                 if let Some(d) = duration_ms { cmd.push_str(&format!(" -d {}", d)); }
                 // Quote the message to preserve literal whitespace (tabs etc)
                 // that would otherwise be split by the server's command parser.
-                cmd.push_str(&format!(" {}", crate::util::quote_arg(&msg)));
+                // `--` first, so a message that starts with `-` reaches the
+                // server as the message and not as a flag (issue #795).
+                if msg.is_empty() {
+                    cmd.push_str(&format!(" {}", crate::util::quote_arg(&msg)));
+                } else {
+                    cmd.push_str(&format!(" -- {}", crate::util::quote_arg(&msg)));
+                }
                 cmd.push('\n');
                 if print_to_stdout {
                     let resp = send_control_with_response(cmd)?;
@@ -4420,11 +4435,12 @@ fn run_main() -> io::Result<()> {
             }
             // rename-window - Rename current window
             "rename-window" | "renamew" => {
-                // cmd_args[0] is the command, cmd_args[1] should be the new name
-                if let Some(name) = cmd_args.get(1) {
-                    if !name.starts_with('-') {
-                        send_control(format!("rename-window {}\n", crate::util::quote_arg(name)))?;
-                    }
+                // The operand read the way tmux's getopt reads it: after `--`
+                // a dash-leading name is the name (issue #795), and `--` on
+                // the wire keeps the server from reading it as a flag.
+                let operand_args: Vec<&str> = cmd_args[1..].iter().map(|s| s.as_str()).collect();
+                if let Some(name) = crate::cli::first_operand("rename-window", &operand_args) {
+                    send_control(format!("rename-window -- {}\n", crate::util::quote_arg(name)))?;
                 }
                 return Ok(());
             }
