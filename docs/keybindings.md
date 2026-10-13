@@ -672,11 +672,28 @@ Key names for `bind-key` and `send-keys`:
 | Shift+Tab | `BTab` (sends `ESC [ Z`) |
 | Ctrl+Backspace | `C-BSpace` (writes `0x08`, the native Windows encoding, so PSReadLine runs BackwardKillWord; `M-BSpace` writes `ESC 0x7f`). A terminal that sends a bare `0x08` for Ctrl+Backspace is seen as `C-h`, which is also what tmux reports for it |
 | Non-ASCII keys | Any single Unicode character: `ы`, `é`, `ß`, with the usual modifiers (`M-ф`, `C-ы`, `S-ы`). `list-keys` prints the character as typed |
-| Mouse key names | tmux's mouse names (`WheelUpPane`, `MouseDown1Pane`, `DoubleClick1Pane`, and so on), `Any`, `None`, `Mouse`, `FocusIn`/`FocusOut`, `PasteStart`/`PasteEnd` and `UserN` are accepted so a ported tmux config loads, but psmux does not act on them |
+| Mouse key names | tmux's mouse names (`WheelUpPane`, `MouseDown1Pane`, `MouseDrag1Border`, `DoubleClick1Pane`, `WheelDownStatus`, and so on, with `C-`, `M-` and `S-`) are real keys: `bind`, `unbind` and `list-keys` take them. The wheel over a pane runs them (see [Mouse key bindings](#mouse-key-bindings)); the other mouse names are stored and listed but psmux's built-in mouse handling still acts on clicks, drags and the status line. `Any`, `None`, `Mouse`, `FocusIn`/`FocusOut`, `PasteStart`/`PasteEnd` and `UserN` are accepted so a ported tmux config loads, but psmux does not act on them |
 
 Aliases are accepted for several of these: `Return` for `Enter`, `Esc` for `Escape`,
 `BSpace` for `Backspace`, `PPage` or `PgUp` for `PageUp`, `NPage` or `PgDn` for `PageDown`,
 `IC` for `Insert`, `DC` for `Delete`, `BackTab` for `BTab`.
+
+### Mouse key bindings
+
+A wheel notch over a pane is the tmux key `WheelUpPane` or `WheelDownPane`, with `C-`, `M-`
+or `S-` when a modifier is held, and it is looked up the way tmux looks it up: in the
+`copy-mode` (or `copy-mode-vi`) table while the pane is in copy mode, then in `root`.
+
+| Situation | What happens |
+|-----------|--------------|
+| Nothing changed | The built-in defaults, listed by `list-keys`: root `WheelUpPane` enters copy mode and scrolls, the copy-mode `WheelUpPane` / `WheelDownPane` scroll 3 lines and leave copy mode at the bottom, and a program that asked for the mouse gets the wheel |
+| `bind -n WheelUpPane ...`, `bind -T copy-mode-vi WheelDownPane ...` | Your command runs instead. `-t =`, `-t=` and `{mouse}` name the pane under the pointer, and `send-keys -M` hands the wheel to the program in it |
+| `unbind -n WheelUpPane` | The key is gone, as in tmux: the wheel no longer enters copy mode, and only reaches a program that enabled mouse reporting |
+| A modified wheel (`C-WheelUpPane`) with nothing bound | As in tmux: a program with mouse reporting on gets it (with the Ctrl bit), a shell prompt gets nothing, copy mode ignores it |
+| `set -g ctrl-wheel-zoom on` | Ctrl+wheel in Windows Terminal zooms the font before any binding is consulted |
+
+Clicks, drags and the status line still use psmux's built-in mouse handling; binding those
+names is accepted and listed but does not change what they do yet.
 
 ### Extended keys from the host terminal
 
