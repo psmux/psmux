@@ -2712,6 +2712,23 @@ pub fn send_control(line: String) -> io::Result<()> {
 }
 
 pub fn send_control_with_response(line: String) -> io::Result<String> {
+    send_control_with_response_bounded(line, Some(Duration::from_millis(3000)))
+}
+
+/// [`send_control_with_response`] for a command whose reply comes only once
+/// the work it starts has finished: a forwarded `if-shell` (a shell condition,
+/// then the chosen branch, which may create a session), a forwarded
+/// `run-shell`, and `source-file`. A tmux client waits for its command list
+/// however long it runs (client.c leaves only on the server's MSG_EXIT). The
+/// 3 s read bound made a slow condition or session creation look like no
+/// answer, and the CLI then ran the command a SECOND time locally while the
+/// server was still running the first: a duplicate session, a run-shell body
+/// run twice (#734 follow up). The connect stays bounded.
+pub fn send_control_with_response_wait(line: String) -> io::Result<String> {
+    send_control_with_response_bounded(line, None)
+}
+
+fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
     if env::var("PSMUX_ROUTE_DEBUG").is_ok() {
         eprintln!("[route] send_control_with_response target={:?} full={:?} argv={:?} line={:?}",
@@ -2736,7 +2753,7 @@ pub fn send_control_with_response(line: String) -> io::Result<String> {
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad server address"))?;
     let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1000))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+    let _ = stream.set_read_timeout(read_timeout);
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ref ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);

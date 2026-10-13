@@ -4076,7 +4076,10 @@ fn run_main() -> io::Result<()> {
                     line.push(' ');
                     line.push_str(&crate::util::quote_arg(&shell_cmd_str));
                     line.push('\n');
-                    match crate::session::send_control_with_response(line) {
+                    // Waits for the server to finish the command (#734 follow
+                    // up): with a read bound, a body slower than 3 s came back
+                    // as "no response" and then ran AGAIN here.
+                    match crate::session::send_control_with_response_wait(line) {
                         Ok(resp) => {
                             if !resp.is_empty() {
                                 io::stdout().write_all(resp.as_bytes())?;
@@ -4444,8 +4447,13 @@ fn run_main() -> io::Result<()> {
                             std::process::exit(1);
                         }
                     } else {
-                        // Send source-file command to server if attached
-                        send_control(format!("source-file {}\n", crate::util::quote_arg(&expanded)))?;
+                        // The server answers once the file has run (#734 follow
+                        // up), so this returns when its commands are done, as
+                        // tmux's client does (cmd-source-file.c waits for the
+                        // inserted commands before the item continues).
+                        let resp = crate::session::send_control_with_response_wait(
+                            format!("source-file {}\n", crate::util::quote_arg(&expanded)))?;
+                        if !resp.is_empty() { print!("{}", resp); }
                     }
                 }
                 return Ok(());
@@ -4731,7 +4739,12 @@ fn run_main() -> io::Result<()> {
                             line.push_str(&crate::util::quote_arg(a));
                         }
                         line.push('\n');
-                        match send_control_with_response(line) {
+                        // Waits however long the condition and the branch take
+                        // (#734 follow up). A 3 s read bound turned a slow one
+                        // into "no response", and the fallback below then ran
+                        // the condition and the branch a second time while the
+                        // server was still on the first: a duplicate session.
+                        match crate::session::send_control_with_response_wait(line) {
                             Ok(resp) => {
                                 if !resp.is_empty() { print!("{}", resp); }
                                 return Ok(());
@@ -4803,7 +4816,9 @@ fn run_main() -> io::Result<()> {
                             format!("{}\n", cmd)
                         };
                         // Use send_control_with_response to capture any output from the chosen command
-                        let resp = send_control_with_response(tcp_cmd)?;
+                        // The branch may create a session (#734 follow up),
+                        // which can take longer than the 3 s read bound.
+                        let resp = crate::session::send_control_with_response_wait(tcp_cmd)?;
                         if !resp.is_empty() {
                             print!("{}", resp);
                         }
