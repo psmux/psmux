@@ -25,7 +25,12 @@
 # turns 0x0a into Ctrl+Enter there, exactly as in Alacritty.
 # PART B starts the client in a real Alacritty window and reads the pane for
 # the reply tail. It is skipped when Alacritty is not installed. It opens a
-# window, so do not type while it runs.
+# window, so do not type while it runs. Alacritty loads conpty.dll from PATH
+# when it finds one (WezTerm's install directory has one), and then runs the
+# client under that OpenConsole.exe instead of the system conhost. The torn
+# reply tail was measured under WezTerm's OpenConsole (16 of 17 starts on master)
+# and not under the system conhost on 26200 (0 of 4); the Ctrl+J failure shows
+# under both.
 #
 # Set PSMUX_TEST_BIN to test a binary that is not on PATH.
 
@@ -99,18 +104,25 @@ $clientVars = @("PSMUX_SESSION", "PSMUX_SESSION_NAME", "PSMUX_PANE", "PSMUX_TARG
 # long enough for the panes to be counted.
 function Run-Keys($conf, $keys, [bool]$alacritty) {
     Kill-Ns $NS_IN
+    # Removed through the Env: drive, not [Environment]::SetEnvironmentVariable
+    # with $null: under PowerShell 7.6 a child started by Start-Process after
+    # that call still gets the variable, set to the empty string, and an empty
+    # WEZTERM_PANE or ALACRITTY_LOG is still present, so every client here took
+    # the VT input route whatever the build.
     $saved = @{}
     foreach ($k in $clientVars) {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
-        [Environment]::SetEnvironmentVariable($k, $null)
+        Remove-Item "Env:\$k" -EA SilentlyContinue
     }
-    if ($alacritty) { [Environment]::SetEnvironmentVariable("ALACRITTY_LOG", "C:\Temp\Alacritty-4242.log") }
+    if ($alacritty) { Set-Item "Env:\ALACRITTY_LOG" "C:\Temp\Alacritty-4242.log" }
     $savedWarm = $env:PSMUX_NO_WARM; $env:PSMUX_NO_WARM = "1"
     $steps = "w7000," + (($keys -split ',') -join ",w700,") + ",h7000"
     $p = Start-Process -FilePath $VTHOST -WindowStyle Hidden -PassThru `
         -ArgumentList @($steps, "`"$PSMUX`"", "-L", $NS_IN, "-f", "`"$conf`"", "new-session", "-s", $S_IN)
     $script:OpenedPids += $p.Id
-    foreach ($k in $clientVars) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $clientVars) {
+        if ($null -ne $saved[$k]) { Set-Item "Env:\$k" $saved[$k] } else { Remove-Item "Env:\$k" -EA SilentlyContinue }
+    }
     $env:PSMUX_NO_WARM = $savedWarm
     # Count while the host holds the console: 7 s to come up, the keys, then 2 s.
     Start-Sleep -Milliseconds (7000 + 700 * ($keys -split ',').Count + 2000)
@@ -143,10 +155,14 @@ if (-not (Test-Path $VTHOST)) {
     $n = Run-Keys $confCb "02,63" $true
     Check ($n -eq 2) "C-b then c split the window (panes $n)" "C-b then c left [$n] panes"
 
-    # Not a check: the same 0x0a without Alacritty's variable, to show what the
-    # console route makes of it on this host. It is the same on every build.
+    # The same 0x0a without Alacritty's variable must stay on the console route,
+    # where conhost hands it over as Ctrl+Enter. It is the same on every build,
+    # and it proves this host shows the problem at all: had a VT route signal
+    # leaked into the client, A1 would pass on a build without the fix.
+    Write-Head "A4. without ALACRITTY_LOG the client stays on the console route"
     $n = Run-Keys $confCj "0a,63" $false
-    Write-Info "without ALACRITTY_LOG, C-j then c left $n pane(s): the console route"
+    Check ($n -eq 1) "without ALACRITTY_LOG, C-j then c left one pane (the console route)" `
+        "without ALACRITTY_LOG, C-j then c left [$n] panes, so a VT route signal reached the client"
 }
 
 # ==========================================================================
@@ -175,6 +191,10 @@ if (-not $alacritty) {
         $scrub,
         "Remove-Item Env:\PSMUX_HOST_COLORS -EA SilentlyContinue",
         "`$env:PSMUX_NO_WARM = '1'",
+        # A short start directory, so the prompt fits on one row of a default
+        # sized window: a long one wraps, and the pane holds the wrapped rows
+        # as separate lines, so the prompt line was never found.
+        "Set-Location `"`$env:SystemDrive\`"",
         "& '$PSMUX' -L $NS_WIN -f '$confWin' new-session -s $S_WIN"
     ) | Set-Content -Path $launch -Encoding UTF8
 
@@ -198,6 +218,7 @@ if (-not $alacritty) {
         $typed = if ($prompt) { ($prompt -replace '^PS [^>]*>', '').Trim() } else { $null }
         Write-Info "start $n : prompt line [$prompt]"
         if ($null -eq $typed) {
+            Write-Info "start $n : the pane held [$($cap.Trim())]"
             Write-Fail "start $n : no PowerShell prompt in the pane"
         } else {
             Check ($typed -eq "") "start $n : nothing was typed at the prompt" `
