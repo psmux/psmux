@@ -132,11 +132,11 @@ fn validation_resolves_to_stable_ids() {
     let app = app();
     // s:0.1 -> %2 (the active window's second pane)
     let r = resolve_temp_target(&app, &pane_index(1)).unwrap();
-    assert_eq!(r, TempTarget { win: None, win_is_id: false, win_name: None, pane: Some(2), pane_is_id: true });
+    assert_eq!(r, TempTarget { win: None, win_is_id: false, win_name: None, pane: Some(2), pane_is_id: true, session: None });
     assert!(r.is_resolved());
     // s:1 -> @11, no pane part (the window's active pane when it runs)
     let r = resolve_temp_target(&app, &window_index(1)).unwrap();
-    assert_eq!(r, TempTarget { win: Some(11), win_is_id: true, win_name: None, pane: None, pane_is_id: false });
+    assert_eq!(r, TempTarget { win: Some(11), win_is_id: true, win_name: None, pane: None, pane_is_id: false, session: None });
     // s:other.0 -> @11 + %4
     let t = TempTarget { win_name: Some("other".into()), pane: Some(0), ..Default::default() };
     let r = resolve_temp_target(&app, &t).unwrap();
@@ -258,4 +258,78 @@ fn targeted_sender_wraps_every_request() {
     let plain = TargetedSender::new(&tx, None);
     plain.send(CtrlReq::ClearHistory).unwrap();
     assert!(matches!(rx.try_recv().unwrap(), CtrlReq::ClearHistory));
+}
+
+// Issue #793: a target's session part is a claim about which server the
+// connection reached. Over the raw TCP protocol the reporter's script read the
+// first `<ns>*.port` file, which is the namespace's warm standby
+// (`<ns>____warm__` sorts before `<ns>__t`), and the standby ran
+// `send-keys -t t:@1.%1 C-c` and `respawn-pane -k -t t:@1.%1` on ITS OWN %1 and
+// answered OK. tmux answers "can't find session: t" (cmd-find.c).
+
+fn named(name: &str, ns: Option<&str>, id: usize) -> AppState {
+    let mut a = app();
+    a.session_name = name.to_string();
+    a.socket_name = ns.map(|s| s.to_string());
+    a.session_id = id;
+    a
+}
+
+fn session_only(s: &str) -> TempTarget {
+    TempTarget { session: Some(s.to_string()), ..Default::default() }
+}
+
+#[test]
+fn issue793_foreign_session_is_cant_find_session() {
+    let warm = named("__warm__", Some("ns793unit"), 4);
+    let t = TempTarget {
+        win: Some(10), win_is_id: true, pane: Some(1), pane_is_id: true,
+        session: Some("t".into()), ..Default::default()
+    };
+    assert_eq!(resolve_temp_target(&warm, &t).unwrap_err(), "can't find session: t");
+    assert_eq!(resolve_temp_target(&warm, &session_only("t")).unwrap_err(), "can't find session: t");
+    // Checked before the window and pane, so the message names the session.
+    let t = TempTarget { pane: Some(99), pane_is_id: true, session: Some("bogus".into()), ..Default::default() };
+    assert_eq!(resolve_temp_target(&warm, &t).unwrap_err(), "can't find session: bogus");
+    // Nothing moved.
+    assert_eq!(active(&warm), (0, 1));
+}
+
+#[test]
+fn issue793_own_session_in_every_spelling_resolves() {
+    let a = named("work", Some("ns793unit"), 7);
+    for s in ["work", "=work", "ns793unit__work", "$7", "wo"] {
+        assert!(session_names_this_server(&a, s), "{s} names this server");
+        let t = TempTarget { pane: Some(2), pane_is_id: true, session: Some(s.into()), ..Default::default() };
+        let r = resolve_temp_target(&a, &t).unwrap();
+        assert_eq!((r.pane, r.session.as_deref()), (Some(2), None), "{s}");
+    }
+    // A session-only target resolves to no window and no pane.
+    let r = resolve_temp_target(&a, &session_only("work")).unwrap();
+    assert_eq!((r.win, r.pane), (None, None));
+    for s in ["Work", "worker", "$8", "other", "ns793unit__other", "__warm__"] {
+        assert!(!session_names_this_server(&a, s), "{s} is another session");
+    }
+}
+
+#[test]
+fn issue793_which_targets_carry_a_session_to_check() {
+    use crate::server::connection::explicit_target_session;
+    let t = Some("t:@1.%1");
+    assert_eq!(explicit_target_session("send-keys", t).as_deref(), Some("t"));
+    assert_eq!(explicit_target_session("respawn-pane", t).as_deref(), Some("t"));
+    assert_eq!(explicit_target_session("respawn-window", Some("t:@1")).as_deref(), Some("t"));
+    assert_eq!(explicit_target_session("kill-window", Some("=t:@1")).as_deref(), Some("t"));
+    assert_eq!(explicit_target_session("select-pane", Some("t:0.1")).as_deref(), Some("t"));
+    // No explicit session: pane ids, window forms and bare words are unchanged.
+    for raw in ["%1", "@1.%1", ":1", ":.+", "0", "t", "main"] {
+        assert_eq!(explicit_target_session("send-keys", Some(raw)), None, "{raw}");
+    }
+    assert_eq!(explicit_target_session("send-keys", None), None);
+    // Targets that name another session or a client on purpose.
+    for cmd in ["switch-client", "detach-client", "kill-session", "has-session", "new-session",
+                "move-window", "link-window", "join-pane", "move-pane", "swap-window", "swap-pane",
+                "set-option", "refresh-client", "display-panes"] {
+        assert_eq!(explicit_target_session(cmd, t), None, "{cmd}");
+    }
 }

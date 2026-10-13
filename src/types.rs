@@ -3021,6 +3021,12 @@ pub struct TempTarget {
     pub win_name: Option<String>,
     pub pane: Option<usize>,
     pub pane_is_id: bool,
+    /// The session the target names explicitly (`sess:...`), checked against
+    /// this server's own session before anything else (issue #793). One
+    /// server holds one session, so a connection that reaches the wrong
+    /// server must get tmux's "can't find session", never act on its own
+    /// panes. Always None in a resolved target.
+    pub session: Option<String>,
 }
 
 impl TempTarget {
@@ -3033,6 +3039,7 @@ impl TempTarget {
             win_name: pt.window_name.clone(),
             pane: pt.pane,
             pane_is_id: pt.pane_is_id,
+            session: None,
         }
     }
 

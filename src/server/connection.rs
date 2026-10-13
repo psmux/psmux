@@ -281,6 +281,54 @@ fn validate_target(
     }
 }
 
+/// Does `cmd`'s outer `-t` name a session that must be THIS server's own?
+///
+/// One psmux server holds one session, so the session part of a `-t` (or of a
+/// TARGET line) is only ever a claim about which server the connection
+/// reached. These commands are the exceptions: their target names another
+/// session on purpose (switch-client, the cross-session window and pane
+/// movers, new-session's group target, kill-session's forward), a client
+/// rather than a session (detach-client and the other target-client
+/// commands), or they resolve the session themselves (has-session, and
+/// set-option's own parser).
+fn target_session_must_be_ours(cmd: &str) -> bool {
+    !matches!(
+        cmd,
+        "switch-client" | "switchc" | "detach-client" | "detach"
+            | "kill-session" | "kill-ses" | "has-session" | "has"
+            | "new-session" | "new" | "attach-session" | "attach" | "a" | "at"
+            | "refresh-client" | "refresh" | "lock-client" | "lockc"
+            | "suspend-client" | "suspendc" | "show-messages" | "showmsgs"
+            | "display-panes" | "displayp"
+            | "link-window" | "linkw" | "move-window" | "movew"
+            | "join-pane" | "joinp" | "move-pane" | "movep"
+            | "swap-window" | "swapw" | "swap-pane" | "swapp"
+            | "set-option" | "set" | "set-window-option" | "setw"
+    )
+}
+
+/// The session an outer target names explicitly, when it must be this
+/// server's own (issue #793).
+///
+/// Only the explicit forms count: `sess:...` and `$N`. A bare word keeps its
+/// existing meaning (a window-shaped token, or a name some handlers resolve
+/// themselves), so nothing that worked before is reinterpreted.
+///
+/// Without this check a connection that reached the wrong server, such as the
+/// namespace's warm standby, ran `send-keys -t t:@1.%1 C-c` and
+/// `respawn-pane -k -t t:@1.%1` against that server's OWN %1 and answered OK,
+/// while session t never saw them. tmux answers "can't find session: X".
+pub(crate) fn explicit_target_session(cmd: &str, raw_target: Option<&str>) -> Option<String> {
+    if !target_session_must_be_ours(cmd) {
+        return None;
+    }
+    let raw = crate::cli::strip_exact_match_prefix(raw_target?);
+    if !raw.contains(':') && !raw.starts_with('$') {
+        return None;
+    }
+    parse_target(raw).session.filter(|s| !s.is_empty())
+}
+
 /// SetPaneOption/ShowPaneOptions resolve only "" (the active pane) and bare
 /// "%N"/"N" pane ids. set-option keeps its -t in the argument list for the
 /// shared parser (unlike every other command, whose -t without_outer_target
@@ -1692,6 +1740,9 @@ if control_echo || control_noecho {
         // and nothing is mutated.
         // The validated target every request of this command carries.
         let mut ctrl_command_target: Option<crate::types::TempTarget> = None;
+        // Issue #793: a `sess:...` target naming another session is
+        // "can't find session" here, never this server's own panes.
+        let ctrl_target_session = explicit_target_session(cmd_name, ctrl_raw_target.as_deref());
         let mut focus_err = crate::cli::validate_flag_arguments(cmd_name, &cmd_args)
             .err()
             .or_else(|| {
@@ -1699,6 +1750,14 @@ if control_echo || control_noecho {
                     parsed_set.validate(ctrl_set_window_option).err()
                 })
             });
+        if focus_err.is_none() && is_focus_cmd {
+            if let Some(ref s) = ctrl_target_session {
+                let spec = crate::types::TempTarget { session: Some(s.clone()), ..Default::default() };
+                if let Err(e) = validate_target(&tx_ctrl, spec) {
+                    focus_err = Some(e);
+                }
+            }
+        }
         if focus_err.is_none() {
             if is_focus_cmd && matches!(cmd_name, "select-pane" | "selectp") {
                 // Issue #691: one request for the whole target, so the command
@@ -1756,16 +1815,22 @@ if control_echo || control_noecho {
                     || ctrl_target_win_name.is_some())
                     && !skip_target_focus;
                 let want_pane = ctrl_target_pane.is_some() && !skip_pane_focus;
-                if want_win || want_pane {
+                if want_win || want_pane || ctrl_target_session.is_some() {
                     let spec = crate::types::TempTarget {
                         win: if want_win { ctrl_target_win } else { None },
                         win_is_id: ctrl_target_win_is_id,
                         win_name: if want_win { ctrl_target_win_name.clone() } else { None },
                         pane: if want_pane { ctrl_target_pane } else { None },
                         pane_is_id: ctrl_pane_is_id,
+                        session: ctrl_target_session.clone(),
                     };
                     match validate_target(&tx_ctrl, spec) {
-                        Ok(resolved) => ctrl_command_target = Some(resolved),
+                        // A session-only check resolves to no window or pane:
+                        // the command then acts on the real focus as before.
+                        Ok(resolved) if resolved.win.is_some() || resolved.pane.is_some() => {
+                            ctrl_command_target = Some(resolved)
+                        }
+                        Ok(_) => {}
                         Err(e) => focus_err = Some(e),
                     }
                 }
@@ -2185,7 +2250,20 @@ let selectp_owns_target = matches!(cmd, "select-pane" | "selectp");
 // The validated target every request of this command carries (None: the
 // command has no -t, or owns it, and acts on the real focus).
 let mut command_target: Option<crate::types::TempTarget> = None;
+// Issue #793: a `sess:...` target naming another session is tmux's "can't
+// find session", checked before the command touches anything.
+let target_session = explicit_target_session(cmd, raw_target.as_deref());
 if is_focus_cmd {
+    if let Some(ref s) = target_session {
+        let spec = crate::types::TempTarget { session: Some(s.clone()), ..Default::default() };
+        if let Err(e) = validate_target(&tx, spec) {
+            let _ = writeln!(write_stream, "ERROR: {}", e);
+            let _ = write_stream.flush();
+            if !persistent { break; }
+            line.clear();
+            continue;
+        }
+    }
     // A select-pane alone on the command line had its target checked by the
     // CLI (cli_validate_window_pane_target); one inside a list did not, and
     // its request has no reply. Check it here so a target that names nothing
@@ -2198,6 +2276,7 @@ if is_focus_cmd {
             win_name: target_win_name.clone(),
             pane: target_pane,
             pane_is_id,
+            session: None,
         };
         if let Err(e) = validate_target(&tx, spec) {
             let _ = writeln!(write_stream, "ERROR: {}", e);
@@ -2242,15 +2321,19 @@ if is_focus_cmd {
     // its requests interleave with anyone else's.
     let want_win = (target_win.is_some() || target_win_name.is_some()) && !skip_target_focus;
     let want_pane = target_pane.is_some() && !skip_pane_focus && targeted_kill_pane_id.is_none();
-    if want_win || want_pane {
+    if want_win || want_pane || target_session.is_some() {
         let spec = crate::types::TempTarget {
             win: if want_win { target_win } else { None },
             win_is_id: target_win_is_id,
             win_name: if want_win { target_win_name.clone() } else { None },
             pane: if want_pane { target_pane } else { None },
             pane_is_id,
+            session: target_session.clone(),
         };
         match validate_target(&tx, spec) {
+            // A session-only check resolves to no window or pane: the
+            // command then acts on the real focus, as it always did.
+            Ok(resolved) if resolved.win.is_none() && resolved.pane.is_none() => {}
             Ok(resolved) => command_target = Some(resolved),
             Err(e) => {
                 // Unresolvable target: report (tmux: "can't find window: X",
@@ -3450,6 +3533,7 @@ match cmd {
             win_name: target_win_name.clone(),
             pane: target_pane,
             pane_is_id,
+            session: None,
         };
         // No -t window: a bare integer is the target window (legacy compat).
         if dst.win.is_none() && dst.win_name.is_none() && !dst.pane_is_id {
@@ -3574,7 +3658,7 @@ match cmd {
                 Some(spec) => crate::types::TempTarget::from_parsed(&parse_target(spec)),
                 None => crate::types::TempTarget {
                     win: target_win, win_is_id: target_win_is_id, win_name: target_win_name.clone(),
-                    pane: target_pane, pane_is_id,
+                    pane: target_pane, pane_is_id, session: None,
                 },
             };
             // Read screen base64 data from remaining args/payload

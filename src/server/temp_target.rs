@@ -12,6 +12,11 @@ use crate::types::{AppState, TempTarget};
 /// Resolve `t` against the current state.  Ok carries the same target in
 /// stable id form (`TempTarget::is_resolved`); Err carries tmux's message.
 pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<TempTarget, String> {
+    if let Some(ref s) = t.session {
+        if !session_names_this_server(app, s) {
+            return Err(format!("can't find session: {}", s));
+        }
+    }
     let has_win = t.win.is_some() || t.win_name.is_some();
     let win_idx: Option<usize> = if let Some(w) = t.win {
         if t.win_is_id {
@@ -58,7 +63,29 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
         win_name: None,
         pane: pane_id,
         pane_is_id: pane_id.is_some(),
+        session: None,
     })
+}
+
+/// Does the session part of a target name the session this server holds?
+///
+/// Issue #793: one server holds one session, so a target naming any other
+/// session reached the wrong server and must fail like tmux's
+/// `cmd_find_get_session` miss. Accepted: the name itself, the `<ns>__name`
+/// registry base a resolved `$N` carries, the `$N` id, and a prefix of the
+/// name when no session of exactly that name exists in the namespace (tmux
+/// tries the exact name first, then a prefix; switch-client forwards a
+/// prefix it matched to the destination server).
+pub(crate) fn session_names_this_server(app: &AppState, s: &str) -> bool {
+    let s = crate::cli::strip_exact_match_prefix(s);
+    if s == app.session_name || s == app.port_file_base() || s == format!("${}", app.session_id) {
+        return true;
+    }
+    if !s.is_empty() && app.session_name.starts_with(s) {
+        let base = crate::session::namespaced_session_base(app.socket_name.as_deref(), s);
+        return !std::path::Path::new(&crate::paths::port_file(&base)).exists();
+    }
+    false
 }
 
 /// Switch the focus to `t` for one request, remembering the real focus in
