@@ -1729,6 +1729,17 @@ pub(crate) fn run_send_keys_x(app: &mut AppState, cmd: &str, count: usize) -> Re
     Ok(())
 }
 
+/// tmux window_copy_clear_selection, as the copy commands that keep copy mode
+/// open call it: the selection goes, the search highlights stay (unlike
+/// `send -X clear-selection`, which clears both).
+fn copy_selection_done(app: &mut AppState) {
+    app.copy_anchor = None;
+    if app.copy_selection_mode == crate::types::SelectionMode::Line {
+        app.copy_selection_mode = crate::types::SelectionMode::Char;
+    }
+    app.copy_needs_redraw = true;
+}
+
 /// Run one copy-mode command by name (the `send-keys -X` vocabulary). This is
 /// the primary mechanism used by tmux-yank and other plugins.
 fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
@@ -1750,8 +1761,11 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
             crate::copy_mode::toggle_rectangle(app);
         }
         "copy-selection" => {
+            // tmux window_copy_cmd_copy_selection: copy, then clear the
+            // selection and stay in copy mode (the -no-clear variant keeps it).
             let _ = yank_selection(app);
             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
+            copy_selection_done(app);
         }
         "copy-selection-and-cancel" => {
             let _ = yank_selection(app);
@@ -1763,16 +1777,25 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
             let _ = yank_selection(app);
             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
         }
-        s if s.starts_with("copy-pipe-and-cancel") || s.starts_with("copy-pipe") => {
-            // copy-pipe[-and-cancel] [command] — yank + pipe to command
+        s if s == "copy-pipe" || s.starts_with("copy-pipe ")
+            || s.starts_with("copy-pipe-and-cancel") || s.starts_with("copy-pipe-no-clear") => {
+            // copy-pipe[-and-cancel|-no-clear] [command]: yank + pipe to the
+            // command. tmux window-copy.c: copy-pipe clears the selection and
+            // stays, -no-clear keeps it, -and-cancel leaves copy mode.
             let _ = yank_selection(app);
             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
-            // Extract pipe command from argument if present
-            let cancel = s.contains("cancel");
+            let cancel = s.starts_with("copy-pipe-and-cancel");
+            let no_clear = s.starts_with("copy-pipe-no-clear");
+            // The verb is matched whole: `copy-pipe-no-clear` used to leave
+            // `-no-clear` behind as the pipe command.
             let pipe_cmd = cmd.strip_prefix("copy-pipe-and-cancel")
+                .or_else(|| cmd.strip_prefix("copy-pipe-no-clear"))
                 .or_else(|| cmd.strip_prefix("copy-pipe"))
                 .unwrap_or("")
                 .trim();
+            if !cancel && !no_clear {
+                copy_selection_done(app);
+            }
             if !pipe_cmd.is_empty() {
                 if let Some(text) = app.paste_buffers.first().cloned() {
                     // Pipe yanked text to the command's stdin

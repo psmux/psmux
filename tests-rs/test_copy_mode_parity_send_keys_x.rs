@@ -220,3 +220,55 @@ fn page_up_copy_mode_commands_are_read_by_their_flags() {
     assert!(!pages_up("new-window -u"));
     assert!(!pages_up("select-pane \\; copy-mode -u"), "only the first command decides, as before");
 }
+
+// ══════════════ copy-selection and copy-pipe variants ══════════════
+//
+// tmux window-copy.c, measured with tmux 3.4 (select two cells, run the
+// command, read pane_in_mode / selection_present):
+//   copy-selection             stays in copy mode, selection cleared
+//   copy-selection-no-clear    stays, selection kept
+//   copy-selection-and-cancel  leaves copy mode
+//   copy-pipe / -no-clear / -and-cancel  the same three
+// psmux kept the selection after copy-selection and copy-pipe, and ran
+// `copy-pipe-no-clear` as copy-pipe with the pipe command "-no-clear".
+
+fn selected(cmd: &str) -> AppState {
+    let mut a = app(true);
+    a.copy_pos = Some((ROWS - 3, 0));
+    assert_eq!(run_send_keys_x(&mut a, "begin-selection", 1), Ok(()));
+    assert_eq!(run_send_keys_x(&mut a, "cursor-right", 2), Ok(()));
+    assert!(a.copy_anchor.is_some(), "a selection before {}", cmd);
+    assert_eq!(run_send_keys_x(&mut a, cmd, 1), Ok(()));
+    a
+}
+
+#[test]
+fn copy_selection_clears_and_stays() {
+    let a = selected("copy-selection");
+    assert!(a.mode.in_copy());
+    assert!(a.copy_anchor.is_none(), "copy-selection clears the selection");
+    assert!(!a.paste_buffers.is_empty(), "and copied it");
+}
+
+#[test]
+fn copy_selection_no_clear_keeps_it() {
+    let a = selected("copy-selection-no-clear");
+    assert!(a.mode.in_copy());
+    assert!(a.copy_anchor.is_some());
+}
+
+#[test]
+fn copy_selection_and_cancel_leaves() {
+    let a = selected("copy-selection-and-cancel");
+    assert!(!a.mode.in_copy());
+}
+
+#[test]
+fn copy_pipe_variants_follow_tmux() {
+    let a = selected("copy-pipe");
+    assert!(a.mode.in_copy() && a.copy_anchor.is_none(), "copy-pipe clears and stays");
+    let a = selected("copy-pipe-no-clear");
+    assert!(a.mode.in_copy() && a.copy_anchor.is_some(), "copy-pipe-no-clear keeps the selection");
+    let a = selected("copy-pipe-and-cancel");
+    assert!(!a.mode.in_copy(), "copy-pipe-and-cancel leaves");
+}
