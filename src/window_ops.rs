@@ -2550,6 +2550,98 @@ pub fn swap_pane_across_windows(
     true
 }
 
+/// Where a pane sits: a cell of a window's tiled tree, or a floating pane.
+enum PaneSlot {
+    Tiled(usize, Vec<usize>),
+    Float(usize, usize),
+}
+
+/// The window and floating index a `%id` spec (or `sess:@w.%id`) names, when
+/// that pane is a floating one.
+fn floating_spec(app: &AppState, spec: &str) -> Option<(usize, usize)> {
+    let pt = crate::cli::parse_target(crate::cli::strip_exact_match_prefix(spec.trim()));
+    if !pt.pane_is_id { return None; }
+    crate::tree::find_floating_by_id(app, pt.pane?)
+}
+
+/// Give `p` and its pseudo console a new size.
+fn resize_pane_pty(p: &mut crate::types::Pane, rows: u16, cols: u16) {
+    if p.last_rows != rows || p.last_cols != cols {
+        let _ = p.master.resize(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        if let Ok(mut parser) = p.term.lock() { parser.screen_mut().set_size(rows, cols); }
+        p.last_rows = rows;
+        p.last_cols = cols;
+    }
+}
+
+/// Swap two panes when at least one is floating: the panes trade places, so
+/// the one that lands in a floating slot takes that float's position and size
+/// and the one that lands in a tiled cell takes the cell's (tmux exchanges
+/// the layout cells, cmd-swap-pane.c). Returns whether anything moved.
+fn swap_with_floating(app: &mut AppState, a: PaneSlot, b: PaneSlot) -> bool {
+    fn float_inner(fp: &crate::types::FloatingPane) -> (u16, u16) {
+        (fp.h.saturating_sub(2).max(1), fp.w.saturating_sub(2).max(1))
+    }
+    match (a, b) {
+        (PaneSlot::Float(w1, f1), PaneSlot::Float(w2, f2)) => {
+            if (w1, f1) == (w2, f2) { return false; }
+            // Each pane moves into the other's slot; the slots keep their
+            // geometry.
+            if w1 == w2 {
+                let fl = &mut app.windows[w1].floating;
+                let (lo, hi) = (f1.min(f2), f1.max(f2));
+                let (head, tail) = fl.split_at_mut(hi);
+                std::mem::swap(&mut head[lo].pane, &mut tail[0].pane);
+            } else {
+                let (lo, hi) = (w1.min(w2), w1.max(w2));
+                let (head, tail) = app.windows.split_at_mut(hi);
+                let (fa, fb) = if w1 < w2 { (f1, f2) } else { (f2, f1) };
+                std::mem::swap(&mut head[lo].floating[fa].pane, &mut tail[0].floating[fb].pane);
+            }
+            for (w, f) in [(w1, f1), (w2, f2)] {
+                let fp = &mut app.windows[w].floating[f];
+                fp.id = fp.pane.id;
+                let (r, c) = float_inner(fp);
+                resize_pane_pty(&mut fp.pane, r, c);
+            }
+            true
+        }
+        (PaneSlot::Float(fw, fi), PaneSlot::Tiled(tw, path)) | (PaneSlot::Tiled(tw, path), PaneSlot::Float(fw, fi)) => {
+            let tiled_id = match crate::tree::get_active_pane_id(&app.windows[tw].root, &path) {
+                Some(id) => id,
+                None => return false,
+            };
+            let float_id = app.windows[fw].floating[fi].id;
+            {
+                let (float_win, tiled_win): (&mut crate::types::Window, &mut crate::types::Window);
+                if fw == tw {
+                    let win = &mut app.windows[fw];
+                    let Some(leaf) = crate::tree::active_pane_mut(&mut win.root, &path) else { return false };
+                    std::mem::swap(&mut win.floating[fi].pane, leaf);
+                } else {
+                    let (lo, hi) = (fw.min(tw), fw.max(tw));
+                    let (head, tail) = app.windows.split_at_mut(hi);
+                    if fw < tw { float_win = &mut head[lo]; tiled_win = &mut tail[0]; }
+                    else { float_win = &mut tail[0]; tiled_win = &mut head[lo]; }
+                    let Some(leaf) = crate::tree::active_pane_mut(&mut tiled_win.root, &path) else { return false };
+                    std::mem::swap(&mut float_win.floating[fi].pane, leaf);
+                }
+            }
+            let fp = &mut app.windows[fw].floating[fi];
+            fp.id = fp.pane.id;
+            let (r, c) = float_inner(fp);
+            resize_pane_pty(&mut fp.pane, r, c);
+            let mru = &mut app.windows[tw].pane_mru;
+            crate::tree::remove_from_mru(mru, tiled_id);
+            crate::tree::touch_mru(mru, float_id);
+            let area = app.windows[tw].area;
+            crate::tree::resize_window_panes(app, tw, area);
+            true
+        }
+        (PaneSlot::Tiled(..), PaneSlot::Tiled(..)) => false,
+    }
+}
+
 /// Resolve a `swap-pane` pair from RAW target specs and perform the swap.
 /// `src` of None is tmux's default source: the current pane
 /// (cmd-swap-pane.c:38, `CMD_FIND_DEFAULT_MARKED`, which falls back to the
@@ -2569,6 +2661,38 @@ pub fn swap_pane_by_spec(
     }
     if app.windows.is_empty() { return Err("can't find pane".to_string()); }
     let active = app.active_idx.min(app.windows.len() - 1);
+    // A floating pane on either side (tmux cmd-swap-pane.c swaps a floating
+    // pane with any other pane by exchanging their cells: each takes the
+    // other's place and size). resolve_pane_spec knows the tiled tree only,
+    // so `swap-pane -s <float>` was "can't find pane" (issue #793 follow up).
+    let src_float = match src {
+        Some(s) => floating_spec(app, s),
+        None => {
+            let w = &app.windows[active];
+            w.floating_focus.filter(|fi| *fi < w.floating.len()).map(|fi| (active, fi))
+        }
+    };
+    let dst_float = floating_spec(app, dst);
+    if src_float.is_some() || dst_float.is_some() {
+        let src_slot = match src_float {
+            Some(f) => PaneSlot::Float(f.0, f.1),
+            None => {
+                let (w, p) = match src {
+                    Some(s) => resolve_pane_spec(app, s)?,
+                    None => (active, app.windows[active].active_path.clone()),
+                };
+                PaneSlot::Tiled(w, p)
+            }
+        };
+        let dst_slot = match dst_float {
+            Some(f) => PaneSlot::Float(f.0, f.1),
+            None => {
+                let (w, p) = resolve_pane_spec(app, dst)?;
+                PaneSlot::Tiled(w, p)
+            }
+        };
+        return Ok(swap_with_floating(app, src_slot, dst_slot));
+    }
     let (sw, sp) = match src {
         Some(s) => resolve_pane_spec(app, s)?,
         None => (active, app.windows[active].active_path.clone()),

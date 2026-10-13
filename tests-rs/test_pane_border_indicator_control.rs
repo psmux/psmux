@@ -59,7 +59,7 @@ fn rejected_control_command(command: &str, args: &[&str]) -> String {
         None,
         false,
         None,
-        0,
+        0, false,
     ));
     let response = response_rx.recv().unwrap();
     assert!(response.starts_with("\u{0001}ERR\u{0001}"));
@@ -354,7 +354,7 @@ fn persistent_control_accepts_global_window_forms() {
             None,
             false,
             None,
-            0,
+            0, false,
         ));
         assert_eq!(response_rx.recv().unwrap(), "");
         assert_indicator_request(request_rx.recv().unwrap(), expected);

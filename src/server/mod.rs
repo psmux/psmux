@@ -1389,6 +1389,58 @@ pub(crate) fn set_pane_input_off(
     }
 }
 
+/// `respawn-pane` on the active window's floating pane `fi`: tmux's rules
+/// (refused while the process lives unless -k), a new process in the same
+/// pane id, size and place.
+pub(crate) fn respawn_floating_pane(
+    app: &mut AppState,
+    fi: usize,
+    workdir: Option<&str>,
+    kill: bool,
+    command: Option<&str>,
+    empty: bool,
+) -> io::Result<()> {
+    let idx = app.active_idx;
+    let tiled = crate::tree::pane_paths(&app.windows[idx].root).len();
+    let (inner_h, inner_w, id, dead) = {
+        let fp = &app.windows[idx].floating[fi];
+        (fp.h.saturating_sub(2).max(1), fp.w.saturating_sub(2).max(1), fp.id, fp.pane.dead)
+    };
+    if !dead && !kill {
+        return Err(io::Error::new(io::ErrorKind::Other, format!(
+            "pane {}:{}.{} still active",
+            app.session_name, app.win_display_index(idx), tiled + fi
+        )));
+    }
+    let removals = app.env_scopes.child_removals(&app.environment);
+    let new_pane = if empty {
+        crate::popup::create_empty_pane(inner_h, inner_w, id)
+    } else {
+        crate::popup::create_popup_pane(
+            command.unwrap_or(""),
+            workdir,
+            inner_h,
+            inner_w,
+            id,
+            &app.session_name,
+            &app.environment,
+            &removals,
+            app.host_colors.as_ref(),
+        )
+    };
+    let Some(new_pane) = new_pane else {
+        return Err(io::Error::new(io::ErrorKind::Other, "could not start the new process"));
+    };
+    let fp = &mut app.windows[idx].floating[fi];
+    let mut old = std::mem::replace(&mut fp.pane, new_pane);
+    if !fp.title.is_empty() {
+        fp.pane.title = fp.title.clone();
+        fp.pane.title_locked = true;
+    }
+    let _ = old.child.kill();
+    Ok(())
+}
+
 /// Record the pane focus notifications a change of active pane owes.
 ///
 /// tmux moves the active pane through `window_set_active_pane`, which calls
@@ -2522,7 +2574,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // The real focus (active window index, active pane id) while a
     // CtrlReq::Targeted request runs with its target focused; Some only
     // inside that one request's iteration (see server::temp_target).
-    let mut temp_focus_restore: Option<(usize, usize)> = None;
+    let mut temp_focus_restore: Option<temp_target::SavedFocus> = None;
 
     // ── Background spare shell spawner ──────────────────────────────────────
     //
@@ -3352,7 +3404,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::KillPaneById(pid) => {
                     if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                    unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                    // A floating %id closes that float, as `kill-pane` does
+                    // for the focused one. kill_pane_by_id walks the tiled
+                    // tree only, so `kill-pane -t <float>` used to do nothing
+                    // at exit 0 (issue #793 follow up).
+                    if let Some((wi, fi)) = crate::tree::find_floating_by_id(&app, pid) {
+                        let win = &mut app.windows[wi];
+                        let focused_id = win.floating_focus.and_then(|f| win.floating.get(f)).map(|fp| fp.id);
+                        let mut fp = win.floating.remove(fi);
+                        let _ = fp.pane.child.kill();
+                        win.floating_focus = match focused_id {
+                            Some(id) if id != pid => win.floating.iter().position(|f| f.id == id),
+                            Some(_) if !win.floating.is_empty() => Some(win.floating.len() - 1),
+                            _ => None,
+                        };
+                        state_dirty = true;
+                    } else {
+                        unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                    }
                 }
                 CtrlReq::CapturePane(resp, pane_id, preserve_trailing) => {
                     // Note: do NOT gate on is_active_pane_squelched here.
@@ -3545,6 +3614,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // shell command or a set-option -F value, where `%` is
                     // not strftime (issue #734 follow up).
                     let _ = resp.send(crate::format::expand_format_untimed(&fmt, &app));
+                }
+                CtrlReq::ExpandFormatNoTarget(fmt, resp) => {
+                    // Untimed, as tmux's format_single_from_target is.
+                    let text = crate::format::with_sessionless(true, || crate::format::expand_format_untimed(&fmt, &app));
+                    let _ = resp.send(text);
                 }
                 CtrlReq::ClientAttach(cid, pid) => {
                     // Registration and the attached counter are one idempotent
@@ -5707,7 +5781,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // `run_server`, so the server exited and every window and
                     // pane in the session died — while the client, which never
                     // read a reply, printed nothing and exited 0.
-                    match respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref(), empty, &env_sets) {
+                    // A focused floating pane (a -t naming one runs focused on
+                    // it) is respawned in place; respawn_active_pane knows the
+                    // tiled tree only, so `respawn-pane -k -t <float>` used to
+                    // be refused or hit the tiled pane (issue #793 follow up).
+                    let float_fi = {
+                        let w = &app.windows[app.active_idx];
+                        w.floating_focus.filter(|fi| *fi < w.floating.len())
+                    };
+                    let outcome = match float_fi {
+                        Some(fi) => respawn_floating_pane(&mut app, fi, workdir.as_deref(), kill, command.as_deref(), empty),
+                        None => respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref(), empty, &env_sets),
+                    };
+                    match outcome {
                         Ok(()) => {
                             hook_event = Some("after-respawn-pane");
                             let _ = resp.send(Ok(()));

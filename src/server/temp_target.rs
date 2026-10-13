@@ -64,18 +64,28 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
     }
     let pane_id: Option<usize> = match t.pane {
         Some(p) if t.pane_is_id => {
-            if crate::tree::find_pane_by_id_global(app, p).is_none() {
+            // A floating pane is a pane of its window too (tmux new-pane):
+            // a -t naming one runs the request with it focused.
+            if crate::tree::find_pane_by_id_global(app, p).is_none()
+                && crate::tree::find_floating_by_id(app, p).is_none()
+            {
                 return Err(format!("can't find pane: %{}", p));
             }
             Some(p)
         }
         Some(p) => {
             // Positional index within the target window, the order
-            // focus_pane_by_index and #{pane_index} use.
-            let root = &app.windows[idx].root;
-            match crate::tree::pane_paths(root).get(p).and_then(|path| crate::tree::get_active_pane_id(root, path)) {
+            // focus_pane_by_index and #{pane_index} use; floating panes
+            // follow the tiled ones (#767).
+            let win = &app.windows[idx];
+            let root = &win.root;
+            let paths = crate::tree::pane_paths(root);
+            match paths.get(p).and_then(|path| crate::tree::get_active_pane_id(root, path)) {
                 Some(id) => Some(id),
-                None => return Err(format!("can't find pane: {}", p)),
+                None => match p.checked_sub(paths.len()).and_then(|fi| win.floating.get(fi)) {
+                    Some(fp) => Some(fp.id),
+                    None => return Err(format!("can't find pane: {}", p)),
+                },
             }
         }
         None => None,
@@ -111,19 +121,37 @@ pub(crate) fn session_names_this_server(app: &AppState, s: &str) -> bool {
     false
 }
 
+/// The real focus a temporary -t focus replaced: the active window index, its
+/// active tiled pane id, and every window's focused floating pane (by pane
+/// id, since the request may close one and shift the others).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SavedFocus {
+    pub active_idx: usize,
+    pub pane_id: usize,
+    pub floating: Vec<(usize, Option<usize>)>,
+}
+
 /// Switch the focus to `t` for one request, remembering the real focus in
-/// `saved` (active window index, active pane id) for `restore_temp_focus`.
-/// On Err nothing has changed.
+/// `saved` for `restore_temp_focus`. On Err nothing has changed.
+///
+/// A floating pane target gets the input focus of its window
+/// (`floating_focus`), which is what every pane request already follows
+/// first; a tiled pane target takes that focus away for the request, or a
+/// focused float would have received a `send-keys -t %1` meant for %1
+/// (issue #793 follow up).
 pub(crate) fn apply_temp_target(
     app: &mut AppState,
-    saved: &mut Option<(usize, usize)>,
+    saved: &mut Option<SavedFocus>,
     t: &TempTarget,
 ) -> Result<(), String> {
     let r = resolve_temp_target(app, t)?;
     if saved.is_none() && app.active_idx < app.windows.len() {
         let w = &app.windows[app.active_idx];
         let pane_id = crate::tree::get_active_pane_id(&w.root, &w.active_path).unwrap_or(usize::MAX);
-        *saved = Some((app.active_idx, pane_id));
+        let floating = app.windows.iter()
+            .map(|w| (w.id, w.floating_focus.and_then(|fi| w.floating.get(fi)).map(|fp| fp.id)))
+            .collect();
+        *saved = Some(SavedFocus { active_idx: app.active_idx, pane_id, floating });
         // The REAL active window, so #{window_active} and the `*` flag are
         // not fooled by the temporary switch (issue #551).
         app.temp_focus_saved_active = Some(app.active_idx);
@@ -144,15 +172,20 @@ pub(crate) fn apply_temp_target(
 /// Put back the focus `apply_temp_target` saved, if any.  By pane id, not
 /// path, because the request may have restructured the tree (#71); if that
 /// pane is gone the window keeps whatever active pane the request left.
-pub(crate) fn restore_temp_focus(app: &mut AppState, saved: &mut Option<(usize, usize)>) {
-    if let Some((restore_idx, restore_pane_id)) = saved.take() {
-        if restore_idx < app.windows.len() {
-            app.active_idx = restore_idx;
-            let win = &mut app.windows[restore_idx];
-            if let Some(path) = crate::tree::find_path_by_id(&win.root, restore_pane_id) {
+pub(crate) fn restore_temp_focus(app: &mut AppState, saved: &mut Option<SavedFocus>) {
+    if let Some(s) = saved.take() {
+        if s.active_idx < app.windows.len() {
+            app.active_idx = s.active_idx;
+            let win = &mut app.windows[s.active_idx];
+            if let Some(path) = crate::tree::find_path_by_id(&win.root, s.pane_id) {
                 win.active_path = path;
             }
             app.last_window_area = win.area;
+        }
+        for (wid, float_id) in s.floating {
+            if let Some(w) = app.windows.iter_mut().find(|w| w.id == wid) {
+                w.floating_focus = float_id.and_then(|id| w.floating.iter().position(|fp| fp.id == id));
+            }
         }
         app.temp_focus_saved_active = None;
     }

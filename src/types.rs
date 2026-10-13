@@ -3564,6 +3564,10 @@ pub enum CtrlReq {
     /// `run-shell "helper --path '#{pane_current_path}'"` handed the helper that
     /// literal string.
     ExpandFormat(String, mpsc::Sender<String>),
+    /// Expand a format with no session, window or pane, as tmux does for a
+    /// CMD_FIND_CANFAIL command whose -t named nothing (issue #793 follow
+    /// up). Server variables and options still resolve.
+    ExpandFormatNoTarget(String, mpsc::Sender<String>),
     /// move-window. `src`/`dst` are RAW tmux target specs, resolved on the
     /// server against the live window list by `AppState::resolve_window_spec`.
     ///

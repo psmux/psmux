@@ -1247,9 +1247,27 @@ fn capture_target(app: &AppState, pane_id: Option<usize>) -> (usize, Vec<usize>)
 }
 
 pub fn capture_active_pane_text(app: &mut AppState, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
-    let (win_idx, path) = capture_target(app, pane_id);
-    let win = &mut app.windows[win_idx];
-    let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
+    // A floating pane: named by %id, or the focused one when the request has
+    // no id (a -t naming it by index runs with it focused). capture_target
+    // knows the tiled tree only, so a floating %id captured the ACTIVE pane
+    // (issue #793 follow up).
+    let float_at = match pane_id {
+        Some(pid) if crate::tree::find_pane_by_id_global(app, pid).is_none() => {
+            crate::tree::find_floating_by_id(app, pid)
+        }
+        Some(_) => None,
+        None => {
+            let w = &app.windows[app.active_idx];
+            w.floating_focus.filter(|fi| *fi < w.floating.len()).map(|fi| (app.active_idx, fi))
+        }
+    };
+    let p: &mut crate::types::Pane = if let Some((wi, fi)) = float_at {
+        &mut app.windows[wi].floating[fi].pane
+    } else {
+        let (win_idx, path) = capture_target(app, pane_id);
+        let win = &mut app.windows[win_idx];
+        match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) }
+    };
     let parser = match p.live_parser().lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let screen = parser.screen();
     let mut text = String::new();

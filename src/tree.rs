@@ -994,8 +994,36 @@ fn focus_pane_by_id_inner(app: &mut AppState, pid: usize, update_mru: bool) {
         let mut path = Vec::new();
         let mut found = None;
         rec(&w.root, &mut path, &mut found, pid);
-        if let Some(p) = found { app.active_idx = wi; let win = &mut app.windows[wi]; win.active_path = p; if update_mru { touch_mru(&mut win.pane_mru, pid); } return; }
+        if let Some(p) = found {
+            app.active_idx = wi;
+            let win = &mut app.windows[wi];
+            win.active_path = p;
+            // A tiled pane taking the focus takes it from a focused floating
+            // pane too: input follows `floating_focus` first, so leaving it
+            // set kept `select-pane -t %1` and every `-t %1` request on the
+            // float (issue #793 follow up).
+            win.floating_focus = None;
+            if update_mru { touch_mru(&mut win.pane_mru, pid); }
+            return;
+        }
     }
+    // A floating pane (tmux new-pane): focusing it is giving it the input
+    // focus in its window. Before, a floating %id matched nothing here and
+    // the request quietly ran on whatever was focused.
+    for (wi, w) in app.windows.iter_mut().enumerate() {
+        if let Some(fi) = w.floating.iter().position(|fp| fp.id == pid) {
+            w.floating_focus = Some(fi);
+            app.active_idx = wi;
+            return;
+        }
+    }
+}
+
+/// The window and index of floating pane `pid`, if it is one.
+pub fn find_floating_by_id(app: &AppState, pid: usize) -> Option<(usize, usize)> {
+    app.windows.iter().enumerate().find_map(|(wi, w)| {
+        w.floating.iter().position(|fp| fp.id == pid).map(|fi| (wi, fi))
+    })
 }
 
 pub fn focus_pane_by_index(app: &mut AppState, idx: usize) {

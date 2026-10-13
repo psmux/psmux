@@ -400,3 +400,66 @@ fn issue793_which_commands_check_or_can_fail() {
         assert!(!target_can_fail(c), "{c}");
     }
 }
+
+// Issue #793 follow up: a floating pane is a pane of its window for every
+// by-id request. It resolves, a -t naming it runs the request with it focused
+// (`floating_focus`, which input follows first), and a -t naming a TILED pane
+// takes that focus away for the request so a focused float cannot swallow it.
+
+#[test]
+fn issue793_floating_target_resolves_and_focuses_for_one_request() {
+    let mut app = app();
+    add_float(&mut app, 1, 9);
+    let t = TempTarget { pane: Some(9), pane_is_id: true, ..Default::default() };
+    assert_eq!(resolve_temp_target(&app, &t).unwrap().pane, Some(9));
+    // By index: window 1 has %4 at 0, the float at 1.
+    let t = TempTarget { win: Some(1), pane: Some(1), ..Default::default() };
+    assert_eq!(resolve_temp_target(&app, &t).unwrap().pane, Some(9));
+    let mut saved = None;
+    let t = TempTarget { pane: Some(9), pane_is_id: true, ..Default::default() };
+    apply_temp_target(&mut app, &mut saved, &t).unwrap();
+    assert_eq!((app.active_idx, app.windows[1].floating_focus), (1, Some(0)));
+    restore_temp_focus(&mut app, &mut saved);
+    assert_eq!((app.active_idx, app.windows[1].floating_focus), (0, None));
+    assert_eq!(active(&app), (0, 1));
+}
+
+#[test]
+fn issue793_tiled_target_is_not_swallowed_by_a_focused_float() {
+    let mut app = app();
+    add_float(&mut app, 0, 8);
+    app.windows[0].floating_focus = Some(0);
+    let mut saved = None;
+    let t = TempTarget { pane: Some(2), pane_is_id: true, ..Default::default() };
+    apply_temp_target(&mut app, &mut saved, &t).unwrap();
+    assert_eq!(app.windows[0].floating_focus, None, "the request runs on %2, not on the float");
+    assert_eq!(active(&app), (0, 2));
+    restore_temp_focus(&mut app, &mut saved);
+    assert_eq!(app.windows[0].floating_focus, Some(0), "the float gets its focus back");
+    assert_eq!(active(&app), (0, 1));
+}
+
+#[test]
+fn issue793_focus_pane_by_id_moves_floating_focus() {
+    let mut app = app();
+    add_float(&mut app, 1, 9);
+    crate::tree::focus_pane_by_id(&mut app, 9);
+    assert_eq!((app.active_idx, app.windows[1].floating_focus), (1, Some(0)));
+    crate::tree::focus_pane_by_id(&mut app, 4);
+    assert_eq!((app.active_idx, app.windows[1].floating_focus), (1, None));
+}
+
+#[test]
+fn issue793_swap_pane_trades_a_float_with_a_tiled_pane() {
+    let mut app = app();
+    add_float(&mut app, 0, 8);
+    assert_eq!(crate::window_ops::swap_pane_by_spec(&mut app, Some("%8"), "%2", true), Ok(true));
+    assert_eq!(app.windows[0].floating[0].id, 2);
+    assert_eq!(app.windows[0].floating[0].pane.id, 2);
+    assert!(crate::tree::find_pane_by_id_global(&app, 8).is_some(), "%8 is tiled now");
+    assert!(crate::tree::find_pane_by_id_global(&app, 2).is_none());
+    // And two floats in different windows trade places too.
+    add_float(&mut app, 1, 9);
+    assert_eq!(crate::window_ops::swap_pane_by_spec(&mut app, Some("%2"), "%9", true), Ok(true));
+    assert_eq!((app.windows[0].floating[0].id, app.windows[1].floating[0].id), (9, 2));
+}

@@ -197,6 +197,114 @@ fn expand_set_option_value(
     rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(value)
 }
 
+/// if-shell's arguments: whether `-F` is given, and the operands (condition,
+/// command, else command), a `{ ... }` block collapsed into one operand.
+fn if_shell_parts(args: &[&str]) -> (bool, Vec<String>) {
+    let format_mode = args.iter().any(|a| *a == "-F" || *a == "-bF" || *a == "-Fb");
+    let mut positional: Vec<String> = Vec::new();
+    let non_flags: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+    let mut j = 0;
+    while j < non_flags.len() {
+        if non_flags[j] == "{" {
+            // Everything between { and } is one command.
+            let mut depth = 1;
+            let mut block = Vec::new();
+            j += 1;
+            while j < non_flags.len() && depth > 0 {
+                if non_flags[j] == "{" { depth += 1; }
+                else if non_flags[j] == "}" { depth -= 1; if depth == 0 { break; } }
+                block.push(non_flags[j]);
+                j += 1;
+            }
+            positional.push(block.join(" "));
+        } else {
+            positional.push(non_flags[j].to_string());
+        }
+        j += 1;
+    }
+    (format_mode, positional)
+}
+
+/// Decide an if-shell condition: a `-F` format (true unless empty or "0") or
+/// a shell command (its exit status), both format expanded first like tmux
+/// (cmd-if-shell.c:86).
+///
+/// `target_failed`: the -t named nothing (CMD_FIND_CANFAIL), so tmux expands
+/// with an EMPTY target: `#{pane_id}` is "" and `-F '#{pane_id}'` is false.
+/// Expanding against the active pane took the true branch (issue #793 follow
+/// up). Server variables such as `#{pid}` still resolve.
+fn if_shell_condition(
+    tx: &TargetedSender,
+    condition: &str,
+    format_mode: bool,
+    target_failed: bool,
+    client: Option<crate::types::ClientSel>,
+) -> bool {
+    if format_mode {
+        let (rtx, rrx) = mpsc::channel::<String>();
+        if target_failed {
+            let _ = tx.send(CtrlReq::ExpandFormatNoTarget(condition.to_string(), rtx));
+        } else {
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None, client));
+        }
+        let expanded = rrx.recv().unwrap_or_default();
+        return !expanded.is_empty() && expanded != "0";
+    }
+    // The shell command is format expanded before it runs. It went to the
+    // shell verbatim once, so a guard such as `if-shell 'check #{pid}'` saw
+    // the literal `#{pid}` (issue #734 follow up).
+    let condition = expand_shell_command_for(tx, condition.to_string(), target_failed);
+    if condition == "true" || condition == "1" {
+        true
+    } else if condition == "false" || condition == "0" {
+        false
+    } else {
+        let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
+        let mut c = std::process::Command::new(&shell_prog);
+        for a in &shell_args { c.arg(a); }
+        c.arg(condition.as_str());
+        c.stdout(std::process::Stdio::null());
+        c.stderr(std::process::Stdio::null());
+        { use crate::platform::HideWindowCommandExt; c.hide_window(); }
+        c.status().map(|s| s.success()).unwrap_or(false)
+    }
+}
+
+/// run-shell's shell command: everything but its own `-b`, a balanced pair of
+/// outer quotes removed (#402), not yet format expanded.
+fn run_shell_command_text(args: &[&str]) -> (bool, String) {
+    let background = args.iter().any(|a| *a == "-b");
+    let cmd_parts: Vec<&str> = args.iter().filter(|a| **a != "-b").copied().collect();
+    let shell_cmd = cmd_parts.join(" ");
+    let trimmed = shell_cmd.trim();
+    let shell_cmd = if trimmed.len() >= 2
+        && ((trimmed.starts_with('\'') && trimmed.ends_with('\''))
+            || (trimmed.starts_with('"') && trimmed.ends_with('"')))
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    };
+    (background, shell_cmd)
+}
+
+/// `expand_shell_command`, or with no session, window or pane when the
+/// command's -t named nothing (tmux CMD_FIND_CANFAIL runs it with an empty
+/// target; issue #793 follow up).
+fn expand_shell_command_for(tx: &TargetedSender, cmd: String, target_failed: bool) -> String {
+    if !target_failed {
+        return expand_shell_command(tx, cmd);
+    }
+    if !cmd.contains('#') {
+        return cmd;
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    if tx.send(CtrlReq::ExpandFormatNoTarget(cmd.clone(), rtx)).is_err() {
+        return cmd;
+    }
+    rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(cmd)
+}
+
 /// Format expand the shell command of if-shell or run-shell before it runs.
 ///
 /// tmux expands it unconditionally (cmd-if-shell.c:86
@@ -1090,8 +1198,34 @@ struct ParsedNewPane {
     detached: bool,     // -d
     print: bool,        // -P
     empty: bool,        // -E (empty pane, no command)
+    format: Option<String>, // -F (the -P template)
 }
 
+/// What `new-pane -P` prints: the new pane's `%id`, or `-F`'s format expanded
+/// for that pane (tmux cmd-split-window.c expands the -P template against the
+/// new pane). `send` delivers the expansion request to the server loop.
+fn new_pane_print_text(id_text: String, format: Option<&str>, send: impl Fn(CtrlReq)) -> String {
+    let Some(fmt) = format else { return id_text };
+    let Some(id) = id_text.trim().strip_prefix('%').and_then(|n| n.parse::<usize>().ok()) else {
+        return id_text;
+    };
+    let (rtx, rrx) = mpsc::channel::<String>();
+    send(CtrlReq::DisplayMessageById(rtx, fmt.to_string(), id, false, None, None));
+    rrx.recv_timeout(Duration::from_secs(2)).unwrap_or(id_text)
+}
+
+/// tmux's new-pane flags that take a value (cmd-split-window.c,
+/// "bB:c:de:EfF:hIkl:LMm:Op:PR:s:S:t:T:vWx:X:y:Y:Z").
+const NEW_PANE_VALUE_FLAGS: &str = "BceFlmpRsStTxXyY";
+
+/// Parse `new-pane` the way tmux's getopt does: options up to the first
+/// operand or `--`, every operand after that is the command.
+///
+/// Issue #793 follow up: the old scan matched a handful of known flags
+/// anywhere and joined everything else into the command, so the value of a
+/// flag it did not know became the command. `new-pane -P -F '#{pane_id}'`
+/// started `pwsh -Command "-F #{pane_id}"`, which exited at once and took
+/// the floating pane with it, after -P had already printed its id.
 fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     let mut detached = false;
     let mut print = false;
@@ -1099,49 +1233,75 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     let mut border = String::new();
     let mut title: Option<String> = None;
     let mut start_dir: Option<String> = None;
+    let mut format: Option<String> = None;
     // x/y = POSITION (from -X/-Y); w/h = SIZE (from -x/-y). tmux ordering.
     let (mut x, mut y, mut w, mut h): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) = (None, None, None, None);
-    let mut skip = std::collections::HashSet::new();
-    // `--` ends option parsing; everything after it is the command argv.
-    let mut raw_from: Option<usize> = None;
+    // Where the command starts, and whether a `--` introduced it.
+    let mut cmd_from = args.len();
+    let mut after_marker = false;
     let mut i = 0;
-    while i < args.len() {
-        match args[i] {
-            "--" => { skip.insert(i); raw_from = Some(i + 1); }
-            "-d" => { skip.insert(i); detached = true; }
-            "-P" => { skip.insert(i); print = true; }
-            "-E" => { skip.insert(i); empty = true; }
-            "-B" => { if let Some(v) = args.get(i+1) { border = v.trim_matches('"').to_string(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-T" => { if let Some(v) = args.get(i+1) { title = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-c" => { if let Some(v) = args.get(i+1) { start_dir = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-x" => { if let Some(v) = args.get(i+1) { w = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-y" => { if let Some(v) = args.get(i+1) { h = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-X" => { if let Some(v) = args.get(i+1) { x = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-Y" => { if let Some(v) = args.get(i+1) { y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            _ => {}
+    'opts: while i < args.len() {
+        let a = args[i];
+        if a == "--" {
+            cmd_from = i + 1;
+            after_marker = true;
+            break;
         }
-        if raw_from.is_some() { break; }
+        if !a.starts_with('-') || a.len() < 2 {
+            cmd_from = i;
+            break;
+        }
+        let flags: Vec<char> = a[1..].chars().collect();
+        let mut j = 0;
+        while j < flags.len() {
+            let f = flags[j];
+            if NEW_PANE_VALUE_FLAGS.contains(f) {
+                // The value is the rest of this token, or the next argument.
+                let rest: String = flags[j + 1..].iter().collect();
+                let value: Option<String> = if !rest.is_empty() {
+                    Some(rest)
+                } else {
+                    i += 1;
+                    args.get(i).map(|v| v.to_string())
+                };
+                let v = value.unwrap_or_default();
+                let v = v.trim_matches('"').to_string();
+                match f {
+                    'B' => border = v,
+                    'T' => title = Some(v),
+                    'c' => start_dir = Some(v),
+                    'F' => format = Some(v),
+                    'x' => w = v.parse().ok(),
+                    'y' => h = v.parse().ok(),
+                    'X' => x = v.parse().ok(),
+                    'Y' => y = v.parse().ok(),
+                    _ => {}
+                }
+                i += 1;
+                continue 'opts;
+            }
+            match f {
+                'd' => detached = true,
+                'P' => print = true,
+                'E' => empty = true,
+                _ => {}
+            }
+            j += 1;
+        }
         i += 1;
     }
+    let tail = &args[cmd_from.min(args.len())..];
     // tmux parity (#582): a multi-token argv after `--` is exec'd directly
     // (tmux execvp), so keep the marker plus token boundaries for
     // build_command's argv decoder. A single token keeps tmux's string
-    // semantics (shell route).
-    let command = if let Some(start) = raw_from {
-        let tail = &args[start.min(args.len())..];
-        if tail.len() > 1 {
-            format!("-- {}", requote_command_tail(tail))
-        } else {
-            tail.join(" ")
-        }
+    // semantics (shell route). Operands without `--` keep the string form
+    // they always had.
+    let command = if after_marker && tail.len() > 1 {
+        format!("-- {}", requote_command_tail(tail))
     } else {
-        args.iter().enumerate()
-            .filter(|(idx, _)| !skip.contains(idx))
-            .map(|(_, a)| *a)
-            .collect::<Vec<&str>>()
-            .join(" ")
+        tail.join(" ")
     };
-    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print, empty }
+    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print, empty, format }
 }
 
 /// The request for `list-clients [-F format] [-f filter]` (issue #724).
@@ -1761,6 +1921,9 @@ if control_echo || control_noecho {
         // and nothing is mutated.
         // The validated target every request of this command carries.
         let mut ctrl_command_target: Option<crate::types::TempTarget> = None;
+        // A CMD_FIND_CANFAIL command whose -t named nothing (see the one shot
+        // route's `target_failed`).
+        let mut ctrl_target_failed = false;
         // Issue #793: a `sess:...` target naming another session is
         // "can't find session" here, never this server's own panes.
         let ctrl_target_session = explicit_target_session(cmd_name, ctrl_raw_target.as_deref());
@@ -1873,7 +2036,7 @@ if control_echo || control_noecho {
                         }
                         Ok(_) => {}
                         // tmux CMD_FIND_CANFAIL: the command runs, with no target.
-                        Err(_) if target_can_fail(cmd_name) => {}
+                        Err(_) if target_can_fail(cmd_name) => { ctrl_target_failed = true; }
                         Err(e) => focus_err = Some(e),
                     }
                 }
@@ -1892,7 +2055,7 @@ if control_echo || control_noecho {
             let dispatched = dispatch_control_command(
                 cmd_name, &filtered_args, &targeted_tx, resp_s,
                 ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
-                ctrl_client_id,
+                ctrl_client_id, ctrl_target_failed,
             );
             // Collect the response BEFORE acquiring the write lock, so the
             // notification thread can still write while we wait.
@@ -2293,6 +2456,9 @@ let selectp_owns_target = matches!(cmd, "select-pane" | "selectp");
 // The validated target every request of this command carries (None: the
 // command has no -t, or owns it, and acts on the real focus).
 let mut command_target: Option<crate::types::TempTarget> = None;
+// A CMD_FIND_CANFAIL command whose -t named nothing: tmux runs it with an
+// empty target, so its formats expand with no session, window or pane.
+let mut target_failed = false;
 // Issue #793: a `sess:...` target naming another session is tmux's "can't
 // find session", checked before the command touches anything.
 let target_session = explicit_target_session(cmd, raw_target.as_deref());
@@ -2392,6 +2558,7 @@ if is_focus_cmd {
             // ... 'display -p yes'` as TARGET %99 plus the command, and the
             // branch's display-message would otherwise be refused for %99.
             Err(_) if target_can_fail(cmd) => {
+                target_failed = true;
                 global_target_win = None;
                 global_target_win_is_id = false;
                 global_target_win_name = None;
@@ -4917,6 +5084,7 @@ match cmd {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx) });
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                let text = new_pane_print_text(text, p.format.as_deref(), |r| { let _ = tx.send(r); });
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
             }
@@ -5136,7 +5304,6 @@ match cmd {
         let _ = tx.send(CtrlReq::CommandPrompt(initial));
     }
     "run-shell" | "run" => {
-        let background = args.iter().any(|a| *a == "-b");
         // Only strip run-shell's OWN "-b" flag. A blind `!a.starts_with('-')`
         // filter here also deleted flags belonging to the wrapped shell
         // command itself (e.g. `run-shell psmux new-window -n X -c 'dir'`
@@ -5147,8 +5314,6 @@ match cmd {
         // arm directly, while the stored-bind path (fixed in eb5bee1) goes
         // through commands.rs::execute_command_string_single, which already
         // does an exact "-b" match instead of a starts_with prefix filter.
-        let cmd_parts: Vec<&str> = args.iter().filter(|a| **a != "-b").copied().collect();
-        let shell_cmd = cmd_parts.join(" ");
         // Strip only a BALANCED pair of outer wrapping quotes, e.g.
         // run-shell "'~/plugins/foo.tmux'" -> ~/plugins/foo.tmux.
         // A blind trim_matches here was the root cause of #402: it also removed
@@ -5156,21 +5321,13 @@ match cmd {
         // quoted (e.g. `psmux new-window -c 'C:\path'` or `pwsh -Command "..."`),
         // producing an unterminated-string parse error in the spawned shell so the
         // command silently never ran. Only unwrap when both ends match the same quote.
-        let trimmed = shell_cmd.trim();
-        let shell_cmd = if trimmed.len() >= 2
-            && ((trimmed.starts_with('\'') && trimmed.ends_with('\''))
-                || (trimmed.starts_with('"') && trimmed.ends_with('"')))
-        {
-            trimmed[1..trimmed.len() - 1].to_string()
-        } else {
-            trimmed.to_string()
-        };
+        let (background, shell_cmd) = run_shell_command_text(&args);
         // Expand formats against live server state (tmux parity). Without
         // this, `run-shell "helper '#{pane_id}'"` passed the helper the
         // literal text `#{pane_id}`; with `-b` swallowing the spawn result, the
         // bind then failed completely silently. Every `#` sequence counts, not
         // only `#{`: tmux turns `##` into `#` and `#S` into the session name.
-        let shell_cmd = expand_shell_command(tx, shell_cmd);
+        let shell_cmd = expand_shell_command_for(tx, shell_cmd, target_failed);
         // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
         if shell_cmd.is_empty() {
@@ -5253,69 +5410,14 @@ match cmd {
         }
     }
     "if-shell" | "if" => {
-        let format_mode = args.iter().any(|a| *a == "-F" || *a == "-bF" || *a == "-Fb");
-        // Collect positional args (skip flags like -b, -F, -bF),
-        // collapsing brace blocks { ... } into single tokens.
-        let mut positional: Vec<String> = Vec::new();
-        {
-            let non_flags: Vec<&str> = args.iter()
-                .filter(|a| !a.starts_with('-'))
-                .copied()
-                .collect();
-            let mut j = 0;
-            while j < non_flags.len() {
-                if non_flags[j] == "{" {
-                    // Collect everything between { and } as a single command
-                    let mut depth = 1;
-                    let mut block = Vec::new();
-                    j += 1;
-                    while j < non_flags.len() && depth > 0 {
-                        if non_flags[j] == "{" { depth += 1; }
-                        else if non_flags[j] == "}" { depth -= 1; if depth == 0 { break; } }
-                        block.push(non_flags[j]);
-                        j += 1;
-                    }
-                    positional.push(block.join(" "));
-                } else {
-                    positional.push(non_flags[j].to_string());
-                }
-                j += 1;
-            }
-        }
+        let (format_mode, positional) = if_shell_parts(&args);
         if positional.len() >= 2 {
             let condition = &positional[0];
             let true_cmd = &positional[1];
             let false_cmd = positional.get(2);
-            let success = if format_mode {
-                let (rtx, rrx) = std::sync::mpsc::channel::<String>();
-                // An attached client's own if-shell -F is about that client.
-                let client = persistent.then_some(crate::types::ClientSel::Id(client_id));
-                let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None, client));
-                let expanded = rrx.recv().unwrap_or_default();
-                !expanded.is_empty() && expanded != "0"
-            } else {
-                // The shell command is format expanded before it runs, like
-                // tmux (cmd-if-shell.c:86). It went to the shell verbatim, so
-                // a guard such as `if-shell 'check #{pid}'` saw the literal
-                // `#{pid}` while `if-shell -F` and run-shell expanded theirs
-                // (issue #734 follow up).
-                let condition = expand_shell_command(tx, condition.to_string());
-                if condition == "true" || condition == "1" {
-                    true
-                } else if condition == "false" || condition == "0" {
-                    false
-                } else {
-                    // Use resolve_run_shell for consistent shell fallback
-                    let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
-                    let mut c = std::process::Command::new(&shell_prog);
-                    for a in &shell_args { c.arg(a); }
-                    c.arg(condition.as_str());
-                    c.stdout(std::process::Stdio::null());
-                    c.stderr(std::process::Stdio::null());
-                    { use crate::platform::HideWindowCommandExt; c.hide_window(); }
-                    c.status().map(|s| s.success()).unwrap_or(false)
-                }
-            };
+            // An attached client's own if-shell -F is about that client.
+            let client = persistent.then_some(crate::types::ClientSel::Id(client_id));
+            let success = if_shell_condition(tx, condition, format_mode, target_failed, client);
             let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
             if let Some(chosen) = cmd_to_run {
                 if !pending_chain.is_empty() {
@@ -5818,6 +5920,7 @@ fn dispatch_control_command(
     pane_is_id: bool,
     raw_target: Option<&str>,
     client_id: u64,
+    target_failed: bool,
 ) -> bool {
     match cmd {
         "list-windows" | "lsw" => {
@@ -5893,7 +5996,10 @@ fn dispatch_control_command(
             if p.print {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx) });
-                if let Ok(text) = rrx.recv_timeout(Duration::from_secs(2)) { let _ = resp_tx.send(text); }
+                if let Ok(text) = rrx.recv_timeout(Duration::from_secs(2)) {
+                    let text = new_pane_print_text(text, p.format.as_deref(), |r| { let _ = tx.send(r); });
+                    let _ = resp_tx.send(text);
+                }
                 true
             } else {
                 let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None });
@@ -7056,6 +7162,141 @@ fn dispatch_control_command(
             let _ = resp_tx.send(String::new());
             true
         }
+        // run-shell, if-shell, swap-window and join-pane were "unknown
+        // command" on this route (issue #793 follow up). Their output and
+        // errors use the same %begin/%end/%error block as every command.
+        "run-shell" | "run" => {
+            let (background, shell_cmd) = run_shell_command_text(args);
+            let shell_cmd = expand_shell_command_for(tx, shell_cmd, target_failed);
+            let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
+            if shell_cmd.is_empty() {
+                let _ = resp_tx.send("\u{0001}ERR\u{0001}usage: run-shell [-b] shell-command".to_string());
+                return true;
+            }
+            let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+            if background {
+                // -b does not wait; only a spawn failure is reported.
+                match c.spawn() {
+                    Ok(_) => { let _ = resp_tx.send(String::new()); }
+                    Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}: {}", shell_cmd, e)); }
+                }
+            } else {
+                match c.output() {
+                    Ok(out) => { let _ = resp_tx.send(run_shell_output_text(&out)); }
+                    Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}", e)); }
+                }
+            }
+            true
+        }
+        "if-shell" | "if" => {
+            let (format_mode, positional) = if_shell_parts(args);
+            if positional.len() < 2 {
+                let _ = resp_tx.send("\u{0001}ERR\u{0001}usage: if-shell [-bF] [-t target-pane] shell-command command [command]".to_string());
+                return true;
+            }
+            let client = Some(crate::types::ClientSel::Id(client_id));
+            let success = if_shell_condition(tx, &positional[0], format_mode, target_failed, client);
+            let chosen = if success { positional.get(1) } else { positional.get(2) };
+            let Some(chosen) = chosen else {
+                let _ = resp_tx.send(String::new());
+                return true;
+            };
+            // tmux inserts the branch right after the if-shell item
+            // (cmd-if-shell.c cmdq_insert_after), and a control client sees
+            // its output inside the same guard. Each command of the branch
+            // runs through this dispatcher, its output collected in order; the
+            // first error ends the branch and becomes the block's %error.
+            let mut body = String::new();
+            for sub in crate::config::split_chained_commands_pub(chosen) {
+                let toks = parse_command_line(&sub);
+                let Some(name) = toks.first().map(|s| s.as_str()) else { continue };
+                let sub_args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
+                let sub_raw = sub_args.windows(2).find(|w| w[0] == "-t").map(|w| w[1]);
+                let pt = sub_raw.map(parse_target).unwrap_or_default();
+                let filtered = without_outer_target(name, &sub_args);
+                // The branch's own -t is resolved like any command's: a target
+                // naming nothing is its error, and a good one is what its
+                // requests run against.
+                let mut sub_target: Option<crate::types::TempTarget> = None;
+                let mut sub_failed = false;
+                if sub_raw.is_some() {
+                    let mut spec = crate::types::TempTarget::from_parsed(&pt);
+                    spec.session = explicit_target_session(name, sub_raw);
+                    spec.pane_check_only = pt.pane.is_some() && pane_checked_not_focused(name, pt.pane_is_id);
+                    match validate_target(tx.inner, spec) {
+                        Ok(r) if r.win.is_some() || r.pane.is_some() => sub_target = Some(r),
+                        Ok(_) => {}
+                        Err(_) if target_can_fail(name) => sub_failed = true,
+                        Err(e) => {
+                            body.push_str(&e);
+                            let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", body));
+                            return true;
+                        }
+                    }
+                }
+                let sub_tx = TargetedSender::new(tx.inner, sub_target);
+                let (stx, srx) = mpsc::channel::<String>();
+                let answered = dispatch_control_command(
+                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, sub_failed,
+                );
+                if !answered { continue; }
+                let text = srx.recv_timeout(Duration::from_secs(15)).unwrap_or_default();
+                if let Some(err) = text.strip_prefix("\u{0001}ERR\u{0001}") {
+                    body.push_str(err);
+                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", body));
+                    return true;
+                }
+                body.push_str(&text);
+                if !text.is_empty() && !text.ends_with('\n') { body.push('\n'); }
+            }
+            let _ = resp_tx.send(body.trim_end_matches('\n').to_string());
+            true
+        }
+        "swap-window" | "swapw" => {
+            let src = flag_value(args, "-s");
+            // The -t was peeled off into raw_target; a bare operand is the
+            // legacy destination form, as on the one shot route.
+            let dst = raw_target.map(|s| s.to_string()).or_else(|| {
+                args.iter().enumerate()
+                    .find(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
+                    .map(|(_, a)| a.to_string())
+            });
+            let Some(dst) = dst else {
+                let _ = resp_tx.send("\u{0001}ERR\u{0001}can't find window: ".to_string());
+                return true;
+            };
+            let (sw_s, sw_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::SwapWindow { src, dst, detach: args.iter().any(|a| *a == "-d"), resp: sw_s });
+            match sw_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
+            true
+        }
+        "join-pane" | "joinp" | "move-pane" | "movep" => {
+            let src_raw = flag_value(args, "-s");
+            let src = src_raw.as_deref()
+                .map(|sv| crate::types::TempTarget::from_parsed(&parse_target(sv)))
+                .unwrap_or_default();
+            let dst = raw_target
+                .map(|t| crate::types::TempTarget::from_parsed(&parse_target(t)))
+                .unwrap_or_default();
+            let (jp_s, jp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::JoinPane {
+                src_raw,
+                src,
+                dst,
+                horizontal: args.contains(&"-h"),
+                detach: args.contains(&"-d"),
+                before: args.contains(&"-b"),
+                resp: jp_s,
+            });
+            match jp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
+            true
+        }
         "run-command" | "runcmd" => {
             let full_cmd = args.join(" ");
             let (rtx, rrx) = mpsc::channel::<String>();
@@ -7114,6 +7355,10 @@ fn dispatch_control_command(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue793_followup.rs"]
+mod tests_issue793_followup;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue476_bindkey_quoting.rs"]

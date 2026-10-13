@@ -480,6 +480,13 @@ pub fn create_popup_pane(
 
     let mut cmd_builder = if command.trim().is_empty() {
         crate::pane::build_command(None, true, false)
+    } else if command.trim_start().starts_with("-- ") {
+        // The `-- prog args...` argv form (#582) that new-pane's parser
+        // emits for a multi-token command after `--`. Handed to
+        // `pwsh -Command` it was the string "-- cmd.exe /q /k", which pwsh
+        // rejects at once, so the floating pane died as soon as it was made
+        // (issue #793 follow up). The tiled panes' builder decodes it.
+        crate::pane::build_command(Some(command), true, false)
     } else {
         let mut builder = portable_pty::CommandBuilder::new(
             if cfg!(windows) { "pwsh" } else { "sh" },
