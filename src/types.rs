@@ -1601,10 +1601,11 @@ pub struct AppState {
     /// The pane `data_version` the snapshot was last re-cloned at, so the
     /// automatic refresh only rebuilds it when the pane printed something.
     pub copy_refresh_version: u64,
-    /// Where the cursor sits in the copy-mode search or goto-line prompt,
-    /// counted in characters back from the end of the input, so text typed
-    /// at the end (the common case) needs no bookkeeping. tmux keeps it as
-    /// `prompt_index` (prompt.c) (discussion #694).
+    /// Where the cursor sits in the copy-mode search or goto-line prompt, or in
+    /// a prompt opened by a copy mode binding, counted in characters back from
+    /// the end of the input, so text typed at the end (the common case) needs
+    /// no bookkeeping. tmux keeps it as `prompt_index` (prompt.c) (discussion
+    /// #694).
     pub copy_prompt_back: usize,
     /// Earlier copy-mode searches, oldest first, for Up and Down in the search
     /// prompt (tmux's per type prompt history, prompt.c `prompt_up_history`).

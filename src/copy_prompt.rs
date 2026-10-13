@@ -41,6 +41,12 @@ pub struct CopyCommandPrompt {
     pub key: bool,
     /// `-e`: backspace on an empty prompt cancels it.
     pub bspace_exit: bool,
+    /// `-T search`: Up and Down walk the copy mode search history and Enter
+    /// adds to it. tmux keeps one history per prompt type
+    /// (status_prompt_up_history, status.c:1761), and its own `/` and `?` are
+    /// `command-prompt -T search` (key-bindings.c:597, :610), so this prompt
+    /// shares the history psmux's built in search prompt keeps.
+    pub search_history: bool,
 }
 
 impl CopyCommandPrompt {
@@ -108,6 +114,8 @@ pub struct PromptArgs {
     pub key: bool,
     pub bspace_exit: bool,
     pub literal: bool,
+    /// `-T`: the prompt type.
+    pub prompt_type: Option<String>,
 }
 
 /// Parse everything after the command name.
@@ -160,6 +168,7 @@ pub fn parse_args(args: &str) -> PromptArgs {
             match flag {
                 'p' => pa.prompts = value,
                 'I' => pa.inputs = value,
+                'T' => pa.prompt_type = value,
                 _ => {}
             }
             break;
@@ -276,6 +285,7 @@ pub fn build(app: &AppState, args: &str) -> CopyCommandPrompt {
         numeric: !pa.single && pa.numeric,
         key: !pa.single && !pa.numeric && pa.key,
         bspace_exit: pa.bspace_exit,
+        search_history: pa.prompt_type.as_deref() == Some("search"),
     }
 }
 
@@ -301,6 +311,11 @@ pub fn open(app: &mut AppState, args: &str) {
     // A pending count stays for the command the prompt runs (`3f` then `x`
     // jumps to the third x): input::run_copy_mode_command_line spends it.
     app.mode = Mode::CopyCommandPrompt(Box::new(prompt));
+    // The cursor starts at the end, after any -I text (status_prompt_set sets
+    // prompt_index to the length of the input, status.c:720), and Up starts
+    // from the newest history entry (prompt_hindex is cleared, :727).
+    app.copy_prompt_back = 0;
+    app.copy_search_history_pos = None;
     refresh(app);
 }
 
@@ -336,6 +351,8 @@ pub enum Fed {
 fn close(app: &mut AppState) {
     app.mode = Mode::CopyMode;
     app.status_message = None;
+    app.copy_prompt_back = 0;
+    app.copy_search_history_pos = None;
 }
 
 /// Feed one key to the open prompt.
@@ -369,30 +386,66 @@ pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
         accept(app);
         return Fed::Reprocess;
     }
+    // Everything else is line editing, through the editor the other prompts
+    // use, so the cursor moves and keys like C-a, C-k and C-t work here too.
+    // tmux runs this prompt's keys through the same switch as any other
+    // prompt's (process_key, status.c:1483). Only -k, -N and -1 leave
+    // before it (status.c:1438 to :1470).
     match key {
         PromptKey::Char(c) => {
-            p.input.push(c);
             if p.single {
+                p.input.push(c);
                 accept(app);
             } else {
+                crate::copy_mode::prompt_insert(&mut p.input, app.copy_prompt_back, c.encode_utf8(&mut [0; 4]));
                 refresh(app);
             }
         }
-        PromptKey::Enter => accept(app),
+        PromptKey::Enter => {
+            // Enter adds a non empty line to the type's history before the
+            // command runs (status.c:1664 to :1666).
+            if p.search_history {
+                let typed = p.input.clone();
+                crate::copy_mode::remember_search(app, &typed);
+            }
+            accept(app);
+        }
         PromptKey::Escape | PromptKey::Named("C-c") | PromptKey::Named("C-g") => close(app),
         PromptKey::Backspace => {
+            // tmux closes a -e prompt on BSpace only when nothing is typed,
+            // wherever the cursor is (status.c:1520).
             if p.input.is_empty() && p.bspace_exit {
                 close(app);
             } else {
-                p.input.pop();
+                crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back, "bspace");
                 refresh(app);
             }
         }
-        PromptKey::Named("C-u") => {
-            p.input.clear();
+        // A -1 prompt takes only a key that answers it. The prompt is still
+        // redrawn: the server clears the status line before it hands a key
+        // on, so a key that changes nothing would otherwise take the prompt
+        // off the screen while it stays open.
+        PromptKey::Named(_) if p.single => refresh(app),
+        // Up and Down (and C-p, C-n) recall history. Only a -T search prompt
+        // has one here; for any other type they change nothing. Every key
+        // here redraws the prompt, for the same reason as above.
+        PromptKey::Named(name) => {
+            let up = match crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back, name) {
+                crate::copy_mode::PromptEdit::HistoryUp => Some(true),
+                crate::copy_mode::PromptEdit::HistoryDown => Some(false),
+                _ => None,
+            };
+            if let (Some(up), true) = (up, p.search_history) {
+                let mut pos = app.copy_search_history_pos;
+                if let Some(text) = crate::copy_mode::search_history_step(&app.copy_search_history, &mut pos, up) {
+                    // A recalled line puts the cursor at its end (status.c:1633).
+                    p.input = text;
+                    app.copy_prompt_back = 0;
+                }
+                app.copy_search_history_pos = pos;
+            }
             refresh(app);
         }
-        PromptKey::Named(_) => {}
     }
     Fed::Consumed
 }
@@ -406,6 +459,11 @@ fn accept(app: &mut AppState) {
     p.current += 1;
     if p.current < p.prompts.len() {
         p.input = p.prompts[p.current].1.clone();
+        // The next prompt also starts with the cursor at its end and its
+        // history from the newest entry (status_prompt_update, status.c:791
+        // and :794).
+        app.copy_prompt_back = 0;
+        app.copy_search_history_pos = None;
         refresh(app);
         return;
     }

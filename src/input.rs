@@ -1209,6 +1209,13 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Backspace => PromptKey::Backspace,
                 KeyCode::Char(c) if ctrl => { named = format!("C-{}", c.to_ascii_lowercase()); PromptKey::Named(&named) }
                 KeyCode::Char(c) => PromptKey::Char(c),
+                KeyCode::Left => PromptKey::Named("left"),
+                KeyCode::Right => PromptKey::Named("right"),
+                KeyCode::Home => PromptKey::Named("home"),
+                KeyCode::End => PromptKey::Named("end"),
+                KeyCode::Delete => PromptKey::Named("delete"),
+                KeyCode::Up => PromptKey::Named("up"),
+                KeyCode::Down => PromptKey::Named("down"),
                 _ => PromptKey::Named(""),
             };
             if feed(app, pk) == Fed::Reprocess {

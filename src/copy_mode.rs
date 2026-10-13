@@ -385,9 +385,6 @@ pub fn copy_prompt_text(mode: &Mode) -> Option<String> {
 /// text outgrows the line: tmux draws the label at `ax`, then the input from
 /// `ax + start` with its own offset (status.c:922 to :948), so the label stays
 /// put and the user can still see which prompt is open.
-///
-/// The copy-mode command prompt has no editor: its keys only append
-/// (`copy_prompt::feed`), so its cursor is always at the end.
 pub fn copy_prompt_cursor(mode: &Mode, back: usize) -> Option<(usize, usize)> {
     let text = copy_prompt_text(mode)?;
     let (label_len, back) = match mode {
@@ -398,7 +395,12 @@ pub fn copy_prompt_cursor(mode: &Mode, back: usize) -> Option<(usize, usize)> {
             // cursor is clamped to the text that is actually there.
             back.min(input.chars().count()),
         ),
-        Mode::CopyCommandPrompt(p) => (text.len() - p.input.len(), 0),
+        // A prompt opened by a copy mode binding edits through the same
+        // editor (`copy_prompt::feed`) and keeps its cursor in the same field.
+        Mode::CopyCommandPrompt(p) => (
+            text.len() - p.input.len(),
+            back.min(p.input.chars().count()),
+        ),
         _ => (text.len(), 0),
     };
     let mut at = text.len();
@@ -2904,3 +2906,7 @@ mod test_issue753_copy_redraw;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue785_prompt_transpose.rs"]
 mod test_issue785_prompt_transpose;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue789_copy_prompt_editor.rs"]
+mod test_issue789_copy_prompt_editor;

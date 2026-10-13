@@ -86,9 +86,10 @@ fn a_mode_with_no_prompt_has_no_cursor() {
 }
 
 #[test]
-fn the_copy_mode_command_prompt_ignores_back() {
-    // `copy_prompt::feed` only ever appends, so that prompt's cursor is the
-    // end of the text whatever the search prompt left in `copy_prompt_back`.
+fn the_copy_mode_command_prompt_follows_back() {
+    // `copy_prompt::feed` edits through the shared editor and keeps its
+    // cursor in `copy_prompt_back`, like the search and goto line prompts,
+    // so the cursor is drawn where the editor left it (#789).
     let p = crate::copy_prompt::CopyCommandPrompt {
         prompts: vec![("(goto line) ".to_string(), String::new())],
         current: 0,
@@ -99,11 +100,13 @@ fn the_copy_mode_command_prompt_ignores_back() {
         numeric: false,
         key: false,
         bspace_exit: false,
+        search_history: false,
     };
     let m = Mode::CopyCommandPrompt(Box::new(p));
     assert_eq!(copy_prompt_text(&m).as_deref(), Some("(goto line) 7"));
     assert_eq!(copy_prompt_cursor(&m, 0), Some((12, 13)));
-    assert_eq!(copy_prompt_cursor(&m, 5), Some((12, 13)), "a stale count cannot move it");
+    assert_eq!(copy_prompt_cursor(&m, 1), Some((12, 12)), "one back is before the 7");
+    assert_eq!(copy_prompt_cursor(&m, 5), Some((12, 12)), "a stale count is clamped to the input");
 }
 
 #[test]
