@@ -75,6 +75,7 @@ fn rig_with_float(name: &str, border: &str) -> Option<(AppState, usize, usize)> 
         id: fid,
         title: String::new(),
         position: None,
+        styles: Default::default(),
     });
     win.floating_focus = Some(0);
     Some((app, tiled_id, fid))

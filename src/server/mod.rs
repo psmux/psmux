@@ -3253,7 +3253,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let t = title.clone().unwrap_or_default();
                             if !t.is_empty() { pane.title = t.clone(); pane.title_locked = true; }
                             let win = &mut app.windows[app.active_idx];
-                            win.floating.push(crate::types::FloatingPane { pane, x: nx, y: ny, w: sw, h: sh, border: sborder, id: pane_id, title: t, position: None });
+                            win.floating.push(crate::types::FloatingPane { pane, x: nx, y: ny, w: sw, h: sh, border: sborder, id: pane_id, title: t, position: None, styles: Default::default() });
                             if !detached { win.floating_focus = Some(win.floating.len() - 1); }
                             state_dirty = true;
                         }
@@ -7545,7 +7545,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::popup::open_display_popup(&mut app, req, area, close_on_exit, true, &session_name);
                     state_dirty = true;
                 }
-                CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, empty, resp } => {
+                CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, empty, resp, extra } => {
                     // A floating pane (tmux new-pane): a PTY-backed pane rendered
                     // over the active window's tiled layout. Flags match tmux:
                     // -x/-y are SIZE, -X/-Y are POSITION. Reuses the popup pane
@@ -7577,7 +7577,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             inner_w,
                             pane_id,
                             &app.session_name,
-                            &app.environment,
+                            // -e KEY=VALUE (tmux new-pane environ_put into the
+                            // spawn environment) over the session's.
+                            &{
+                                let mut env = app.environment.clone();
+                                for (k, v) in &extra.env { env.insert(k.clone(), v.clone()); }
+                                env
+                            },
                             &app.env_scopes.child_removals(&app.environment),
                             app.host_colors.as_ref(),
                         )
@@ -7597,6 +7603,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             id: pane_id,
                             title: title_str,
                             position: None,
+                            styles: extra.styles.clone(),
                         };
                         let win = &mut app.windows[app.active_idx];
                         win.floating.push(fp);

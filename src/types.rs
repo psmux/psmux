@@ -1259,6 +1259,27 @@ pub struct FloatingPane {
     /// Last `-P` position keyword (top-left/centre/...), kept so the float can
     /// be re-anchored when the terminal is resized. `None` for explicit coords.
     pub position: Option<String>,
+    /// new-pane -s/-S/-R: this float's own styles.
+    pub styles: FloatStyles,
+}
+
+/// A floating pane's own styles (tmux new-pane, cmd-split-window.c): `-s`
+/// sets its window-style and window-active-style, `-S` its
+/// pane-active-border-style, `-R` its pane-border-style. Empty means the
+/// session's option applies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FloatStyles {
+    pub style: String,
+    pub active_border: String,
+    pub border: String,
+}
+
+/// What new-pane carries beyond position and size: `-e` variables for the new
+/// process and the float's own styles.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FloatExtras {
+    pub env: Vec<(String, String)>,
+    pub styles: FloatStyles,
 }
 
 /// A menu item for display-menu
@@ -3127,6 +3148,8 @@ pub enum CtrlReq {
         empty: bool,
         /// -P: reply with the new pane id over `resp`.
         resp: Option<mpsc::Sender<String>>,
+        /// -e environment for the new process and the -s/-S/-R styles.
+        extra: FloatExtras,
     },
     KillPane,
     KillPaneById(usize),

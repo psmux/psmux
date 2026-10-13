@@ -5418,13 +5418,15 @@ fn run_main() -> io::Result<()> {
                     crate::util::quote_arg_if_needed(s)
                 }).collect();
                 let line = format!("{}\n", parts.join(" "));
-                // -P prints the new pane id, so read the server's response.
-                if cmd_args.iter().any(|a| a.as_str() == "-P") {
-                    let resp = send_control_with_response(line)?;
-                    print!("{}", resp);
-                } else {
-                    send_control(line)?;
+                // Read the reply either way: -P prints the new pane id, and a
+                // flag a floating pane cannot honour is refused with a message
+                // that fire and forget would have dropped at exit 0.
+                let resp = send_control_with_response(line)?;
+                if let Some(msg) = resp.trim_start().strip_prefix("ERROR:") {
+                    eprintln!("psmux: {}", msg.trim());
+                    std::process::exit(1);
                 }
+                print!("{}", resp);
                 return Ok(());
             }
             // server-info - Show server information

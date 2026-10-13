@@ -1,7 +1,10 @@
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
-$psmux = (Get-Command psmux -ErrorAction Stop).Source
+# PSMUX_TEST_BIN picks the binary under test and PSMUX_DATA_DIR the data
+# directory, as in the other suites; the port and key files are read from it.
+$psmux = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -ErrorAction Stop).Source }
+$dataDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { Join-Path $env:USERPROFILE ".psmux" }
 $runId = [guid]::NewGuid().ToString("N")
 $namespace = "borderpreview_$($runId.Substring(0, 12))"
 $session = "borderpreview"
@@ -28,8 +31,8 @@ function Get-DefaultSessions {
 }
 
 function Invoke-RawPsmux([string]$SessionBase, [string]$Command) {
-    $port = [int](Get-Content (Join-Path $env:USERPROFILE ".psmux\$SessionBase.port"))
-    $key = (Get-Content (Join-Path $env:USERPROFILE ".psmux\$SessionBase.key") -Raw).Trim()
+    $port = [int](Get-Content (Join-Path $dataDir "$SessionBase.port"))
+    $key = (Get-Content (Join-Path $dataDir "$SessionBase.key") -Raw).Trim()
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
         $client.Connect("127.0.0.1", $port)
@@ -86,7 +89,7 @@ $defaultSessionsBefore = @(Get-DefaultSessions)
 try {
     & $psmux -L $namespace kill-server 2>$null | Out-Null
     & $psmux -L $namespace new-session -d -s $session 2>&1 | Out-Null
-    $portFile = Join-Path $env:USERPROFILE ".psmux\${namespace}__${session}.port"
+    $portFile = Join-Path $dataDir "${namespace}__${session}.port"
     Wait-Until { Test-Path $portFile } 10 "Session port file was not created"
 
     & $psmux -L $namespace split-window -h -t $session 2>&1 | Out-Null

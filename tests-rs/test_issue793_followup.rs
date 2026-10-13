@@ -35,12 +35,44 @@ fn new_pane_options_stop_at_the_first_operand() {
     assert_eq!((p.w, p.h, p.x, p.y), (Some(40), Some(10), Some(2), Some(3)));
     assert_eq!(p.title.as_deref(), Some("t"));
     assert_eq!(p.command, "cmd.exe /k -x");
-    // Value flags tmux has that psmux does not use are consumed, not run.
-    let p = parse_new_pane_args(&["-e", "A=1", "-s", "fg=red", "-m", "hi", "-l", "50%", "-P"]);
+    // -l / -p size a tiled split; tmux reads only -x/-y/-X/-Y for a float.
+    let p = parse_new_pane_args(&["-l", "50%", "-p", "30", "-h", "-b", "-f", "-Z", "-P"]);
     assert_eq!(p.command, "");
-    assert!(p.print);
+    assert!(p.print && p.unsupported.is_none());
     let p = parse_new_pane_args(&["-E"]);
     assert!(p.empty);
+}
+
+#[test]
+fn new_pane_env_and_styles_are_kept() {
+    let p = parse_new_pane_args(&["-e", "A=1", "-eB=two=2", "-s", "bg=blue", "-S", "fg=red", "-R", "fg=green", "--", "cmd.exe"]);
+    assert_eq!(p.extra.env, vec![("A".to_string(), "1".to_string()), ("B".to_string(), "two=2".to_string())]);
+    assert_eq!(p.extra.styles.style, "bg=blue");
+    assert_eq!(p.extra.styles.active_border, "fg=red");
+    assert_eq!(p.extra.styles.border, "fg=green");
+    assert_eq!(p.command, "cmd.exe");
+    assert!(p.refusal().is_none());
+}
+
+#[test]
+fn new_pane_flags_a_float_cannot_honour_are_refused() {
+    // They used to be consumed and ignored at exit 0.
+    for (args, flag) in [
+        (vec!["-k"], 'k'),
+        (vec!["-m", "bye"], 'm'),
+        (vec!["-I"], 'I'),
+        (vec!["-O"], 'O'),
+        (vec!["-M"], 'M'),
+        (vec!["-W"], 'W'),
+        (vec!["-L"], 'L'),
+        (vec!["-dk"], 'k'),
+    ] {
+        let p = parse_new_pane_args(&args);
+        assert_eq!(p.unsupported, Some(flag), "{args:?}");
+        let msg = p.refusal().unwrap();
+        assert!(msg.starts_with(&format!("new-pane -{}:", flag)), "{msg}");
+        assert!(msg.contains("not supported"), "{msg}");
+    }
 }
 
 #[test]
@@ -51,6 +83,21 @@ fn if_shell_parts_reads_the_operands() {
     let (f, pos) = if_shell_parts(&["-b", "true", "{", "rename-window", "a", "}"]);
     assert!(!f);
     assert_eq!(pos, vec!["true", "rename-window a"]);
+    // Dash tokens inside a block belong to the block (tmux 3.4 keeps them):
+    // they used to be dropped, so `{ display -p x }` ran `display x`.
+    let (f, pos) = if_shell_parts(&["true", "{", "display", "-p", "x", "}"]);
+    assert!(!f);
+    assert_eq!(pos, vec!["true", "display -p x"]);
+    let (f, pos) = if_shell_parts(&["-F", "0", "{", "set", "-g", "@b", "yes", "}", "{", "set", "-gF", "@b", "#{e|+:1,2}", "}"]);
+    assert!(f, "-gF inside a block is not if-shell's -F");
+    assert_eq!(pos.len(), 3);
+    assert_eq!(pos[1], "set -g @b yes");
+    assert_eq!(parse_command_line(&pos[2]), vec!["set", "-gF", "@b", "#{e|+:1,2}"]);
+    let (f, _) = if_shell_parts(&["true", "{", "set", "-gF", "@b", "x", "}"]);
+    assert!(!f, "an F inside a block does not turn on format mode");
+    // A nested block stays one operand, braces included.
+    let (_, pos) = if_shell_parts(&["true", "{", "if-shell", "true", "{", "display", "-p", "in", "}", "}"]);
+    assert_eq!(pos, vec!["true", "if-shell true { display -p in }"]);
 }
 
 #[test]

@@ -199,28 +199,47 @@ fn expand_set_option_value(
 
 /// if-shell's arguments: whether `-F` is given, and the operands (condition,
 /// command, else command), a `{ ... }` block collapsed into one operand.
+///
+/// Flags are if-shell's own only at the top level. Inside a block every token
+/// belongs to the block's commands: the old reader dropped every `-` token
+/// before collapsing blocks, so `if-shell true { display -p x }` ran
+/// `display x` and `{ set -gF @o '#{...}' }` ran `set @o '#{...}'` (issue
+/// #793 follow up; tmux 3.4 keeps them, cmd-parse.y). Block tokens are
+/// requoted so the command reparses to the same words.
 fn if_shell_parts(args: &[&str]) -> (bool, Vec<String>) {
-    let format_mode = args.iter().any(|a| *a == "-F" || *a == "-bF" || *a == "-Fb");
+    let mut format_mode = false;
     let mut positional: Vec<String> = Vec::new();
-    let non_flags: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-    let mut j = 0;
-    while j < non_flags.len() {
-        if non_flags[j] == "{" {
-            // Everything between { and } is one command.
-            let mut depth = 1;
-            let mut block = Vec::new();
-            j += 1;
-            while j < non_flags.len() && depth > 0 {
-                if non_flags[j] == "{" { depth += 1; }
-                else if non_flags[j] == "}" { depth -= 1; if depth == 0 { break; } }
-                block.push(non_flags[j]);
-                j += 1;
+    let mut depth = 0usize;
+    let mut block: Vec<String> = Vec::new();
+    for a in args {
+        if depth == 0 {
+            if *a == "{" {
+                depth = 1;
+                block.clear();
+            } else if a.starts_with('-') && a.len() > 1 && positional.is_empty() {
+                // getopt: flags come before the first operand.
+                if a[1..].contains('F') { format_mode = true; }
+            } else {
+                positional.push(a.to_string());
             }
-            positional.push(block.join(" "));
-        } else {
-            positional.push(non_flags[j].to_string());
+            continue;
         }
-        j += 1;
+        match *a {
+            "{" => { depth += 1; block.push(a.to_string()); }
+            "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    positional.push(block.join(" "));
+                } else {
+                    block.push(a.to_string());
+                }
+            }
+            _ => block.push(crate::util::quote_arg_if_needed(a)),
+        }
+    }
+    // An unclosed block still counts as the operand it started.
+    if depth > 0 && !block.is_empty() {
+        positional.push(block.join(" "));
     }
     (format_mode, positional)
 }
@@ -1199,6 +1218,27 @@ struct ParsedNewPane {
     print: bool,        // -P
     empty: bool,        // -E (empty pane, no command)
     format: Option<String>, // -F (the -P template)
+    extra: crate::types::FloatExtras, // -e, -s, -S, -R
+    /// A tmux new-pane flag psmux's floating panes cannot honour (-k, -m,
+    /// -I, -O, -M, -W, -L, -Z). Refused with a message, never ignored.
+    unsupported: Option<char>,
+}
+
+impl ParsedNewPane {
+    /// The refusal for an `unsupported` flag, or None.
+    fn refusal(&self) -> Option<String> {
+        let f = self.unsupported?;
+        let what = match f {
+            'k' | 'm' => "remain-on-exit for a floating pane",
+            'I' => "an input pane (-I)",
+            'O' => "a modal pane (-O)",
+            'M' => "mouse placement (-M)",
+            'W' => "waiting for the pane's command (-W)",
+            'L' => "a tiled pane from new-pane (use split-window)",
+            _ => "this flag",
+        };
+        Some(format!("new-pane -{}: {} is not supported", f, what))
+    }
 }
 
 /// What `new-pane -P` prints: the new pane's `%id`, or `-F`'s format expanded
@@ -1234,6 +1274,8 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     let mut title: Option<String> = None;
     let mut start_dir: Option<String> = None;
     let mut format: Option<String> = None;
+    let mut extra = crate::types::FloatExtras::default();
+    let mut unsupported: Option<char> = None;
     // x/y = POSITION (from -X/-Y); w/h = SIZE (from -x/-y). tmux ordering.
     let (mut x, mut y, mut w, mut h): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) = (None, None, None, None);
     // Where the command starts, and whether a `--` introduced it.
@@ -1275,6 +1317,19 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
                     'y' => h = v.parse().ok(),
                     'X' => x = v.parse().ok(),
                     'Y' => y = v.parse().ok(),
+                    // -e KEY=VALUE, repeatable: the new process's environment.
+                    'e' => {
+                        if let Some((k, val)) = v.split_once('=') {
+                            extra.env.push((k.to_string(), val.to_string()));
+                        }
+                    }
+                    's' => extra.styles.style = v,
+                    'S' => extra.styles.active_border = v,
+                    'R' => extra.styles.border = v,
+                    'm' => { unsupported.get_or_insert('m'); }
+                    // -l/-p size a TILED split; tmux's floating cell reads
+                    // only -x/-y/-X/-Y (layout_floating_args_parse), so for a
+                    // floating pane they change nothing there either.
                     _ => {}
                 }
                 i += 1;
@@ -1284,6 +1339,11 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
                 'd' => detached = true,
                 'P' => print = true,
                 'E' => empty = true,
+                'k' | 'I' | 'O' | 'M' | 'W' | 'L' => { unsupported.get_or_insert(f); }
+                // -b/-f/-h place a TILED split; a floating pane has no
+                // neighbour to go before or beside, and -Z zooms only for a
+                // modal pane (layout_get_floating_cell). tmux changes nothing
+                // for them on a plain floating pane either.
                 _ => {}
             }
             j += 1;
@@ -1301,7 +1361,7 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     } else {
         tail.join(" ")
     };
-    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print, empty, format }
+    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print, empty, format, extra, unsupported }
 }
 
 /// The request for `list-clients [-F format] [-f filter]` (issue #724).
@@ -2043,6 +2103,28 @@ if control_echo || control_noecho {
             }
         }
 
+        // A command that waits on a job (run-shell, and if-shell's shell
+        // condition) opens its block BEFORE the job runs, as tmux does: the
+        // guard line goes out when the item starts (cmd-queue.c:592,
+        // cmdq_guard "begin") and `%end` when the job's callback continues the
+        // item. Built after the job, a 7 s run-shell showed nothing at all
+        // for 7 s and then `%begin` and `%end` together (issue #793 follow
+        // up). Notifications may arrive between the two lines, as in tmux.
+        let early_begin = focus_err.is_none()
+            && matches!(cmd_name, "run-shell" | "run" | "if-shell" | "if");
+        if early_begin {
+            let mut head = String::new();
+            if control_echo {
+                head.push_str(trimmed);
+                head.push('\n');
+            }
+            head.push_str(&control::format_begin(ts, cmd_counter));
+            head.push('\n');
+            let mut ws = write_lock.lock().unwrap();
+            let _ = ws.write_all(head.as_bytes());
+            let _ = ws.flush();
+        }
+
         // Dispatch command (use a oneshot for the response)
         let (resp_s, resp_r) = mpsc::channel::<String>();
         let response_result = if let Some(err) = focus_err {
@@ -2060,7 +2142,12 @@ if control_echo || control_noecho {
             // Collect the response BEFORE acquiring the write lock, so the
             // notification thread can still write while we wait.
             if dispatched {
-                Some(resp_r.recv_timeout(Duration::from_secs(5)))
+                if early_begin {
+                    // A job takes as long as it takes; tmux waits for it.
+                    Some(resp_r.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected))
+                } else {
+                    Some(resp_r.recv_timeout(Duration::from_secs(5)))
+                }
             } else {
                 None
             }
@@ -2077,15 +2164,17 @@ if control_echo || control_noecho {
         // in one send instead of one per line; the bytes are unchanged.
         let mut out = String::new();
 
-        // Echo the command if -C mode
-        if control_echo {
-            out.push_str(trimmed);
+        if !early_begin {
+            // Echo the command if -C mode
+            if control_echo {
+                out.push_str(trimmed);
+                out.push('\n');
+            }
+
+            // Send %begin
+            out.push_str(&control::format_begin(ts, cmd_counter));
             out.push('\n');
         }
-
-        // Send %begin
-        out.push_str(&control::format_begin(ts, cmd_counter));
-        out.push('\n');
 
         match response_result {
             Some(Ok(response)) => {
@@ -5080,9 +5169,16 @@ match cmd {
     }
     "new-pane" | "newp" => {
         let p = parse_new_pane_args(&args);
+        if let Some(msg) = p.refusal() {
+            let _ = writeln!(write_stream, "ERROR: {}", msg);
+            let _ = write_stream.flush();
+            if !persistent { break; }
+            line.clear();
+            continue;
+        }
         if p.print {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx) });
+            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx), extra: p.extra });
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let text = new_pane_print_text(text, p.format.as_deref(), |r| { let _ = tx.send(r); });
                 let _ = write!(write_stream, "{}\n", text);
@@ -5090,7 +5186,7 @@ match cmd {
             }
             if !persistent && pending_chain.is_empty() { break; }
         } else {
-            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None });
+            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None, extra: p.extra });
         }
     }
     "display-popup" | "popup" => {
@@ -5993,16 +6089,20 @@ fn dispatch_control_command(
         }
         "new-pane" | "newp" => {
             let p = parse_new_pane_args(args);
+            if let Some(msg) = p.refusal() {
+                let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", msg));
+                return true;
+            }
             if p.print {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx) });
+                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx), extra: p.extra });
                 if let Ok(text) = rrx.recv_timeout(Duration::from_secs(2)) {
                     let text = new_pane_print_text(text, p.format.as_deref(), |r| { let _ = tx.send(r); });
                     let _ = resp_tx.send(text);
                 }
                 true
             } else {
-                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None });
+                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None, extra: p.extra });
                 false
             }
         }

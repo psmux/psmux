@@ -40,6 +40,12 @@ pub(crate) struct FloatJson {
     #[serde(default)] pub cursor_row: u16,
     #[serde(default)] pub cursor_col: u16,
     #[serde(default)] pub hide_cursor: bool,
+    /// new-pane -s: the float's window-style (and window-active-style).
+    #[serde(default)] pub style: String,
+    /// new-pane -S: its pane-active-border-style.
+    #[serde(default)] pub astyle: String,
+    /// new-pane -R: its pane-border-style.
+    #[serde(default)] pub bstyle: String,
 }
 
 /// Content rect of a float on screen: the same placement and border inset
@@ -1648,8 +1654,22 @@ pub(crate) fn render_float_overlays(
             // single/simple/number/spaces/unknown -> plain line box
             _ => Some(BorderType::Plain),
         };
+        // A float's own -S/-R border style and -s content style, set by
+        // new-pane, go over the session's (tmux sets them as the pane's own
+        // options, cmd-split-window.c).
+        let own_border = if fl.focused { &fl.astyle } else { &fl.bstyle };
         let pane_border_style = if fl.focused { active_border_style } else { border_style };
+        let pane_border_style = if own_border.is_empty() {
+            pane_border_style
+        } else {
+            complete_pane_border_colors(pane_border_style.patch(crate::style::parse_tmux_style(own_border)))
+        };
         let window_style = window_styles.for_pane(fl.focused);
+        let window_style = if fl.style.is_empty() {
+            window_style
+        } else {
+            Some(window_style.unwrap_or_default().patch(crate::style::parse_tmux_style(&fl.style)))
+        };
         let window_dim = window_styles.dim_for_pane(fl.focused);
         // Paths that paint straight from the window style take it pre dimmed;
         // `apply_window_content_style` dims the cell colours itself.

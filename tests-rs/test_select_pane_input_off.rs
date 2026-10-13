@@ -237,6 +237,7 @@ fn add_floating(f: &mut Fixture, focus: bool) -> Captured {
         id: 6,
         title: String::new(),
         position: None,
+        styles: Default::default(),
     });
     if focus {
         win.floating_focus = Some(win.floating.len() - 1);

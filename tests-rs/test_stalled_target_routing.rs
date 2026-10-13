@@ -352,6 +352,7 @@ fn add_float(app: &mut AppState, win: usize, id: usize) {
         id,
         title: String::new(),
         position: None,
+        styles: Default::default(),
     });
 }
 

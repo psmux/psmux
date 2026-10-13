@@ -259,6 +259,81 @@ Check ($res.ok -and $w1 -eq ($w0 - 1) -and $inW0 -eq 2) "join-pane -s s:1 -t s:0
 $res = Run-Cc "join-pane -s %99 -t s:0"
 Check ((-not $res.ok) -and $res.text -match "can't find pane") "join-pane -s %99 is %error" "ok=$($res.ok) [$($res.text)]"
 
+# ── 6. if-shell keeps the dash tokens inside a { ... } block ──
+#
+# tmux 3.4 (source-file of the same lines): @b1=v1, @b3=3 (`set -gF` kept).
+# Over TCP and -CC psmux dropped every `-` token inside the block before
+# this fix: `{ display -p x }` ran `display x` (no output) and
+# `{ set -gF @o '#{e|+:1,2}' }` stored the literal format.
+
+Write-Head "6. if-shell brace blocks keep their flags"
+Fresh
+$res = Run-Tcp "if-shell true { display -p tcpbrace793 }"
+Check ($res.ok -and $res.text -match 'tcpbrace793') "TCP { display -p x } prints x" "ok=$($res.ok) [$($res.text)]"
+Run-Tcp "if-shell true { set -gF @t2 '#{e|+:1,2}' }" | Out-Null
+$v = ((P show -gv '@t2') -join '').Trim()
+Check ($v -eq '3') "TCP { set -gF @o '#{e|+:1,2}' } stores 3" "stored [$v]"
+Run-Tcp "if-shell -F 0 { set -g @t3 yes } { set -g @t3 no }" | Out-Null
+$v = ((P show -gv '@t3') -join '').Trim()
+Check ($v -eq 'no') "TCP -F 0 { yes } { no } runs the else block" "stored [$v]"
+$res = Run-Cc "if-shell true { display -p ccbrace793 }"
+Check ($res.ok -and $res.text -eq 'ccbrace793') "-CC { display -p x } prints x in the block" "ok=$($res.ok) [$($res.text)]"
+$res = Run-Cc "if-shell true { set -gF @c2 '#{e|+:2,2}' }"
+$v = ((P show -gv '@c2') -join '').Trim()
+Check ($res.ok -and $v -eq '4') "-CC { set -gF ... } stores 4" "ok=$($res.ok) [$($res.text)] stored [$v]"
+
+# ── 7. new-pane -e/-s/-S/-R applied, flags a float cannot honour refused ──
+
+Write-Head "7. new-pane extras"
+Fresh
+$fid = ((P new-pane -d -P -e FOO793=bar793 -- cmd.exe /q /k 'echo %FOO793%') -join '').Trim()
+Start-Sleep -Seconds 2
+$cap = (P capture-pane -p -t $fid) -join "`n"
+Check ($fid -match '^%\d+$' -and $cap -match '(?m)^bar793') "-e FOO793=bar793 reaches the float's process ($fid)" "id [$fid] capture [$cap]"
+P kill-pane -t $fid | Out-Null
+$fid = ((P new-pane -d -P -s bg=blue -S fg=red -R fg=green) -join '').Trim()
+Start-Sleep -Seconds 1
+$dump = (P dump-state) -join ''
+Check ($dump -match '"style":"bg=blue"' -and $dump -match '"astyle":"fg=red"' -and $dump -match '"bstyle":"fg=green"') "-s/-S/-R reach the float the client draws" "floats json did not carry them"
+P kill-pane -t $fid | Out-Null
+foreach ($flag in @(@('-k'), @('-m', 'bye'), @('-I'), @('-O'), @('-M'), @('-W'), @('-L'))) {
+    $before = @(Floats).Count
+    $o = (P @(@('new-pane', '-d') + $flag) | ForEach-Object { "$_" }) -join ' '
+    $rc = $LASTEXITCODE
+    Start-Sleep -Milliseconds 500
+    $after = @(Floats).Count
+    Check ($rc -eq 1 -and $o -match 'not supported' -and $after -eq $before) "CLI new-pane $($flag -join ' ') is refused: $o" "rc=$rc out=[$o] floats $before -> $after"
+}
+$res = Run-Tcp "new-pane -d -k"
+Check ((-not $res.ok) -and $res.text -match 'not supported') "TCP new-pane -k is ERROR" "[$($res.text)]"
+$res = Run-Cc "new-pane -d -k"
+Check ((-not $res.ok) -and $res.text -match 'not supported') "-CC new-pane -k is %error" "ok=$($res.ok) [$($res.text)]"
+$before = @(Floats).Count
+$o = ((P new-pane -d -P -l 50% -h -b -f -Z) -join '').Trim()
+Start-Sleep -Seconds 1
+Check ($o -match '^%\d+$' -and @(Floats).Count -eq $before + 1) "-l/-h/-b/-f/-Z (tiled only in tmux) still make the float" "out=[$o]"
+
+# ── 8. a long run-shell opens its -CC block at once ──
+#
+# tmux writes %begin when the item starts and %end when the job ends. psmux
+# wrote both after the job: nothing for 7 s, then the whole block.
+
+Write-Head "8. -CC %begin goes out before a long job"
+Fresh
+Cc-Start
+$start = (Cc-Text).Length
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$script:cc.StandardInput.Write("run-shell 'Start-Sleep -Seconds 6; echo late793'`n"); $script:cc.StandardInput.Flush()
+$beginAt = $null; $endAt = $null
+while ($sw.Elapsed.TotalSeconds -lt 20) {
+    Start-Sleep -Milliseconds 100
+    $x = (Cc-Text).Substring($start)
+    if (-not $beginAt -and $x -match '%begin') { $beginAt = $sw.Elapsed.TotalSeconds }
+    if ($x -match '(?s)%begin.*late793.*%end') { $endAt = $sw.Elapsed.TotalSeconds; break }
+}
+Check ($beginAt -ne $null -and $beginAt -lt 2) "%begin at $([math]::Round([double]$beginAt, 1)) s, before the job ends" "%begin at $beginAt"
+Check ($endAt -ne $null -and $endAt -ge 5.5) "%end with the output at $([math]::Round([double]$endAt, 1)) s, after the job (no 5 s timeout)" "%end at $endAt"
+
 } finally {
     Cc-Stop
     P kill-server | Out-Null

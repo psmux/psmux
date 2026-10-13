@@ -937,6 +937,19 @@ pub fn serialize_floats_json(app: &AppState) -> String {
             ),
         );
         out.push_str(&json_escape_string(&fp.title));
+        // new-pane -s/-S/-R: the float's own styles, sent only when set.
+        for (key, value) in [
+            ("style", &fp.styles.style),
+            ("astyle", &fp.styles.active_border),
+            ("bstyle", &fp.styles.border),
+        ] {
+            if !value.is_empty() {
+                out.push_str("\",\"");
+                out.push_str(key);
+                out.push_str("\":\"");
+                out.push_str(&json_escape_string(value));
+            }
+        }
         out.push_str("\",\"rows\":[");
         // The float's own cursor, so the client can put the terminal cursor
         // inside the focused float the way tmux does for its active pane
