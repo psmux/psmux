@@ -1790,6 +1790,42 @@ pub(crate) fn run_send_keys_x(app: &mut AppState, cmd: &str, count: usize) -> Re
     Ok(())
 }
 
+/// The copy-line family: (whole line, pipe, cancel) for `copy-line`,
+/// `copy-end-of-line`, their `copy-pipe-` and `-and-cancel` spellings.
+fn copy_line_verb(cmd: &str) -> Option<(bool, bool, bool)> {
+    match cmd.split_whitespace().next().unwrap_or("") {
+        "copy-line" => Some((true, false, false)),
+        "copy-line-and-cancel" => Some((true, false, true)),
+        "copy-pipe-line" => Some((true, true, false)),
+        "copy-pipe-line-and-cancel" => Some((true, true, true)),
+        "copy-end-of-line" => Some((false, false, false)),
+        "copy-end-of-line-and-cancel" => Some((false, false, true)),
+        "copy-pipe-end-of-line" => Some((false, true, false)),
+        "copy-pipe-end-of-line-and-cancel" => Some((false, true, true)),
+        _ => None,
+    }
+}
+
+/// Hand copied text to a copy-pipe command's stdin (nothing when the
+/// command is empty).
+fn pipe_copy_text(pipe_cmd: &str, text: &str) {
+    if pipe_cmd.is_empty() {
+        return;
+    }
+    let mut copy_pipe_cmd = std::process::Command::new(if cfg!(windows) { "pwsh" } else { "sh" });
+    copy_pipe_cmd.args(if cfg!(windows) { vec!["-NoProfile", "-Command", pipe_cmd] } else { vec!["-c", pipe_cmd] })
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    { use crate::platform::HideWindowCommandExt; copy_pipe_cmd.hide_window(); }
+    if let Ok(mut child) = copy_pipe_cmd.spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
 /// tmux window_copy_clear_selection, as the copy commands that keep copy mode
 /// open call it: the selection goes, the search highlights stay (unlike
 /// `send -X clear-selection`, which clears both).
@@ -1857,23 +1893,8 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
             if !cancel && !no_clear {
                 copy_selection_done(app);
             }
-            if !pipe_cmd.is_empty() {
-                if let Some(text) = app.paste_buffers.first().cloned() {
-                    // Pipe yanked text to the command's stdin
-                    let mut copy_pipe_cmd = std::process::Command::new(if cfg!(windows) { "pwsh" } else { "sh" });
-                    copy_pipe_cmd.args(if cfg!(windows) { vec!["-NoProfile", "-Command", pipe_cmd] } else { vec!["-c", pipe_cmd] })
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null());
-                    { use crate::platform::HideWindowCommandExt; copy_pipe_cmd.hide_window(); }
-                    if let Ok(mut child) = copy_pipe_cmd.spawn() {
-                        if let Some(mut stdin) = child.stdin.take() {
-                            use std::io::Write;
-                            let _ = stdin.write_all(text.as_bytes());
-                        }
-                        let _ = child.wait();
-                    }
-                }
+            if let Some(text) = app.paste_buffers.first().cloned() {
+                pipe_copy_text(pipe_cmd, &text);
             }
             if cancel {
                 crate::copy_mode::exit_copy_mode(app);
@@ -1938,7 +1959,27 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
         // The -and-cancel spellings are tmux's names for what the built-in `D`
         // key does (key-bindings.c binds D to copy-pipe-end-of-line-and-cancel),
         // so the name `list-keys` shows for `D` is one this table runs.
-        "copy-end-of-line" | "copy-end-of-line-and-cancel" | "copy-pipe-end-of-line-and-cancel" => { let _ = crate::copy_mode::copy_end_of_line(app); crate::copy_mode::exit_copy_mode(app); }
+        // tmux window_copy_do_copy_end_of_line / window_copy_do_copy_line:
+        // copy (and pipe, for the copy-pipe-* spellings, to the optional
+        // command), then leave copy mode for the -and-cancel forms only; the
+        // others clear the selection and keep the cursor where it was.
+        s if copy_line_verb(s).is_some() => {
+            let (whole_line, pipe, cancel) = copy_line_verb(s).unwrap();
+            let _ = if whole_line { crate::copy_mode::copy_line(app) } else { crate::copy_mode::copy_end_of_line(app) };
+            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
+            if pipe {
+                let pipe_cmd = s.split_once(char::is_whitespace).map(|(_, a)| a.trim()).unwrap_or("");
+                if let Some(text) = app.paste_buffers.first().cloned() {
+                    pipe_copy_text(pipe_cmd, &text);
+                }
+            }
+            if cancel {
+                crate::copy_mode::exit_copy_mode(app);
+                if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
+            } else {
+                copy_selection_done(app);
+            }
+        }
         "select-word" => {
             // Select the word under cursor
             crate::copy_mode::move_word_backward(app);
@@ -1965,6 +2006,8 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
                 let appended = format!("{}{}", app.paste_buffers[1], app.paste_buffers[0]);
                 app.paste_buffers[0] = appended;
             }
+            // tmux window_copy_cmd_append_selection: clear and stay.
+            copy_selection_done(app);
         }
         "append-selection-and-cancel" => {
             let _ = yank_selection(app);
@@ -1973,27 +2016,9 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
                 let appended = format!("{}{}", app.paste_buffers[1], app.paste_buffers[0]);
                 app.paste_buffers[0] = appended;
             }
-            app.mode = Mode::Passthrough;
-            app.copy_scroll_offset = 0;
-            app.copy_pos = None;
-            if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
-        }
-        "copy-line" => {
-            // Select entire current line and yank
-            if let Some((r, _)) = crate::copy_mode::get_copy_pos(app) {
-                app.copy_anchor = Some((r, 0));
-                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-                app.copy_selection_mode = crate::types::SelectionMode::Line;
-                let cols = app.windows.get(app.active_idx)
-                    .and_then(|w| active_pane(&w.root, &w.active_path))
-                    .map(|p| p.last_cols).unwrap_or(80);
-                app.copy_pos = Some((r, cols.saturating_sub(1)));
-                let _ = yank_selection(app);
-                if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
-            }
-            app.mode = Mode::Passthrough;
-            app.copy_scroll_offset = 0;
-            app.copy_pos = None;
+            // The canonical exit: it clears the selection and the pane's
+            // saved copy state too.
+            crate::copy_mode::exit_copy_mode(app);
             if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
         }
         s if s.starts_with("goto-line") => {

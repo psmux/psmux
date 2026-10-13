@@ -272,3 +272,55 @@ fn copy_pipe_variants_follow_tmux() {
     let a = selected("copy-pipe-and-cancel");
     assert!(!a.mode.in_copy(), "copy-pipe-and-cancel leaves");
 }
+
+// ══════════════ the copy-line family and append-selection ══════════════
+//
+// tmux 3.4 (window_copy_do_copy_line / _end_of_line, append_selection):
+// only the -and-cancel spellings leave copy mode; the others copy, clear the
+// selection and keep the cursor. psmux left copy mode on copy-end-of-line
+// and copy-line (copy-line also kept the selection), ignored
+// copy-pipe-end-of-line, copy-line-and-cancel and both copy-pipe-line verbs,
+// and kept the selection after append-selection.
+
+fn at_line(cmd: &str) -> (AppState, Option<(u16, u16)>) {
+    let mut a = app(true);
+    a.copy_pos = Some((ROWS - 3, 2));
+    let before = a.copy_pos;
+    assert_eq!(run_send_keys_x(&mut a, cmd, 1), Ok(()));
+    (a, before)
+}
+
+#[test]
+fn copy_line_family_stays_unless_cancel() {
+    for cmd in ["copy-line", "copy-end-of-line", "copy-pipe-line", "copy-pipe-end-of-line"] {
+        let (a, before) = at_line(cmd);
+        assert!(a.mode.in_copy(), "{} stays in copy mode", cmd);
+        assert!(a.copy_anchor.is_none(), "{} leaves no selection", cmd);
+        assert_eq!(a.copy_pos, before, "{} keeps the cursor", cmd);
+        assert!(!a.paste_buffers.is_empty(), "{} copied", cmd);
+    }
+    for cmd in ["copy-line-and-cancel", "copy-end-of-line-and-cancel",
+                "copy-pipe-line-and-cancel", "copy-pipe-end-of-line-and-cancel"] {
+        let (a, _) = at_line(cmd);
+        assert!(!a.mode.in_copy(), "{} leaves copy mode", cmd);
+        assert!(!a.paste_buffers.is_empty(), "{} copied", cmd);
+    }
+}
+
+#[test]
+fn copy_line_copies_the_whole_line_and_end_of_line_the_rest() {
+    let (a, _) = at_line("copy-line");
+    let line = a.paste_buffers[0].clone();
+    let (b, _) = at_line("copy-end-of-line");
+    let rest = b.paste_buffers[0].clone();
+    assert!(line.starts_with("line"), "{:?}", line);
+    assert!(line.ends_with(&rest) && rest.len() + 2 == line.len(), "line {:?} rest {:?}", line, rest);
+}
+
+#[test]
+fn append_selection_clears_and_stays() {
+    let a = selected("append-selection");
+    assert!(a.mode.in_copy() && a.copy_anchor.is_none());
+    let a = selected("append-selection-and-cancel");
+    assert!(!a.mode.in_copy() && a.copy_anchor.is_none());
+}

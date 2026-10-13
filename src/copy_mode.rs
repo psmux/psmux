@@ -2112,6 +2112,21 @@ pub fn copy_end_of_line(app: &mut AppState) -> io::Result<()> {
     Ok(())
 }
 
+/// Yank the cursor's whole line (tmux copy-line): the cursor does not move.
+pub fn copy_line(app: &mut AppState) -> io::Result<()> {
+    let (r, _) = match get_copy_pos(app) { Some(p) => p, None => return Ok(()) };
+    let win = &mut app.windows[app.active_idx];
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(()) };
+    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(()) };
+    let screen = parser.screen();
+    let cols = p.last_cols;
+    let text = capture_row_text(screen, r, 0..cols).trim_end().to_string();
+    app.paste_buffers.insert(0, text.clone());
+    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+    copy_to_system_clipboard(&text);
+    Ok(())
+}
+
 /// Jump to the previous search match in copy mode.
 pub fn search_prev(app: &mut AppState) {
     if app.copy_search_matches.is_empty() { return; }
