@@ -6,25 +6,32 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use std::path::{Path, PathBuf};
 
-use crate::platform::terminal_zoom::{scroll_to_zoom_enabled, wheel_zoom_direction, wt_settings_path};
+use crate::platform::terminal_zoom::{scroll_to_zoom_enabled, scroll_to_zoom_setting, wheel_zoom_direction, wt_settings_path};
 
 #[test]
-fn zoom_needs_the_terminal_option_set_to_true() {
+fn zoom_is_off_only_when_the_terminal_option_is_false() {
     assert!(scroll_to_zoom_enabled(r#"{ "experimental.scrollToZoom": true }"#));
     assert!(scroll_to_zoom_enabled("{\r\n    \"copyOnSelect\": false,\r\n    \"experimental.scrollToZoom\" :\r\n true,\r\n}"));
     assert!(!scroll_to_zoom_enabled(r#"{ "experimental.scrollToZoom": false }"#));
-    // Missing key: the wheel keeps scrolling.
-    assert!(!scroll_to_zoom_enabled(r#"{ "copyOnSelect": false }"#));
-    assert!(!scroll_to_zoom_enabled(""));
-    assert!(!scroll_to_zoom_enabled("not json at all"));
+    assert!(!scroll_to_zoom_enabled("{\r\n    \"experimental.scrollToZoom\" :\r\n false,\r\n}"));
+    // Missing key: Windows Terminal's default, which zooms.
+    assert!(scroll_to_zoom_enabled(r#"{ "copyOnSelect": false }"#));
+    assert!(scroll_to_zoom_enabled(""));
+    assert!(scroll_to_zoom_enabled("not json at all"));
+    assert_eq!(scroll_to_zoom_setting(r#"{ "copyOnSelect": false }"#), None);
+    assert_eq!(scroll_to_zoom_setting(r#"{ "experimental.scrollToZoom": true }"#), Some(true));
+    assert_eq!(scroll_to_zoom_setting(r#"{ "experimental.scrollToZoom": false }"#), Some(false));
 }
 
 #[test]
 fn commented_out_option_does_not_count() {
-    assert!(!scroll_to_zoom_enabled("{\n // \"experimental.scrollToZoom\": true,\n \"a\": 1 }"));
-    assert!(!scroll_to_zoom_enabled("{ /* \"experimental.scrollToZoom\": true */ \"a\": 1 }"));
+    assert_eq!(scroll_to_zoom_setting("{\n // \"experimental.scrollToZoom\": true,\n \"a\": 1 }"), None);
+    assert_eq!(scroll_to_zoom_setting("{ /* \"experimental.scrollToZoom\": true */ \"a\": 1 }"), None);
+    // A commented-out false does not switch the zoom off.
+    assert!(scroll_to_zoom_enabled("{\n // \"experimental.scrollToZoom\": false,\n \"a\": 1 }"));
+    assert!(scroll_to_zoom_enabled("{ /* \"experimental.scrollToZoom\": false */ \"a\": 1 }"));
     // A `//` inside a string is not a comment.
-    assert!(scroll_to_zoom_enabled("{ \"u\": \"http://x\", \"experimental.scrollToZoom\": true }"));
+    assert!(!scroll_to_zoom_enabled("{ \"u\": \"http://x\", \"experimental.scrollToZoom\": false }"));
 }
 
 #[test]

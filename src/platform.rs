@@ -6093,11 +6093,21 @@ pub mod terminal_zoom {
         }
     }
 
-    /// Whether a Windows Terminal `settings.json` turns Ctrl+Wheel zoom on.
-    /// Only an explicit `"experimental.scrollToZoom": true` counts; a missing
-    /// key keeps the wheel scrolling.  The file is JSON with comments, so
-    /// comments outside strings are dropped before looking for the key.
+    /// Whether a Windows Terminal `settings.json` leaves Ctrl+Wheel zoom on.
+    /// Windows Terminal zooms on Ctrl+Wheel unless the user sets
+    /// `"experimental.scrollToZoom": false` (measured on 1.24: a settings file
+    /// without the key zooms), so only an explicit `false` turns it off.  The
+    /// opt in is psmux's own `ctrl-wheel-zoom` option; this only respects a
+    /// user who switched the terminal's wheel zoom off.
     pub fn scroll_to_zoom_enabled(settings: &str) -> bool {
+        scroll_to_zoom_setting(settings) != Some(false)
+    }
+
+    /// The value of `"experimental.scrollToZoom"` in a Windows Terminal
+    /// `settings.json`, or `None` when the key is absent.  The file is JSON
+    /// with comments, so comments outside strings are dropped before looking
+    /// for the key.
+    pub fn scroll_to_zoom_setting(settings: &str) -> Option<bool> {
         let mut text = String::with_capacity(settings.len());
         let mut chars = settings.chars().peekable();
         let mut in_str = false;
@@ -6127,16 +6137,21 @@ pub mod terminal_zoom {
             }
         }
         const KEY: &str = "\"experimental.scrollToZoom\"";
-        let mut on = false;
+        let mut value = None;
         let mut rest = text.as_str();
         while let Some(i) = rest.find(KEY) {
             rest = &rest[i + KEY.len()..];
             if let Some(v) = rest.trim_start().strip_prefix(':') {
                 // The last occurrence wins, as for a repeated JSON key.
-                on = v.trim_start().starts_with("true");
+                let v = v.trim_start();
+                if v.starts_with("true") {
+                    value = Some(true);
+                } else if v.starts_with("false") {
+                    value = Some(false);
+                }
             }
         }
-        on
+        value
     }
 
     #[cfg(not(windows))]
@@ -6174,8 +6189,10 @@ pub mod terminal_zoom {
 
         /// Whether the foreground window is the Windows Terminal hosting this
         /// client.  The pseudo console window is owned by its terminal window on
-        /// current Windows Terminal builds; when that link is missing, any
-        /// foreground Windows Terminal window is accepted.  Returns that window.
+        /// current Windows Terminal builds, and that link is required: without
+        /// it the foreground terminal could be another Windows Terminal window
+        /// (the wheel reaches an unfocused window under the pointer), and the
+        /// synthesized zoom key would land there.  Returns that window.
         fn hosting_terminal_foreground() -> Option<isize> {
             // A client reached over SSH must never type into the local desktop.
             if std::env::var_os("WT_SESSION").is_none()
@@ -6195,11 +6212,8 @@ pub mod terminal_zoom {
                     return None;
                 }
                 let console = GetConsoleWindow();
-                if console != 0 {
-                    let owner = GetAncestor(console, GA_ROOTOWNER);
-                    if owner != 0 && owner != console && owner != fg {
-                        return None;
-                    }
+                if console == 0 || GetAncestor(console, GA_ROOTOWNER) != fg {
+                    return None;
                 }
                 Some(fg)
             }
@@ -6228,15 +6242,17 @@ pub mod terminal_zoom {
             }
         }
 
-        /// Whether the Windows Terminal that owns `hwnd` has its Ctrl+Wheel
-        /// zoom option (`experimental.scrollToZoom`) turned on.  Read on every
-        /// notch, so toggling it in the settings applies without a restart.
+        /// Whether the Windows Terminal that owns `hwnd` still has its
+        /// Ctrl+Wheel zoom on (`experimental.scrollToZoom` not set to false).
+        /// A settings file psmux cannot find or read means the terminal's
+        /// default, which is on.  Read on every notch, so toggling it in the
+        /// settings applies without a restart.
         fn scroll_to_zoom_on(hwnd: isize) -> bool {
-            let Some(exe) = window_exe(hwnd) else { return false };
-            let Some(local) = std::env::var_os("LOCALAPPDATA") else { return false };
+            let Some(exe) = window_exe(hwnd) else { return true };
+            let Some(local) = std::env::var_os("LOCALAPPDATA") else { return true };
             let path = super::wt_settings_path(&exe, std::path::Path::new(&local));
             std::fs::read_to_string(path)
-                .map_or(false, |text| super::scroll_to_zoom_enabled(&text))
+                .map_or(true, |text| super::scroll_to_zoom_enabled(&text))
         }
 
         fn tap(vk: u8, up: bool) {
