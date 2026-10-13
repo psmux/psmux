@@ -606,8 +606,48 @@ pub fn start_command_raw_argv(raw_args: &[String]) -> String {
     if raw_args.is_empty() {
         return String::new();
     }
-    let quoted: Vec<String> = raw_args.iter().map(|a| quote_start_command_word(a)).collect();
-    format!("-- {}", quoted.join(" "))
+    // The exact encoding, not the display quoting: a later respawn decodes
+    // this with `decode_argv`, and the display form (`dq"x%` as `"dq"x%"`)
+    // does not decode back to the same words (#794).
+    encode_argv_form(raw_args)
+}
+
+/// Quote argv words so [`decode_argv`] gives back exactly the same words: the
+/// tail of the `-- prog args` argv form that carries an explicit argument
+/// vector between the CLI, the server and `build_command` (#582, #794).
+///
+/// An empty word is `''`, a word with a `'` goes in double quotes with `\` and
+/// `"` escaped, a word with whitespace or `"` in single quotes (literal), and
+/// anything else bare. A bare `;` or `\;` stays bare: it is data here, and the
+/// chained command splitter has already run.
+pub fn requote_argv<S: AsRef<str>>(words: &[S]) -> String {
+    words.iter().map(|w| {
+        let t = w.as_ref();
+        if t.is_empty() {
+            "''".to_string()
+        } else if t == ";" || t == "\\;" {
+            t.to_string()
+        } else if t.contains('\'') {
+            format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
+        } else if t.chars().any(|c| c.is_whitespace() || c == '"') {
+            format!("'{}'", t)
+        } else {
+            t.to_string()
+        }
+    }).collect::<Vec<String>>().join(" ")
+}
+
+/// `-- <requoted words>`: the argv form of a pane command.
+pub fn encode_argv_form<S: AsRef<str>>(words: &[S]) -> String {
+    format!("-- {}", requote_argv(words))
+}
+
+/// The words of an argv form's tail, exactly as [`requote_argv`] wrote them.
+/// It is the command parser's own tokenizer, which `requote_argv` was written
+/// against; the spawn tokenizer that used to decode it knows no escapes, so a
+/// word holding a quote and a backslash came back changed (#794).
+pub fn decode_argv(tail: &str) -> Vec<String> {
+    crate::commands::parse_command_line(tail)
 }
 
 /// Render a stored `Pane::start_command` for `#{pane_start_command}`.
@@ -629,7 +669,13 @@ pub fn start_command_display(raw: &str) -> String {
             return String::new();
         }
         if rest.starts_with(char::is_whitespace) {
-            return rest.trim().to_string();
+            // Each word as tmux's cmd_stringify_argv writes it, whichever
+            // encoding carried the argv here.
+            return decode_argv(rest)
+                .iter()
+                .map(|w| quote_start_command_word(w))
+                .collect::<Vec<_>>()
+                .join(" ");
         }
     }
     quote_start_command_word(trimmed)
@@ -2953,7 +2999,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
             match t.strip_prefix("--") {
                 Some(rest) if rest.is_empty() => (None, None),
                 Some(rest) if rest.starts_with(char::is_whitespace) => {
-                    let toks = split_spawn_tokens(rest);
+                    let toks = decode_argv(rest);
                     match toks.len() {
                         0 => (None, None),
                         1 => (Some(toks.into_iter().next().unwrap()), None),
@@ -2961,16 +3007,20 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                             // Unix launch idioms (`env VAR=v prog`, `/bin/bash
                             // -c '...'`) need the string path's Windows
                             // translation (#399); direct-exec'ing `env` would
-                            // fail outright. Shell metacharacters mean the
-                            // argv was really a flattened shell string (the
-                            // respawn wire path loses quotes), so those keep
-                            // shell semantics too.
+                            // fail outright.
+                            //
+                            // Nothing else leaves the argv: tmux execvp's it
+                            // whatever its words hold (spawn.c). A `&`, `(`,
+                            // `$` or backtick in a program path or an argument
+                            // used to send the whole command to `<shell>
+                            // -Command` as one flattened string, where the
+                            // pane died or ran under pwsh (#794). That guard
+                            // stood in for a wire format that lost quotes;
+                            // every route now carries the words intact.
                             let tail = rest.trim();
-                            let needs_shell = tail.chars().any(|c| matches!(c,
-                                '&' | '|' | '<' | '>' | ';' | '`' | '$' | '(' | ')' | '%' | '\n' | '\r'))
-                                || detect_bash_c_wrapper(tail).is_some()
-                                || detect_env_prefix_command(tail).is_some();
-                            if needs_shell {
+                            if detect_bash_c_wrapper(tail).is_some()
+                                || detect_env_prefix_command(tail).is_some()
+                            {
                                 (Some(tail.to_string()), None)
                             } else {
                                 (None, Some(toks))
@@ -2998,38 +3048,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
     }
     #[cfg(windows)]
     if let Some(tokens) = raw_argv {
-        // `-- cat -` spells the tmux blocker idiom too (#580).
-        if tokens.len() == 2 && tokens[0] == "cat" && tokens[1] == "-" {
-            return build_command(Some("cat"), env_shim, allow_predictions);
-        }
-        // CreateProcess resolves bare names (cmd.exe, ping) via its own
-        // search path and auto-wraps .bat/.cmd; normalize unix-style
-        // forward slashes like the direct-spawn path does.
-        let prog = tokens[0].replace('/', "\\");
-        let mut builder = CommandBuilder::new(&prog);
-        if let Some(ref dir) = cwd { builder.cwd(dir); }
-        apply_bare_env_if_set(&mut builder);
-        builder.env("TERM", "xterm-256color");
-        builder.env("COLORTERM", "truecolor");
-        builder.env("PSMUX_SESSION", "1");
-        let prog_args: Vec<String> = tokens[1..].to_vec();
-        builder.args(&prog_args);
-        // #495 follow-up, same as the direct-spawn path: an interactive
-        // PowerShell needs psrl_init or #{pane_current_path} freezes.
-        if is_powershell_program(&prog) && powershell_args_interactive(&prog_args) {
-            let has_noprofile = prog_args.iter()
-                .any(|a| a.eq_ignore_ascii_case("-NoProfile"));
-            let psrl_init = if has_noprofile {
-                build_psrl_init_noprofile(env_shim)
-            } else {
-                build_psrl_init(env_shim, allow_predictions)
-            };
-            if !has_noprofile {
-                builder.args(["-NoProfile"]);
-            }
-            builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
-        }
-        return builder;
+        return build_argv_command(&tokens, env_shim, allow_predictions);
     }
     if let Some(cmd) = command {
         // On Windows, detect `/bin/bash -c '...'` wrappers used by tools like
@@ -3348,32 +3367,165 @@ pub fn build_raw_command(raw_args: &[String]) -> CommandBuilder {
     if raw_args.is_empty() {
         return build_command(None, true, false);
     }
-    // tmux blocker idiom (issue #580): `new-session -- cat` is how Claude
-    // Code's teammate backend creates its root placeholder session. The
-    // shell-wrapped paths substitute a stdin-draining blocker in
-    // build_command, but this direct-exec path handed the literal `cat` to
-    // CreateProcessW, which fails the whole new-session. Route the idiom
-    // through build_command so it gets the same blocker.
+    build_argv_command(raw_args, true, false)
+}
+
+/// The variable a batch script's command line rides in to cmd.exe (#794).
+#[cfg(windows)]
+pub const BATCH_LINE_ENV: &str = "PSMUX_BATCH_LINE";
+
+/// Spawn an explicit argument vector, the `-- prog args` form, as tmux does:
+/// straight to the program (spawn.c execvp), never through a shell, whatever
+/// the words hold (#582, #794). Every route that carries an argv ends here:
+/// new-session's raw argv, and the `--` form new-window, split-window,
+/// respawn-pane, respawn-window, new-pane and display-popup hand to
+/// `build_command`.
+///
+/// Each word reaches the program as one argument: portable-pty quotes it for
+/// CreateProcess by the CommandLineToArgvW rules (ArgvQuote: backslashes
+/// doubled before a quote and at the end of a quoted word, `"` escaped).
+///
+/// A `.bat` or `.cmd` script cannot be started that way safely: CreateProcess
+/// hands it to cmd.exe, which reads its command line with cmd's own syntax, so
+/// an `&` or `|` in an argument would run as a command (the BatBadBut class).
+/// Such a script gets a command line written for cmd (see
+/// [`batch_command_line`]) and cmd.exe is started to run it.
+pub fn build_argv_command(tokens: &[String], env_shim: bool, allow_predictions: bool) -> CommandBuilder {
+    // tmux blocker idiom (issue #580): `-- cat` / `-- cat -` is how Claude
+    // Code's teammate backend creates its placeholder panes. A literal `cat`
+    // fails CreateProcessW, so it gets the stdin-draining blocker that the
+    // string route substitutes.
     #[cfg(windows)]
     {
-        let joined = raw_args.join(" ");
-        if matches!(joined.trim(), "cat" | "cat -") {
-            return build_command(Some("cat"), true, false);
+        let blocker = match tokens {
+            [only] => only == "cat",
+            [first, second] => first == "cat" && second == "-",
+            _ => false,
+        };
+        if blocker {
+            return build_command(Some("cat"), env_shim, allow_predictions);
         }
     }
-    let program = &raw_args[0];
-    let mut builder = CommandBuilder::new(program);
-    // Set CWD explicitly — portable_pty on Windows defaults to USERPROFILE
-    // (home dir) when no cwd is set on CommandBuilder.
-    if let Ok(dir) = std::env::current_dir() { builder.cwd(dir); }
+    let cwd = std::env::current_dir().ok();
+    // CreateProcess resolves bare names (cmd.exe, ping) via its own search
+    // path; normalize unix-style forward slashes in the program like the
+    // direct-spawn path does.
+    #[cfg(windows)]
+    let prog = tokens[0].replace('/', "\\");
+    #[cfg(not(windows))]
+    let prog = tokens[0].clone();
+    let prog_args: Vec<String> = tokens[1..].to_vec();
+    #[cfg(windows)]
+    if let Some(script) = batch_script_target(&prog) {
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut builder = CommandBuilder::new(&comspec);
+        if let Some(ref dir) = cwd { builder.cwd(dir); }
+        apply_bare_env_if_set(&mut builder);
+        builder.env("TERM", "xterm-256color");
+        builder.env("COLORTERM", "truecolor");
+        builder.env("PSMUX_SESSION", "1");
+        // cmd.exe expands `%PSMUX_BATCH_LINE%` once and then parses the
+        // result, which is the line batch_command_line wrote for it; the
+        // expanded text is not expanded again, so a `%` in an argument stays
+        // literal. Written as an argument that needs no quoting, it reaches
+        // cmd's /c untouched by CreateProcess quoting.
+        builder.env(BATCH_LINE_ENV, batch_command_line(&script, &prog_args));
+        builder.args(["/d", "/e:ON", "/v:OFF", "/c", &format!("%{}%", BATCH_LINE_ENV)]);
+        return builder;
+    }
+    let mut builder = CommandBuilder::new(&prog);
+    if let Some(ref dir) = cwd { builder.cwd(dir); }
+    apply_bare_env_if_set(&mut builder);
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
     builder.env("PSMUX_SESSION", "1");
-    if raw_args.len() > 1 {
-        let args: Vec<&str> = raw_args[1..].iter().map(|s| s.as_str()).collect();
-        builder.args(args);
+    builder.args(&prog_args);
+    // #495 follow-up, same as the direct-spawn path: an interactive
+    // PowerShell needs psrl_init or #{pane_current_path} freezes.
+    #[cfg(windows)]
+    if is_powershell_program(&prog) && powershell_args_interactive(&prog_args) {
+        let has_noprofile = prog_args.iter()
+            .any(|a| a.eq_ignore_ascii_case("-NoProfile"));
+        let psrl_init = if has_noprofile {
+            build_psrl_init_noprofile(env_shim)
+        } else {
+            build_psrl_init(env_shim, allow_predictions)
+        };
+        if !has_noprofile {
+            builder.args(["-NoProfile"]);
+        }
+        builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
     }
+    #[cfg(not(windows))]
+    let _ = (env_shim, allow_predictions);
     builder
+}
+
+/// The script an argv's program names when it is a `.bat` or `.cmd` file,
+/// given by path or found on PATH (a bare `npm` is `npm.cmd`).
+#[cfg(windows)]
+fn batch_script_target(prog: &str) -> Option<String> {
+    let is_batch = |p: &str| {
+        let lower = p.to_ascii_lowercase();
+        lower.ends_with(".bat") || lower.ends_with(".cmd")
+    };
+    if is_batch(prog) {
+        return Some(prog.to_string());
+    }
+    if !prog.contains('\\') && !prog.contains('/') {
+        let resolved = cached_which(prog);
+        if resolved != prog && is_batch(&resolved) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+/// The command line cmd.exe runs for a batch script and its arguments, each
+/// argument reaching the script as `%1`, `%2`... with cmd's syntax kept out
+/// of it. The rules are Rust's own for `Command` on a batch file
+/// (library/std/src/sys/args/windows.rs `make_bat_command_line`): the script
+/// in quotes; an argument in quotes when it is empty, ends with `\`, or holds
+/// a space or any ASCII symbol outside `#$*+-./:?@\_`; inside quotes a `"`
+/// doubled, with the backslashes before it and before the closing quote
+/// doubled. A line break would end the line, so it becomes a space.
+#[cfg(windows)]
+pub fn batch_command_line(script: &str, args: &[String]) -> String {
+    const UNQUOTED: &str = r"#$*+-./:?@\_";
+    let mut line = String::new();
+    line.push('"');
+    line.push_str(&script.replace('"', ""));
+    line.push('"');
+    for arg in args {
+        let arg: String = arg.chars().map(|c| if c == '\r' || c == '\n' { ' ' } else { c }).collect();
+        line.push(' ');
+        let quote = arg.is_empty()
+            || arg.ends_with('\\')
+            || arg.chars().any(|c| {
+                (c.is_ascii() && !(c.is_ascii_alphanumeric() || UNQUOTED.contains(c))) || c.is_control()
+            });
+        if quote {
+            line.push('"');
+        }
+        let mut backslashes = 0usize;
+        for c in arg.chars() {
+            if c == '\\' {
+                backslashes += 1;
+            } else {
+                if c == '"' {
+                    line.extend(std::iter::repeat_n('\\', backslashes));
+                    line.push('"');
+                }
+                backslashes = 0;
+            }
+            line.push(c);
+        }
+        if quote {
+            line.extend(std::iter::repeat_n('\\', backslashes));
+            line.push('"');
+        }
+    }
+    line
 }
 
 /// Spawn a dedicated PTY reader thread that processes output and updates the
@@ -4752,3 +4904,7 @@ mod tests_issue683_shell_env;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue712_bash_quote_strip.rs"]
 mod tests_issue712_bash_quote_strip;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue794_argv_metachars.rs"]
+mod test_issue794_argv_metachars;

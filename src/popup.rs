@@ -120,10 +120,12 @@ pub struct DisplayPopupArgs {
 pub fn parse_display_popup_args<S: AsRef<str>>(args: &[S]) -> Result<DisplayPopupArgs, String> {
     let mut out = DisplayPopupArgs::default();
     let mut i = 0;
+    let mut after_marker = false;
     while i < args.len() {
         let tok = args[i].as_ref();
         if tok == "--" {
             i += 1;
+            after_marker = true;
             break;
         }
         if !tok.starts_with('-') || tok.len() < 2 {
@@ -178,11 +180,16 @@ pub fn parse_display_popup_args<S: AsRef<str>>(args: &[S]) -> Result<DisplayPopu
             break; // a value-taking flag ends the cluster
         }
     }
-    out.command = args[i.min(args.len())..]
-        .iter()
-        .map(|a| a.as_ref())
-        .collect::<Vec<&str>>()
-        .join(" ");
+    let words: Vec<&str> = args[i.min(args.len())..].iter().map(|a| a.as_ref()).collect();
+    // `-- prog args...` is an argument vector, run as it stands (tmux
+    // job_run execvp's an argv of more than one word), in the argv form
+    // create_popup_pane hands to build_command (#794). Without `--` the words
+    // stay one command string, as they always have here.
+    out.command = if after_marker && words.len() > 1 {
+        crate::pane::encode_argv_form(&words)
+    } else {
+        words.join(" ")
+    };
     Ok(out)
 }
 

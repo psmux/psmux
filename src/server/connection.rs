@@ -702,19 +702,8 @@ fn list_keys_notes_args(args: &[&str]) -> (Option<String>, bool, Option<String>)
 }
 
 fn requote_command_tail(args: &[&str]) -> String {
-    args.iter().map(|t| {
-        if t.is_empty() {
-            "''".to_string()
-        } else if *t == ";" || *t == "\\;" {
-            t.to_string()
-        } else if t.contains('\'') {
-            format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
-        } else if t.chars().any(|c| c.is_whitespace() || c == '"') {
-            format!("'{}'", t)
-        } else {
-            t.to_string()
-        }
-    }).collect::<Vec<String>>().join(" ")
+    // One encoder for the argv form, the one build_command decodes (#794).
+    crate::pane::requote_argv(args)
 }
 
 /// The positional `shell-command` operand of `respawn-pane` / `respawn-window`

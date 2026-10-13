@@ -93,7 +93,9 @@ fn flags_after_the_command_belong_to_the_command() {
     assert_eq!(p.height, None);
     let p = parse("-E -- -T notatitle");
     assert_eq!(p.title, None);
-    assert_eq!(p.command, "-T notatitle");
+    // After `--` the words are an argument vector, carried in the argv form
+    // build_command runs directly, as tmux's job_run execvp's it (#794).
+    assert_eq!(p.command, crate::pane::encode_argv_form(&["-T", "notatitle"]));
 }
 
 #[test]
