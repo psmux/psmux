@@ -888,9 +888,13 @@ fn drain_plugin_req(
             }
         }
         CtrlReq::SourceFile(path, _done) => {
-            app.defaults_suppressed = false;
-            app.key_tables.clear();
-            crate::config::populate_default_bindings(app);
+            // Same rule as the run_server arm: only the startup config is a
+            // reload that starts from the defaults.
+            if crate::config::is_startup_config(app, &path) {
+                app.defaults_suppressed = false;
+                app.key_tables.clear();
+                crate::config::populate_default_bindings(app);
+            }
             crate::config::source_file(app, &path);
             // A runtime source-file can record warnings (e.g. an unreadable
             // path); flush them like the startup load does or they never
@@ -900,7 +904,8 @@ fn drain_plugin_req(
             resize_all_panes(app);
         }
         CtrlReq::UnbindAll => {
-            app.key_tables.clear();
+            // `unbind-key -a` with no table: the prefix table (tmux).
+            crate::config::unbind_all_in_table(app, "prefix");
             app.defaults_suppressed = true;
         }
         CtrlReq::UnbindAllInTable(table) => {
@@ -5758,7 +5763,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::UnbindAll => {
-                    app.key_tables.clear();
+                    // `unbind-key -a` with no table: the prefix table only,
+                    // as tmux cmd-unbind-key.c.
+                    crate::config::unbind_all_in_table(&mut app, "prefix");
                     app.defaults_suppressed = true;
                     meta_dirty = true;
                     state_dirty = true;
@@ -6094,11 +6101,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // `done` is dropped at the end of this arm, after the
                     // file has run: that is the one-shot source-file's answer.
                     let _done = done;
-                    // Reset binding state so config reload gets a clean slate.
-                    // If the config has unbind-key -a, it will re-set the flag.
-                    app.defaults_suppressed = false;
-                    app.key_tables.clear();
-                    crate::config::populate_default_bindings(&mut app);
+                    // tmux's source-file only runs the file's commands
+                    // (cmd-source-file.c): bindings made before it stay, so
+                    // a `bind` from the CLI and the files a plugin manager
+                    // sources one after another all survive. psmux keeps one
+                    // deliberate difference: sourcing the server's STARTUP
+                    // config is a reload and starts from the default
+                    // bindings, so a config that stops saying `unbind-key -a`
+                    // gets the defaults back on reload (#195, 266d414). tmux
+                    // keeps them unbound until the server restarts.
+                    if crate::config::is_startup_config(&app, &path) {
+                        app.defaults_suppressed = false;
+                        app.key_tables.clear();
+                        crate::config::populate_default_bindings(&mut app);
+                    }
                     // Use config helper for standard source-file behavior (-F support,
                     // nested parse context). Keep direct glob handling for wildcard sources.
                     let is_format_expand = path.starts_with("-F ") || path.starts_with("-F\t");

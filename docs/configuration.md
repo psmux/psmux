@@ -1071,6 +1071,22 @@ psmux source-file ~/.psmux.conf
 
 This re-executes every line in the config file, applying any changes to options, key bindings, hooks, and styles immediately.
 
+### What source-file does to key bindings
+
+Like tmux, `source-file` only runs the file's commands: bindings made before it stay. A `bind` typed at
+the CLI survives, and files sourced one after another (a plugin manager's, for example) all keep
+their bindings.
+
+One deliberate difference from tmux: sourcing the config file the server **started with** (the `-f`
+file or `PSMUX_CONFIG_FILE`, otherwise the first of `~/.psmux.conf`, `~/.psmuxrc`, `~/.tmux.conf`,
+`~/.config/psmux/psmux.conf` that existed) is a reload, and it starts from the default bindings. The
+reason is [#195](https://github.com/psmux/psmux/issues/195): a config that stops saying `unbind-key -a`
+gets the default bindings back when it is reloaded. tmux keeps them unbound until the server restarts.
+The comparison ignores case and slash direction, so `source-file ~/.PSMUX.conf` is the same reload.
+Because the reload starts from the defaults, bindings made outside the config (at the CLI, or by a
+file the config does not source) are dropped by it; re-source those files from the config if you want
+them to survive a reload.
+
 ## Window and Pane Numbering
 
 By default, windows and panes are numbered starting from 0. You can change the starting index for both:

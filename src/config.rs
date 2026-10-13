@@ -331,6 +331,7 @@ pub fn load_config(app: &mut AppState) {
             config_file
         };
         set_current_config_file(&expanded);
+        app.startup_config_file = Some(expanded.clone());
         match std::fs::read_to_string(&expanded) {
             Ok(content) => parse_config_content(app, &content),
             // An explicitly requested config file that cannot be read is a
@@ -360,13 +361,46 @@ pub fn load_config(app: &mut AppState) {
         format!("{}\\.tmux.conf", home),
         format!("{}\\.config\\psmux\\psmux.conf", home),
     ];
+    app.startup_config_file = None;
     for path in paths {
         if let Ok(content) = std::fs::read_to_string(&path) {
+            app.startup_config_file = Some(path.clone());
             set_current_config_file(&path);
             parse_config_content(app, &content);
             set_current_config_file("");
             break;
         }
+    }
+}
+
+/// Whether a runtime `source-file` argument names the config file the server
+/// started with (`app.startup_config_file`), so the source is a config
+/// reload. `spec` is the argument as the server receives it: optionally
+/// `-F <format>`, quotes, a leading `~`. Paths are compared canonicalised,
+/// and on Windows without regard to case or slash direction.
+pub fn is_startup_config(app: &AppState, spec: &str) -> bool {
+    let Some(start) = app.startup_config_file.as_deref() else { return false };
+    let spec = spec.trim();
+    let raw = match spec.strip_prefix("-F ").or_else(|| spec.strip_prefix("-F\t")) {
+        Some(f) => crate::format::expand_format(f.trim().trim_matches('"').trim_matches('\''), app),
+        None => spec.trim_matches('"').trim_matches('\'').to_string(),
+    };
+    let expand = |p: &str| -> String {
+        if p.starts_with('~') { p.replacen('~', &crate::paths::home_dir(), 1) } else { p.to_string() }
+    };
+    same_config_path(&expand(&raw), &expand(start))
+}
+
+/// Two config paths naming the same file.
+pub(crate) fn same_config_path(a: &str, b: &str) -> bool {
+    let norm = |p: &std::path::Path| -> String {
+        let s = p.to_string_lossy().replace('/', "\\");
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s).trim_end_matches('\\').to_string();
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => norm(&x) == norm(&y),
+        _ => norm(std::path::Path::new(a)) == norm(std::path::Path::new(b)),
     }
 }
 
@@ -2478,8 +2512,11 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
             // -a -T <table>: only clear that table
             unbind_all_in_table(app, &t);
         } else {
-            // -a (no table): clear ALL tables + suppress defaults
-            app.key_tables.clear();
+            // -a with no -T or -n is the prefix table only, as in tmux
+            // (cmd-unbind-key.c: tablename defaults to "prefix"), and as the
+            // #195 follow up (b2410550) said. Root, copy-mode and any other
+            // table keep their bindings.
+            unbind_all_in_table(app, "prefix");
             app.defaults_suppressed = true;
         }
         return;
@@ -3425,6 +3462,10 @@ mod test_ctrl_wheel_zoom_option;
 #[cfg(test)]
 #[path = "../tests-rs/test_bind_brace_blocks.rs"]
 mod test_bind_brace_blocks;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_source_file_key_tables.rs"]
+mod test_source_file_key_tables;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]

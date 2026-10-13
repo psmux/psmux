@@ -1954,6 +1954,11 @@ pub struct AppState {
     /// in that binding can hand it to the pane: (pane id, SGR button with
     /// modifier bits, press, pointer cell, when).
     pub last_mouse_event: Option<(usize, u8, bool, Option<(i16, i16)>, std::time::Instant)>,
+    /// The config file the server loaded at startup (the -f /
+    /// PSMUX_CONFIG_FILE override or the first default path that existed).
+    /// A runtime source-file of THIS file is a config reload and starts from
+    /// the default bindings; any other file only adds, as in tmux.
+    pub startup_config_file: Option<String>,
     /// Panes extracted for cross-session forwarding, keyed by forward_id.
     /// The source server keeps these alive so the real ConPTY continues running.
     pub forwarded_panes: HashMap<u64, ForwardedPane>,
@@ -2910,6 +2915,7 @@ impl AppState {
             defaults_suppressed: false,
             copy_mode_defaults_unbound: std::collections::HashSet::new(),
             last_mouse_event: None,
+            startup_config_file: None,
             forwarded_panes: HashMap::new(),
             next_forward_id: 1,
         }

@@ -177,7 +177,7 @@ The `-F` flag on `bind-key` now properly expands format variables, enabling plug
 
 ### Unbind All Keys
 
-`unbind-key -a` correctly removes all key bindings across all key tables. You can also target specific tables: `unbind-key -a -T prefix`, `unbind-key -a -T root`, `unbind-key -a -T copy-mode`.
+`unbind-key -a` removes every binding in the `prefix` table, as in tmux; other tables keep theirs. Target a table with `-T`: `unbind-key -a -T root` (or `-n`), `unbind-key -a -T copy-mode`, `unbind-key -a -T copy-mode-vi`. To clear everything, run it once per table.
 
 ### Client Prefix Format Variable
 
