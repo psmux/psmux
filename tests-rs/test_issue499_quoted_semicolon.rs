@@ -107,9 +107,10 @@ fn chaining_still_works_around_a_quoted_semicolon_value() {
 }
 
 // ---------------------------------------------------------------------------
-// tmux parity: a semicolon that is only part of a token is not a separator.
-// tmux inspects the whole argument (`cmd_parse_from_arguments`), so `a;b`
-// and `a; b` round-trip. These passed before the fix and must keep passing.
+// A semicolon in the middle of a token is not a separator, so `a;b`
+// round-trips. A token that ENDS in `;` does end the command (#734 follow
+// up): both tmux grammars agree (cmd-parse.y:1098 for argv, :1675 for a
+// command string), so `a; b` is `a` then `b`.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -118,8 +119,8 @@ fn mid_token_semicolon_is_not_a_separator() {
 }
 
 #[test]
-fn token_trailing_semicolon_is_not_a_separator() {
-    assert_eq!(split("set-option @key a; b"), vec!["set-option @key a; b"]);
+fn token_trailing_semicolon_ends_the_command() {
+    assert_eq!(split("set-option @key a; b"), vec!["set-option @key a", "b"]);
 }
 
 #[test]

@@ -707,6 +707,14 @@ pub fn quote_arg_if_needed(s: &str) -> String {
         || s.chars().any(char::is_whitespace)
         || s.contains('"')
         || s.contains('\'')
+        // An argv element ending in `;` is data on the CLI route (only a
+        // lone `;` separates there, cli::split_cli_command_list), but bare on
+        // the wire the server's splitter now reads `word;` as the end of a
+        // command, as tmux's command string lexer does (#734 follow up).
+        // Quoted it stays one argument. A lone `;` is a separator either way
+        // and a modified `;` key (`M-;`) is left raw for bind-key.
+        || (s.len() > 1 && s.ends_with(';') && !s.ends_with("\\;")
+            && !crate::config::is_modified_semicolon_key(s))
     {
         quote_arg(s)
     } else {

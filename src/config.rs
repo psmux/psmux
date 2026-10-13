@@ -2053,8 +2053,21 @@ pub fn split_chained_commands_pub(command: &str) -> Vec<String> {
 ///     of spaces inside a quoted argument survive chaining (previously
 ///     `set-option @a 1 \; set-option @b "x    y"` stored `x y`).
 ///
-/// A semicolon that is only *part* of a token (`a;b`, `a; b`) is left alone,
-/// again matching tmux, which inspects the whole argument.
+/// A top-level token that *ends* with an unescaped `;` ends the command too,
+/// the `;` dropped and the rest of the token kept (#734 follow up): `-s probe;
+/// display-message -p done` is `-s probe` then `display-message -p done`. Both
+/// tmux grammars agree on that: cmd_parse_from_arguments (cmd-parse.y:1098)
+/// cuts an argument ending in `;` and ends the command there, and the string
+/// lexer ends a token at an unquoted `;` and returns the `;` as the separator
+/// (cmd-parse.y:1314 and :1675). psmux made a session named `probe;` and sent
+/// the marker to it as arguments. `\;` at the end of a token stays a literal
+/// `;` in both (cmd-parse.y:1100 and the lexer's escape).
+///
+/// A `;` in the middle of a token (`a;b`) is left alone. The two tmux grammars
+/// disagree there (an argv element `a;b` is one argument, a command string
+/// `a;b` is two commands), and the line read here is often a flattened argv
+/// whose arguments were not quoted, so splitting it would change the value of
+/// a plain `set -g @v a;b`.
 fn split_chained_commands(command: &str) -> Vec<String> {
     let chars: Vec<char> = command.chars().collect();
     let mut commands: Vec<String> = Vec::new();
@@ -2085,6 +2098,17 @@ fn split_chained_commands(command: &str) -> Vec<String> {
                 seg_start = i;
                 continue;
             }
+            // `word;` : a bare `;` closing a token (not `\;`, handled by the
+            // escape arm below, and not a `;` inside a token).
+            if c == ';' && !starts_token && ends_token && !{
+                let ts = chars[..i].iter().rposition(|ch| ch.is_whitespace()).map_or(0, |p| p + 1);
+                is_modified_semicolon_key(&chars[ts..=i].iter().collect::<String>())
+            } {
+                push_seg(&mut commands, &chars[seg_start..i]);
+                i += 1;
+                seg_start = i;
+                continue;
+            }
         }
 
         match c {
@@ -2100,6 +2124,26 @@ fn split_chained_commands(command: &str) -> Vec<String> {
 
     push_seg(&mut commands, &chars[seg_start.min(chars.len())..]);
     commands
+}
+
+/// A key name for the `;` key with modifiers, such as `M-;`, `C-M-;` or `^;`.
+/// tmux needs these written `M-\;` (its lexer and its argv rule both cut the
+/// `;`), but psmux has always taken `bind -n M-; ...` as written, so a token
+/// like this does not end a command at its trailing `;`. No real argument
+/// ending a command looks like one.
+pub(crate) fn is_modified_semicolon_key(token: &str) -> bool {
+    if token == "^;" {
+        return true;
+    }
+    let mut rest = token;
+    let mut modifiers = 0;
+    while rest.len() > 2 && rest.as_bytes()[1] == b'-'
+        && matches!(rest.as_bytes()[0].to_ascii_uppercase(), b'C' | b'M' | b'S')
+    {
+        rest = &rest[2..];
+        modifiers += 1;
+    }
+    modifiers > 0 && rest == ";"
 }
 
 /// One whitespace separated token of `s` starting at or after byte `from`,
@@ -3286,3 +3330,7 @@ mod tests_issue734_side_ifshell_braces;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue734_side_bind_notes.rs"]
 mod tests_issue734_side_bind_notes;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue734_followup_queue.rs"]
+mod tests_issue734_followup_queue;
