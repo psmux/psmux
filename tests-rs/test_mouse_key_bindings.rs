@@ -267,3 +267,21 @@ fn client_routed_keys_report_only_changes() {
 fn a_status_target_is_a_window() {
     assert_eq!(resolve_mouse_targets_to("select-window -t =", ":2"), "select-window -t :2");
 }
+
+#[test]
+fn a_binding_to_tmux_default_command_keeps_the_built_in() {
+    let mut app = app();
+    parse_config_content(&mut app, "bind -n MouseDrag1Border resize-pane -M");
+    parse_config_content(&mut app, "bind -n MouseDown1Status switch-client -t=");
+    parse_config_content(&mut app, "bind -n WheelUpPane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -e } }");
+    parse_config_content(&mut app, "bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel");
+    let b = |n: &str, c: bool| resolve(&app, parse(n).unwrap(), c);
+    assert_eq!(b("MouseDrag1Border", false), Dispatch::Builtin);
+    assert_eq!(b("MouseDown1Status", false), Dispatch::Builtin);
+    assert_eq!(b("WheelUpPane", false), Dispatch::Builtin);
+    app.mode_keys = "vi".into();
+    assert_eq!(resolve(&app, drag_end_pane_key(), true), Dispatch::Builtin);
+    // Anything else is the user's own command.
+    parse_config_content(&mut app, "bind -n MouseDrag1Border resize-pane -Z");
+    assert_eq!(resolve(&app, parse("MouseDrag1Border").unwrap(), false), Dispatch::User("resize-pane -Z".into()));
+}

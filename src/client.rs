@@ -3981,6 +3981,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut rsel_block: bool = false;
     let mut selection_changed = false; // forces redraw for selection overlay
     let mut border_drag = false; // true when dragging a pane separator (resize)
+    // A press on a separator whose MouseDrag1Border lost its built-in
+    // default: the dispatch letter (U runs the binding on every drag motion,
+    // F / D do nothing), until the release.
+    let mut border_drag_route: Option<char> = None;
     // The copy-mode line number mode and scrollback size the frames are being
     // painted with, which is what the gutter width is computed from. Kept out
     // here because a copy-mode release re-reports a cell the server gave as a
@@ -6905,15 +6909,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 && me.column >= barea.x && me.column < barea.x + barea.width
                                             };
                                             if hit {
-                                                client_drag = Some(ClientDragState {
-                                                    path: bpath.clone(),
-                                                    kind: bkind.clone(),
-                                                    index: *bidx,
-                                                    start_pos: if bkind == "Horizontal" { me.column } else { me.row },
-                                                    initial_sizes: bsizes.clone(),
-                                                    total_pixels: *btotal,
-                                                });
-                                                border_drag = true;
+                                                // tmux MouseDrag1Border: built in, drag
+                                                // the separator; otherwise the table
+                                                // decides on each drag motion.
+                                                let route = mouse_route(&mouse_overrides, "MouseDrag1Border", client_copy_mode);
+                                                if route == 'B' {
+                                                    client_drag = Some(ClientDragState {
+                                                        path: bpath.clone(),
+                                                        kind: bkind.clone(),
+                                                        index: *bidx,
+                                                        start_pos: if bkind == "Horizontal" { me.column } else { me.row },
+                                                        initial_sizes: bsizes.clone(),
+                                                        total_pixels: *btotal,
+                                                    });
+                                                    border_drag = true;
+                                                } else {
+                                                    border_drag_route = Some(route);
+                                                }
                                                 on_border = true;
                                                 rsel_start = None;
                                                 rsel_end = None;
@@ -7166,7 +7178,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
-                                if border_drag {
+                                if let Some(route) = border_drag_route {
+                                    if route == 'U' {
+                                        cmd_batch.push(format!("mouse-key MouseDrag1Border : {} {} 32\n", me.column, me.row));
+                                    }
+                                } else if border_drag {
                                     if let Some(ref d) = client_drag {
                                         let current_pos = if d.kind == "Horizontal" { me.column } else { me.row };
                                         let pixel_delta = current_pos as i32 - d.start_pos as i32;
@@ -7311,7 +7327,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                             MouseEventKind::Drag(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if border_drag {
+                                if border_drag_route.take().is_some() {
+                                    deferred_left_click = None;
+                                } else if border_drag {
                                     deferred_left_click = None;
                                     cmd_batch.push(format!("split-resize-done\n"));
                                     border_drag = false;

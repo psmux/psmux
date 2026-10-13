@@ -176,6 +176,7 @@ pub const ROOT_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpStatus", "previous-window"),
     ("WheelDownStatus", "next-window"),
     ("MouseDown1Status", "select-window -t ="),
+    ("MouseDrag1Border", "resize-pane -M"),
 ];
 pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("WheelUpPane", "select-pane \\; send-keys -X -N 3 scroll-up"),
@@ -183,12 +184,74 @@ pub const COPY_MODE_MOUSE_DEFAULTS: &[(&str, &str)] = &[
     ("MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
 ];
 
+/// tmux's own default commands for keys psmux handles with a built-in
+/// behaviour. A ported config often repeats them (`bind -n MouseDrag1Border
+/// resize-pane -M`); such a binding means "the default", so it keeps psmux's
+/// built-in handling instead of running a command psmux does not model the
+/// same way. (table, key, tmux command), compared after `canonical_command`.
+const DEFAULT_EQUIVALENTS: &[(&str, &str, &str)] = &[
+    ("root", "MouseDrag1Border", "resize-pane -M"),
+    ("root", "MouseDown1Status", "switch-client -t ="),
+    ("root", "MouseDown1Status", "select-window -t ="),
+    ("root", "MouseDown1Pane", "select-pane -t = ; send-keys -M"),
+    ("root", "MouseDrag1Pane", "if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -M }"),
+    ("root", "WheelUpPane", "if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -e }"),
+    ("root", "WheelUpPane", "if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -e }"),
+    ("root", "WheelUpStatus", "previous-window"),
+    ("root", "WheelDownStatus", "next-window"),
+    ("copy-mode", "MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
+    ("copy-mode-vi", "MouseDragEnd1Pane", "send-keys -X copy-pipe-and-cancel"),
+];
+
+/// A command line in one spelling for comparing defaults: whitespace runs
+/// folded, `send` / `if` / `selectp` spelled out, `-t=` as `-t =`, `\;` as
+/// `;`, single quotes as double.
+fn canonical_command(cmd: &str) -> String {
+    let cmd = cmd.replace('\'', "\"");
+    let mut out: Vec<String> = Vec::new();
+    for tok in cmd.split_whitespace() {
+        // `a;` ends a command like a separate `;` (but `\;` at the end of a
+        // word is a literal semicolon).
+        match tok.strip_suffix(';') {
+            Some(w) if !w.is_empty() && !w.ends_with('\\') => {
+                out.extend(canonical_word(w));
+                out.push(";".into());
+            }
+            _ => out.extend(canonical_word(tok)),
+        }
+    }
+    out.join(" ")
+}
+fn canonical_word(tok: &str) -> Vec<String> {
+    match tok {
+        "\\;" => vec![";".into()],
+        "send" => vec!["send-keys".into()],
+        "if" => vec!["if-shell".into()],
+        "selectp" => vec!["select-pane".into()],
+        "-t=" => vec!["-t".into(), "=".into()],
+        other => vec![other.to_string()],
+    }
+}
+
+/// Whether a user binding of `key` in `table` is tmux's default command for
+/// it (see DEFAULT_EQUIVALENTS).
+fn is_default_equivalent(table: &str, key: (KeyCode, KeyModifiers), cmd: &str) -> bool {
+    if key.1 != KeyModifiers::NONE {
+        return false;
+    }
+    let canon = canonical_command(cmd);
+    DEFAULT_EQUIVALENTS.iter().any(|(t, k, c)| {
+        *t == table && parse(k).map_or(false, |pk| pk == key) && canonical_command(c) == canon
+    })
+}
+
 /// Mouse keys whose built-in behaviour lives in the client (it hit-tests the
 /// status line, borders and panes itself). The server tells the client which
 /// of them no longer have their built-in default (`client_overrides`), and
 /// the client sends those to the server as `mouse-key` instead of acting.
 pub const CLIENT_ROUTED: &[&str] = &[
     "MouseDown1Status",
+    "MouseDrag1Border",
 ];
 
 /// One letter per dispatch, for the client: B built-in, U user binding,
@@ -240,7 +303,11 @@ pub fn resolve(app: &crate::types::AppState, key: (KeyCode, KeyModifiers), in_co
     let mode_table = if in_copy { Some(crate::config::active_copy_mode_table(app)) } else { None };
     for table in mode_table.into_iter().chain(std::iter::once("root")) {
         if let Some(b) = app.key_tables.get(table).and_then(|v| v.iter().find(|b| b.key == key)) {
-            return Dispatch::User(crate::commands::format_action(&b.action));
+            let cmd = crate::commands::format_action(&b.action);
+            if is_default_equivalent(table, key, &cmd) {
+                return Dispatch::Builtin;
+            }
+            return Dispatch::User(cmd);
         }
         let builtin = crate::config::copy_mode_default_keys(table).iter().any(|(k, _, _)| *k == key);
         if builtin && !app.copy_mode_defaults_unbound.contains(&(table.to_string(), key)) {
