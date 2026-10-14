@@ -9907,6 +9907,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
 
+            crate::rendering::style_wide_trailing_cells(f.buffer_mut());
         })?;
         if client_log_enabled() {
             client_log("draw", &format!("draw OK, render={}us overlays: popup={} confirm={} menu={} display_panes={}",

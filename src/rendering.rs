@@ -451,6 +451,31 @@ pub fn fix_border_intersections(
     junctions
 }
 
+/// ratatui resets the cells hidden behind a wide character to `Cell::EMPTY`,
+/// but the host paints the wide character's background there.  When a later
+/// wide character overwrites only the left half, the host keeps that
+/// background on the right half, and the diff never repaints it because the
+/// new blank equals the reset cell.  Recording the covering style makes the
+/// diff write that column.
+pub fn style_wide_trailing_cells(buf: &mut Buffer) {
+    use ratatui::buffer::CellWidth;
+
+    let width = (buf.area.width as usize).max(1);
+    let mut index = 0;
+    while index < buf.content.len() {
+        let row_end = (index / width + 1) * width;
+        let end = (index + (buf.content[index].cell_width() as usize).max(1)).min(row_end);
+        let style = buf.content[index].style();
+        for hidden in buf.content[index + 1..end]
+            .iter_mut()
+            .filter(|cell| cell.symbol() == " ")
+        {
+            hidden.set_style(style);
+        }
+        index = end;
+    }
+}
+
 // ─── UI layout helpers ──────────────────────────────────────────────────────
 
 pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
@@ -477,3 +502,7 @@ pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue735_cursor_style_default.rs"]
 mod test_issue735_cursor_style_default;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_wide_char_background_residue.rs"]
+mod test_wide_char_background_residue;
