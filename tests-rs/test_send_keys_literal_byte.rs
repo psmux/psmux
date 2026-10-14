@@ -70,8 +70,10 @@ fn coalescing_merges_mixed_encodings_into_one_write() {
         "send -lt %1 A".to_string(),
     ];
     let merged = coalesce_send_commands(parts);
-    assert_eq!(merged.len(), 1, "three sub-commands must merge into one");
+    assert_eq!(merged.len(), 3, "one write plus a reply placeholder per merged command (#799)");
     assert_eq!(merged[0], "send -H -t %1 1b 5b 41");
+    assert_eq!(merged[1], format!("{}send -t %1 0x5b", COALESCED_SEND_REPLY));
+    assert_eq!(merged[2], format!("{}send -lt %1 A", COALESCED_SEND_REPLY));
 }
 
 #[test]

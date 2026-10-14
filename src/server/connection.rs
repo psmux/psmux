@@ -554,6 +554,168 @@ fn split_top_level_semicolons(s: &str) -> Vec<String> {
     out
 }
 
+/// The send-keys requests for one command line, shared by the one shot
+/// route and the control route so every flag means the same on both. The
+/// control route used to carry its own copy that knew only -H and -l: -X
+/// typed its copy command's NAME into the pane, and -N and `--` were
+/// dropped (issue #799). The error is tmux's for a refused -X.
+fn send_keys_requests(args: &[&str], tx: &TargetedSender, client_id: u64) -> Result<(), String> {
+    // End-of-options: a bare `--` terminates flag parsing. Every token after
+    // it is an operand even if it begins with '-', and `--` itself is
+    // consumed. Without this, `send-keys -l -- -foo` dropped `--` as a dash
+    // token and dropped `-foo` because its first byte is '-', so a
+    // dash-leading literal had no deliverable spelling (issue #562).
+    let end_of_opts: Option<usize> = args.iter().position(|a| *a == "--");
+    let past_opts = |i: usize| -> bool { end_of_opts.is_some_and(|eo| i > eo) };
+    let is_marker = |i: usize| -> bool { end_of_opts == Some(i) };
+    // tmux short-flag clusters (e.g. iTerm2's `send -lt %1 l`): inspect
+    // each `-xyz` arg and check whether any of x/y/z is a known flag.
+    // Tokens at or after the `--` marker are operands, not flags.
+    let flag_has = |c: char| -> bool {
+        args.iter().enumerate().any(|(i, a)| {
+            !is_marker(i) && !past_opts(i)
+                && a.starts_with('-') && !a.starts_with("--")
+                && a.chars().skip(1).any(|fc| fc == c)
+        })
+    };
+    // Returns true if the previous arg is a short-flag cluster whose
+    // *trailing* character takes an operand (e.g. -t, -lt, -N).
+    let prev_consumes_operand = |i: usize| -> bool {
+        if i == 0 { return false; }
+        if is_marker(i - 1) || past_opts(i - 1) { return false; }
+        if let Some(prev) = args.get(i - 1) {
+            if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
+                if let Some(last) = prev.chars().last() {
+                    return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
+                }
+            }
+        }
+        false
+    };
+    // A token counts as an operand (a key to deliver) when it is past the
+    // `--` marker, or when it is neither a flag cluster nor a flag's value.
+    // The `--` marker itself is never an operand.
+    let is_operand = |i: usize, a: &str| -> bool {
+        if is_marker(i) { return false; }
+        // An EMPTY argument sends nothing, as in tmux. Writing
+        // `send-keys -t x "X" ""` is an ordinary way to say "type X with no
+        // trailing newline", and the empty argument must produce no
+        // keystroke whatsoever.
+        //
+        // It used to qualify as an operand (an empty string does not start
+        // with '-') and travel on as a key NAMED "", which matched no key
+        // name and fell through to a handler that deleted the rest of the
+        // line. Measured against tmux 3.4 with an identical sequence:
+        //
+        //   type "echo arrow_ABC", then Left Left Left, then `"X" ""`
+        //     tmux   -> arrow_XABC
+        //     psmux  -> arrow_AX     (everything right of the cursor gone)
+        //
+        // It stayed hidden because it is invisible when the cursor is at the
+        // end of the line: only an edit in the MIDDLE of a line shows it.
+        // The check is before past_opts so an empty token after `--` is
+        // dropped too.
+        if a.is_empty() { return false; }
+        if past_opts(i) { return true; }
+        !a.starts_with('-') && !prev_consumes_operand(i)
+    };
+    let literal = flag_has('l');
+    let paste_mode = flag_has('p');
+    let has_x = flag_has('X');
+    let hex_mode = flag_has('H');
+    // tmux send-keys -M: forward the mouse event of the running mouse
+    // binding (see window_ops::send_mouse_event). It sends no keys.
+    let mouse_mode = flag_has('M');
+    // Parse -N <count> for repeat (look for any cluster ending in 'N')
+    let mut repeat_count: usize = 1;
+    if let Some(n_pos) = args.iter().enumerate().position(|(i, a)| !is_marker(i) && !past_opts(i) && a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
+        if let Some(count_str) = args.get(n_pos + 1) {
+            repeat_count = count_str.parse::<usize>().unwrap_or(1).max(1);
+        }
+    }
+    if mouse_mode {
+        let _ = tx.send(CtrlReq::SendMouse(client_id));
+    } else if hex_mode {
+        // tmux `send-keys -H`: every operand is one hexadecimal BYTE value.
+        // tmux tags these keys KEYC_LITERAL and writes them to the pty as
+        // single bytes ("can't be more than 8 bits"), so this is a byte
+        // channel, not a codepoint channel.  Decode here and pass the raw
+        // bytes through untouched so UTF-8 sequences and escape sequences
+        // survive verbatim.
+        let mut bytes: Vec<u8> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if !is_operand(i, a) { continue; }
+            // A malformed operand is dropped rather than leaked into the
+            // pane as its literal token text.
+            if let Ok(byte) = u8::from_str_radix(a, 16) { bytes.push(byte); }
+        }
+        if !bytes.is_empty() {
+            for _ in 0..repeat_count {
+                let _ = tx.send(CtrlReq::SendBytes(bytes.clone()));
+            }
+        }
+    } else if has_x {
+        // send-keys -X copy-mode-command
+        let cmd_parts: Vec<&str> = args.iter().enumerate()
+            .filter(|(i, a)| is_operand(*i, a))
+            .map(|(_, a)| *a).collect();
+        // One request carrying the count: tmux hands -N to the copy
+        // command as its repeat (`wme->prefix`), and refuses -X outside
+        // a mode with "not in a mode" (cmd-send-keys.c).
+        let (rtx, rrx) = mpsc::channel();
+        let _ = tx.send(CtrlReq::SendKeysXRun {
+            cmd: cmd_parts.join(" "),
+            count: repeat_count,
+            resp: Some(rtx),
+        });
+        if let Ok(Err(e)) = rrx.recv_timeout(Duration::from_secs(5)) {
+            return Err(e);
+        }
+    } else {
+        let keys: Vec<String> = args.iter()
+            .enumerate()
+            .filter(|(i, a)| is_operand(*i, a))
+            .map(|(_, a)| {
+                // Convert real-tmux 0xNN hex codepoint syntax (sent by
+                // iTerm2's gateway: e.g. `send -t %1 0xd` for Enter) into
+                // the literal character so SendKeys forwards the right
+                // byte to the PTY instead of the string "0xd".
+                let s = *a;
+                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                        if let Ok(n) = u32::from_str_radix(rest, 16) {
+                            if let Some(c) = char::from_u32(n) {
+                                return c.to_string();
+                            }
+                        }
+                    }
+                }
+                s.to_string()
+            })
+            .collect();
+        // If any key was a hex-converted single byte, force literal mode so
+        // the byte is written verbatim and not parsed as a key name.
+        let any_hex = args.iter().any(|a| {
+            let s = *a;
+            if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit());
+            }
+            false
+        });
+        let effective_literal = literal || any_hex;
+        for _ in 0..repeat_count {
+            if paste_mode {
+                let _ = tx.send(CtrlReq::SendPaste(keys.join("")));
+            } else {
+                // #490: hand the tokens over UNJOINED so quoted
+                // arguments keep their exact whitespace end to end.
+                let _ = tx.send(CtrlReq::SendKeys(keys.clone(), effective_literal));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Try to decode a single `send`/`send-keys` command into the literal byte
 /// payload it would inject and the pane target.  Returns `None` if the
 /// command uses features we don't safely coalesce (e.g. `-X`, `-p`, `-N`,
@@ -1043,23 +1205,38 @@ pub(crate) fn select_pane_requests(
 /// pane into a single synthesized `send -lt <target> <bytes>` command.
 /// This keeps multi-byte VT sequences (arrows, function keys, etc.) atomic
 /// when they reach the shell PTY.
+///
+/// Every merged command after the first leaves a `COALESCED_SEND_REPLY`
+/// placeholder behind, so the client still gets one empty `%begin`/`%end`
+/// block per command it sent: tmux guards each queue item on its own
+/// (cmd-queue.c:592 and :652), and a client pairs replies to commands by
+/// count (issue #799).
 fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(parts.len());
     let mut acc: Vec<u8> = Vec::new();
     let mut acc_target: Option<String> = None;
+    let mut merged: Vec<String> = Vec::new();
 
-    fn flush(out: &mut Vec<String>, acc: &mut Vec<u8>, target: &mut Option<String>) {
-        if acc.is_empty() { return; }
-        // Re-emit as `send -H`: a byte-exact, pure-ASCII command line.  The
-        // previous `send -l '<latin1>'` form ran every byte through a latin-1
-        // char round trip, which double-encoded anything the decoder had
-        // already turned into UTF-8 (a `send 0x4e2d` arrived as "ä¸­").
-        let hex: Vec<String> = acc.iter().map(|b| format!("{:02x}", b)).collect();
-        let line = match target.as_deref() {
-            Some(t) if !t.is_empty() => format!("send -H -t {} {}", t, hex.join(" ")),
-            _ => format!("send -H {}", hex.join(" ")),
-        };
-        out.push(line);
+    fn flush(out: &mut Vec<String>, acc: &mut Vec<u8>, target: &mut Option<String>, merged: &mut Vec<String>) {
+        let mut parts = merged.drain(..);
+        let Some(first) = parts.next() else { return };
+        if acc.is_empty() {
+            // Nothing to write (only empty operands): the first command runs
+            // as sent, so it is still validated and answered.
+            out.push(first);
+        } else {
+            // Re-emit as `send -H`: a byte-exact, pure-ASCII command line.  The
+            // previous `send -l '<latin1>'` form ran every byte through a latin-1
+            // char round trip, which double-encoded anything the decoder had
+            // already turned into UTF-8 (a `send 0x4e2d` arrived as "ä¸­").
+            let hex: Vec<String> = acc.iter().map(|b| format!("{:02x}", b)).collect();
+            let line = match target.as_deref() {
+                Some(t) if !t.is_empty() => format!("send -H -t {} {}", t, hex.join(" ")),
+                _ => format!("send -H {}", hex.join(" ")),
+            };
+            out.push(line);
+        }
+        out.extend(parts.map(|part| format!("{}{}", COALESCED_SEND_REPLY, part)));
         acc.clear();
         *target = None;
     }
@@ -1067,23 +1244,29 @@ fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
     for part in parts {
         match decode_send_command(&part) {
             Some((tgt, bytes)) => {
-                let target_match = acc.is_empty()
+                let target_match = merged.is_empty()
                     || acc_target.as_deref() == Some(tgt.as_str());
                 if !target_match {
-                    flush(&mut out, &mut acc, &mut acc_target);
+                    flush(&mut out, &mut acc, &mut acc_target, &mut merged);
                 }
-                if acc.is_empty() { acc_target = Some(tgt); }
+                if merged.is_empty() { acc_target = Some(tgt); }
                 acc.extend_from_slice(&bytes);
+                merged.push(part);
             }
             None => {
-                flush(&mut out, &mut acc, &mut acc_target);
+                flush(&mut out, &mut acc, &mut acc_target, &mut merged);
                 out.push(part);
             }
         }
     }
-    flush(&mut out, &mut acc, &mut acc_target);
+    flush(&mut out, &mut acc, &mut acc_target, &mut merged);
     out
 }
+
+/// Marks a sub-command that `coalesce_send_commands` merged into the send
+/// before it: its keys are already written, so it only answers an empty
+/// block. The rest of the string is the command as the client sent it.
+const COALESCED_SEND_REPLY: &str = "\u{0001}COALESCED-SEND\u{0001}";
 
 /// tmux's `break-pane` template when `-P` is given without `-F`
 /// (cmd-break-pane.c:29, BREAK_PANE_TEMPLATE).
@@ -1812,6 +1995,24 @@ if control_echo || control_noecho {
 
         cmd_counter += 1;
         let ts = chrono::Utc::now().timestamp();
+
+        // A send merged into the one before it: its keys went out with that
+        // write, and it answers its own empty block like any send (#799).
+        if let Some(original) = trimmed.strip_prefix(COALESCED_SEND_REPLY) {
+            let mut out = String::new();
+            if control_echo {
+                out.push_str(original);
+                out.push('\n');
+            }
+            out.push_str(&control::format_begin(ts, cmd_counter));
+            out.push('\n');
+            out.push_str(&control::format_end(ts, cmd_counter));
+            out.push('\n');
+            let mut ws = write_lock.lock().unwrap();
+            let _ = ws.write_all(out.as_bytes());
+            let _ = ws.flush();
+            continue;
+        }
 
         // Dispatch the command (before acquiring write lock)
         let parsed = crate::cli::normalize_flag_equals(parse_command_line(trimmed));
@@ -3124,160 +3325,10 @@ match cmd {
     "toggle-sync" => { let _ = tx.send(CtrlReq::ToggleSync); }
     "set-pane-title" => { let title = args.join(" "); let _ = tx.send(CtrlReq::SetPaneTitle(title)); }
     "send-keys" | "send" => {
-        // End-of-options: a bare `--` terminates flag parsing. Every token after
-        // it is an operand even if it begins with '-', and `--` itself is
-        // consumed. Without this, `send-keys -l -- -foo` dropped `--` as a dash
-        // token and dropped `-foo` because its first byte is '-', so a
-        // dash-leading literal had no deliverable spelling (issue #562).
-        let end_of_opts: Option<usize> = args.iter().position(|a| *a == "--");
-        let past_opts = |i: usize| -> bool { end_of_opts.is_some_and(|eo| i > eo) };
-        let is_marker = |i: usize| -> bool { end_of_opts == Some(i) };
-        // tmux short-flag clusters (e.g. iTerm2's `send -lt %1 l`): inspect
-        // each `-xyz` arg and check whether any of x/y/z is a known flag.
-        // Tokens at or after the `--` marker are operands, not flags.
-        let flag_has = |c: char| -> bool {
-            args.iter().enumerate().any(|(i, a)| {
-                !is_marker(i) && !past_opts(i)
-                    && a.starts_with('-') && !a.starts_with("--")
-                    && a.chars().skip(1).any(|fc| fc == c)
-            })
-        };
-        // Returns true if the previous arg is a short-flag cluster whose
-        // *trailing* character takes an operand (e.g. -t, -lt, -N).
-        let prev_consumes_operand = |i: usize| -> bool {
-            if i == 0 { return false; }
-            if is_marker(i - 1) || past_opts(i - 1) { return false; }
-            if let Some(prev) = args.get(i - 1) {
-                if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
-                    if let Some(last) = prev.chars().last() {
-                        return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
-                    }
-                }
-            }
-            false
-        };
-        // A token counts as an operand (a key to deliver) when it is past the
-        // `--` marker, or when it is neither a flag cluster nor a flag's value.
-        // The `--` marker itself is never an operand.
-        let is_operand = |i: usize, a: &str| -> bool {
-            if is_marker(i) { return false; }
-            // An EMPTY argument sends nothing, as in tmux. Writing
-            // `send-keys -t x "X" ""` is an ordinary way to say "type X with no
-            // trailing newline", and the empty argument must produce no
-            // keystroke whatsoever.
-            //
-            // It used to qualify as an operand (an empty string does not start
-            // with '-') and travel on as a key NAMED "", which matched no key
-            // name and fell through to a handler that deleted the rest of the
-            // line. Measured against tmux 3.4 with an identical sequence:
-            //
-            //   type "echo arrow_ABC", then Left Left Left, then `"X" ""`
-            //     tmux   -> arrow_XABC
-            //     psmux  -> arrow_AX     (everything right of the cursor gone)
-            //
-            // It stayed hidden because it is invisible when the cursor is at the
-            // end of the line: only an edit in the MIDDLE of a line shows it.
-            // The check is before past_opts so an empty token after `--` is
-            // dropped too.
-            if a.is_empty() { return false; }
-            if past_opts(i) { return true; }
-            !a.starts_with('-') && !prev_consumes_operand(i)
-        };
-        let literal = flag_has('l');
-        let paste_mode = flag_has('p');
-        let has_x = flag_has('X');
-        let hex_mode = flag_has('H');
-        // tmux send-keys -M: forward the mouse event of the running mouse
-        // binding (see window_ops::send_mouse_event). It sends no keys.
-        let mouse_mode = flag_has('M');
-        // Parse -N <count> for repeat (look for any cluster ending in 'N')
-        let mut repeat_count: usize = 1;
-        if let Some(n_pos) = args.iter().enumerate().position(|(i, a)| !is_marker(i) && !past_opts(i) && a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
-            if let Some(count_str) = args.get(n_pos + 1) {
-                repeat_count = count_str.parse::<usize>().unwrap_or(1).max(1);
-            }
-        }
-        if mouse_mode {
-            let _ = tx.send(CtrlReq::SendMouse(client_id));
-        } else if hex_mode {
-            // tmux `send-keys -H`: every operand is one hexadecimal BYTE value.
-            // tmux tags these keys KEYC_LITERAL and writes them to the pty as
-            // single bytes ("can't be more than 8 bits"), so this is a byte
-            // channel, not a codepoint channel.  Decode here and pass the raw
-            // bytes through untouched so UTF-8 sequences and escape sequences
-            // survive verbatim.
-            let mut bytes: Vec<u8> = Vec::new();
-            for (i, a) in args.iter().enumerate() {
-                if !is_operand(i, a) { continue; }
-                // A malformed operand is dropped rather than leaked into the
-                // pane as its literal token text.
-                if let Ok(byte) = u8::from_str_radix(a, 16) { bytes.push(byte); }
-            }
-            if !bytes.is_empty() {
-                for _ in 0..repeat_count {
-                    let _ = tx.send(CtrlReq::SendBytes(bytes.clone()));
-                }
-            }
-        } else if has_x {
-            // send-keys -X copy-mode-command
-            let cmd_parts: Vec<&str> = args.iter().enumerate()
-                .filter(|(i, a)| is_operand(*i, a))
-                .map(|(_, a)| *a).collect();
-            // One request carrying the count: tmux hands -N to the copy
-            // command as its repeat (`wme->prefix`), and refuses -X outside
-            // a mode with "not in a mode" (cmd-send-keys.c).
-            let (rtx, rrx) = mpsc::channel();
-            let _ = tx.send(CtrlReq::SendKeysXRun {
-                cmd: cmd_parts.join(" "),
-                count: repeat_count,
-                resp: Some(rtx),
-            });
-            if let Ok(Err(e)) = rrx.recv_timeout(Duration::from_secs(5)) {
-                if !persistent {
-                    let _ = writeln!(write_stream, "ERROR: {}", e);
-                    let _ = write_stream.flush();
-                }
-            }
-        } else {
-            let keys: Vec<String> = args.iter()
-                .enumerate()
-                .filter(|(i, a)| is_operand(*i, a))
-                .map(|(_, a)| {
-                    // Convert real-tmux 0xNN hex codepoint syntax (sent by
-                    // iTerm2's gateway: e.g. `send -t %1 0xd` for Enter) into
-                    // the literal character so SendKeys forwards the right
-                    // byte to the PTY instead of the string "0xd".
-                    let s = *a;
-                    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
-                            if let Ok(n) = u32::from_str_radix(rest, 16) {
-                                if let Some(c) = char::from_u32(n) {
-                                    return c.to_string();
-                                }
-                            }
-                        }
-                    }
-                    s.to_string()
-                })
-                .collect();
-            // If any key was a hex-converted single byte, force literal mode so
-            // the byte is written verbatim and not parsed as a key name.
-            let any_hex = args.iter().any(|a| {
-                let s = *a;
-                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                    return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit());
-                }
-                false
-            });
-            let effective_literal = literal || any_hex;
-            for _ in 0..repeat_count {
-                if paste_mode {
-                    let _ = tx.send(CtrlReq::SendPaste(keys.join("")));
-                } else {
-                    // #490: hand the tokens over UNJOINED so quoted
-                    // arguments keep their exact whitespace end to end.
-                    let _ = tx.send(CtrlReq::SendKeys(keys.clone(), effective_literal));
-                }
+        if let Err(e) = send_keys_requests(&args, tx, client_id) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
             }
         }
     }
@@ -6342,72 +6393,15 @@ fn dispatch_control_command(
             true
         }
         "send-keys" | "send" => {
-            let flag_has = |c: char| -> bool {
-                args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|fc| fc == c))
-            };
-            let prev_consumes_operand = |i: usize| -> bool {
-                if i == 0 { return false; }
-                if let Some(prev) = args.get(i - 1) {
-                    if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
-                        if let Some(last) = prev.chars().last() {
-                            return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
-                        }
-                    }
-                }
-                false
-            };
-            let literal = flag_has('l');
-            if flag_has('H') {
-                // tmux `send-keys -H`: every operand is one hexadecimal BYTE value.
-                // tmux tags these keys KEYC_LITERAL and writes them to the pty as
-                // single bytes ("can't be more than 8 bits"), so this is a byte
-                // channel, not a codepoint channel.  Decode here and pass the raw
-                // bytes through untouched so UTF-8 sequences and escape sequences
-                // survive verbatim.
-                let mut bytes: Vec<u8> = Vec::new();
-                for (i, a) in args.iter().enumerate() {
-                    if a.starts_with('-') || prev_consumes_operand(i) { continue; }
-                    // A malformed operand is dropped rather than leaked into the
-                    // pane as its literal token text.
-                    if let Ok(byte) = u8::from_str_radix(a, 16) { bytes.push(byte); }
-                }
-                if !bytes.is_empty() {
-                    let _ = tx.send(CtrlReq::SendBytes(bytes));
-                }
-                return true;
+            // tmux answers an empty block once the keys are written
+            // (cmd-send-keys.c:253). The -H branch of the copy this replaced
+            // returned without answering, so the dropped sender came out as
+            // `command timed out` / %error (issue #799); every merged
+            // `send -l` took that branch too.
+            match send_keys_requests(args, tx, client_id) {
+                Ok(()) => { let _ = resp_tx.send(String::new()); }
+                Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
             }
-            // Convert real-tmux 0xNN hex codepoint syntax (used by iTerm2 for
-            // every keystroke: `send -t %1 0xd` etc.) into literal characters.
-            // An empty operand sends nothing, as in tmux. Same rule as the
-            // `is_operand` helper in the send-keys handler above, which carries
-            // the full explanation.
-            let keys: Vec<String> = args.iter().enumerate().filter(|(i, a)| {
-                !a.is_empty() && !a.starts_with('-') && !prev_consumes_operand(*i)
-            }).map(|(_, a)| {
-                let s = *a;
-                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                    if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
-                        if let Ok(n) = u32::from_str_radix(rest, 16) {
-                            if let Some(c) = char::from_u32(n) {
-                                return c.to_string();
-                            }
-                        }
-                    }
-                }
-                s.to_string()
-            }).collect();
-            let any_hex = args.iter().any(|a| {
-                let s = *a;
-                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                    return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit());
-                }
-                false
-            });
-            let effective_literal = literal || any_hex;
-            // #490: hand the tokens over UNJOINED so quoted arguments keep
-            // their exact whitespace end to end.
-            let _ = tx.send(CtrlReq::SendKeys(keys, effective_literal));
-            let _ = resp_tx.send(String::new());
             true
         }
         "capture-pane" | "capturep" => {
@@ -6913,9 +6907,18 @@ fn dispatch_control_command(
                 if let Ok(idx) = name.parse::<usize>() {
                     let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
                 } else {
-                    let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name));
+                    let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
                 }
-                rrx.recv_timeout(Duration::from_secs(5)).ok().flatten()
+                match rrx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Some(text)) => Some(text),
+                    // A missing buffer is tmux's error (cmd-save-buffer.c:92),
+                    // not a dropped reply the caller reports as a timeout.
+                    Ok(None) => {
+                        let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}no buffer {}", name));
+                        return true;
+                    }
+                    Err(_) => None,
+                }
             } else {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::ShowBuffer(rtx));
@@ -7645,6 +7648,10 @@ mod tests_issue793_followup;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue476_bindkey_quoting.rs"]
 mod tests_issue476_bindkey_quoting;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue799_cc_send_keys_reply.rs"]
+mod tests_issue799_cc_send_keys_reply;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_send_keys_literal_byte.rs"]
