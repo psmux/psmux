@@ -284,6 +284,7 @@ fn if_shell_condition(
         c.arg(condition.as_str());
         c.stdout(std::process::Stdio::null());
         c.stderr(std::process::Stdio::null());
+        crate::commands::apply_job_env(&mut c);
         { use crate::platform::HideWindowCommandExt; c.hide_window(); }
         c.status().map(|s| s.success()).unwrap_or(false)
     }
@@ -4117,6 +4118,18 @@ match cmd {
                 .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
                 .collect());
         if !persistent { let _ = write!(write_stream, "ok\n"); }
+    }
+    "job-environ" => {
+        // The environment a job of this server runs with (#804), a base64
+        // Windows environment block, for a run-shell or if-shell the CLI
+        // runs in its own process: tmux runs every job in the server.
+        use base64::Engine;
+        let block = crate::client_env::encode_env_block(crate::commands::job_environment());
+        if !persistent {
+            let _ = write!(write_stream, "{}\n", base64::engine::general_purpose::STANDARD.encode(&block));
+            let _ = write_stream.flush();
+        }
+        if !persistent && pending_chain.is_empty() { break; }
     }
     "client-attach" => {
         if !attached_sent {

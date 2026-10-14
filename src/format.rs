@@ -466,6 +466,24 @@ impl Drop for AsyncFormatGuard {
     }
 }
 
+/// The child a `#()` job runs in. tmux starts it through job_run with no
+/// session (format.c:431), so it has $TMUX and the global environment (#804).
+fn format_job_command(cmd: &str) -> std::process::Command {
+    use std::process::Command;
+    use crate::platform::HideWindowCommandExt;
+    let mut c = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]).hide_window();
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    crate::commands::apply_job_env(&mut c);
+    c
+}
+
 /// Expand `#(command)` (tmux compatibility). Has two modes, selected by the
 /// thread-local [`FORMAT_ASYNC`] flag that [`AsyncFormatGuard`] sets:
 ///
@@ -494,13 +512,7 @@ fn run_shell_command(cmd: &str, app: &AppState) -> String {
     // return its real output. A one-shot `display-message -p '#(cmd)'` has no
     // later repaint to pick up an async result, so it must block here.
     if !FORMAT_ASYNC.with(|c| c.get()) {
-        use std::process::Command;
-        use crate::platform::HideWindowCommandExt;
-        let output = if cfg!(windows) {
-            Command::new("cmd").args(["/C", cmd]).hide_window().output()
-        } else {
-            Command::new("sh").args(["-c", cmd]).output()
-        };
+        let output = format_job_command(cmd).output();
         let value = match output {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => String::new(),
@@ -542,13 +554,7 @@ fn run_shell_command(cmd: &str, app: &AppState) -> String {
             guard.insert(cmd.to_string(), crate::types::ShellEntry { at: base_at, value: last_value.clone(), running: true });
             drop(guard);
             std::thread::spawn(move || {
-                use std::process::Command;
-                use crate::platform::HideWindowCommandExt;
-                let output = if cfg!(windows) {
-                    Command::new("cmd").args(["/C", &cmd_owned]).hide_window().output()
-                } else {
-                    Command::new("sh").args(["-c", &cmd_owned]).output()
-                };
+                let output = format_job_command(&cmd_owned).output();
                 let value = match output {
                     Ok(o) if o.status.success() => {
                         String::from_utf8_lossy(&o.stdout).trim().to_string()

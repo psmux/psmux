@@ -4089,9 +4089,20 @@ fn run_main() -> io::Result<()> {
                     }
                 }
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd_str);
+                // tmux runs the job in the server, with the server's
+                // environment and $TMUX (#804); this one runs here, so it
+                // takes the server's job environment instead of this CLI's.
+                let job_env = crate::commands::fetch_server_job_environment();
+                let build = |cmd: &str| {
+                    let mut c = crate::commands::build_run_shell_command(cmd);
+                    if let Some(env) = &job_env {
+                        crate::commands::apply_server_job_environment(&mut c, env);
+                    }
+                    c
+                };
                 // Run the command using the resolved shell
                 if background {
-                    let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+                    let mut c = build(&shell_cmd);
                     // Report a failure to START the command. `-b` waives the
                     // output, not the error.
                     if let Err(e) = c.spawn() {
@@ -4099,7 +4110,7 @@ fn run_main() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 } else {
-                    let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+                    let mut c = build(&shell_cmd);
                     let output = c.output()?;
                     io::stdout().write_all(&output.stdout)?;
                     io::stderr().write_all(&output.stderr)?;
@@ -4759,6 +4770,13 @@ fn run_main() -> io::Result<()> {
                             Err(e) => eprintln!("if-shell: {} (running without format expansion)", e),
                         }
                     }
+                    // A shell condition is a job: tmux runs it in the server,
+                    // with the server's environment and $TMUX (#804).
+                    let job_env = if !format_mode && !["true", "1", "false", "0"].contains(&cond.as_str()) {
+                        crate::commands::fetch_server_job_environment()
+                    } else {
+                        None
+                    };
                     if background && !format_mode {
                         // -b flag: run the condition check in a background thread
                         // and dispatch the result command asynchronously (like tmux)
@@ -4771,6 +4789,9 @@ fn run_main() -> io::Result<()> {
                                 c.arg(&cond);
                                 c.stdout(std::process::Stdio::null());
                                 c.stderr(std::process::Stdio::null());
+                                if let Some(env) = &job_env {
+                                    crate::commands::apply_server_job_environment(&mut c, env);
+                                }
                                 { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                                 c.status().map(|s| s.success()).unwrap_or(false)
                             };
@@ -4803,6 +4824,9 @@ fn run_main() -> io::Result<()> {
                             c.arg(&cond);
                             c.stdout(std::process::Stdio::null());
                             c.stderr(std::process::Stdio::null());
+                            if let Some(env) = &job_env {
+                                crate::commands::apply_server_job_environment(&mut c, env);
+                            }
                             { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                             c.status().map(|s| s.success()).unwrap_or(false)
                         }

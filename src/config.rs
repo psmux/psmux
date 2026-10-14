@@ -991,6 +991,7 @@ fn process_brace_if_shell(app: &mut AppState, bb: &parse_config_content_types::B
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(&condition);
+        crate::commands::apply_job_env(&mut c);
         { use crate::platform::HideWindowCommandExt; c.hide_window(); }
         c.status().map(|s| s.success()).unwrap_or(false)
     };
@@ -3445,6 +3446,7 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(condition);
+        crate::commands::apply_job_env(&mut c);
         { use crate::platform::HideWindowCommandExt; c.hide_window(); }
         c.status().map(|s| s.success()).unwrap_or(false)
     };

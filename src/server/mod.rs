@@ -2307,6 +2307,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // by run-shell (from hooks, keybindings, etc.) can find this server when
     // they call `psmux set -g ...` or other CLI commands.
     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
+    // Job children (run-shell, if-shell, #(), popups) get $TMUX (#804).
+    crate::commands::publish_job_env(app.control_port, app.socket_name.as_deref());
 
     // NOTE: the .key file is written BEFORE ensure_session_registry_files
     // above — never recreate/truncate it here, after the .port beacon is
@@ -5315,6 +5317,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     // Update env so run-shell/hooks from this server target the new name
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
+                    // Job children (run-shell, if-shell, #(), popups) get $TMUX (#804).
+                    crate::commands::publish_job_env(app.control_port, app.socket_name.as_deref());
                     // Re-load user config so the claimed session reflects the
                     // current config file.  The warm server loaded config at
                     // its own startup, but the user may have changed their

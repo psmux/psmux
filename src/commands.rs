@@ -189,11 +189,111 @@ fn prepend_if_absent(old: &str, dir: &str) -> Option<String> {
 /// run-shell path funnels through here: hooks, key bindings, `run` config
 /// lines, client-forwarded commands and the CLI fallback.
 pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = build_run_shell_command_inner(shell_cmd);
     #[cfg(windows)]
     ensure_psmux_on_path(&mut c);
+    apply_job_env(&mut c);
     c
+}
+
+/// The session identity this server adds to every job child (#804): run-shell,
+/// if-shell, `#()` and popup commands.
+///
+/// tmux runs each of these through job_run (job.c:92), whose environment is
+/// environ_for_session (environ.c:253): the global environment, the session
+/// environment over it, then `TMUX=<socket>,<pid>,<session>` (environ.c:282).
+/// TMUX_PANE is set for a pane only (spawn.c:394), never for a job; a job
+/// reaches its pane through `#{pane_id}`. Here the global and session
+/// environment already ARE the server process environment (environ.rs), which
+/// a job inherits, so what is missing is `TMUX` itself.
+///
+/// `PSMUX_SESSION` stays a pane marker: the nested session guard reads it
+/// (util::inside_psmux_pane), and tmux does not call a job nested either (its
+/// check walks the pane ttys, server-client.c server_client_check_nested).
+///
+/// Empty in a client process, so a command built there is left as it was.
+static JOB_ENV: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// The variables [`JOB_ENV`] holds for this server identity.
+pub fn job_env_vars(control_port: Option<u16>, socket_name: Option<&str>) -> Vec<(String, String)> {
+    vec![
+        ("TMUX".to_string(), crate::pane::tmux_env_value(control_port, socket_name)),
+        // Git Bash would rewrite the /tmp/ path in TMUX otherwise (as for panes).
+        ("MSYS2_ENV_CONV_EXCL".to_string(), "TMUX".to_string()),
+    ]
+}
+
+/// Record this server's identity for its job children, once its port is
+/// bound and again on a warm claim.
+pub fn publish_job_env(control_port: Option<u16>, socket_name: Option<&str>) {
+    if let Ok(mut g) = JOB_ENV.write() {
+        *g = job_env_vars(control_port, socket_name);
+    }
+}
+
+/// What [`JOB_ENV`] holds now (empty in a client process).
+pub fn job_env() -> Vec<(String, String)> {
+    JOB_ENV.read().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// Give a job child this server's identity (see [`JOB_ENV`]).
+pub fn apply_job_env(c: &mut std::process::Command) {
+    let vars = job_env();
+    if vars.is_empty() {
+        return;
+    }
+    for (k, v) in &vars {
+        c.env(k, v);
+    }
+    // TMUX names the server now; the path that told this server who it is
+    // must not leak into the child (as for panes, pane.rs set_tmux_env).
+    c.env_remove(crate::socket_path::SOCKET_PATH_ENV);
+}
+
+/// The whole environment a job of this server runs with: the server process
+/// environment plus [`JOB_ENV`]. The server answers `job-environ` with it, so
+/// a run-shell or if-shell the CLI runs in its own process gets the same
+/// environment as one the server runs (tmux runs every job in the server).
+pub fn job_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let extra = job_env();
+    let mut out: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(k, _)| {
+            let ks = k.to_string_lossy();
+            !ks.eq_ignore_ascii_case(crate::socket_path::SOCKET_PATH_ENV)
+                && !extra.iter().any(|(e, _)| e.eq_ignore_ascii_case(&ks))
+        })
+        .collect();
+    out.extend(extra.into_iter().map(|(k, v)| (k.into(), v.into())));
+    out
+}
+
+/// Run a job built in the CLI process with the server's job environment
+/// (`env`, from [`job_environment`] over `job-environ`) instead of the CLI's
+/// own. psmux stays reachable on the child's PATH (#660).
+pub fn apply_server_job_environment(c: &mut std::process::Command, env: &[(std::ffi::OsString, std::ffi::OsString)]) {
+    c.env_clear();
+    c.envs(env.iter().map(|(k, v)| (k, v)));
+    #[cfg(windows)]
+    {
+        let path = env.iter()
+            .find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        apply_own_dir_to_path(c, &path);
+    }
+}
+
+/// Ask the server this CLI targets for its job environment. `None` when no
+/// server answers, and the job then runs with the CLI's environment as before.
+pub fn fetch_server_job_environment() -> Option<Vec<(std::ffi::OsString, std::ffi::OsString)>> {
+    use base64::Engine;
+    let resp = crate::session::send_control_with_response("job-environ\n".to_string()).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(resp.trim().as_bytes()).ok()?;
+    let env = crate::client_env::decode_env_block(&bytes)?;
+    if !crate::client_env::is_sane(&env) {
+        return None;
+    }
+    Some(env)
 }
 
 /// Build a `std::process::Command` for a run-shell invocation.
@@ -2606,6 +2706,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                             cmd.args(shell_args)
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null());
+                            apply_job_env(&mut cmd);
                             #[cfg(windows)]
                             { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }
                             cmd.status()
@@ -3353,6 +3454,10 @@ mod tests_issue200_new_session;
 #[cfg(test)]
 #[path = "../tests-rs/test_run_shell_resolve.rs"]
 mod tests_run_shell_resolve;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue804_job_env.rs"]
+mod tests_issue804_job_env;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_hide_window.rs"]
