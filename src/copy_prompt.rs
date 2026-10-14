@@ -360,9 +360,11 @@ pub fn open(app: &mut AppState, args: &str) {
     app.mode = Mode::CopyCommandPrompt(Box::new(prompt));
     // The cursor starts at the end, after any -I text (status_prompt_set sets
     // prompt_index to the length of the input, status.c:720), and Up starts
-    // from the newest history entry (prompt_hindex is cleared, :727).
+    // from the newest history entry (prompt_hindex is cleared, :727). Nothing
+    // is cut yet for C-y (status_prompt_clear frees prompt_saved, :764).
     app.copy_prompt_back = 0;
     app.copy_search_history_pos = None;
+    app.prompt_saved = None;
     refresh(app);
 }
 
@@ -489,7 +491,8 @@ pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
             if p.input.is_empty() && p.bspace_exit {
                 close(app);
             } else {
-                crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back, "bspace");
+                crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back,
+                    &mut app.prompt_saved, "bspace", || None);
                 refresh(app);
             }
         }
@@ -502,7 +505,9 @@ pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
         // has one here; for any other type they change nothing. Every key
         // here redraws the prompt, for the same reason as above.
         PromptKey::Named(name) => {
-            let up = match crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back, name) {
+            let buffers = &app.paste_buffers;
+            let up = match crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back,
+                &mut app.prompt_saved, name, || buffers.first().cloned()) {
                 crate::copy_mode::PromptEdit::HistoryUp => Some(true),
                 crate::copy_mode::PromptEdit::HistoryDown => Some(false),
                 _ => None,

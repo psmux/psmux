@@ -50,9 +50,18 @@ fn refresh_goto_prompt(app: &mut AppState) {
     }
 }
 
+/// Open the search prompt on a pane that is already in copy mode. A new
+/// prompt starts with nothing for C-y to take back from an earlier C-w.
+fn open_search_prompt(app: &mut AppState, forward: bool) {
+    app.mode = Mode::CopySearch { input: String::new(), forward };
+    app.prompt_saved = None;
+    refresh_search_prompt(app);
+}
+
 /// Open the goto-line prompt on a pane that is already in copy mode.
 fn open_goto_prompt(app: &mut AppState) {
     app.mode = Mode::CopyGoto { input: String::new() };
+    app.prompt_saved = None;
     refresh_goto_prompt(app);
 }
 
@@ -235,12 +244,14 @@ pub fn run_copy_mode_command_line(app: &mut AppState, cmd: &str) {
 fn command_prompt_edit(
     input: &mut String,
     cursor: &mut usize,
+    saved: &mut Option<String>,
     key: &str,
+    top_buffer: impl FnOnce() -> Option<String>,
 ) -> crate::copy_mode::PromptEdit {
     // Counted without slicing, because an index left inside a character by the
     // old arms would panic on a slice.
     let mut back = input.char_indices().filter(|(i, _)| *i >= *cursor).count();
-    let result = crate::copy_mode::prompt_edit(input, &mut back, key);
+    let result = crate::copy_mode::prompt_edit(input, &mut back, saved, key, top_buffer);
     let total = input.chars().count();
     let idx = total - back.min(total);
     *cursor = input
@@ -421,6 +432,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char(']') => { paste_latest(app)?; app.mode = Mode::Passthrough; true }
                 KeyCode::Char(':') => {
                     app.command_vi_normal = false;
+                    app.prompt_saved = None;
                     app.mode = Mode::CommandPrompt { input: String::new(), cursor: 0 };
                     true
                 }
@@ -734,7 +746,9 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     let name = crate::config::format_key_binding(&(key.code, key.modifiers));
                     let mut recall = None;
                     if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
-                        match command_prompt_edit(input, cursor, &name) {
+                        let buffers = &app.paste_buffers;
+                        match command_prompt_edit(input, cursor, &mut app.prompt_saved, &name,
+                            || buffers.first().cloned()) {
                             crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
                             crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
                             _ => {}
@@ -1021,12 +1035,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => { crate::copy_mode::move_word_backward(app); }
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => { yank_selection(app)?; exit_copy_mode(app); }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.mode = Mode::CopySearch { input: String::new(), forward: true };
-                    refresh_search_prompt(app);
+                    open_search_prompt(app, true);
                 }
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.mode = Mode::CopySearch { input: String::new(), forward: false };
-                    refresh_search_prompt(app);
+                    open_search_prompt(app, false);
                 }
                 KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     exit_copy_mode(app);
@@ -1140,12 +1152,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('y') => { yank_selection(app)?; exit_copy_mode(app); }
                 // --- copy-mode search ---
                 KeyCode::Char('/') => {
-                    app.mode = Mode::CopySearch { input: String::new(), forward: true };
-                    refresh_search_prompt(app);
+                    open_search_prompt(app, true);
                 }
                 KeyCode::Char('?') => {
-                    app.mode = Mode::CopySearch { input: String::new(), forward: false };
-                    refresh_search_prompt(app);
+                    open_search_prompt(app, false);
                 }
                 // --- copy-mode goto line ---
                 KeyCode::Char(':') if app.mode_keys != "emacs" => { open_goto_prompt(app); }
@@ -3890,8 +3900,8 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
             }
         }
         'y' => { yank_selection(app)?; exit_copy_mode(app); }
-        '/' => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; refresh_search_prompt(app); }
-        '?' => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; refresh_search_prompt(app); }
+        '/' => { open_search_prompt(app, true); }
+        '?' => { open_search_prompt(app, false); }
         'n' => { search_next(app); }
         'N' => { search_prev(app); }
         'i' => { app.copy_text_object_pending = Some(1); }  // inner text object
@@ -4032,7 +4042,9 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let mut back = app.copy_prompt_back;
                 let mut recall = None;
                 if let Mode::CopySearch { ref mut input, .. } = app.mode {
-                    match crate::copy_mode::prompt_edit(input, &mut back, k) {
+                    let buffers = &app.paste_buffers;
+                    match crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, k,
+                        || buffers.first().cloned()) {
                         crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
                         crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
                         _ => {}
@@ -4088,7 +4100,9 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             _ => {
                 let mut back = app.copy_prompt_back;
                 if let Mode::CopyGoto { ref mut input } = app.mode {
-                    crate::copy_mode::prompt_edit(input, &mut back, k);
+                    let buffers = &app.paste_buffers;
+                    crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, k,
+                        || buffers.first().cloned());
                 }
                 app.copy_prompt_back = back;
                 refresh_goto_prompt(app);
@@ -4211,8 +4225,8 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             // `send-key M-x`, not through the char table, so this is the arm
             // that actually runs when the user presses M-x.
             "M-x" | "m-x" => { crate::copy_mode::jump_to_mark(app); }
-            "C-s" | "c-s" => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; refresh_search_prompt(app); }
-            "C-r" | "c-r" => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; refresh_search_prompt(app); }
+            "C-s" | "c-s" => { open_search_prompt(app, true); }
+            "C-r" | "c-r" => { open_search_prompt(app, false); }
             "C-c" | "c-c" => {
                 exit_copy_mode(app);
             }

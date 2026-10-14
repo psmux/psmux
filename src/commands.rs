@@ -2329,6 +2329,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Support -I initial_text, -p prompt (ignored), -1 (ignored)
             let initial = parts.windows(2).find(|w| w[0] == "-I").map(|w| w[1].to_string()).unwrap_or_default();
             app.command_vi_normal = false;
+            app.prompt_saved = None;
             app.mode = Mode::CommandPrompt { input: initial.clone(), cursor: initial.len() };
         }
         "paste-buffer" | "pasteb" => {
