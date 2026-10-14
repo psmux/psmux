@@ -279,6 +279,22 @@ Before #648 psmux kept a single ordinary option store and `-w` selected the same
 
 Two window options keep a dedicated field alongside the table because other code reads them directly: `automatic-rename` still reports `off` for a window born with `-n NAME` (#266) and `window-size` still drives `resize-window`. Both stay in step with the table on a write and on a `-u`.
 
+### Session-scoped Options
+
+A session option set without `-g` belongs to the session, and the global table is its parent, as in tmux (#803):
+
+```text
+psmux set -g -t pr prefix C-a      # global C-a, session C-a (inherited)
+psmux set    -t pr prefix C-x      # global C-a, session C-x
+psmux set -u -t pr prefix          # global C-a, session C-a again
+```
+
+`set -g` writes only the global value, even while the session holds its own, and `set -u` drops the session's value so the global shows through again; with no session value it changes nothing. `-o` without `-g` asks the session's own value, `-a` appends to the scope it names, and a boolean named with no value toggles at that scope. `show -g` prints the global values, `show -A` marks every session option the session inherits with tmux's `*`, and `show` and `show -v <name>` print the value the session uses. This is what makes the nested session toggle (see `set prefix None` above) give back the user's own prefix and `status-left` on the way out.
+
+What "global" means: psmux runs one server per session, so the global table is global to that session's server, the same as `set-environment -g`. A `set -g` sent to one session never reaches a session in another server, and it never did.
+
+Scope follows the option name, as in tmux: only options tmux keeps per session (`prefix`, `status-left`, `key-table`, `mouse`, and the other session options) get a session value. Server and window options and `@user` options keep the stores they had. A startup config runs before the session has a window, so a `set` line without `-g` there keeps landing in the global table, the rule an untargeted `-w` line follows; the command prompt, key bindings and a runtime `source-file` write the session's value. Two differences from tmux remain: a session that sets nothing still lists every option under `show` (tmux lists only the session's own entries there), and `show -v <name>` prints the inherited value where tmux prints nothing, so existing scripts keep working.
+
 ### Value-only `show-options -v`
 
 `-v` prints the value and nothing else in every scope, so a script can compare stdout with `on` or `off` directly (#647):

@@ -432,6 +432,269 @@ pub(crate) fn unset_window_option(app: &mut AppState, window_index: usize, name:
     }
 }
 
+// ── Session scope (#803) ────────────────────────────────────────────────────
+//
+// tmux keeps a table per session whose parent is the global session table:
+// `set` without -g writes the session table, `set -u` removes the entry so the
+// global shows through again (options_remove_or_default only writes a default
+// into a GLOBAL table, options.c), and a read walks session then global
+// (options_get). psmux used to have the one store, so a session write replaced
+// the global and `-u` reset both to the built in default.
+//
+// psmux runs one session per server. The typed AppState fields every reader
+// already uses (prefix_key, status_left, ...) therefore hold the value the
+// session USES, and what is kept on the side is the GLOBAL value an override
+// shadows, in `AppState::session_option_globals`. No reader has to change,
+// and a server whose session overrides nothing (every server until someone
+// runs `set` without -g at runtime) behaves exactly as before. "Global" is
+// global to that server: a session in another server is never touched by
+// either scope, the same as `set-environment -g`.
+
+/// True for an option tmux keeps in the SESSION table, as the catalog marks it.
+/// Only these get a session entry; every other name keeps its single store.
+pub(crate) fn is_session_option(name: &str) -> bool {
+    crate::server::option_catalog::option_definition(name)
+        .is_some_and(|d| d.scope == crate::server::option_catalog::OptionScope::Session)
+}
+
+/// Does the session hold its own value for `name`?
+pub(crate) fn session_overrides(app: &AppState, name: &str) -> bool {
+    app.session_option_globals.contains_key(name)
+}
+
+/// What the GLOBAL session table holds for `name` (`show -g`).
+pub(crate) fn global_session_option_value(app: &AppState, name: &str) -> String {
+    match app.session_option_globals.get(name) {
+        Some(Some(value)) => value.clone(),
+        Some(None) => crate::server::option_catalog::default_for(name)
+            .unwrap_or("")
+            .to_string(),
+        None => get_option_value(app, name),
+    }
+}
+
+/// A shadowed global is stored as text, so spell a key the way `show` would.
+fn canonical_global_value(name: &str, value: &str) -> String {
+    match name {
+        "prefix" | "prefix2" if !value.is_empty() => crate::config::parse_option_key(value, false)
+            .map(|key| crate::config::format_option_key(&key))
+            .unwrap_or_else(|_| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+/// `set-option [-u|-a|-o|-q] <session option> [value]` without `-g`, shared by
+/// the CLI/TCP routes and the config parser (command prompt, key bindings,
+/// a runtime source-file). Returns `""` or `ERROR: ...` like the window writer.
+///
+/// The first write remembers the global it shadows, then writes the typed
+/// field; an empty value with no -a toggles a boolean against the session's
+/// current value; `-o` asks the session table only (cmd-set-option.c uses
+/// options_get_only on the target table).
+pub(crate) fn apply_set_session_option(
+    app: &mut AppState,
+    option: &str,
+    value: &str,
+    unset: bool,
+    append: bool,
+    only_if_unset: bool,
+    quiet: bool,
+) -> String {
+    if unset {
+        unset_session_option(app, option);
+        return String::new();
+    }
+    if only_if_unset && session_overrides(app, option) {
+        return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
+    }
+    // An explicit empty value on a string option (`set status-left ""`) is a
+    // real value, as it is at global scope.
+    let toggle = value.is_empty() && !append && is_boolean_option(option);
+    if append {
+        if let Err(error) = crate::server::option_catalog::validate_option_append(option) {
+            return format!("ERROR: {}", error);
+        }
+    }
+    let new_value = if toggle {
+        let current = get_option_value(app, option);
+        if matches!(current.as_str(), "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
+    } else if append {
+        format!("{}{}", crate::format::lookup_option_pub(option, app).unwrap_or_default(), value)
+    } else {
+        value.to_string()
+    };
+    if let Err(error) = crate::server::option_catalog::validate_option_value(option, &new_value) {
+        return format!("ERROR: {}", error);
+    }
+    if !session_overrides(app, option) {
+        let global = app
+            .user_set_options
+            .contains(option)
+            .then(|| get_option_value(app, option));
+        app.session_option_globals.insert(option.to_string(), global);
+    }
+    match apply_set_option(app, option, &new_value, quiet) {
+        Ok(()) => String::new(),
+        Err(error) => format!("ERROR: {}", error),
+    }
+}
+
+/// `set-option -u <session option>` without `-g`: drop the session's entry and
+/// put the global it shadowed back. Nothing to do when the session has none,
+/// exactly like tmux removing an entry its table does not hold.
+pub(crate) fn unset_session_option(app: &mut AppState, option: &str) {
+    let Some(global) = app.session_option_globals.remove(option) else { return };
+    match global {
+        Some(value) => {
+            if apply_set_option(app, option, &value, true).is_err() {
+                reset_option_to_default(app, option);
+            }
+        }
+        // The global was the built in default; restore it without touching
+        // the -o bookkeeping, which still describes the global table.
+        None => {
+            let was_set = app.user_set_options.contains(option);
+            reset_option_to_default(app, option);
+            if was_set {
+                app.user_set_options.insert(option.to_string());
+            }
+        }
+    }
+}
+
+/// A `-g` write to a session option while the session overrides it (#803).
+pub(crate) enum GlobalWrite<'a> {
+    Set(&'a str),
+    Append(&'a str),
+    Unset,
+    Toggle,
+    OnlyIfUnset(&'a str),
+}
+
+/// Apply a `-g` write to the shadowed global instead of the typed field the
+/// session is using. Callers check [`session_overrides`] first; with no
+/// session entry the ordinary global path runs unchanged.
+pub(crate) fn write_shadowed_global(app: &mut AppState, option: &str, op: GlobalWrite) -> Result<(), String> {
+    let current = global_session_option_value(app, option);
+    let new_value = match op {
+        GlobalWrite::Unset => {
+            app.session_option_globals.insert(option.to_string(), None);
+            app.user_set_options.remove(option);
+            return Ok(());
+        }
+        GlobalWrite::OnlyIfUnset(_) if app.user_set_options.contains(option) => {
+            return Err(format!("already set: {}", option));
+        }
+        GlobalWrite::Set(value) | GlobalWrite::OnlyIfUnset(value) => value.to_string(),
+        GlobalWrite::Append(value) => {
+            crate::server::option_catalog::validate_option_append(option)?;
+            format!("{}{}", current, value)
+        }
+        GlobalWrite::Toggle => {
+            if !is_boolean_option(option) {
+                return Err(format!("empty value for '{}'", option));
+            }
+            if matches!(current.as_str(), "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
+        }
+    };
+    crate::server::option_catalog::validate_option_value(option, &new_value)?;
+    app.session_option_globals
+        .insert(option.to_string(), Some(canonical_global_value(option, &new_value)));
+    app.user_set_options.insert(option.to_string());
+    Ok(())
+}
+
+/// Divert a `-g` set request for an option the session overrides to the
+/// shadowed global (see [`write_shadowed_global`]). Returns the request
+/// untouched when there is nothing to divert, `None` once it is handled.
+pub(crate) fn divert_shadowed_global_request(
+    app: &mut AppState,
+    req: crate::types::CtrlReq,
+) -> Option<crate::types::CtrlReq> {
+    use crate::types::CtrlReq;
+    let option = match &req {
+        CtrlReq::SetOption(option, _)
+        | CtrlReq::SetOptionQuiet(option, _, _)
+        | CtrlReq::SetOptionAppend(option, _)
+        | CtrlReq::SetOptionUnset(option)
+        | CtrlReq::SetOptionToggle(option)
+        | CtrlReq::SetOptionOnlyIfUnset(option, _, _) => option.clone(),
+        _ => return Some(req),
+    };
+    if !session_overrides(app, &option) {
+        return Some(req);
+    }
+    match req {
+        CtrlReq::SetOption(_, value) | CtrlReq::SetOptionQuiet(_, value, _) => {
+            let _ = write_shadowed_global(app, &option, GlobalWrite::Set(&value));
+        }
+        CtrlReq::SetOptionAppend(_, value) => {
+            let _ = write_shadowed_global(app, &option, GlobalWrite::Append(&value));
+        }
+        CtrlReq::SetOptionUnset(_) => {
+            let _ = write_shadowed_global(app, &option, GlobalWrite::Unset);
+        }
+        CtrlReq::SetOptionToggle(_) => {
+            let _ = write_shadowed_global(app, &option, GlobalWrite::Toggle);
+        }
+        CtrlReq::SetOptionOnlyIfUnset(_, value, resp) => {
+            let reply = match write_shadowed_global(app, &option, GlobalWrite::OnlyIfUnset(&value)) {
+                Ok(()) => String::new(),
+                Err(error) => format!("ERROR: {}", error),
+            };
+            if let Some(resp) = resp {
+                let _ = resp.send(reply);
+            }
+        }
+        _ => unreachable!("filtered above"),
+    }
+    None
+}
+
+/// `show-options [-g] <session option>`: the global table's value with `-g`,
+/// else the value the session uses, and whether the session inherits it.
+pub(crate) fn session_option_query(app: &AppState, name: &str, global: bool) -> (String, bool) {
+    if global {
+        return (global_session_option_value(app, name), false);
+    }
+    (get_option_value(app, name), !session_overrides(app, name))
+}
+
+/// Rewrite a `show-options` listing (lines `name value`) for the table asked
+/// for: with `global` every overridden session option shows its global value
+/// instead; with `mark_inherited` every session option the session does not
+/// hold gets tmux's `*` after its name (cmd-show-options.c:197). Lines for
+/// other options pass through untouched.
+pub(crate) fn scope_session_listing(app: &AppState, text: &str, global: bool, mark_inherited: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let ending = &line[body.len()..];
+        let (name, rest) = match body.split_once(' ') {
+            Some((name, rest)) => (name, Some(rest)),
+            None => (body, None),
+        };
+        if !is_session_option(name) {
+            out.push_str(line);
+            continue;
+        }
+        if global && session_overrides(app, name) {
+            let value = global_session_option_value(app, name);
+            out.push_str(&format!("{} {}{}", name, crate::util::quote_arg_if_needed(&value), ending));
+            continue;
+        }
+        if mark_inherited && !global && !session_overrides(app, name) {
+            match rest {
+                Some(rest) => out.push_str(&format!("{}* {}{}", name, rest, ending)),
+                None => out.push_str(&format!("{}*{}", name, ending)),
+            }
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Effective value of an option that is stored empty or not stored at all.
 ///
 /// Several options live in `user_options` (or are simply left blank at startup)
@@ -1551,6 +1814,10 @@ mod tests_issue647_show_options_value;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue728_pane_user_options.rs"]
 mod tests_issue728_pane_user_options;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue803_session_options.rs"]
+mod tests_issue803_session_options;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue648_window_scoped_options.rs"]

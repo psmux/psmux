@@ -745,6 +745,9 @@ fn drain_plugin_req(
     req: CtrlReq,
     shared_aliases: &std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 ) {
+    // #803: a `-g` write to an option the session overrides lands on the
+    // global it shadows (see the main request loop).
+    let Some(req) = crate::server::options::divert_shadowed_global_request(app, req) else { return };
     match req {
         CtrlReq::SetOption(option, value) => {
             if apply_set_option(app, &option, &value, false).is_ok() {
@@ -870,6 +873,18 @@ fn drain_plugin_req(
                 app, &target, &option, &value, unset, append, only_if_unset, quiet,
             );
             let _ = resp.send(reply);
+        }
+        CtrlReq::SetSessionOption { option, value, unset, append, only_if_unset, quiet, resp } => {
+            let reply = crate::server::options::apply_set_session_option(
+                app, &option, &value, unset, append, only_if_unset, quiet,
+            );
+            let _ = resp.send(reply);
+        }
+        CtrlReq::SessionOptionQuery(resp, name, global) => {
+            let _ = resp.send(crate::server::options::session_option_query(app, &name, global));
+        }
+        CtrlReq::ScopeSessionListing(resp, text, global, mark_inherited) => {
+            let _ = resp.send(crate::server::options::scope_session_listing(app, &text, global, mark_inherited));
         }
         CtrlReq::ShowOptions(resp) => {
             // Minimal: just send empty to unblock the caller
@@ -3140,6 +3155,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                         other => other,
+                    };
+                    // #803: a `-g` write to an option this session overrides
+                    // goes to the global it shadows, not to the value in use.
+                    let Some(req) = crate::server::options::divert_shadowed_global_request(&mut app, req) else {
+                        meta_dirty = true;
+                        state_dirty = true;
+                        continue;
                     };
                     let mutates_state = !matches!(&req,
                         CtrlReq::DumpState(..)
@@ -7756,6 +7778,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::UserOptionLookup(resp, name, target, table) => {
                     let _ = resp.send(crate::server::options::lookup_user_option(&app, &name, &target, table));
+                }
+                CtrlReq::SetSessionOption { option, value, unset, append, only_if_unset, quiet, resp } => {
+                    let reply = crate::server::options::apply_set_session_option(
+                        &mut app, &option, &value, unset, append, only_if_unset, quiet,
+                    );
+                    // The value the session uses may have moved, so reconcile
+                    // the warm pane and redraw, as the global setter does.
+                    let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                    meta_dirty = true;
+                    state_dirty = true;
+                    let _ = resp.send(reply);
+                }
+                CtrlReq::SessionOptionQuery(resp, name, global) => {
+                    let _ = resp.send(crate::server::options::session_option_query(&app, &name, global));
+                }
+                CtrlReq::ScopeSessionListing(resp, text, global, mark_inherited) => {
+                    let _ = resp.send(crate::server::options::scope_session_listing(&app, &text, global, mark_inherited));
                 }
                 CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
                     let reply = crate::server::options::apply_set_window_option(

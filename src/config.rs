@@ -1622,6 +1622,48 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
         return;
     }
 
+    // #803: a session option without -g writes the SESSION's own table, and
+    // `-u` drops that entry so the global shows through again. A startup
+    // config runs before the session has a window, so its lines keep landing
+    // in the global table they always have (the rule an untargeted -w line
+    // follows, #648); the command prompt, key bindings and a runtime
+    // source-file reach the session the way tmux's do.
+    if crate::server::options::is_session_option(key) && !pane_scope {
+        let value = if format_expand && !raw_value.is_empty() {
+            crate::format::expand_format(&raw_value, app)
+        } else {
+            raw_value.clone()
+        };
+        if !is_global && !app.windows.is_empty() {
+            let reply = crate::server::options::apply_set_session_option(
+                app, key, &value, unset_mode, append_mode, only_if_unset, quiet,
+            );
+            if let Some(error) = reply.strip_prefix("ERROR: ") {
+                warn_config(app, error.to_string());
+            }
+            return;
+        }
+        if is_global && crate::server::options::session_overrides(app, key) {
+            use crate::server::options::GlobalWrite;
+            let op = if unset_mode {
+                GlobalWrite::Unset
+            } else if append_mode {
+                GlobalWrite::Append(&value)
+            } else if value.is_empty() && crate::server::options::is_boolean_option(key) {
+                GlobalWrite::Toggle
+            } else if only_if_unset {
+                GlobalWrite::OnlyIfUnset(&value)
+            } else {
+                GlobalWrite::Set(&value)
+            };
+            match crate::server::options::write_shadowed_global(app, key, op) {
+                Err(error) if !(quiet && error.starts_with("already set")) => warn_config(app, error),
+                _ => {}
+            }
+            return;
+        }
+    }
+
     // Handle -u (unset): restore the option's table default.
     //
     // Issue #619: the `user_set_options` erase used to be reachable only for

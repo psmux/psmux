@@ -1842,6 +1842,15 @@ pub struct AppState {
     /// Used by set-option -o (only-if-unset) to distinguish defaults from
     /// explicitly configured values.
     pub user_set_options: std::collections::HashSet<String>,
+    /// The session's own option table (#803), kept as the GLOBAL values it
+    /// shadows. psmux runs one session per server, so the typed fields above
+    /// already hold what the session uses: its own value when it set one, the
+    /// global otherwise, which is tmux's options_get walk from the session
+    /// table to its parent. An entry here means "this session overrides
+    /// `name`" and holds what `show -g` reports and `set -u` falls back to:
+    /// `Some(value)` for a global somebody set, `None` for the built in
+    /// default. See options::apply_set_session_option.
+    pub session_option_globals: std::collections::HashMap<String, Option<String>>,
     /// pane-border-style: style for inactive pane borders
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
@@ -2963,6 +2972,7 @@ impl AppState {
             user_options: std::collections::HashMap::new(),
             global_window_user_options: std::collections::HashMap::new(),
             user_set_options: std::collections::HashSet::new(),
+            session_option_globals: std::collections::HashMap::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
             pane_border_hover_style: "fg=yellow".to_string(),
@@ -3662,6 +3672,25 @@ pub enum CtrlReq {
     SetOptionToggle(String),  // set-option <bool-option> with no value (#535)
     /// Per-window `window-size` override; None unsets the local value.
     SetWindowSize(Option<String>),
+    /// `set-option [-u|-a|-o|-q] <session option> [value]` without `-g` (#803):
+    /// the session's own table, not the global one. An empty `value` with no
+    /// `-u`/`-a` toggles a boolean. Replies `""` or `ERROR: ...`.
+    SetSessionOption {
+        option: String,
+        value: String,
+        unset: bool,
+        append: bool,
+        only_if_unset: bool,
+        quiet: bool,
+        resp: mpsc::Sender<String>,
+    },
+    /// `show-options [-g] [-A] <session option>` (#803): the value of one
+    /// table (the global one with `-g`, else the session's resolved value) and
+    /// whether the session inherits it.
+    SessionOptionQuery(mpsc::Sender<(String, bool)>, String, bool),
+    /// Rewrite a `show-options` listing for `-g` (global values) or `-A`
+    /// (`*` on every session option the session inherits) (#803).
+    ScopeSessionListing(mpsc::Sender<String>, String, bool, bool),
     /// `set-option -w [-u|-a|-o] [-t <window>] <name> [value]` (#648).
     ///
     /// `target` is the RAW `-t` string so the server can resolve a window by

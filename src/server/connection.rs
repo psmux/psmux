@@ -4427,6 +4427,35 @@ match cmd {
                 let _ = write!(write_stream, "{}\n", reply);
                 let _ = write_stream.flush();
             }
+        } else if !global
+            && non_flag_args
+                .first()
+                .is_some_and(|name| crate::server::options::is_session_option(name))
+        {
+            // #803: without -g a session option goes to the SESSION's own
+            // table; `-u` drops that entry so the global shows through again.
+            let option = non_flag_args[0].to_string();
+            let value = if has_u {
+                String::new()
+            } else {
+                expand_set_option_value(&tx, has_f, non_flag_args[1..].join(" "))
+            };
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::SetSessionOption {
+                option,
+                value,
+                unset: has_u,
+                append: has_a,
+                only_if_unset: has_o,
+                quiet: has_q,
+                resp: rtx,
+            });
+            if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                if !reply.is_empty() {
+                    let _ = write!(write_stream, "{}\n", reply);
+                    let _ = write_stream.flush();
+                }
+            }
         } else if has_u {
             if let Some(option) = non_flag_args.first() {
                 if *option == "window-size" && !global {
@@ -4641,9 +4670,39 @@ match cmd {
             if !persistent && pending_chain.is_empty() { break; }
             continue;
         }
-        // Any named query is a single-option query; `-q` only silences the
-        // error (it used to turn `show -q name` into the full listing).
-        if opt_name.is_some() {
+        // #803: a session listing answers for the table the flags pick: `-g`
+        // prints the global values the session may be overriding, `-A` marks
+        // every session option the session inherits with `*`.
+        let scope_listing = |text: String| -> String {
+            if window_scope || !(has_g || has_a) {
+                return text;
+            }
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ScopeSessionListing(rtx, text.clone(), has_g, has_a));
+            rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or(text)
+        };
+        let session_query = opt_name.filter(|name| {
+            !window_scope && (has_g || has_a) && crate::server::options::is_session_option(name)
+        });
+        if let Some(name) = session_query {
+            // #803: `show -g <name>` reads the global table, `show -A <name>`
+            // marks a value the session inherits (cmd-show-options.c:197).
+            let (rtx, rrx) = mpsc::channel::<(String, bool)>();
+            let _ = tx.send(CtrlReq::SessionOptionQuery(rtx, name.to_string(), has_g));
+            if let Ok((value, inherited)) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                let output = if has_v {
+                    format!("{}\n", value)
+                } else {
+                    format!("{}{} {}\n", name, if has_a && inherited { "*" } else { "" }, value)
+                };
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+                } else {
+                    let _ = write_stream.write_all(output.as_bytes());
+                    let _ = write_stream.flush();
+                }
+            }
+        } else if opt_name.is_some() {
             // Single-option query: show-options -v <name> or show <name>
             if let Some(name) = opt_name {
                 let (rtx, rrx) = mpsc::channel::<String>();
@@ -4719,7 +4778,7 @@ match cmd {
             } else {
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
             }
-            if let Ok(text) = rrx.recv() {
+            if let Ok(text) = rrx.recv().map(|text| scope_listing(text)) {
                 // Extract values only (each line is "option_name value")
                 let values_only: String = text.lines()
                     .filter_map(|line| {
@@ -4773,7 +4832,7 @@ match cmd {
             } else {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
-                if let Ok(text) = rrx.recv() {
+                if let Ok(text) = rrx.recv().map(|text| scope_listing(text)) {
                     if persistent {
                         let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), text));
                     } else {
@@ -6632,6 +6691,33 @@ fn dispatch_control_command(
                 let _ = tx.send(CtrlReq::SetWindowOption {
                     target: raw_target,
                     option,
+                    value,
+                    unset,
+                    append,
+                    only_if_unset,
+                    quiet,
+                    resp: rtx,
+                });
+                let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+                let _ = resp_tx.send(reply);
+                return true;
+            }
+            // #803: without -g a session option goes to the SESSION's own
+            // table, as on the one-shot route above.
+            if !global
+                && positional
+                    .first()
+                    .is_some_and(|name| crate::server::options::is_session_option(name))
+            {
+                let value = if unset {
+                    String::new()
+                } else {
+                    let val = positional[1..].join(" ").trim_matches('"').to_string();
+                    expand_set_option_value(tx, format_expand, val)
+                };
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SetSessionOption {
+                    option: positional[0].to_string(),
                     value,
                     unset,
                     append,
