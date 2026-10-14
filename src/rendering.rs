@@ -457,22 +457,37 @@ pub fn fix_border_intersections(
 /// background on the right half, and the diff never repaints it because the
 /// new blank equals the reset cell.  Recording the covering style makes the
 /// diff write that column.
+///
+/// This runs on every frame, so it walks the buffer row by row and settles a
+/// one byte symbol (ASCII, the bulk of any screen) as one column before
+/// anything else, unless the cell forces its own width.
 pub fn style_wide_trailing_cells(buf: &mut Buffer) {
-    use ratatui::buffer::CellWidth;
+    use ratatui::buffer::{CellDiffOption, CellWidth};
 
     let width = (buf.area.width as usize).max(1);
-    let mut index = 0;
-    while index < buf.content.len() {
-        let row_end = (index / width + 1) * width;
-        let end = (index + (buf.content[index].cell_width() as usize).max(1)).min(row_end);
-        let style = buf.content[index].style();
-        for hidden in buf.content[index + 1..end]
-            .iter_mut()
-            .filter(|cell| cell.symbol() == " ")
-        {
-            hidden.set_style(style);
+    for row in buf.content.chunks_mut(width) {
+        let mut index = 0;
+        while index < row.len() {
+            let cell = &row[index];
+            let cell_width = if cell.symbol().len() == 1
+                && matches!(cell.diff_option, CellDiffOption::None)
+            {
+                1
+            } else {
+                (cell.cell_width() as usize).max(1)
+            };
+            let end = (index + cell_width).min(row.len());
+            if cell_width > 1 {
+                let style = cell.style();
+                for hidden in row[index + 1..end]
+                    .iter_mut()
+                    .filter(|cell| cell.symbol() == " ")
+                {
+                    hidden.set_style(style);
+                }
+            }
+            index = end;
         }
-        index = end;
     }
 }
 
@@ -506,3 +521,7 @@ mod test_issue735_cursor_style_default;
 #[cfg(test)]
 #[path = "../tests-rs/test_wide_char_background_residue.rs"]
 mod test_wide_char_background_residue;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue800_wide_trailing_bytes.rs"]
+mod test_issue800_wide_trailing_bytes;
