@@ -16,7 +16,15 @@ function Default-Sessions {
     (& $Binary list-sessions 2>&1 | Out-String).Trim()
 }
 function P { & $Binary -L $namespace @args }
-function State { (P dump-state) | ConvertFrom-Json }
+# Frames carry tabs and attention; full records come from `list-windows -J`.
+function State {
+    $state = (P dump-state) | ConvertFrom-Json
+    $listing = @((P list-windows -J) | ConvertFrom-Json)
+    for ($i = 0; $i -lt $state.windows.Count; $i++) {
+        $state.windows[$i] | Add-Member -NotePropertyName ps_panes -NotePropertyValue $listing[$i].ps_panes -Force
+    }
+    $state
+}
 function Assert($condition, $message) {
     if (-not $condition) { throw $message }
     Write-Host "PASS: $message"
@@ -130,7 +138,7 @@ while ($true) {
     Assert ($foreground -ne $firstWindow) 'foreground is a separate window'
     $clients = @(Open-Client; Open-Client)
     foreach ($client in $clients) {
-        Wait-Frame $client { param($s) $s.windows[0].ps_panes[0].records[0].state -eq 'working' } 'client receives initial full state'
+        Wait-Frame $client { param($s) $s.windows.Count -gt 0 -and -not $s.windows[0].ps_panes } 'client receives initial state without record text'
     }
     'state=done:app=test:msg=UmVhZHk=' | Set-Content -LiteralPath $control -NoNewline
     $state = Wait-State { param($s) $s.windows[0].ps_attention.state -eq 'done' } 'background completion appears with a silent foreground'
@@ -155,7 +163,7 @@ while ($true) {
     Assert ($state.windows[0].ps_panes[0].records[0].state -eq 'error') 'acknowledgement preserves reported state'
     Assert ($state.windows[0].ps_panes[0].records[0].seen) 'acknowledgement is record-local and shared'
     foreach ($client in $clients) {
-        Wait-Frame $client { param($s) -not $s.windows[0].ps_attention -and $s.windows[0].ps_panes[0].records[0].seen } 'shared acknowledgement is pushed to both clients'
+        Wait-Frame $client { param($s) -not $s.windows[0].ps_attention } 'shared acknowledgement is pushed to both clients'
     }
     'state=working' | Set-Content -LiteralPath $control -NoNewline
     $null = Wait-State { param($s) $s.windows[0].ps_panes[0].records[0].state -eq 'working' } 'next run begins'

@@ -59,7 +59,7 @@ Validation runs before record mutation and checks field limits, ids, base64, UTF
 
 Custom formats can show `#{pane_ps_state}` to distinguish `working` from `idle`; root formats do not select child records. Absent fields expand to empty. These names are psmux extensions, inspired by a tmux proposal; they do not imply shipped tmux OSC 7501 support.
 
-The window objects in `dump-state` and JSON window listings include optional `ps_attention` and `ps_panes` fields. `ps_panes` contains pane ids and records with id, state, kind, progress, inherited app, title, msg, and seen. Titles and messages remain literal, untrusted text in JSON. They have no status-format variables and must never be treated as markup or commands by an inspection tool. Old clients can ignore the additive fields; old servers can omit them.
+The window objects in `dump-state` frames include an optional `ps_attention` field. `list-windows -J` adds `ps_panes`, which frames leave out so record text is not pushed to every client on every redraw. `ps_panes` contains pane ids and records with id, state, kind, progress, inherited app, title, msg, and seen. Titles and messages remain literal, untrusted text in JSON. They have no status-format variables and must never be treated as markup or commands by an inspection tool. Old clients can ignore the additive fields; old servers can omit them.
 
 ## Windows console detection
 

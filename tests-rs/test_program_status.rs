@@ -54,6 +54,11 @@ fn report(pane: &Pane, body: &str) {
     pane.live_parser().lock().unwrap().process(format!("\x1b]7501;{body}\x07").as_bytes());
 }
 
+/// `list-windows -J`, the inspection path that carries full records.
+fn listing(app: &AppState) -> serde_json::Value {
+    serde_json::from_str(&crate::util::list_windows_json(app).unwrap()).unwrap()
+}
+
 fn enable_attention(app: &mut AppState) {
     crate::config::parse_config_content(app, concat!(
         "set -g window-status-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'\n",
@@ -79,7 +84,8 @@ fn custom_tabs_show_attention_only_after_explicit_opt_in() {
         for (window, prefix, pane) in [(0, "ACTIVE:test", 10), (1, "INACTIVE:test", 20)] {
             let suffix = if symbol.is_empty() { String::new() } else { format!(" [{symbol}%{pane}]") };
             assert_eq!(json[window]["tab_text"], format!("{prefix}{suffix}"), "{state}");
-            assert_eq!(json[window]["ps_panes"][0]["records"][0]["state"], state);
+            assert!(json[window].get("ps_panes").is_none(), "frames never carry records");
+            assert_eq!(listing(&app)[window]["ps_panes"][0]["records"][0]["state"], state);
         }
     }
 }
@@ -108,7 +114,7 @@ fn stock_tabs_preserve_tmux_defaults_even_with_program_reports() {
         let json: serde_json::Value = serde_json::from_str(&crate::server::helpers::list_windows_json_with_tabs(&app).unwrap()).unwrap();
         for window in 0..2 {
             assert_eq!(json[window]["tab_text"], before[window]["tab_text"], "{state}");
-            assert_eq!(json[window]["ps_panes"][0]["records"][0]["state"], state);
+            assert_eq!(listing(&app)[window]["ps_panes"][0]["records"][0]["state"], state);
         }
     }
 }
@@ -214,7 +220,8 @@ fn respawn_then_immediate_report_refreshes_cached_tabs_and_records() {
     assert!(crate::server::helpers::refresh_program_status_tabs(&app, &mut cached_version, &mut cached_windows).unwrap());
     let json: serde_json::Value = serde_json::from_str(&cached_windows).unwrap();
     assert_eq!(json[1]["ps_attention"]["state"], "blocked");
-    assert_eq!(json[1]["ps_panes"][0]["records"][0]["state"], "blocked");
+    assert!(json[1].get("ps_panes").is_none());
+    assert_eq!(listing(&app)[1]["ps_panes"][0]["records"][0]["state"], "blocked");
     assert!(json[1]["tab_text"].as_str().unwrap().contains("[?%20]"));
     assert!(!json[1]["tab_text"].as_str().unwrap().contains("[+%20]"));
 }
@@ -242,7 +249,8 @@ fn formats_and_structured_records_keep_literal_text_out_of_style_execution() {
     assert_eq!(crate::format::expand_format("#{window_ps_attention}", &app), " [?%10]");
     let frame = crate::server::helpers::list_windows_json_with_tabs(&app).unwrap();
     let json: serde_json::Value = serde_json::from_str(&frame).unwrap();
-    assert_eq!(json[0]["ps_panes"][0]["records"][0]["msg"], "#[fg=red]");
+    assert!(json[0].get("ps_panes").is_none());
+    assert_eq!(listing(&app)[0]["ps_panes"][0]["records"][0]["msg"], "#[fg=red]");
     assert!(!json[0]["tab_text"].as_str().unwrap().contains("#[fg=red]"));
     assert!(json[0]["tab_text"].as_str().unwrap().contains("[?%10]"));
     let old: crate::util::WinInfo = serde_json::from_str(r#"{"id":1,"name":"old","active":true}"#).unwrap();
