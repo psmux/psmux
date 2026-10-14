@@ -61,6 +61,17 @@ Key bindings now distinguish between lowercase and uppercase letters exactly lik
 
 `set -g prefix C-Space` now works correctly. Previously, multi-character key names like `Space` were parsed as single character fallbacks.
 
+### No Prefix (`set prefix None`)
+
+`None`, in any case, is a key for `prefix` and `prefix2`, as in tmux: `set prefix None` turns the prefix off, `show -v prefix` prints `None`, and `set -u prefix` brings it back (#802). This is the first half of the usual nested session toggle:
+
+```text
+bind -T root F12 set prefix None \; set key-table off \; set status-left "OFF"
+bind -T off  F12 set -u prefix \; set -u key-table \; set -u status-left
+```
+
+A value that is not a key is refused with tmux's `bad key: <value>` on every route (CLI, command prompt, config file, where it lands in `config-warnings.log`), and the option keeps its value. It used to be dropped without a word.
+
 ### Wrapped Directional Pane Navigation
 
 Directional pane navigation (`select-pane -U/-D/-L/-R`) now wraps at layout edges, matching tmux behavior. Navigating past the rightmost pane wraps to the leftmost, and so on. Wrap is also correctly suppressed while zoomed.
