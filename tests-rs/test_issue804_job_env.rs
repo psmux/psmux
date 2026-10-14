@@ -97,7 +97,10 @@ fn job_environment_is_server_env_plus_tmux() {
     // Round trips through the block the server sends for `job-environ`.
     let block = crate::client_env::encode_env_block(env.clone());
     let back = crate::client_env::decode_env_block(&block).expect("decodes");
-    assert_eq!(back.len(), env.len());
+    // The block drops cmd.exe's "=C:" style entries, which no child needs.
+    let usable = env.iter().filter(|(k, _)| !k.to_string_lossy().starts_with('=')).count();
+    assert_eq!(back.len(), usable);
+    assert!(back.iter().any(|(k, _)| k == "TMUX"));
 }
 
 #[test]
