@@ -1481,6 +1481,15 @@ psmux -t alpha list-panes -F '#{pane_id} #{pane_left},#{pane_top}'
 `move-pane` behaves the same way and also removes the pane from the source window. Use `-h` or
 `-v` to choose the split direction and `-d` to avoid focusing the transplanted pane.
 
+The moved pane belongs to its new session from then on, as in tmux. If it was the last pane of
+the source session, that session is gone (`ls` and `has-session` no longer see it and the name is
+free again), and `kill-session` on the source no longer touches a pane that was moved out of it.
+The source server process keeps hosting the console in the background and exits by itself when the
+pane exits or is killed. If that process is ended some other way, the pane in the new session
+turns dead like any exited pane: `pane-exited` or `pane-died` fires and `remain-on-exit` decides
+whether it stays. One difference from tmux remains: pane ids are per server in psmux, so the moved
+pane gets a new `%id` in its new session.
+
 ## Mouse Wire Commands
 
 The client normally speaks these to the server on your behalf, but five of them are also accepted

@@ -1192,6 +1192,15 @@ pub struct ForwardedPane {
     pub cols: u16,
     /// Handle to the forwarding threads (so we can abort on kill).
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the forwarding thread once the target session connected the
+    /// I/O tunnel.
+    pub accepted: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the forwarding thread when the tunnel closed: the target dropped
+    /// the proxy pane or its server ended. Nobody can see or type into the
+    /// pane after that, so the reaper ends its child.
+    pub tunnel_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// When the pane was extracted, for the accept timeout.
+    pub created: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

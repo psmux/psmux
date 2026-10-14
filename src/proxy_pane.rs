@@ -123,6 +123,8 @@ pub struct ProxyChild {
     forward_id: u64,
     pid: Option<u32>,
     exited: bool,
+    /// Consecutive status polls without a usable answer.
+    unknown_polls: u32,
 }
 
 impl ProxyChild {
@@ -132,7 +134,7 @@ impl ProxyChild {
         forward_id: u64,
         pid: Option<u32>,
     ) -> Self {
-        Self { control_addr, control_key, forward_id, pid, exited: false }
+        Self { control_addr, control_key, forward_id, pid, exited: false, unknown_polls: 0 }
     }
 
     fn send_control(&self, cmd: &str) -> io::Result<String> {
@@ -160,11 +162,61 @@ impl ProxyChild {
     }
 }
 
+/// What one `pane-forward-status` round trip says about the hosted pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForwardProbe {
+    Running,
+    /// The host said `exited`, nothing listens on its port any more, or the
+    /// port now belongs to a server that refuses the key: the pane is gone.
+    Exited,
+    /// No usable answer this time (timeout, empty reply while the host is
+    /// busy). Not evidence either way on its own.
+    Unknown,
+}
+
+/// Consecutive [`ForwardProbe::Unknown`] answers taken as the host being gone.
+/// The reaper polls every 100ms, so this is a few hundred milliseconds of a
+/// host that accepts nothing and answers nothing.
+pub(crate) const FORWARD_UNKNOWN_LIMIT: u32 = 5;
+
+pub(crate) fn classify_forward_status(reply: &io::Result<String>) -> ForwardProbe {
+    match reply {
+        Ok(r) => {
+            let r = r.trim();
+            if r == "running" {
+                ForwardProbe::Running
+            } else if r == "exited" || r.starts_with("ERROR: Invalid session key")
+                || r.starts_with("ERROR: Authentication required")
+            {
+                ForwardProbe::Exited
+            } else {
+                ForwardProbe::Unknown
+            }
+        }
+        // Nothing listens on the host's port: the hosting process ended.
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => ForwardProbe::Exited,
+        Err(_) => ForwardProbe::Unknown,
+    }
+}
+
 impl portable_pty::Child for ProxyChild {
     fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
         if self.exited { return Ok(Some(portable_pty::ExitStatus::with_exit_code(0))); }
-        let resp = self.send_control(&format!("pane-forward-status {}", self.forward_id))?;
-        if resp.trim() == "exited" {
+        // A host that is gone used to surface here as an Err, which every
+        // reaper reads as "still running": the target kept a pane with
+        // pane_dead=0 whose keystrokes went nowhere and never fired
+        // pane-exited. A refused connection now means exited, and so does a
+        // host that stays unreachable for FORWARD_UNKNOWN_LIMIT polls.
+        let reply = self.send_control(&format!("pane-forward-status {}", self.forward_id));
+        let gone = match classify_forward_status(&reply) {
+            ForwardProbe::Running => { self.unknown_polls = 0; false }
+            ForwardProbe::Exited => true,
+            ForwardProbe::Unknown => {
+                self.unknown_polls += 1;
+                self.unknown_polls >= FORWARD_UNKNOWN_LIMIT
+            }
+        };
+        if gone {
             self.exited = true;
             Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
         } else {

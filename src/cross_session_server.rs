@@ -121,9 +121,13 @@ pub fn handle_pane_forward_extract(
     // to the detached local parser; the snapshot already covers the visible
     // screen at extract time.
     let sd_clone = shutdown.clone();
+    let accepted = Arc::new(AtomicBool::new(false));
+    let tunnel_closed = Arc::new(AtomicBool::new(false));
+    let (accepted_t, closed_t) = (accepted.clone(), tunnel_closed.clone());
     std::thread::spawn(move || {
         // Accept one connection for I/O forwarding
         if let Ok((stream, _)) = listener.accept() {
+            accepted_t.store(true, std::sync::atomic::Ordering::Release);
             let _ = stream.set_nodelay(true);
             match stream.try_clone() {
                 Ok(tcp_writer) => {
@@ -133,7 +137,10 @@ pub fn handle_pane_forward_extract(
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                Err(_) => return,
+                Err(_) => {
+                    closed_t.store(true, std::sync::atomic::Ordering::Release);
+                    return;
+                }
             }
             // Writer: TCP -> PTY input (same 64K buffer as the reader side for
             // symmetric throughput)
@@ -155,6 +162,9 @@ pub fn handle_pane_forward_extract(
             // fails and the pane's reader thread unregisters the entry and
             // re-syncs the PIPE_PANE_COUNT gate.
             let _ = tcp_reader.shutdown(std::net::Shutdown::Both);
+            // Nobody can reach the pane any more: the target dropped the
+            // proxy or its server ended. The reaper ends the child.
+            closed_t.store(true, std::sync::atomic::Ordering::Release);
         }
     });
     // Store forwarded pane state
@@ -167,6 +177,9 @@ pub fn handle_pane_forward_extract(
         rows,
         cols,
         shutdown,
+        accepted,
+        tunnel_closed,
+        created: std::time::Instant::now(),
     });
     // Send response
     let title_wire = title.replace(' ', "\x01");
@@ -228,17 +241,24 @@ pub fn handle_pane_forward_inject(
     } else {
         None
     };
-    // Generate a unique pane ID
+    // Allocate the pane id the way a cold spawn does. It used to be one more
+    // than the highest id in the tree, which is not what the allocator hands
+    // out next: ids of killed panes and of spares already issued sit above it,
+    // so the next split or new-window could reuse the proxy's id and two panes
+    // answered to the same `%N`. Pane ids are per server today, so the joined
+    // pane does not keep the id it had in the source session (tmux keeps it);
+    // see docs/design/multi-session-server.md.
     let pane_id = {
-        let mut max_id = 0usize;
-        for win in &app.windows {
-            let mut leaves = Vec::new();
-            tree::collect_leaf_paths_pub(&win.root, &mut Vec::new(), &mut leaves);
-            for (id, _) in &leaves {
-                if *id > max_id { max_id = *id; }
-            }
+        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
+        if dropped > 0 {
+            crate::warm_trace!(
+                "pool: id floor raised to {} by a cross session join, discarded {} spare(s)",
+                app.next_pane_id, dropped
+            );
         }
-        max_id + 1
+        let id = app.next_pane_id;
+        app.next_pane_id += 1;
+        id
     };
     // Create the proxy pane
     let proxy_pane = match crate::proxy_pane::create_proxy_pane(
@@ -298,3 +318,191 @@ pub fn handle_pane_forward_inject(
     }
     Ok(())
 }
+
+// ── Lifetime of a forwarded pane ────────────────────────────────────────
+//
+// A pane joined into another session keeps its real ConPTY and child here,
+// in the source server, and the target holds a proxy (src/proxy_pane.rs).
+// In tmux the pane simply belongs to the target from then on: the source
+// session can be destroyed (its last window went, or kill-session) and the
+// pane lives on. Here that means this process must keep hosting the pane
+// after its own session is gone, and must not outlive the pane either.
+
+/// How long an extracted pane waits for the target to connect its tunnel.
+/// A join whose inject never arrived leaves a pane nobody can see; after this
+/// it is ended rather than kept as an invisible shell.
+pub(crate) const FORWARD_ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the reaper does with one forwarded pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForwardVerdict {
+    /// Still in use by the target.
+    Keep,
+    /// The child exited by itself: drop the entry (the target learns it from
+    /// `pane-forward-status`, which answers `exited` for an unknown id).
+    ChildExited,
+    /// The tunnel closed, or never opened in time: nobody can reach the pane,
+    /// so end its child and drop the entry.
+    TunnelGone,
+}
+
+pub(crate) fn forward_verdict(
+    child_exited: bool,
+    accepted: bool,
+    tunnel_closed: bool,
+    age: std::time::Duration,
+) -> ForwardVerdict {
+    if child_exited {
+        ForwardVerdict::ChildExited
+    } else if tunnel_closed || (!accepted && age >= FORWARD_ACCEPT_TIMEOUT) {
+        ForwardVerdict::TunnelGone
+    } else {
+        ForwardVerdict::Keep
+    }
+}
+
+/// Drop forwarded panes that are over (see [`ForwardVerdict`]). Returns how
+/// many were dropped.
+pub(crate) fn reap_forwarded_panes(app: &mut AppState) -> usize {
+    use std::sync::atomic::Ordering;
+    if app.forwarded_panes.is_empty() {
+        return 0;
+    }
+    let mut over: Vec<(u64, ForwardVerdict)> = Vec::new();
+    for (id, fp) in app.forwarded_panes.iter_mut() {
+        let exited = matches!(fp.child.try_wait(), Ok(Some(_)));
+        let v = forward_verdict(
+            exited,
+            fp.accepted.load(Ordering::Acquire),
+            fp.tunnel_closed.load(Ordering::Acquire),
+            fp.created.elapsed(),
+        );
+        if v != ForwardVerdict::Keep {
+            over.push((*id, v));
+        }
+    }
+    for (id, v) in &over {
+        if let Some(mut fp) = app.forwarded_panes.remove(id) {
+            fp.shutdown.store(true, Ordering::Relaxed);
+            if *v == ForwardVerdict::TunnelGone {
+                let _ = fp.child.kill();
+            }
+        }
+    }
+    over.len()
+}
+
+/// `pane-forward-status`: `exited` once the child is gone or the id is unknown.
+pub(crate) fn forward_status(app: &mut AppState, fwd_id: u64) -> String {
+    match app.forwarded_panes.get_mut(&fwd_id) {
+        Some(fp) => match fp.child.try_wait() {
+            Ok(None) => "running".to_string(),
+            _ => "exited".to_string(),
+        },
+        None => "exited".to_string(),
+    }
+}
+
+pub(crate) fn forward_resize(app: &mut AppState, fwd_id: u64, rows: u16, cols: u16) {
+    if let Some(fp) = app.forwarded_panes.get(&fwd_id) {
+        let _ = fp.master.resize(portable_pty::PtySize {
+            rows, cols, pixel_width: 0, pixel_height: 0,
+        });
+    }
+}
+
+pub(crate) fn forward_kill(app: &mut AppState, fwd_id: u64) {
+    if let Some(mut fp) = app.forwarded_panes.remove(&fwd_id) {
+        fp.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = fp.child.kill();
+    }
+}
+
+/// End every forwarded pane's child (server shutdown).
+pub(crate) fn kill_all_forwarded(app: &mut AppState) {
+    for (_, mut fp) in app.forwarded_panes.drain() {
+        fp.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = fp.child.kill();
+    }
+}
+
+/// This session is ending (its last window went, kill-session, or
+/// destroy-unattached) while it still hosts panes joined into other sessions.
+///
+/// The session goes away exactly as it would have: its registry files are
+/// removed, its clients are detached, its own panes and spares are ended and
+/// its name is released, so `ls` no longer lists it and a new session may take
+/// the name. The process stays up only to serve the forwarded panes and exits
+/// once the last of them is over. It used to exit on the spot, which ended the
+/// shells the user was looking at in the other session.
+pub(crate) fn become_forward_host(
+    app: &mut AppState,
+    session_guard: Option<crate::platform::SessionMutex>,
+) -> ! {
+    let base = app.port_file_base();
+    crate::session::remove_session_registry_files(std::path::Path::new(
+        &crate::paths::port_file(&base),
+    ));
+    // No longer a server this data dir lists, so not one the orphan reaper
+    // may claim either: without its marker the reaper leaves it alone.
+    let _ = std::fs::remove_file(crate::paths::server_marker_file(std::process::id()));
+    if !app.control_clients.is_empty() {
+        crate::control::emit_notification(
+            app,
+            crate::types::ControlNotification::Exit { reason: None },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    crate::types::send_directive_to_all_clients("DETACH");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    crate::types::shutdown_persistent_streams();
+    tree::kill_all_children_batch(&mut app.windows);
+    app.warm_pane.kill_all();
+    crate::warm_pane_sync::reap_inflight_spares();
+    // Release the session name for a new session of the same name.
+    drop(session_guard);
+    run_forward_host(app)
+}
+
+/// The loop of a process that only hosts forwarded panes. It answers the
+/// proxies' control requests and nothing else, and exits when no forwarded
+/// pane is left.
+fn run_forward_host(app: &mut AppState) -> ! {
+    use crate::types::CtrlReq;
+    let rx = app.control_rx.take();
+    loop {
+        if let Some(rx) = rx.as_ref() {
+            if let Ok(req) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                let mut pending = vec![req];
+                while let Ok(r) = rx.try_recv() {
+                    pending.push(r);
+                }
+                for req in pending {
+                    match req {
+                        CtrlReq::PaneForwardResize(id, rows, cols) => forward_resize(app, id, rows, cols),
+                        CtrlReq::PaneForwardStatus(id, resp) => {
+                            let _ = resp.send(forward_status(app, id));
+                        }
+                        CtrlReq::PaneForwardKill(id) => forward_kill(app, id),
+                        CtrlReq::KillServer | CtrlReq::KillServerScoped(_) => {
+                            kill_all_forwarded(app);
+                        }
+                        // Anything else was meant for the session that is gone.
+                        _ => {}
+                    }
+                }
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        reap_forwarded_panes(app);
+        if app.forwarded_panes.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::process::exit(0);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests-rs/test_joinpane_proxy_ownership.rs"]
+mod tests_joinpane_proxy_ownership;

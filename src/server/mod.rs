@@ -104,6 +104,8 @@ fn shutdown_this_server(app: &mut AppState) -> ! {
     let _ = std::fs::remove_file(crate::paths::held_file(app.port_file_base()));
     // Kill all child processes using a single process snapshot
     tree::kill_all_children_batch(&mut app.windows);
+    // ...and the panes this server hosts for other sessions (join-pane).
+    crate::cross_session_server::kill_all_forwarded(app);
     // Kill warm pane's child (process::exit skips Drop)
     app.warm_pane.kill_all();
     // ...and the spares whose spawn is still in flight, which the pool
@@ -3739,6 +3741,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         hook_event = Some("client-detached");
                         if app.attached_clients == 0 && app.destroy_unattached {
+                            if !app.forwarded_panes.is_empty() { crate::cross_session_server::become_forward_host(&mut app, session_guard.take()); }
                             let regpath = crate::paths::port_file(&app.port_file_base());
                             let keypath = crate::paths::key_file(&app.port_file_base());
                             let _ = std::fs::remove_file(&regpath);
@@ -5062,6 +5065,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::KillSession => {
                     // Fire session-closed hook before cleanup
                     if let Some(cmds) = app.hooks.get("session-closed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    // A pane joined into another session belongs to that
+                    // session now (tmux): end this session, keep hosting it.
+                    if !app.forwarded_panes.is_empty() {
+                        crate::cross_session_server::become_forward_host(&mut app, session_guard.take());
+                    }
                     // Remove port/key/sid files FIRST so clients see the session
                     // as gone immediately, then kill processes.
                     let regpath = crate::paths::port_file(&app.port_file_base());
@@ -5797,29 +5805,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-join-pane");
                 }
                 CtrlReq::PaneForwardResize(fwd_id, fwd_rows, fwd_cols) => {
-                    if let Some(fp) = app.forwarded_panes.get(&fwd_id) {
-                        let _ = fp.master.resize(portable_pty::PtySize {
-                            rows: fwd_rows, cols: fwd_cols, pixel_width: 0, pixel_height: 0,
-                        });
-                    }
+                    crate::cross_session_server::forward_resize(&mut app, fwd_id, fwd_rows, fwd_cols);
                 }
                 CtrlReq::PaneForwardStatus(fwd_id, resp) => {
-                    let status = if let Some(fp) = app.forwarded_panes.get_mut(&fwd_id) {
-                        match fp.child.try_wait() {
-                            Ok(Some(_)) => "exited".to_string(),
-                            Ok(None) => "running".to_string(),
-                            Err(_) => "exited".to_string(),
-                        }
-                    } else {
-                        "exited".to_string()
-                    };
-                    let _ = resp.send(status);
+                    let _ = resp.send(crate::cross_session_server::forward_status(&mut app, fwd_id));
                 }
                 CtrlReq::PaneForwardKill(fwd_id) => {
-                    if let Some(mut fp) = app.forwarded_panes.remove(&fwd_id) {
-                        fp.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let _ = fp.child.kill();
-                    }
+                    crate::cross_session_server::forward_kill(&mut app, fwd_id);
                 }
                 CtrlReq::SetPaneOption {
                     target,
@@ -6925,6 +6917,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     });
                     hook_event = Some("client-detached");
                     if app.attached_clients == 0 && app.destroy_unattached {
+                        if !app.forwarded_panes.is_empty() { crate::cross_session_server::become_forward_host(&mut app, session_guard.take()); }
                         let regpath = crate::paths::port_file(&app.port_file_base());
                         let keypath = crate::paths::key_file(&app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
@@ -7022,6 +7015,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         hook_event = Some("client-detached");
                     }
                     if app.attached_clients == 0 && app.destroy_unattached {
+                        if !app.forwarded_panes.is_empty() { crate::cross_session_server::become_forward_host(&mut app, session_guard.take()); }
                         let regpath = crate::paths::port_file(&app.port_file_base());
                         let keypath = crate::paths::key_file(&app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
@@ -7075,6 +7069,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         hook_event = Some("client-detached");
                     }
                     if app.attached_clients == 0 && app.destroy_unattached {
+                        if !app.forwarded_panes.is_empty() { crate::cross_session_server::become_forward_host(&mut app, session_guard.take()); }
                         let regpath = crate::paths::port_file(&app.port_file_base());
                         let keypath = crate::paths::key_file(&app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
@@ -8836,6 +8831,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // Dropping the corpses is all that is needed: the deficit they
             // leave behind is refilled by the background spawner on the very
             // next loop tick, off the command path.
+            // Panes joined into other sessions: end the ones whose tunnel
+            // closed (the target dropped them or its server ended) and drop
+            // the ones whose child exited.
+            crate::cross_session_server::reap_forwarded_panes(&mut app);
             let reaped = app.warm_pane.reap_dead();
             if reaped > 0 {
                 crate::warm_trace!("pool: reaped {} dead spare(s), depth now {}", reaped, app.warm_pane.len());
@@ -8952,6 +8951,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::commands::fire_hooks(&mut app, "pane-died");
                 crate::commands::fire_hooks(&mut app, "pane-exited");
             }
+            if app.exit_empty && all_empty && !app.forwarded_panes.is_empty() {
+                // The session's last pane went, and one of them went into
+                // another session through join-pane. In tmux the session is
+                // destroyed and that pane lives on in its new session; here
+                // this process holds its ConPTY, so it stays up as the host.
+                warm_debug(&format!("EXIT_EMPTY for session '{}' while hosting {} forwarded pane(s) -> forward host", app.session_name, app.forwarded_panes.len()));
+                crate::cross_session_server::become_forward_host(&mut app, session_guard.take());
+            }
             if app.exit_empty && all_empty {
                 warm_debug(&format!("EXIT_EMPTY firing for session '{}' (all panes empty/dead) -> removing port file + process::exit", app.session_name));
                 // Notify CC clients that the session is ending so iTerm2
@@ -8965,10 +8972,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // the DCS stream before we tear down the process.
                     std::thread::sleep(std::time::Duration::from_millis(80));
                 }
-                let regpath = crate::paths::port_file(&app.port_file_base());
-                let keypath = crate::paths::key_file(&app.port_file_base());
-                let _ = std::fs::remove_file(&regpath);
-                let _ = std::fs::remove_file(&keypath);
+                // Every registry file of the session, not only .port and .key:
+                // .pid and .sid used to stay behind after a natural exit.
+                crate::session::remove_session_registry_files(std::path::Path::new(
+                    &crate::paths::port_file(&app.port_file_base()),
+                ));
                 crate::types::send_directive_to_all_clients("DETACH");
                 std::thread::sleep(Duration::from_millis(50));
                 crate::types::shutdown_persistent_streams();

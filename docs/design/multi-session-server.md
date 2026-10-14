@@ -191,6 +191,17 @@ Failure modes, each reproduced:
    kept alive by a second window, `kill-session -t S` ended the moved shell; T's
    pane again stayed `pane_dead=0`, no `pane-exited` fired.
 3. **Pane identity changes.** S's `%1` became `%3` in T. tmux keeps `%1`.
+
+Status: failure modes 1 and 2 are fixed in place (see `tests/test_joinpane_proxy_ownership.ps1`):
+the source server now stays up as a host for a forwarded pane after its own session
+ends (registry files removed, name released, not listed), exits once the pane is over,
+and a proxy whose host is gone reads as an exited child, so the target fires
+`pane-exited` / `pane-died` and honours `remain-on-exit`. The same fix found that the
+proxy pane took "highest id in the tree plus one" as its id, which a later split
+could hand out again (`%1 %3 %3 %2 %4` measured); it now takes the allocator's next
+id. Failure mode 3 stays as documented: pane ids are per server today, so a moved
+pane gets an id of its new server until ids are server or namespace unique (stage 0a
+and 0g).
 4. **Two processes own one pane.** Resize travels over a separate control connection,
    `pane_pid` names a process whose parent is another server, and `kill-server` in
    one namespace has to find the owner by scanning.
