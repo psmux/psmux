@@ -282,6 +282,9 @@ fn if_shell_condition(
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(condition.as_str());
+        // Console input injection can detach the server and invalidate its
+        // stdin handle. Conditions never consume pane input.
+        c.stdin(std::process::Stdio::null());
         c.stdout(std::process::Stdio::null());
         c.stderr(std::process::Stdio::null());
         crate::commands::apply_job_env(&mut c);
