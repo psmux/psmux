@@ -4346,9 +4346,9 @@ pub fn spawn_reader_thread(
         // latency that pushed XTVERSION into the reader thread does not bite
         // either: a console host's opening `ESC[1t ESC[c` is 31 bytes, far
         // under ECHO_CHUNK_MAX, so it skips the coalescing wait entirely.
-        if let Ok(mut parser) = term_reader.lock() {
-            parser.screen_mut().capture_queries(true);
-        }
+        // Query capture is armed per batch below, not once here: clear-history
+        // swaps a fresh `vt100::Parser` into this same mutex, and a flag set
+        // once would leave the pane unanswered for the rest of its life.
         // Issue #685: the palette generation last mirrored into
         // `types::PANE_PALETTES`.  A fresh parser starts at 0 with an empty
         // palette, so a pane id reused by respawn-pane withdraws whatever the
@@ -4471,6 +4471,7 @@ pub fn spawn_reader_thread(
             // post-write value, the way tmux's in-order dispatch does.
             let mut decrqm_state: Option<DecrqmState> = None;
             if let Ok(mut parser) = term_reader.lock() {
+                parser.screen_mut().capture_queries(true);
                 parser.process(&bytes);
                 device_queries = parser.screen_mut().take_queries();
                 if !device_queries.is_empty() {
