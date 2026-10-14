@@ -87,9 +87,13 @@ set -g claude-code-fix-tty off
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `claude-code-fix-tty` | `on` | Sets `PSMUX_CLAUDE_TEAMMATE_MODE=tmux` and defines a `claude` wrapper function that injects `--teammate-mode tmux` when `teammateMode` is not configured in any of your Claude Code settings files (your settings always take priority) |
+| `claude-code-fix-tty` | `on` | Sets `PSMUX_CLAUDE_TEAMMATE_MODE=tmux` and `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, and defines a `claude` wrapper function that injects `--teammate-mode tmux` when `teammateMode` is not configured in any of your Claude Code settings files (your settings always take priority) |
 
-The `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var is always set (not gated by any option) since it's required for the feature to work at all.
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is only filled in when the pane would not already have it: a value inherited from the environment that started the server, or one you set with `set-environment -g CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS 0`, is kept as is. With `claude-code-fix-tty off` psmux does not set it at all.
+
+### Your own `claude` or `env` always wins
+
+The `claude` wrapper and the `env` shim are installed after your PowerShell profile has run, and only when the name is still free. If your profile defines `claude` or `env` as a function, filter or alias, psmux leaves it alone, so the pane runs exactly what runs outside psmux. In that case the `--teammate-mode tmux` injection does not happen; add `"teammateMode": "tmux"` to `~/.claude/settings.json` or pass the flag from your own wrapper.
 
 ## Two Agent Systems in Claude Code
 

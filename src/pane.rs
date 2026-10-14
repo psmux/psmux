@@ -2245,12 +2245,6 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
     // Prevent MSYS2/Git-Bash from path-mangling the TMUX value (which starts
     // with /tmp/ and would be rewritten to a Windows path otherwise).
     builder.env("MSYS2_ENV_CONV_EXCL", "TMUX");
-    // Enable Claude Code agent teams feature.  The standalone binary gates
-    // the entire teammate tool-set (spawnTeam, spawnTeammate, …) behind
-    //   T8(): LA(process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS) || --agent-teams
-    // Without this env var the team tools are never registered and Claude
-    // always falls back to the in-process "Agent" tool.
-    builder.env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
 
     // ── Claude Code workarounds (removable once upstream fixes land) ──
     //
@@ -2262,8 +2256,20 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
     //   teammateMode in any settings.json Claude Code reads, because CLI flags
     //   outrank settings and blind injection silently overrode an explicit
     //   user choice.  Disable with: set -g claude-code-fix-tty off
+    //
+    // Agent teams: the standalone binary gates the entire teammate tool-set
+    // (spawnTeam, spawnTeammate, …) behind
+    //   T8(): LA(process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS) || --agent-teams
+    // Without it Claude always falls back to the in-process "Agent" tool, so
+    // psmux defaults it to 1.  It is part of the same Claude Code integration,
+    // so the same option turns it off, and a value the pane already inherits
+    // (the server environment or set-environment) is the user's own and is
+    // kept as is (#805).
     if fix_tty {
         builder.env("PSMUX_CLAUDE_TEAMMATE_MODE", "tmux");
+        if builder.get_env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").is_none() {
+            builder.env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+        }
     }
 
 }
@@ -2304,7 +2310,13 @@ pub fn apply_env_removals(builder: &mut CommandBuilder, names: &[String]) {
 ///      escapes (`\@`, `\:`) that native env.exe does not strip, causing
 ///      agent ID mismatches and spawn failures (psmux#172, #173, #180).
 ///      Users who need the raw env.exe can invoke it as `env.exe` explicitly.
+///   5. `env` and the `claude` wrapper below are installed only when the name
+///      is still free after the user's profile ran: a function, filter or
+///      alias the user defined is theirs and must win in every pane (#805).
+///      Test-Path on the Function: and Alias: drives costs microseconds,
+///      unlike Get-Command, so pane startup does not slow down.
 const ENV_SHIM_PS: &str = concat!(
+    "if(-not((Test-Path Function:env) -or (Test-Path Alias:env))){ ",
     "function Global:env { ",
     // _pu: POSIX-unescape helper — strips `\` before non-word, non-backslash
     // chars (e.g. \@ → @, \: → :) produced by npm shell-quote.
@@ -2343,7 +2355,7 @@ const ENV_SHIM_PS: &str = concat!(
     "else{& $cmd @rest} ",
     "} elseif($v.Count -gt 0){ ",
     "foreach($e in $v.GetEnumerator()){[Environment]::SetEnvironmentVariable($e.Key,$e.Value,'Process')} ",
-    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } }; ",
+    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } } }; ",
     // Claude Code teammate-mode wrapper (claude-code#26244, psmux#399):
     // Early standalone (Bun SFE) binaries ignored `teammateMode` from
     // settings.json, so psmux force-injected the `--teammate-mode` CLI flag.
@@ -2362,7 +2374,12 @@ const ENV_SHIM_PS: &str = concat!(
     // and claude.ps1 with no exe (psmux#475).  The CommandType filter
     // (Application = .exe/.cmd, ExternalScript = .ps1) excludes this wrapper
     // function itself, so there is no self-recursion.
-    "if($env:PSMUX_CLAUDE_TEAMMATE_MODE){ ",
+    //
+    // A `claude` function, filter or alias from the user's profile is left
+    // alone (#805): the wrapper cannot chain to it (the filter above skips
+    // functions on purpose), so replacing it would silently run a different
+    // program than the one the user defined.
+    "if($env:PSMUX_CLAUDE_TEAMMATE_MODE -and -not((Test-Path Function:claude) -or (Test-Path Alias:claude))){ ",
     // _psmux_tmcfg: $true when teammateMode is already configured in a settings
     // file Claude Code consults.  Checked at call time (not shim load time) so
     // cd'ing into a project with its own .claude/settings.json is honoured.
@@ -4599,6 +4616,10 @@ mod test_windowsapps_alias_shell;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue475_claude_wrapper.rs"]
 mod test_issue475_claude_wrapper;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue805_profile_wins.rs"]
+mod test_issue805_profile_wins;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue399_teammate_settings_priority.rs"]
