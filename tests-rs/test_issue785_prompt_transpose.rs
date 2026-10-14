@@ -23,7 +23,7 @@ fn edit(text: &str, keys: &[&str]) -> String {
     let mut input = text.to_string();
     let mut back = 0usize;
     for k in keys {
-        prompt_edit(&mut input, &mut back, k);
+        prompt_edit(&mut input, &mut back, &mut None, k, || None);
     }
     prompt_insert(&mut input, back, "X");
     input
@@ -71,10 +71,10 @@ fn characters_are_swapped_whole_not_by_byte() {
 fn c_t_is_an_editing_key_not_one_the_editor_ignores() {
     let mut input = "ab".to_string();
     let mut back = 0usize;
-    assert_eq!(prompt_edit(&mut input, &mut back, "C-t"), PromptEdit::Edited);
+    assert_eq!(prompt_edit(&mut input, &mut back, &mut None, "C-t", || None), PromptEdit::Edited);
     // Even where it changes nothing, so a caller never treats it as unknown.
     let mut input = "a".to_string();
-    assert_eq!(prompt_edit(&mut input, &mut back, "c-t"), PromptEdit::Edited);
+    assert_eq!(prompt_edit(&mut input, &mut back, &mut None, "c-t", || None), PromptEdit::Edited);
 }
 
 // ── the prompts that reach it ───────────────────────────────────────────────
@@ -85,7 +85,7 @@ fn the_client_command_prompt_transposes_on_ctrl_t() {
     use crossterm::event::{KeyCode, KeyModifiers};
     let mut buf = "abc".to_string();
     let mut back = 0usize;
-    let act = command_prompt_key(&mut buf, &mut back, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    let act = command_prompt_key(&mut buf, &mut back, &mut None, KeyCode::Char('t'), KeyModifiers::CONTROL, || None);
     assert_eq!(act, PromptKeyAction::Edited);
     assert_eq!(buf, "acb");
     assert_eq!(back, 0);
@@ -95,7 +95,7 @@ fn the_client_command_prompt_transposes_on_ctrl_t() {
 fn the_rename_overlay_transposes_on_ctrl_t() {
     let mut buf = "abcd".to_string();
     let mut back = 2usize;
-    let closes = crate::client::rename_overlay_ctrl_key(&mut buf, &mut back, 't');
+    let closes = crate::client::rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 't', || None);
     assert!(!closes, "C-t edits the name, it does not close the overlay");
     assert_eq!(buf, "acbd");
     assert_eq!(back, 1);

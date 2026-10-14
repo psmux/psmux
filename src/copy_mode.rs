@@ -323,6 +323,10 @@ pub fn restore_copy_state_from_pane(app: &mut AppState) {
         app.copy_hide_position = s.hide_position;
         if s.in_search {
             app.mode = Mode::CopySearch { input: s.search_input, forward: s.search_input_forward };
+            // The saved state carries the typed text, not a C-w cut, so C-y
+            // starts again from the paste buffer rather than from a cut made
+            // at another pane's prompt.
+            app.prompt_saved = None;
         } else {
             app.mode = Mode::CopyMode;
         }
@@ -1870,9 +1874,22 @@ pub enum PromptEdit {
 /// meaning here: Left, Right, Home, End and their emacs spellings C-b, C-f,
 /// C-a, C-e, Backspace and Delete at the cursor, C-u clears, C-k cuts to the
 /// end, C-w cuts the word before the cursor, C-t transposes the characters at
-/// the cursor, and Space inserts a space, which arrives as a key of its own and
-/// used to be dropped (discussion #694).
-pub fn prompt_edit(input: &mut String, back: &mut usize, key: &str) -> PromptEdit {
+/// the cursor, C-y inserts what C-w last cut or else the top paste buffer, and
+/// Space inserts a space, which arrives as a key of its own and used to be
+/// dropped (discussion #694).
+///
+/// `saved` is what C-w last cut at this prompt, tmux's `prompt_saved`. The
+/// caller keeps it for as long as the prompt is open and clears it when a
+/// prompt opens. `top_buffer` gives the top paste buffer, and is only called
+/// for a C-y with nothing saved, because the client's prompts have to ask the
+/// server for it.
+pub fn prompt_edit(
+    input: &mut String,
+    back: &mut usize,
+    saved: &mut Option<String>,
+    key: &str,
+    top_buffer: impl FnOnce() -> Option<String>,
+) -> PromptEdit {
     let mut chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut b = (*back).min(len);
@@ -1897,7 +1914,22 @@ pub fn prompt_edit(input: &mut String, back: &mut usize, key: &str) -> PromptEdi
             let mut start = idx;
             while start > 0 && chars[start - 1] == ' ' { start -= 1; }
             while start > 0 && chars[start - 1] != ' ' { start -= 1; }
-            chars.drain(start..idx);
+            // tmux keeps the cut for C-y, even an empty one, which then makes
+            // C-y insert nothing rather than the paste buffer
+            // (status.c:1583 to :1587).
+            *saved = Some(chars.drain(start..idx).collect());
+            PromptEdit::Edited
+        }
+        // tmux inserts what C-w last cut, and only when nothing was cut the
+        // top paste buffer, up to its first control character. The cursor
+        // ends after the inserted text (status_prompt_paste, status.c:1186 to
+        // :1245, called from :1645).
+        "c-y" => {
+            let text = match saved {
+                Some(cut) => cut.clone(),
+                None => top_buffer().map(|t| prompt_paste_line(&t).to_string()).unwrap_or_default(),
+            };
+            chars.splice(idx..idx, text.chars());
             PromptEdit::Edited
         }
         // tmux steps the cursor right first unless it is at the end, so inside
@@ -1920,6 +1952,17 @@ pub fn prompt_edit(input: &mut String, back: &mut usize, key: &str) -> PromptEdi
     *input = chars.into_iter().collect();
     *back = b;
     result
+}
+
+/// The part of a paste buffer that C-y puts into a prompt: everything before
+/// the first control character or DEL, so only the first line of a buffer
+/// that has several. tmux stops at the same bytes (status.c:1215).
+pub fn prompt_paste_line(text: &str) -> &str {
+    let end = text
+        .char_indices()
+        .find(|&(_, c)| (c as u32) < 0x20 || c == '\u{7f}')
+        .map_or(text.len(), |(i, _)| i);
+    &text[..end]
 }
 
 /// Insert typed text at a copy-mode prompt's cursor.
@@ -2943,6 +2986,10 @@ mod test_issue753_copy_redraw;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue785_prompt_transpose.rs"]
 mod test_issue785_prompt_transpose;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue815_prompt_paste.rs"]
+mod test_issue815_prompt_paste;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue789_copy_prompt_editor.rs"]

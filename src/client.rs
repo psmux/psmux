@@ -3219,6 +3219,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // (`AppState::copy_prompt_back`). Zero is the end, where a prompt that has
     // just opened puts it.
     let mut rename_back: usize = 0;
+    // What C-w last cut, for C-y to insert again. One for the command prompt
+    // and the rename overlay, as tmux keeps one `prompt_saved` per client:
+    // only one of them is open at a time, and each opening clears it. The
+    // next prompt of a `-p a,b` keeps it, as tmux's status_prompt_update does.
+    let mut prompt_saved: Option<String> = None;
     let mut pane_renaming = false;
     let mut pane_title_buf = String::new();
     let mut command_input = false;
@@ -3269,6 +3274,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             command_input = true;
             command_buf = initial;
             command_back = 0;
+            prompt_saved = None;
             command_prompt_label = label;
             command_prompt_queue = prompts;
             command_answers = Vec::new();
@@ -5085,11 +5091,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     rename_buf = overlay_initial_name(
                                         port, &session_key, "#{window_name}", &active_window_name);
                                     rename_back = 0;
+                                    prompt_saved = None;
                                 } else if cmd == "rename-session" {
                                     renaming = true; session_renaming = true;
                                     rename_buf = overlay_initial_name(
                                         port, &session_key, "#{session_name}", &session_label);
                                     rename_back = 0;
+                                    prompt_saved = None;
                                 } else if cmd == "command-prompt" || cmd.starts_with("command-prompt ") {
                                     let spec = parse_command_prompt_args(
                                         cmd.strip_prefix("command-prompt")
@@ -5196,6 +5204,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     rename_buf = overlay_initial_name(
                                         port, &session_key, "#{window_name}", &active_window_name);
                                     rename_back = 0;
+                                    prompt_saved = None;
                                 }
                                 KeyCode::Char('$') => {
                                     // Rename session, through the same overlay,
@@ -5206,6 +5215,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     rename_buf = overlay_initial_name(
                                         port, &session_key, "#{session_name}", &session_label);
                                     rename_back = 0;
+                                    prompt_saved = None;
                                 }
                                 KeyCode::Char('?') => {
                                     // Build comprehensive help overlay from help.rs
@@ -5225,7 +5235,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // because the `.` fallback below sets one and
                                 // this table is read before the first state dump
                                 // has a chance to rebuild either prompt.
-                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; command_key_answer = false; command_single = false; }
+                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; prompt_saved = None; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; command_key_answer = false; command_single = false; }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
                                 // Same command as the PREFIX_DEFAULTS entry for
                                 // `.`, so the key is not dead for the moment
@@ -5234,6 +5244,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     command_input = true;
                                     command_buf.clear();
                                     command_back = 0;
+                                    prompt_saved = None;
                                     command_history_idx = command_history.len();
                                     command_template = Some("move-window -t '%%'".into());
                                     command_prompt_label = Some("(move-window)".into());
@@ -6133,7 +6144,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char(c) if renaming
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                     && !is_altgr_char(c, key.modifiers) => {
-                                    if rename_overlay_ctrl_key(&mut rename_buf, &mut rename_back, c) {
+                                    if rename_overlay_ctrl_key(&mut rename_buf, &mut rename_back, &mut prompt_saved, c,
+                                        || top_paste_buffer(port, &session_key)) {
                                         renaming = false;
                                         session_renaming = false;
                                         // Nothing else asks for a repaint here:
@@ -6249,22 +6261,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // same ones. `prompt_edit` is not changed by
                                 // this, only called.
                                 KeyCode::Backspace if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, "backspace");
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "backspace", || None);
                                 }
                                 KeyCode::Delete if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, "delete");
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "delete", || None);
                                 }
                                 KeyCode::Left if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, "left");
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "left", || None);
                                 }
                                 KeyCode::Right if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, "right");
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "right", || None);
                                 }
                                 KeyCode::Home if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, "home");
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "home", || None);
                                 }
                                 KeyCode::End if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, "end");
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "end", || None);
                                 }
                                 KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
                                 KeyCode::Backspace if window_idx_input => { let _ = window_idx_buf.pop(); }
@@ -6441,8 +6453,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     match command_prompt_key(
                                         &mut command_buf,
                                         &mut command_back,
+                                        &mut prompt_saved,
                                         effective_code,
                                         key.modifiers,
+                                        || top_paste_buffer(port, &session_key),
                                     ) {
                                         PromptKeyAction::Close => {
                                             command_input = false;
@@ -10759,8 +10773,10 @@ pub(crate) enum PromptKeyAction {
 pub(crate) fn command_prompt_key(
     buf: &mut String,
     back: &mut usize,
+    saved: &mut Option<String>,
     code: KeyCode,
     mods: KeyModifiers,
+    top_buffer: impl FnOnce() -> Option<String>,
 ) -> PromptKeyAction {
     if let KeyCode::Char(c) = code {
         if mods.contains(KeyModifiers::CONTROL)
@@ -10770,7 +10786,7 @@ pub(crate) fn command_prompt_key(
         }
     }
     let name = crate::config::format_key_binding(&(code, mods));
-    match crate::copy_mode::prompt_edit(buf, back, &name) {
+    match crate::copy_mode::prompt_edit(buf, back, saved, &name, top_buffer) {
         crate::copy_mode::PromptEdit::HistoryUp => PromptKeyAction::HistoryUp,
         crate::copy_mode::PromptEdit::HistoryDown => PromptKeyAction::HistoryDown,
         _ => PromptKeyAction::Edited,
@@ -10782,14 +10798,37 @@ pub(crate) fn command_prompt_key(
 /// Escape) and C-[ is Escape itself. Anything else goes to the copy-mode prompt
 /// editor, which ignores what it has no meaning for; none of them may reach
 /// the pane behind the overlay.
-pub(crate) fn rename_overlay_ctrl_key(buf: &mut String, back: &mut usize, c: char) -> bool {
+pub(crate) fn rename_overlay_ctrl_key(
+    buf: &mut String,
+    back: &mut usize,
+    saved: &mut Option<String>,
+    c: char,
+    top_buffer: impl FnOnce() -> Option<String>,
+) -> bool {
     match c.to_ascii_lowercase() {
         'c' | 'g' | '[' => true,
         lc => {
-            let _ = crate::copy_mode::prompt_edit(buf, back, &format!("c-{}", lc));
+            let _ = crate::copy_mode::prompt_edit(buf, back, saved, &format!("c-{}", lc), top_buffer);
             false
         }
     }
+}
+
+/// The top paste buffer, for C-y at a prompt the client draws. The buffers
+/// live in the server, so the client asks with `show-buffer`, over a
+/// connection of its own with the port and key it attached with, the way the
+/// rename overlay asks for the name it opens on. Only the first line is used
+/// (`copy_mode::prompt_paste_line`), so only the first line is read, and it is
+/// read as sent: the usual reply helpers trim it, and a buffer can start or
+/// end with spaces. None when the server does not answer in time.
+fn top_paste_buffer(port: u16, session_key: &str) -> Option<String> {
+    crate::session::fetch_authed_first_line_raw(
+        &format!("127.0.0.1:{}", port),
+        session_key,
+        b"show-buffer\n",
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+    )
 }
 
 /// The name a rename overlay opens on, asked for as it opens.

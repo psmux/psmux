@@ -1964,6 +1964,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
             };
             if term.is_empty() {
                 app.mode = Mode::CopySearch { input: String::new(), forward: fwd };
+                app.prompt_saved = None;
                 let prompt = if fwd { "(search down) " } else { "(search up) " };
                 app.status_message = Some((prompt.to_string(), std::time::Instant::now(), Some(0)));
             } else {

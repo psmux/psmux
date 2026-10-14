@@ -278,11 +278,11 @@ fn prompt_edit_word_and_clear() {
     use crate::copy_mode::{prompt_edit, PromptEdit};
     let mut s = "foo bar baz".to_string();
     let mut back = 0;
-    assert_eq!(prompt_edit(&mut s, &mut back, "C-w"), PromptEdit::Edited);
+    assert_eq!(prompt_edit(&mut s, &mut back, &mut None, "C-w", || None), PromptEdit::Edited);
     assert_eq!(s, "foo bar ");
-    assert_eq!(prompt_edit(&mut s, &mut back, "C-u"), PromptEdit::Edited);
+    assert_eq!(prompt_edit(&mut s, &mut back, &mut None, "C-u", || None), PromptEdit::Edited);
     assert_eq!(s, "");
-    assert_eq!(prompt_edit(&mut s, &mut back, "x"), PromptEdit::Other);
+    assert_eq!(prompt_edit(&mut s, &mut back, &mut None, "x", || None), PromptEdit::Other);
 }
 
 #[test]

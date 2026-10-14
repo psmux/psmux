@@ -2283,6 +2283,36 @@ pub fn fetch_authed_response(
     read_authed_line(&mut br)
 }
 
+/// Like `fetch_authed_response`, but the first line of the reply comes back
+/// as it was sent, with only its line ending taken off: no trimming, and an
+/// empty line or one that reads `OK` is a payload like any other. The server
+/// always acknowledges AUTH with `OK` before it answers, so exactly one such
+/// line is skipped. For text whose spaces matter, such as a paste buffer.
+pub fn fetch_authed_first_line_raw(
+    addr: &str,
+    key: &str,
+    cmd: &[u8],
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
+    let mut br = open_authed(addr, key, cmd, connect_timeout, read_timeout)?;
+    let mut ack = String::new();
+    if std::io::BufRead::read_line(&mut br, &mut ack).ok()? == 0 || ack.trim_end() != "OK" {
+        return None;
+    }
+    let mut line = String::new();
+    if std::io::BufRead::read_line(&mut br, &mut line).ok()? == 0 {
+        return None;
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Some(line)
+}
+
 /// Like `fetch_authed_response` but returns the entire response body
 /// (multi-line payloads such as `list-tree` JSON arrays or `choose-buffer`
 /// listings). The leading AUTH ack line is stripped if present.

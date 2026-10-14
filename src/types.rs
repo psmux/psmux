@@ -1669,6 +1669,12 @@ pub struct AppState {
     /// no bookkeeping. tmux keeps it as `prompt_index` (prompt.c) (discussion
     /// #694).
     pub copy_prompt_back: usize,
+    /// What C-w last cut at the prompt the server has open (the copy mode
+    /// search, goto line and binding prompts, and the server's command
+    /// prompt), for C-y to insert again. tmux keeps it as `prompt_saved`
+    /// (status.c:1583) and drops it when the prompt closes (status.c:764), so
+    /// it is cleared whenever one of these prompts opens.
+    pub prompt_saved: Option<String>,
     /// Earlier copy-mode searches, oldest first, for Up and Down in the search
     /// prompt (tmux's per type prompt history, prompt.c `prompt_up_history`).
     pub copy_search_history: Vec<String>,
@@ -2879,6 +2885,7 @@ impl AppState {
             copy_refresh_live: false,
             copy_refresh_version: 0,
             copy_prompt_back: 0,
+            prompt_saved: None,
             copy_search_history: Vec::new(),
             copy_search_history_pos: None,
             copy_search_marks: false,
