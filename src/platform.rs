@@ -4096,7 +4096,7 @@ pub mod process_info {
             h,
             buffer,
             wchars.as_mut_ptr() as *mut u8,
-            length as usize,
+            char_count * 2,
             &mut bytes_read,
         );
         if ok == 0 { return None; }
