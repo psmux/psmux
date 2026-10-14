@@ -179,12 +179,12 @@ fn unrelated_bindings_still_resolve_distinctly() {
 fn prefix_c_space_from_config_matches_a_nul_key() {
     let mut app = AppState::new("t504".to_string());
     parse_config_content(&mut app, "set -g prefix C-Space\n");
-    assert_eq!(app.prefix_key, ctrl_space(), "`set -g prefix C-Space` must store C-Space");
+    assert_eq!(app.prefix_key, Some(ctrl_space()), "`set -g prefix C-Space` must store C-Space");
 
     // The key the terminal actually delivers, after the client-side fold.
     let delivered = fold_nul_to_ctrl_space((KeyCode::Char('2'), CTRL | SHIFT));
     assert_eq!(
-        delivered, app.prefix_key,
+        Some(delivered), app.prefix_key,
         "the delivered NUL must equal the configured prefix, or the prefix never arms (#504)"
     );
 }
@@ -194,6 +194,6 @@ fn prefix_c_b_is_unaffected_by_the_fold() {
     // The default prefix must not be perturbed by any of this.
     let mut app = AppState::new("t504b".to_string());
     parse_config_content(&mut app, "set -g prefix C-b\n");
-    assert_eq!(app.prefix_key, (KeyCode::Char('b'), CTRL));
-    assert_ne!(fold_nul_to_ctrl_space((KeyCode::Char('2'), CTRL)), app.prefix_key);
+    assert_eq!(app.prefix_key, Some((KeyCode::Char('b'), CTRL)));
+    assert_ne!(Some(fold_nul_to_ctrl_space((KeyCode::Char('2'), CTRL))), app.prefix_key);
 }

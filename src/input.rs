@@ -271,8 +271,11 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 }
                 // Key not found in table — fall through to normal dispatch
             }
-            let is_prefix = (key.code, key.modifiers) == app.prefix_key
-                || matches!(key.code, KeyCode::Char(c) if c == '\u{0002}')
+            // The raw 0x02 alias belongs to C-b, so it must not survive
+            // `set prefix C-a` or `set prefix None` (#802).
+            let is_prefix = app.prefix_key.map_or(false, |p| (key.code, key.modifiers) == p
+                    || (p == (KeyCode::Char('b'), KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char(c) if c == '\u{0002}')))
                 || app.prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2);
             if is_prefix {
                 app.mode = Mode::Prefix { armed_at: Instant::now() };

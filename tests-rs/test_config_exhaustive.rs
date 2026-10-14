@@ -2180,8 +2180,8 @@ bind-key -r Down select-pane -D
 "#;
     parse_config_content(&mut app, config);
     assert!(app.mouse_enabled);
-    assert_eq!(app.prefix_key.0, crossterm::event::KeyCode::Char('a'));
-    assert!(app.prefix_key.1.contains(crossterm::event::KeyModifiers::CONTROL));
+    assert_eq!(app.prefix_key.unwrap().0, crossterm::event::KeyCode::Char('a'));
+    assert!(app.prefix_key.unwrap().1.contains(crossterm::event::KeyModifiers::CONTROL));
     let prefix = app.key_tables.get("prefix").unwrap();
     assert!(prefix.iter().any(|b| b.key.0 == crossterm::event::KeyCode::Char('|')));
     assert!(prefix.iter().any(|b| b.key.0 == crossterm::event::KeyCode::Char('-')));
@@ -2352,8 +2352,8 @@ fn config_unquoted_value() {
 fn config_prefix_c_a() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g prefix C-a\n");
-    assert_eq!(app.prefix_key.0, crossterm::event::KeyCode::Char('a'));
-    assert!(app.prefix_key.1.contains(crossterm::event::KeyModifiers::CONTROL));
+    assert_eq!(app.prefix_key.unwrap().0, crossterm::event::KeyCode::Char('a'));
+    assert!(app.prefix_key.unwrap().1.contains(crossterm::event::KeyModifiers::CONTROL));
 }
 
 #[test]

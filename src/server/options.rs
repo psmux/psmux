@@ -1,5 +1,4 @@
 use crate::types::AppState;
-use crate::config::{format_key_binding, parse_key_string};
 use crate::server::option_catalog::WINDOW_OPTION_NAMES;
 
 /// Upper bound for `repeat-time`, in milliseconds. tmux declares the option as
@@ -479,8 +478,8 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
 /// Get a single option's value by name (for `show-options -v name`).
 pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
     let value = match name {
-        "prefix" => format_key_binding(&app.prefix_key),
-        "prefix2" => app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_else(|| "none".to_string()),
+        "prefix" => crate::config::format_option_key(&app.prefix_key),
+        "prefix2" => crate::config::format_option_key(&app.prefix2_key),
         "base-index" => app.window_base_index.to_string(),
         "pane-base-index" => app.pane_base_index.to_string(),
         "escape-time" => app.escape_time_ms.to_string(),
@@ -978,17 +977,19 @@ pub(crate) fn apply_set_option(
         "mouse-selection-force" => { app.mouse_selection_force = matches!(value, "on" | "true" | "1" | "yes"); }
         "paste-detection" => { app.paste_detection = matches!(value, "on" | "true" | "1" | "yes"); }
         "choose-tree-preview" => { app.choose_tree_preview = matches!(value, "on" | "true" | "1" | "yes"); }
+        // validate_option_value above already refused a bad key with tmux's
+        // "bad key: X" (options.c:1305), so the parse cannot fail here.
         "prefix" => {
-            if let Some(kc) = parse_key_string(value) {
-                app.prefix_key = kc;
+            if let Ok(key) = crate::config::parse_option_key(value, false) {
+                app.prefix_key = key;
                 crate::config::ensure_prefix_self_binding(app);
             }
         }
         "prefix2" => {
-            if value.eq_ignore_ascii_case("none") || value.is_empty() {
+            if value.is_empty() {
                 app.prefix2_key = None;
-            } else if let Some(kc) = parse_key_string(value) {
-                app.prefix2_key = Some(kc);
+            } else if let Ok(key) = crate::config::parse_option_key(value, false) {
+                app.prefix2_key = key;
             }
         }
         "escape-time" => {

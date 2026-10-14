@@ -306,7 +306,7 @@ pub fn list_key_notes(app: &AppState, table: Option<&str>, all: bool, key: Optio
         }
     }
     let width = rows.iter().map(|(k, _)| unicode_width::UnicodeWidthStr::width(k.as_str())).max().unwrap_or(0);
-    let prefix = format_key_binding(&app.prefix_key);
+    let prefix = format_option_key(&app.prefix_key);
     let mut out = String::new();
     for (k, text) in rows {
         let pad = width.saturating_sub(unicode_width::UnicodeWidthStr::width(k.as_str()));
@@ -1817,17 +1817,18 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
             app.bold_is_bright = matches!(value, "on" | "true" | "1" | "yes");
             crate::platform::set_bold_is_bright(app.bold_is_bright);
         }
+        // A bad key was refused (and reported) by the catalog check at the top.
         "prefix" => {
-            if let Some(key) = parse_key_name(value) {
+            if let Ok(key) = parse_option_key(value, true) {
                 app.prefix_key = key;
                 ensure_prefix_self_binding(app);
             }
         }
         "prefix2" => {
-            if value == "none" || value.is_empty() {
+            if value.is_empty() {
                 app.prefix2_key = None;
-            } else if let Some(key) = parse_key_name(value) {
-                app.prefix2_key = Some(key);
+            } else if let Ok(key) = parse_option_key(value, true) {
+                app.prefix2_key = key;
             }
         }
         "escape-time" => {
@@ -2573,7 +2574,9 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
 /// Existing bindings for the prefix key are preserved — the user's override
 /// always wins (e.g. `bind C-a some-other-command` after `set prefix C-a`).
 pub fn ensure_prefix_self_binding(app: &mut AppState) {
-    let key = normalize_key_for_binding(app.prefix_key);
+    // No prefix (`set prefix None`), nothing to forward.
+    let Some(prefix) = app.prefix_key else { return };
+    let key = normalize_key_for_binding(prefix);
     let table = app.key_tables.entry("prefix".to_string()).or_default();
     if table.iter().any(|b| b.key == key) {
         return;
@@ -3085,6 +3088,36 @@ pub fn parse_key_string(key: &str) -> Option<(KeyCode, KeyModifiers)> {
     Some((keycode, mods))
 }
 
+/// Parse the value of a key option (`prefix`, `prefix2`).
+///
+/// tmux types both OPTIONS_TABLE_KEY. "None", in any case, is a real key there
+/// (KEYC_NONE, key-string.c:254) that never matches typed input, so it turns
+/// the prefix off; anything key_string_lookup_string cannot read is refused
+/// with "bad key: X" (options.c:1305) and the option keeps its value. psmux
+/// used to drop both without a word (#802).
+///
+/// The two psmux key parsers accept slightly different spellings, so each
+/// route keeps the parser it always used first (the config file
+/// parse_key_name, the command path parse_key_string) and only falls back to
+/// the other one.
+pub fn parse_option_key(value: &str, config_route: bool) -> Result<Option<(KeyCode, KeyModifiers)>, String> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let parsed = if config_route {
+        parse_key_name(trimmed).or_else(|| parse_key_string(trimmed))
+    } else {
+        parse_key_string(trimmed).or_else(|| parse_key_name(trimmed))
+    };
+    parsed.map(Some).ok_or_else(|| format!("bad key: {}", value))
+}
+
+/// Print a key option the way tmux does: KEYC_NONE is "None" (key-string.c:355).
+pub fn format_option_key(key: &Option<(KeyCode, KeyModifiers)>) -> String {
+    key.as_ref().map(format_key_binding).unwrap_or_else(|| "None".to_string())
+}
+
 /// Format a key binding back to string representation
 pub fn format_key_binding(key: &(KeyCode, KeyModifiers)) -> String {
     let (keycode, mods) = key;
@@ -3551,6 +3584,10 @@ mod tests_issue499_quoted_semicolon;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue504_ctrl_space_nul.rs"]
 mod tests_issue504_ctrl_space_nul;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue802_prefix_none.rs"]
+mod tests_issue802_prefix_none;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue536_config_quoted_whitespace.rs"]

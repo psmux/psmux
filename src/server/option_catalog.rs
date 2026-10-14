@@ -122,6 +122,8 @@ pub enum OptionType {
     Boolean,
     Choice(ChoiceKind),
     Number(NumberKind),
+    /// tmux OPTIONS_TABLE_KEY (prefix, prefix2): a key name or None.
+    Key,
 }
 
 impl OptionType {
@@ -129,6 +131,9 @@ impl OptionType {
         match self {
             Self::Choice(kind) => kind.validate_value(value),
             Self::Number(kind) => kind.validate(name, value),
+            // prefix2 has always taken an empty value as no key.
+            Self::Key if value.is_empty() && name == "prefix2" => Ok(()),
+            Self::Key => crate::config::parse_option_key(value, false).map(|_| ()),
             Self::String | Self::Boolean => Ok(()),
         }
     }
@@ -136,14 +141,14 @@ impl OptionType {
     const fn allows_append(self) -> bool {
         match self {
             Self::Choice(kind) => kind.allows_append(),
-            Self::String | Self::Boolean | Self::Number(_) => true,
+            Self::String | Self::Boolean | Self::Number(_) | Self::Key => true,
         }
     }
 
     const fn allows_local_window_override(self) -> bool {
         match self {
             Self::Choice(kind) => kind.allows_local_window_override(),
-            Self::String | Self::Boolean | Self::Number(_) => true,
+            Self::String | Self::Boolean | Self::Number(_) | Self::Key => true,
         }
     }
 }
@@ -217,8 +222,8 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "exit-empty", scope: Server, option_type: Boolean, default: "on", description: "Exit server when no sessions remain" },
     OptionDef { name: "priority", scope: Server, option_type: Choice(Priority), default: "above-normal", description: "Scheduling class for psmux's own server and client processes (normal/above-normal/high). Pane children are never raised" },
     // ── Session options ──
-    OptionDef { name: "prefix", scope: Session, option_type: OptionType::String, default: "C-b", description: "Primary prefix key" },
-    OptionDef { name: "prefix2", scope: Session, option_type: OptionType::String, default: "none", description: "Secondary prefix key" },
+    OptionDef { name: "prefix", scope: Session, option_type: OptionType::Key, default: "C-b", description: "Primary prefix key" },
+    OptionDef { name: "prefix2", scope: Session, option_type: OptionType::Key, default: "None", description: "Secondary prefix key" },
     OptionDef { name: "base-index", scope: Session, option_type: Number(Index), default: "0", description: "Starting index for windows" },
     OptionDef { name: "pane-base-index", scope: Session, option_type: Number(Index), default: "0", description: "Starting index for panes" },
     OptionDef { name: "display-time", scope: Session, option_type: Number(U64), default: "750", description: "Duration of messages in ms" },

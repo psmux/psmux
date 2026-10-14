@@ -72,7 +72,7 @@ fn list_keys_notes_output() {
     parse_config_line(&mut app, "bind -N 'note' -T mytbl x display-message hi");
     parse_config_line(&mut app, "bind -T mytbl y display-message yo");
     parse_config_line(&mut app, "bind -N 'long key' -T mytbl F12 display-message z");
-    let prefix = format_key_binding(&app.prefix_key);
+    let prefix = crate::config::format_option_key(&app.prefix_key);
 
     // Only noted bindings, keys padded to the widest listed key.
     assert_eq!(

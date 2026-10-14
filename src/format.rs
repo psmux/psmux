@@ -12,7 +12,6 @@ use std::cell::{Cell, RefCell};
 
 use crate::types::{AppState, Node, LayoutKind, Pane, Mode, VERSION};
 use crate::tree::{split_with_gaps, get_active_pane_id, active_pane, count_panes};
-use crate::config::format_key_binding;
 
 // Thread-local override for per-pane format expansion in list-panes.
 // When set to Some(pos), pane_* variables resolve for the Nth pane (0-based)
@@ -1273,8 +1272,8 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "status" => Some(if app.status_visible { "on".into() } else { "off".into() }),
         "status-position" => Some(app.status_position.clone()),
         "status-style" => Some(app.status_style.clone()),
-        "prefix" => Some(format_key_binding(&app.prefix_key)),
-        "prefix2" => Some(app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_else(|| "none".to_string())),
+        "prefix" => Some(crate::config::format_option_key(&app.prefix_key)),
+        "prefix2" => Some(crate::config::format_option_key(&app.prefix2_key)),
         "base-index" => Some(app.window_base_index.to_string()),
         "pane-base-index" => Some(app.pane_base_index.to_string()),
         "escape-time" => Some(app.escape_time_ms.to_string()),
@@ -2458,8 +2457,8 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "mouse-drag-enter-copy-mode" => if app.mouse_drag_enter_copy_mode { "on".into() } else { "off".into() },
         "ctrl-wheel-zoom" => if app.ctrl_wheel_zoom { "on".into() } else { "off".into() },
         "choose-tree-preview" => if app.choose_tree_preview { "on".into() } else { "off".into() },
-        "prefix" => format_key_binding(&app.prefix_key),
-        "prefix2" => app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_else(|| "none".to_string()),
+        "prefix" => crate::config::format_option_key(&app.prefix_key),
+        "prefix2" => crate::config::format_option_key(&app.prefix2_key),
         "status" => if app.status_visible { "on".into() } else { "off".into() },
         "mode_keys" => app.mode_keys.clone(),
         "history_limit" => app.history_limit.to_string(),

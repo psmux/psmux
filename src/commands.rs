@@ -421,7 +421,7 @@ fn generate_show_hooks(app: &AppState) -> String {
 /// Generate show-options output locally (embedded mode fallback).
 fn generate_show_options(app: &AppState) -> String {
     let mut output = String::new();
-    output.push_str(&format!("prefix {}\n", crate::config::format_key_binding(&app.prefix_key)));
+    output.push_str(&format!("prefix {}\n", crate::config::format_option_key(&app.prefix_key)));
     output.push_str(&format!("base-index {}\n", app.window_base_index));
     output.push_str(&format!("pane-base-index {}\n", app.pane_base_index));
     output.push_str(&format!("escape-time {}\n", app.escape_time_ms));
@@ -2547,12 +2547,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, "send-prefix\n", &app.session_key);
             } else {
                 // Send the prefix key to the active pane as if typed
-                let prefix = app.prefix_key;
-                let encoded: Vec<u8> = match prefix.0 {
-                    crossterm::event::KeyCode::Char(c) if prefix.1.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                // Nothing to send when the prefix is None (tmux cmd-send-keys.c).
+                let encoded: Vec<u8> = match app.prefix_key {
+                    Some((crossterm::event::KeyCode::Char(c), m)) if m.contains(crossterm::event::KeyModifiers::CONTROL) => {
                         vec![(c.to_ascii_lowercase() as u8) & 0x1F]
                     }
-                    crossterm::event::KeyCode::Char(c) => format!("{}", c).into_bytes(),
+                    Some((crossterm::event::KeyCode::Char(c), _)) => format!("{}", c).into_bytes(),
                     _ => vec![],
                 };
                 if !encoded.is_empty() {

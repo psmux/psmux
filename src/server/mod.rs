@@ -3894,7 +3894,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if meta_dirty {
                         cached_windows_json = list_windows_json_with_tabs(&app)?;
                         cached_tree_json = list_tree_json(&app)?;
-                        cached_prefix_str = format_key_binding(&app.prefix_key);
+                        cached_prefix_str = crate::config::format_option_key(&app.prefix_key);
                         cached_prefix2_str = app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_default();
                         cached_base_index = app.window_base_index;
                         cached_pred_dim = app.prediction_dimming;
@@ -6122,7 +6122,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ShowOptions(resp) => {
                     let mut output = String::new();
-                    output.push_str(&format!("prefix {}\n", format_key_binding(&app.prefix_key)));
+                    output.push_str(&format!("prefix {}\n", crate::config::format_option_key(&app.prefix_key)));
                     if let Some(ref p2) = app.prefix2_key {
                         output.push_str(&format!("prefix2 {}\n", format_key_binding(p2)));
                     }
@@ -7810,12 +7810,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::SendPrefix => {
                     // Send the prefix key to the active pane as if typed
-                    let prefix = app.prefix_key;
-                    let encoded: Vec<u8> = match prefix.0 {
-                        crossterm::event::KeyCode::Char(c) if prefix.1.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    // Nothing to send when the prefix is None (tmux cmd-send-keys.c).
+                    let encoded: Vec<u8> = match app.prefix_key {
+                        Some((crossterm::event::KeyCode::Char(c), m)) if m.contains(crossterm::event::KeyModifiers::CONTROL) => {
                             vec![(c.to_ascii_lowercase() as u8) & 0x1F]
                         }
-                        crossterm::event::KeyCode::Char(c) => format!("{}", c).into_bytes(),
+                        Some((crossterm::event::KeyCode::Char(c), _)) => format!("{}", c).into_bytes(),
                         _ => vec![],
                     };
                     if !encoded.is_empty() {
@@ -8518,7 +8518,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             if meta_dirty {
                 cached_windows_json = list_windows_json_with_tabs(&app)?;
                 cached_tree_json = list_tree_json(&app)?;
-                cached_prefix_str = format_key_binding(&app.prefix_key);
+                cached_prefix_str = crate::config::format_option_key(&app.prefix_key);
                 cached_prefix2_str = app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_default();
                 cached_base_index = app.window_base_index;
                 cached_pred_dim = app.prediction_dimming;

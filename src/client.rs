@@ -3370,7 +3370,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut force_dump = true;
     let mut last_tree: Vec<WinTree> = Vec::new();
     // Default prefix is Ctrl+B, updated dynamically from server config
-    let mut prefix_key: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
+    // None after `set prefix None` (#802): no key arms the prefix table.
+    let mut prefix_key: Option<(KeyCode, KeyModifiers)> = Some((KeyCode::Char('b'), KeyModifiers::CONTROL));
     // Precompute the raw control character for the default prefix
     let mut prefix_raw_char: Option<char> = Some('\x02');
     // Secondary prefix key (prefix2), default None
@@ -4493,7 +4494,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         crate::platform::augment_enter_shift(&mut key);
                         modified_enter_press_handled = true;
                         // Skip paste buffering — forward directly like a Press.
-                        let is_prefix = (key.code, key.modifiers) == prefix_key
+                        let is_prefix = prefix_key == Some((key.code, key.modifiers))
                             || prefix_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c))
                             || prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2)
                             || prefix2_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c));
@@ -4604,7 +4605,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                         }
                         // Dynamic prefix key check (default: Ctrl+B, configurable via .psmux.conf)
-                        let is_prefix = (key.code, key.modifiers) == prefix_key
+                        let is_prefix = prefix_key == Some((key.code, key.modifiers))
                             || prefix_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c))
                             || prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2)
                             || prefix2_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c));
@@ -8326,9 +8327,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
         // Update prefix key from server config (if provided)
         if let Some(ref prefix_str) = state.prefix {
-            if let Some((kc, km)) = parse_key_string(prefix_str) {
-                if (kc, km) != prefix_key {
-                    prefix_key = (kc, km);
+            if prefix_str.eq_ignore_ascii_case("none") {
+                prefix_key = None;
+                prefix_raw_char = None;
+            } else if let Some((kc, km)) = parse_key_string(prefix_str) {
+                if Some((kc, km)) != prefix_key {
+                    prefix_key = Some((kc, km));
                     // Compute raw control character for Ctrl+<letter> prefix
                     prefix_raw_char = if km.contains(KeyModifiers::CONTROL) {
                         if let KeyCode::Char(c) = kc {
