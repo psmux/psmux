@@ -3926,6 +3926,14 @@ pub mod process_info {
         Buffer: isize, // pointer to wide string
     }
 
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    struct UNICODE_STRING32 {
+        Length: u16,
+        MaximumLength: u16,
+        Buffer: u32,
+    }
+
     #[repr(C)]
     struct PROCESSENTRY32W {
         dw_size: u32,
@@ -4068,58 +4076,27 @@ pub mod process_info {
     }
 
     /// Read CWD from a process handle via NtQueryInformationProcess + ReadProcessMemory.
+    ///
+    /// A WOW64 (32-bit) process has two PEBs, and only the 32-bit one tracks
+    /// its live current directory: the 64-bit copy reads `C:\Windows\` no
+    /// matter where it was started. Every scoop shim is x86, so a pane running
+    /// `nvim` through `~/scoop/shims/nvim.exe` reported `C:\Windows` until the
+    /// 32-bit PEB was preferred (issue #807).
     unsafe fn read_process_cwd(h: isize) -> Option<String> {
-        // Step 1: Get PEB address
-        let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
-        let mut ret_len: u32 = 0;
-        let status = NtQueryInformationProcess(
-            h,
-            0, // ProcessBasicInformation
-            &mut pbi as *mut _ as *mut u8,
-            std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
-            &mut ret_len,
-        );
-        if status != 0 { return None; }
-        let peb_addr = pbi.PebBaseAddress;
-        if peb_addr == 0 { return None; }
+        let (buffer, length) = match wow64_peb_address(h) {
+            Some(peb32) => wow64_cwd_string(h, peb32)?,
+            None => native_cwd_string(h)?,
+        };
+        if length == 0 || buffer == 0 { return None; }
 
-        // Step 2: Read ProcessParameters pointer from PEB.
-        // PEB layout (x64): offset 0x20 = ProcessParameters pointer
-        // PEB layout (x86): offset 0x10 = ProcessParameters pointer
-        let params_ptr_offset = if std::mem::size_of::<usize>() == 8 { 0x20 } else { 0x10 };
-        let mut process_params_ptr: isize = 0;
+        let char_count = (length / 2) as usize;
+        let mut wchars: Vec<u16> = vec![0u16; char_count];
         let mut bytes_read: usize = 0;
         let ok = ReadProcessMemory(
             h,
-            peb_addr + params_ptr_offset,
-            &mut process_params_ptr as *mut isize as *mut u8,
-            std::mem::size_of::<isize>(),
-            &mut bytes_read,
-        );
-        if ok == 0 || process_params_ptr == 0 { return None; }
-
-        // Step 3: Read CurrentDirectory.DosPath (UNICODE_STRING) from RTL_USER_PROCESS_PARAMETERS.
-        // x64 offset: 0x38 = CurrentDirectory.DosPath
-        // x86 offset: 0x24 = CurrentDirectory.DosPath
-        let cwd_offset = if std::mem::size_of::<usize>() == 8 { 0x38 } else { 0x24 };
-        let mut cwd_ustr: UNICODE_STRING = std::mem::zeroed();
-        let ok = ReadProcessMemory(
-            h,
-            process_params_ptr + cwd_offset,
-            &mut cwd_ustr as *mut UNICODE_STRING as *mut u8,
-            std::mem::size_of::<UNICODE_STRING>(),
-            &mut bytes_read,
-        );
-        if ok == 0 || cwd_ustr.Length == 0 || cwd_ustr.Buffer == 0 { return None; }
-
-        // Step 4: Read the actual CWD wide string
-        let char_count = (cwd_ustr.Length / 2) as usize;
-        let mut wchars: Vec<u16> = vec![0u16; char_count];
-        let ok = ReadProcessMemory(
-            h,
-            cwd_ustr.Buffer,
+            buffer,
             wchars.as_mut_ptr() as *mut u8,
-            cwd_ustr.Length as usize,
+            length as usize,
             &mut bytes_read,
         );
         if ok == 0 { return None; }
@@ -4136,6 +4113,70 @@ pub mod process_info {
         } else {
             Some(trimmed.to_string())
         }
+    }
+
+    unsafe fn read_remote<T>(h: isize, address: isize) -> Option<T> {
+        let mut value: T = std::mem::zeroed();
+        let mut bytes_read: usize = 0;
+        let ok = ReadProcessMemory(
+            h,
+            address,
+            &mut value as *mut T as *mut u8,
+            std::mem::size_of::<T>(),
+            &mut bytes_read,
+        );
+        if ok == 0 { None } else { Some(value) }
+    }
+
+    /// Address of the 32-bit PEB, or `None` for a process that is not WOW64.
+    unsafe fn wow64_peb_address(h: isize) -> Option<isize> {
+        let mut peb32: isize = 0;
+        let mut ret_len: u32 = 0;
+        let status = NtQueryInformationProcess(
+            h,
+            26, // ProcessWow64Information
+            &mut peb32 as *mut isize as *mut u8,
+            std::mem::size_of::<isize>() as u32,
+            &mut ret_len,
+        );
+        if status != 0 || peb32 == 0 { None } else { Some(peb32) }
+    }
+
+    /// `(Buffer, Length)` of `CurrentDirectory.DosPath` from the 32-bit PEB.
+    /// PEB32: offset 0x10 = ProcessParameters (u32).
+    /// RTL_USER_PROCESS_PARAMETERS32: offset 0x24 = CurrentDirectory.DosPath.
+    unsafe fn wow64_cwd_string(h: isize, peb32: isize) -> Option<(isize, u16)> {
+        let params: u32 = read_remote(h, peb32 + 0x10)?;
+        if params == 0 { return None; }
+        let ustr: UNICODE_STRING32 = read_remote(h, params as isize + 0x24)?;
+        Some((ustr.Buffer as isize, ustr.Length))
+    }
+
+    /// `(Buffer, Length)` of `CurrentDirectory.DosPath` from the PEB that
+    /// matches psmux's own bitness.
+    unsafe fn native_cwd_string(h: isize) -> Option<(isize, u16)> {
+        let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
+        let mut ret_len: u32 = 0;
+        let status = NtQueryInformationProcess(
+            h,
+            0, // ProcessBasicInformation
+            &mut pbi as *mut _ as *mut u8,
+            std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+            &mut ret_len,
+        );
+        if status != 0 || pbi.PebBaseAddress == 0 { return None; }
+
+        // PEB layout (x64): offset 0x20 = ProcessParameters pointer
+        // PEB layout (x86): offset 0x10 = ProcessParameters pointer
+        let params_ptr_offset = if std::mem::size_of::<usize>() == 8 { 0x20 } else { 0x10 };
+        let params: isize = read_remote(h, pbi.PebBaseAddress + params_ptr_offset)?;
+        if params == 0 { return None; }
+
+        // RTL_USER_PROCESS_PARAMETERS CurrentDirectory.DosPath:
+        // x64 offset 0x38, x86 offset 0x24
+        let cwd_offset = if std::mem::size_of::<usize>() == 8 { 0x38 } else { 0x24 };
+        let ustr: UNICODE_STRING = read_remote(h, params + cwd_offset)?;
+        Some((ustr.Buffer, ustr.Length))
     }
 
     /// Append a line to ~/.psmux/autorename.log (first 100 entries only).
@@ -5222,6 +5263,10 @@ pub mod process_info {
     #[cfg(test)]
     #[path = "../../../tests-rs/test_issue638_nvim_terminal_ctrlc.rs"]
     mod tests_issue638_nvim_terminal_ctrlc;
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_issue807_wow64_cwd.rs"]
+    mod tests_issue807_wow64_cwd;
 }
 
 #[cfg(not(windows))]
