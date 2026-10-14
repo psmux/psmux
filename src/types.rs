@@ -1790,6 +1790,9 @@ pub struct AppState {
     pub allow_rename: bool,
     /// allow-set-title: allow programs to set pane title via OSC 0/2 escape sequences
     pub allow_set_title: bool,
+    /// program-status: accept OSC 7501 reports and answer its capability
+    /// query. Off by default; mirrored into `PROGRAM_STATUS_ENABLED`.
+    pub program_status: bool,
     /// monitor-activity / visual-activity: stored for compat
     pub monitor_activity: bool,
     pub visual_activity: bool,
@@ -2924,6 +2927,7 @@ impl AppState {
             automatic_rename: true,
             allow_rename: true,
             allow_set_title: false,
+            program_status: false,
             monitor_activity: false,
             visual_activity: false,
             activity_action: "other".to_string(),
@@ -4037,6 +4041,11 @@ pub enum CtrlReq {
 /// The server loop checks this to use a shorter recv_timeout, reducing
 /// keystroke-to-display latency for nested shells (e.g. WSL inside pwsh).
 pub static PTY_DATA_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The `program-status` option, read by every pane's parser thread before each
+/// batch so panes created later, warm panes, and a parser swapped in by
+/// clear-history all follow the one switch.
+pub static PROGRAM_STATUS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Sender for the server loop's control channel, published once at server
 /// start so threads that have no `AppState` can wake the loop.

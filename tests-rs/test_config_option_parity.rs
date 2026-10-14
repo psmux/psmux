@@ -22,7 +22,9 @@ fn app() -> AppState {
 /// out so this test cannot disturb its neighbours.
 fn non_default_value(name: &str) -> Option<&'static str> {
     Some(match name {
-        "priority" | "bold-is-bright" | "codepoint-widths" => return None,
+        // program-status flips the process wide PROGRAM_STATUS_ENABLED switch
+        // that every pane parser thread reads; test_program_status covers it.
+        "priority" | "bold-is-bright" | "codepoint-widths" | "program-status" => return None,
         "escape-time" => "123",
         "focus-events" => "on",
         "history-limit" => "4321",

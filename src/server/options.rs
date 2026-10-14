@@ -591,6 +591,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "warm" => if app.warm_enabled { "on".into() } else { "off".into() },
         "warm-pool-size" => app.warm_pane.target.to_string(),
         "alternate-screen" => if app.allow_alternate_screen { "on".into() } else { "off".into() },
+        "program-status" => if app.program_status { "on".into() } else { "off".into() },
         "claude-code-fix-tty" => if app.claude_code_fix_tty { "on".into() } else { "off".into() },
         "claude-code-force-interactive" => if app.claude_code_force_interactive { "on".into() } else { "off".into() },
         "session-group" => app.session_group.clone().unwrap_or_default(),
@@ -814,6 +815,7 @@ pub(crate) fn is_boolean_option(name: &str) -> bool {
             | "cursor-blink"
             | "warm"
             | "alternate-screen"
+            | "program-status"
             | "claude-code-fix-tty"
             | "claude-code-force-interactive"
             | "status"
@@ -1008,6 +1010,9 @@ pub(crate) fn apply_set_option(
             // pane.  warm_pane_sync::for_option_change patches the
             // existing warm pane's parser and walks live panes so the
             // change takes effect immediately (psmux issue #88).
+        }
+        "program-status" => {
+            crate::program_status::set_enabled(app, matches!(value, "on" | "true" | "1" | "yes"));
         }
         "display-time" => {
             if let Ok(ms) = value.parse::<u64>() {

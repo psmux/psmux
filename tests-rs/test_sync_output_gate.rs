@@ -197,9 +197,9 @@ fn sync_gate_shared_detection_releases_every_query_split() {
         (&b"\x1b]7501;?\x1b\\"[..], DeviceQuery::ProgramStatus),
     ] {
         for cut in 0..=query.len() {
-            let mut detector = vt100::QueryDetector::default();
+            let mut detector = ps_detector();
             let mut gate = SyncGate::new();
-            let mut parser = vt100::Parser::default();
+            let mut parser = ps_parser();
             parser.screen_mut().capture_queries(true);
             let t0 = Instant::now();
             let held = cat(&[B, b"held\x1b]7501;state=blocked:app=test\x07"]);
@@ -229,9 +229,9 @@ fn sync_gate_shared_detection_releases_every_query_split() {
 
 #[test]
 fn sync_gate_keeps_paint_and_reports_held_until_a_real_query() {
-    let mut detector = vt100::QueryDetector::default();
+    let mut detector = ps_detector();
     let mut gate = SyncGate::new();
-    let mut parser = vt100::Parser::default();
+    let mut parser = ps_parser();
     parser.screen_mut().capture_queries(true);
     let t0 = Instant::now();
     for batch in [B, b"paint\x1b[31m", b"\x1b]2;7501;? [c\x07", b"\x1b]7501;state=done\x07"] {
@@ -259,7 +259,7 @@ fn sync_gate_keeps_paint_and_reports_held_until_a_real_query() {
 #[test]
 fn sync_gate_exit_drains_reports_before_expiring_transient_state() {
     let mut gate = SyncGate::new();
-    let mut parser = vt100::Parser::default();
+    let mut parser = ps_parser();
     let reports = cat(&[B, b"\x1b]7501;state=done\x07\x1b]7501;state=blocked:id=child\x07"]);
     assert!(gate.feed(reports, Instant::now(), false).is_empty());
     assert!(parser.screen().program_status().get("").is_none());
@@ -290,7 +290,7 @@ fn parser_thread_answers_queries_before_an_open_update_times_out() {
     let pane_id = usize::MAX - 7501;
     assert!(crate::types::take_device_replies(pane_id).is_none());
     let (send, receive) = std::sync::mpsc::channel();
-    let parser = Arc::new(Mutex::new(vt100::Parser::default()));
+    let parser = Arc::new(Mutex::new(ps_parser()));
     spawn_reader_thread(
         Box::new(Output { batches: receive, current: std::io::Cursor::new(Vec::new()) }),
         parser.clone(), Default::default(), Default::default(),
@@ -319,7 +319,7 @@ fn parser_thread_answers_queries_before_an_open_update_times_out() {
 
 #[test]
 fn sync_gate_shared_detection_flood_stays_linear() {
-    let mut detector = vt100::QueryDetector::default();
+    let mut detector = ps_detector();
     let mut gate = SyncGate::new();
     let t0 = Instant::now();
     assert!(!detector.scan(B));
@@ -349,4 +349,17 @@ fn sync_gate_ignores_other_private_modes_that_share_the_prefix() {
     let other = b"\x1b[?20260h\x1b[?2026$p".to_vec();
     assert_eq!(g.feed(other.clone(), Instant::now(), false), other);
     assert!(!g.is_open());
+}
+
+/// OSC 7501 is opt-in (the `program-status` option); these tests run with it on.
+fn ps_detector() -> vt100::QueryDetector {
+    let mut detector = vt100::QueryDetector::default();
+    detector.set_program_status_enabled(true);
+    detector
+}
+
+fn ps_parser() -> vt100::Parser {
+    let mut parser = vt100::Parser::default();
+    parser.screen_mut().set_program_status_enabled(true);
+    parser
 }

@@ -603,6 +603,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("mouse",                      "on"),
     ("mode-keys",                  "emacs"),
     ("focus-events",               "off"),
+    ("program-status",             "off"),
     ("remain-on-exit",             "off"),
     ("renumber-windows",           "off"),
     ("aggressive-resize",          "off"),

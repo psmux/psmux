@@ -1,5 +1,11 @@
 use vt100_psmux::{Parser, ProgramState, TerminalQuery};
 
+fn enabled() -> Parser {
+    let mut parser = Parser::default();
+    parser.screen_mut().set_program_status_enabled(true);
+    parser
+}
+
 fn report(parser: &mut Parser, body: &str) {
     parser.process(format!("\x1b]7501;{body}\x1b\\").as_bytes());
 }
@@ -9,7 +15,7 @@ fn reports_and_detection_survive_every_split_and_terminator() {
     for end in ["\x07", "\x1b\\"] {
         let input = format!("\x1b]7501;state=blocked:kind=permission:progress=0:app=pi:msg=SGVsbG8={end}\x1b]7501;?{end}\x1b[c");
         for split in 0..=input.len() {
-            let mut parser = Parser::default();
+            let mut parser = enabled();
             parser.screen_mut().capture_queries(true);
             assert!(parser.screen().program_status().get("").is_none());
             parser.process(&input.as_bytes()[..split]);
@@ -26,7 +32,7 @@ fn reports_and_detection_survive_every_split_and_terminator() {
 
 #[test]
 fn replacement_inheritance_and_hierarchical_clear() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, "state=working:app=cargo:msg=SGk=");
     report(&mut parser, "state=idle:id=build:app=test");
     report(&mut parser, "state=blocked:id=build/unit:kind=question");
@@ -50,7 +56,7 @@ fn replacement_inheritance_and_hierarchical_clear() {
 
 #[test]
 fn invalid_reports_leave_existing_records_and_seen_unchanged() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, "state=done:app=pi");
     parser.screen_mut().program_status_mut().acknowledge();
     let before = parser.screen().program_status().get("").unwrap().clone();
@@ -71,7 +77,7 @@ fn invalid_reports_leave_existing_records_and_seen_unchanged() {
 
 #[test]
 fn malformed_unknown_duplicate_and_state_specific_fields() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, " state = working :state=blocked:kind=auth:progress=100:other=value:bad:empty!=x");
     let root = parser.screen().program_status().get("").unwrap();
     assert_eq!(root.state, ProgramState::Blocked);
@@ -89,7 +95,7 @@ fn malformed_unknown_duplicate_and_state_specific_fields() {
 
 #[test]
 fn acknowledgements_preserve_retransmissions_but_not_a_new_run_in_one_batch() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, "state=done");
     assert!(parser.screen().program_status().attention().is_some());
     parser.screen_mut().program_status_mut().acknowledge();
@@ -107,7 +113,7 @@ fn acknowledgements_preserve_retransmissions_but_not_a_new_run_in_one_batch() {
 
 #[test]
 fn alternate_screen_soft_reset_prompt_exit_and_ris_lifetimes() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     for (state, id) in [("idle", "idle"), ("working", "work"), ("blocked", "block"), ("done", "done"), ("error", "error")] {
         report(&mut parser, &format!("state={state}:id={id}"));
     }
@@ -126,7 +132,7 @@ fn alternate_screen_soft_reset_prompt_exit_and_ris_lifetimes() {
 
 #[test]
 fn eviction_is_least_recent_update_and_drops_seen_state() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     for id in 0..64 { report(&mut parser, &format!("state=done:id=r{id}")); }
     assert_eq!(parser.screen().program_status().records().count(), 64);
     parser.screen_mut().program_status_mut().acknowledge();
@@ -141,7 +147,7 @@ fn eviction_is_least_recent_update_and_drops_seen_state() {
 
 #[test]
 fn limits_are_checked_before_mutation_including_overwritten_values() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, "state=done");
     for body in [
         format!("state=working:app={}", "a".repeat(33)),
@@ -174,7 +180,7 @@ fn limits_are_checked_before_mutation_including_overwritten_values() {
 
 #[test]
 fn id_boundaries_and_last_value_wins_without_root_fallback() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, "state=done");
     let id = ["a".repeat(32), "b".repeat(32), "c".repeat(32), "d".repeat(29)].join("/");
     assert_eq!(id.len(), 128);
@@ -196,7 +202,7 @@ fn id_boundaries_and_last_value_wins_without_root_fallback() {
 
 #[test]
 fn reinitialization_cannot_reuse_a_previous_semantic_generation() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     report(&mut parser, "state=done");
     let cached_generation = parser.screen().program_status().generation();
     assert_eq!(cached_generation, 1);
@@ -209,7 +215,7 @@ fn reinitialization_cannot_reuse_a_previous_semantic_generation() {
 #[test]
 fn malformed_utf8_does_not_bypass_any_hard_field_limit() {
     for (key, limit) in [("app", 32), ("title", 256), ("msg", 2732), ("id", 128), ("abcdefghijklmnop", 16)] {
-        let mut parser = Parser::default();
+        let mut parser = enabled();
         report(&mut parser, "state=done");
         parser.screen_mut().program_status_mut().acknowledge();
         let generation = parser.screen().program_status().generation();
@@ -235,7 +241,7 @@ fn malformed_utf8_does_not_bypass_any_hard_field_limit() {
 
 #[test]
 fn snapshots_neither_replay_nor_capture_queries_and_ris_preserves_order() {
-    let mut parser = Parser::default();
+    let mut parser = enabled();
     parser.screen_mut().capture_queries(true);
     parser.process(b"\x1b]7501;?\x07");
     let mut snapshot = parser.snapshot();

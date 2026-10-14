@@ -18,8 +18,10 @@ function Default-Sessions {
 function P { & $Binary -L $namespace @args }
 # Frames carry tabs and attention; full records come from `list-windows -J`.
 function State {
-    $state = (P dump-state) | ConvertFrom-Json
+    # Listing first: the frame is then at least as new as the records it is
+    # checked against, so a tab is never judged on an older frame.
     $listing = @((P list-windows -J) | ConvertFrom-Json)
+    $state = (P dump-state) | ConvertFrom-Json
     for ($i = 0; $i -lt $state.windows.Count; $i++) {
         $state.windows[$i] | Add-Member -NotePropertyName ps_panes -NotePropertyValue $listing[$i].ps_panes -Force
     }
@@ -99,6 +101,64 @@ while ($true) {
     P set-window-option -g monitor-activity off
     P set-window-option -g monitor-silence 0
     P set-option -g remain-on-exit on
+
+    # ── program-status off (the default) behaves as before OSC 7501 support ──
+    Assert ((P show-options -g -v program-status).Trim() -eq 'off') 'program-status is off by default'
+    $null = Wait-State { param($s) (P capture-pane -p) -join '' -match 'OSC_WORKER_READY' } 'worker is running'
+    Start-Sleep -Milliseconds 500
+    Assert (-not (State).windows[0].ps_panes) 'off stores no report'
+    Assert ((P display-message -p '#{pane_ps_state}').Trim() -eq '') 'off leaves the format empty'
+    $probe = Join-Path $work 'probe.ps1'
+    @'
+param([string]$Out)
+$e = [char]27
+# DA2 tells whether the console host forwards queries to psmux (psmux answers
+# >84;0;0c, the inbox host answers for itself); DA1 ends the reply window.
+[Console]::Write("$e[>c$e]7501;?$e\$e[c")
+$sw = [Diagnostics.Stopwatch]::StartNew(); $got = ''
+while ($sw.ElapsedMilliseconds -lt 2000) {
+    while ([Console]::KeyAvailable) { $got += [Console]::ReadKey($true).KeyChar }
+    Start-Sleep -Milliseconds 20
+}
+[IO.File]::WriteAllText($Out, $got.Replace("$e", '<ESC>'))
+'@ | Set-Content -LiteralPath $probe -Encoding utf8
+    function Probe-Replies([string]$label) {
+        $out = Join-Path $work "probe_$label.txt"
+        P new-window -d -n "probe_$label" -t "${session}:" ('pwsh -NoLogo -NoProfile -NonInteractive -File "' + $probe + '" -Out "' + $out + '"')
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while (-not (Test-Path $out) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        $PSNativeCommandUseErrorActionPreference = $false
+        P kill-window -t "${session}:probe_$label" 2>$null | Out-Null
+        if (-not (Test-Path $out)) { throw "probe $label wrote nothing" }
+        [IO.File]::ReadAllText($out)
+    }
+    $offReply = Probe-Replies 'off'
+    Write-Host "INFO: replies with program-status off: $offReply"
+    $forwarded = $offReply -match '<ESC>\[>84;0;0c'
+    Assert ($offReply -notmatch '7501') 'off: the OSC 7501 capability query draws no reply, as before'
+    if ($forwarded) {
+        Assert ($offReply -match '<ESC>\[\?1;2c') 'off: psmux still answers the device queries around it'
+    } else {
+        Write-Host 'SKIP: the off assertion above is vacuous on this console host; it answers device queries itself and swallows OSC replies (set PSMUX_CONPTY_DIR to an OpenConsole build)'
+    }
+    $windowsFormat = '#I:#W#{?window_flags,#{window_flags}, }'
+    # The documented opt-in recipe (docs/program-status.md).
+    $recipe = '#I:#W#{?window_flags,#{window_flags},#{?window_ps_attention,, }}#{window_ps_attention}'
+    Assert ((P show-options -g -v window-status-format).Trim() -eq $windowsFormat) 'off leaves the tmux tab default alone'
+
+    # ── program-status on: everything the protocol does ──
+    P set-option -g program-status on
+    Assert ((P show-options -g -v program-status).Trim() -eq 'on') 'program-status turns on'
+    $onReply = Probe-Replies 'on'
+    Write-Host "INFO: replies with program-status on: $onReply"
+    if ($forwarded) {
+        Assert ($onReply -match '<ESC>\]7501;\?:states=idle,working,done,blocked,error:kinds=permission,question,auth<ESC>\\<ESC>\[\?1;2c') 'on: the capability reply arrives, before the DA1 reply'
+    } else {
+        Write-Host 'SKIP: this console host answers device queries itself and swallows OSC replies (set PSMUX_CONPTY_DIR to an OpenConsole build to see them)'
+    }
+    'output' | Set-Content -LiteralPath $control -NoNewline
+    Start-Sleep -Milliseconds 200
+    'state=working:app=test' | Set-Content -LiteralPath $control -NoNewline
     $state = Wait-State { param($s) $s.windows[0].ps_panes.Count -gt 0 } 'application reports reach the server'
     Assert (-not $state.windows[0].ps_attention) 'working has no attention indicator'
     $pane = $state.windows[0].ps_panes[0].pane
@@ -111,8 +171,8 @@ while ($true) {
     $firstWindow = (P display-message -p '#{window_index}').Trim()
     P set-window-option -t "${session}:$firstWindow" window-status-current-format 'LOCAL'
     Assert ((State).windows[0].tab_text -eq 'LOCAL') 'window-local format is installed'
-    P set-option -g window-status-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'
-    P set-option -g window-status-current-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'
+    P set-option -g window-status-format $recipe
+    P set-option -g window-status-current-format $recipe
     $state = State
     Assert ($state.windows[0].tab_text -eq 'LOCAL') 'global opt-in preserves a window-local format'
     P set-window-option -t "${session}:$firstWindow" window-status-current-format 'LOCAL#{window_ps_attention}'
@@ -126,10 +186,11 @@ while ($true) {
     Assert ((P show-options -g -v window-status-current-format).Trim() -eq $stockFormat) 'active reset matches tmux'
     Assert ($state.windows[0].tab_text -notmatch '\[[?!+]%\d+\]') 'reset withdraws indicators without clearing reports'
     Assert ($state.windows[0].ps_attention.state -eq 'blocked') 'reset preserves inspection'
-    P set-option -g window-status-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'
-    P set-option -g window-status-current-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'
+    P set-option -g window-status-format $recipe
+    P set-option -g window-status-current-format $recipe
     $state = State
     Assert ($state.windows[0].tab_text -match '\[\?%\d+\]') 'global format can opt in to existing attention'
+    Assert ($state.windows[0].tab_text -notmatch '  ') "the documented recipe never doubles a space: '$($state.windows[0].tab_text)'"
     'state=working:app=test' | Set-Content -LiteralPath $control -NoNewline
     $state = Wait-State { param($s) $s.windows[0].ps_panes[0].records[0].state -eq 'working' } 'working report after opt-in'
     Assert ($state.windows[0].tab_text -notmatch '\[[?!+]%\d+\]') 'working remains quiet after opt-in'
@@ -177,6 +238,23 @@ while ($true) {
     $null = Wait-State { param($s) $s.windows[0].ps_attention.state -eq 'done' -and ((P display-message -p -t "%$pane" '#{pane_dead}').Trim() -eq '1') } 'completion survives attached process exit'
     P respawn-pane -E -t "%$pane"
     $null = Wait-State { param($s) -not $s.windows[0].ps_panes } 'respawn withdraws old records and seen state'
+
+    # ── set -u restores off; the indicator formats alone do not turn it on ──
+    $emitterScript = Join-Path $work 'emitter.ps1'
+    "[Console]::Write([char]27 + ']7501;state=blocked:app=late' + [char]7 + 'EMITTED')`nStart-Sleep -Seconds 600" | Set-Content -LiteralPath $emitterScript -Encoding utf8
+    $emitter = 'pwsh -NoLogo -NoProfile -NonInteractive -File "' + $emitterScript + '"'
+    P new-window -d -n late_on -t "${session}:" $emitter
+    $null = Wait-State { param($s) @($s.windows | Where-Object { $_.ps_attention.state -eq 'blocked' }).Count -gt 0 } 'on: a new pane reports'
+    P set-option -gu program-status
+    Assert ((P show-options -g -v program-status).Trim() -eq 'off') 'set -u restores off'
+    $state = Wait-State { param($s) -not @($s.windows | Where-Object { $_.ps_panes -or $_.ps_attention }) } 'turning it off withdraws every record'
+    Assert ((P show-options -g -v window-status-format).Trim() -eq $recipe) 'indicator formats are still in place'
+    P new-window -d -n late_off -t "${session}:" $emitter
+    $null = Wait-State { param($s) (P capture-pane -p -t "${session}:late_off") -join '' -match 'EMITTED' } 'off: the report was written to the pane'
+    Start-Sleep -Milliseconds 500
+    $state = State
+    Assert (-not @($state.windows | Where-Object { $_.ps_panes -or $_.ps_attention })) 'off with indicator formats: a report is not stored'
+    Assert (-not @($state.windows | Where-Object { $_.tab_text -match '\[[?!+]%\d+\]' })) 'off with indicator formats: no indicator'
 } finally {
     foreach ($client in $clients) { $client.tcp.Dispose() }
     if ($created) { P kill-server }

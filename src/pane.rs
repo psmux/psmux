@@ -3962,6 +3962,7 @@ impl DeviceQueryScanner {
     pub(crate) fn new() -> Self {
         let mut parser = vt100::Parser::default();
         parser.screen_mut().capture_queries(true);
+        parser.screen_mut().set_program_status_enabled(true);
         Self { parser }
     }
 
@@ -4449,6 +4450,8 @@ pub fn spawn_reader_thread(
             // update first, so the gate must not sit on the question for its
             // one second timeout (PR #781).  A query releases what is held.
             let has_cpr_query = cpr_scanner.scan(&bytes);
+            let program_status = crate::types::PROGRAM_STATUS_ENABLED.load(Ordering::Acquire);
+            query_detector.set_program_status_enabled(program_status);
             let has_reply_request = query_detector.scan(&bytes);
             let flush = has_cpr_query || has_reply_request;
             let bytes = sync_gate.feed(bytes, Instant::now(), flush);
@@ -4472,6 +4475,7 @@ pub fn spawn_reader_thread(
             let mut decrqm_state: Option<DecrqmState> = None;
             if let Ok(mut parser) = term_reader.lock() {
                 parser.screen_mut().capture_queries(true);
+                parser.screen_mut().set_program_status_enabled(program_status);
                 parser.process(&bytes);
                 device_queries = parser.screen_mut().take_queries();
                 if !device_queries.is_empty() {

@@ -1,6 +1,6 @@
 # Quiet program attention (OSC 7501)
 
-Programs can report their state with [OSC 7501](https://www.superlogical.com/rex/docs/build/program-status), revision 0.4. psmux stores those reports separately from output monitoring. Enable [tab indicators](#opt-in-to-attention-indicators) for blocked tasks and unseen results:
+Programs can report their state with [OSC 7501](https://www.superlogical.com/rex/docs/build/program-status), revision 0.4. Support is off by default and turned on with the `program-status` option. Once it is on, psmux stores those reports separately from output monitoring, and [tab indicators](#opt-in-to-attention-indicators) can show blocked tasks and unseen results:
 
 | Indicator | Meaning |
 |---|---|
@@ -14,12 +14,17 @@ Returning through pane selection or a window switch acknowledges the target pane
 
 ## Opt in to attention indicators
 
-The default tab formats match tmux and omit program attention. To show indicators, add these lines to your psmux configuration:
+`program-status` is the single switch, and it is off by default. While it is off, psmux treats OSC 7501 as an unknown sequence, as it did before this support: reports are not stored and the `OSC 7501 ; ?` capability query draws no reply, so programs keep whatever notification they use without it. Adding the format variables below does not turn it on. Turning the option off, or `set -gu program-status`, withdraws every stored record.
+
+The default tab formats match tmux and omit program attention. To accept reports and show indicators, add these lines to your psmux configuration:
 
 ```tmux
-set -g window-status-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'
-set -g window-status-current-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'
+set -g program-status on
+set -g window-status-format '#I:#W#{?window_flags,#{window_flags},#{?window_ps_attention,, }}#{window_ps_attention}'
+set -g window-status-current-format '#I:#W#{?window_flags,#{window_flags},#{?window_ps_attention,, }}#{window_ps_attention}'
 ```
+
+Without pending attention these formats render exactly like the tmux defaults. With it, a tab reads `1:pwsh [?%12]` or `1:pwsh* [?%12]`: the flag placeholder space gives way to the indicator, so there is never a double space.
 
 For custom formats, append `#{window_ps_attention}` to your `window-status-format` and `window-status-current-format` values, including window-local overrides. The variable includes its leading space and expands to empty without pending attention.
 
@@ -35,7 +40,7 @@ printf '\033]7501;state=done:app=build\033\\'
 printf '\033]7501;state=clear\033\\'
 ```
 
-BEL is also accepted as a terminator. Programs can query support with `OSC 7501 ; ? ST`. psmux replies through the pane input pipe before a following primary-device-attributes reply. It consumes reports locally; it does not forward them to the outer terminal or produce desktop notifications.
+BEL is also accepted as a terminator. Programs can query support with `OSC 7501 ; ? ST`. With `program-status` on, psmux replies through the pane input pipe before a following primary-device-attributes reply. It consumes reports locally; it does not forward them to the outer terminal or produce desktop notifications.
 
 The root record has no id. Children use slash-separated ids, replace their own record completely, and inherit app from their nearest ancestor with an explicit app. A hierarchical clear removes the addressed record and its descendants. Each pane holds at most 64 records, evicting the least recently updated record when full. Valid identical reports refresh eviction order without changing acknowledgement.
 
@@ -65,4 +70,4 @@ The window objects in `dump-state` frames include an optional `ps_attention` fie
 
 Certain versions of ConPTY swallow the OSC reply and answer DA1 themselves, so programs can fail to detect support even when psmux implements the protocol. With psmux's default console host, updating Windows Terminal alone does not replace the ConPTY version used for its panes.
 
-Output monitoring remains available with its existing tmux-compatible semantics. For an attention-only setup, enable the tab indicators and disable `monitor-activity` and `monitor-silence` in your configuration.
+Output monitoring remains available with its existing tmux-compatible semantics. For an attention-only setup, turn on `program-status` and the tab indicators, and disable `monitor-activity` and `monitor-silence` in your configuration.

@@ -10,7 +10,12 @@ fn pane(id: usize) -> Pane {
     });
     Pane {
         master, writer, child: crate::util::StubChild::running(),
-        term: Arc::new(Mutex::new(vt100::Parser::default())),
+        term: Arc::new(Mutex::new({
+            // The `program-status` option is on for these tests.
+            let mut parser = vt100::Parser::default();
+            parser.screen_mut().set_program_status_enabled(true);
+            parser
+        })),
         last_rows: 24, last_cols: 80, id, title: "test".into(), title_locked: true,
         child_pid: None, data_version: Arc::new(AtomicU64::new(0)),
         last_title_check: Instant::now(), last_infer_title: Instant::now(), dead: false,
@@ -59,11 +64,34 @@ fn listing(app: &AppState) -> serde_json::Value {
     serde_json::from_str(&crate::util::list_windows_json(app).unwrap()).unwrap()
 }
 
+/// The documented opt-in tab format (docs/program-status.md).
+const RECIPE: &str = "#I:#W#{?window_flags,#{window_flags},#{?window_ps_attention,, }}#{window_ps_attention}";
+
 fn enable_attention(app: &mut AppState) {
-    crate::config::parse_config_content(app, concat!(
-        "set -g window-status-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'\n",
-        "set -g window-status-current-format '#I:#W#{?window_flags,#{window_flags}, }#{window_ps_attention}'\n",
+    crate::config::parse_config_content(app, &format!(
+        "set -g window-status-format '{RECIPE}'\nset -g window-status-current-format '{RECIPE}'\n",
     ));
+}
+
+#[test]
+fn documented_recipe_matches_stock_tabs_until_attention_and_never_doubles_a_space() {
+    let mut app = app();
+    let stock: serde_json::Value = serde_json::from_str(&crate::server::helpers::list_windows_json_with_tabs(&app).unwrap()).unwrap();
+    enable_attention(&mut app);
+    let quiet: serde_json::Value = serde_json::from_str(&crate::server::helpers::list_windows_json_with_tabs(&app).unwrap()).unwrap();
+    for window in 0..2 {
+        assert_eq!(quiet[window]["tab_text"], stock[window]["tab_text"], "no attention: identical to stock");
+    }
+    report(get_pane(&app, 0, 0), "state=blocked");
+    report(get_pane(&app, 1, 0), "state=error");
+    let json: serde_json::Value = serde_json::from_str(&crate::server::helpers::list_windows_json_with_tabs(&app).unwrap()).unwrap();
+    for window in 0..2 {
+        let tab = json[window]["tab_text"].as_str().unwrap();
+        assert!(!tab.contains("  "), "double space in {tab:?}");
+    }
+    assert_eq!(json[0]["tab_text"], "0:test* [?%10]");
+    let second = json[1]["tab_text"].as_str().unwrap();
+    assert!(matches!(second, "1:test [!%20]" | "1:test- [!%20]"), "{second:?}");
 }
 
 #[test]
@@ -294,4 +322,41 @@ fn floating_and_dead_retained_panes_participate_in_attention() {
     app.windows[1].floating_focus = Some(0);
     crate::copy_mode::switch_with_copy_save(&mut app, |app| app.active_idx = 1);
     assert!(window_attention(&app.windows[1]).is_none());
+}
+
+#[test]
+fn program_status_option_is_off_by_default_and_the_single_switch() {
+    // A stock server: off, listed, and a stock parser treats OSC 7501 as
+    // unknown, so the capability query draws no reply and nothing is stored.
+    let mut app = app();
+    assert!(!app.program_status);
+    assert_eq!(crate::server::options::get_option_value(&app, "program-status"), "off");
+    assert_eq!(crate::server::option_catalog::default_for("program-status"), Some("off"));
+    let mut stock = vt100::Parser::default();
+    stock.screen_mut().capture_queries(true);
+    stock.process(b"\x1b]7501;state=blocked\x07\x1b]7501;?\x07\x1b[c");
+    assert!(stock.screen().program_status().records().next().is_none());
+    assert_eq!(stock.screen_mut().take_queries(), vec![vt100::TerminalQuery::Da1]);
+
+    // Opting in to the indicator format alone changes nothing.
+    for pane in [get_pane(&app, 1, 0), get_pane(&app, 1, 1)] {
+        pane.live_parser().lock().unwrap().screen_mut().set_program_status_enabled(false);
+    }
+    enable_attention(&mut app);
+    report(get_pane(&app, 1, 0), "state=blocked");
+    assert!(window_attention(&app.windows[1]).is_none());
+    assert!(window_records(&app.windows[1]).is_empty());
+
+    // The option is the switch, and set -u restores off and withdraws records.
+    crate::server::options::apply_set_option(&mut app, "program-status", "on", false).unwrap();
+    assert!(app.program_status);
+    assert_eq!(crate::server::options::get_option_value(&app, "program-status"), "on");
+    report(get_pane(&app, 1, 0), "state=blocked");
+    assert_eq!(window_attention(&app.windows[1]).unwrap().state, "blocked");
+    crate::server::options::reset_option_to_default(&mut app, "program-status");
+    assert!(!app.program_status);
+    assert_eq!(crate::server::options::get_option_value(&app, "program-status"), "off");
+    assert!(window_attention(&app.windows[1]).is_none());
+    assert!(window_records(&app.windows[1]).is_empty());
+    assert!(!crate::types::PROGRAM_STATUS_ENABLED.load(std::sync::atomic::Ordering::Acquire));
 }

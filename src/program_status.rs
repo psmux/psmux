@@ -46,6 +46,21 @@ fn window_panes(window: &Window, mut visit: impl FnMut(&Pane)) {
     for float in &window.floating { visit(&float.pane); }
 }
 
+/// Apply the `program-status` option. Every pane's parser thread also reads
+/// the atomic before each batch; switching the live parsers here as well makes
+/// the change, and the withdrawal of records when it goes off, immediate.
+pub(crate) fn set_enabled(app: &mut AppState, enabled: bool) {
+    app.program_status = enabled;
+    crate::types::PROGRAM_STATUS_ENABLED.store(enabled, std::sync::atomic::Ordering::Release);
+    for window in &app.windows {
+        window_panes(window, |pane| {
+            if let Ok(mut parser) = pane.live_parser().lock() {
+                parser.screen_mut().set_program_status_enabled(enabled);
+            }
+        });
+    }
+}
+
 pub(crate) fn window_attention(window: &Window) -> Option<Attention> {
     let mut selected = None;
     let mut best = None;

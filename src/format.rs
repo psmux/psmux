@@ -1321,6 +1321,7 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "display-time" => Some(app.display_time_ms.to_string()),
         "display-panes-time" => Some(app.display_panes_time_ms.to_string()),
         "focus-events" => Some(if app.focus_events { "on".into() } else { "off".into() }),
+        "program-status" => Some(if app.program_status { "on".into() } else { "off".into() }),
         "aggressive-resize" => Some(if app.aggressive_resize { "on".into() } else { "off".into() }),
         "synchronize-panes" => Some(if app.sync_input { "on".into() } else { "off".into() }),
         "monitor-silence" => Some(app.monitor_silence.to_string()),

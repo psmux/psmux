@@ -163,6 +163,7 @@ Details worth knowing:
 | `status-left-length` | Int | `10` | Max width of status-left |
 | `status-right-length` | Int | `40` | Max width of status-right |
 | `focus-events` | Bool | `off` | Pass focus events to apps |
+| `program-status` | Bool | `off` | psmux extension. Accept OSC 7501 program status reports and answer its capability query. Off, OSC 7501 is ignored and the query draws no reply. See [program-status.md](program-status.md) |
 | `alternate-screen` | Bool | `on` | Honour the DEC 47 / 1049 alternate screen. Set `off` so full screen program output lands in the scrollback instead of being discarded on exit. See [Alternate Screen](#alternate-screen) |
 | `mode-keys` | Str | `emacs` | `vi` or `emacs` |
 | `status-keys` | Str | | Editing style at the command prompt. Only the literal `vi` is checked; any other value (including unset) keeps emacs style editing |

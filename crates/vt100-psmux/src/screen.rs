@@ -142,6 +142,7 @@ pub struct Screen {
     /// stays `Some` after that so a clear (state=0) is also forwarded.
     osc94_progress: Option<(u8, u8)>,
     program_status: crate::ProgramStatuses,
+    program_status_enabled: bool,
     capture_queries: bool,
     pending_queries: Vec<crate::TerminalQuery>,
 
@@ -240,6 +241,7 @@ impl Screen {
             osc7_path: None,
             osc94_progress: None,
             program_status: crate::ProgramStatuses::default(),
+            program_status_enabled: false,
             capture_queries: false,
             pending_queries: Vec::new(),
             osc52_clipboard: None,
@@ -332,8 +334,10 @@ impl Screen {
         let allow_alternate_screen = self.allow_alternate_screen;
         let mut program_status = std::mem::take(&mut self.program_status);
         program_status.clear();
+        let program_status_enabled = self.program_status_enabled;
         *self = Self::new(size, scrollback_len);
         self.program_status = program_status;
+        self.program_status_enabled = program_status_enabled;
         self.grid.put_scrollback(history);
         self.hyperlinks = hyperlinks;
         self.palette = palette;
@@ -979,6 +983,21 @@ impl Screen {
     /// Mutable records for acknowledgement and attached-process exit cleanup.
     pub fn program_status_mut(&mut self) -> &mut crate::ProgramStatuses {
         &mut self.program_status
+    }
+
+    /// Whether OSC 7501 is accepted. Off, the default, reports are not stored
+    /// and the capability query draws no reply: the sequence is handled as an
+    /// unknown OSC, exactly as before OSC 7501 support. Turning it off
+    /// withdraws every stored record.
+    pub fn set_program_status_enabled(&mut self, enabled: bool) {
+        if self.program_status_enabled == enabled { return; }
+        self.program_status_enabled = enabled;
+        if !enabled { self.program_status.clear(); }
+    }
+
+    /// See [`Screen::set_program_status_enabled`].
+    pub fn program_status_enabled(&self) -> bool {
+        self.program_status_enabled
     }
 
     /// Enable ordered query capture. The host must drain queries after processing.
@@ -1733,10 +1752,12 @@ impl Screen {
         statuses.clear();
         let queries = std::mem::take(&mut self.pending_queries);
         let capture = self.capture_queries;
+        let program_status_enabled = self.program_status_enabled;
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
         self.program_status = statuses;
         self.pending_queries = queries;
         self.capture_queries = capture;
+        self.program_status_enabled = program_status_enabled;
     }
 
     // csi codes

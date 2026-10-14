@@ -210,7 +210,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
-        if let Some(query) = crate::queries::osc_query(params) {
+        if let Some(query) = crate::queries::osc_query(params, self.screen.program_status_enabled()) {
             self.screen.query(query);
             return;
         }
@@ -305,7 +305,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 }
                 self.screen.set_path_literal(&cwd);
             }
-            [b"7501", body @ ..] => {
+            [b"7501", body @ ..] if self.screen.program_status_enabled() => {
                 // vte excludes OSC/ST and semicolon separators from params.
                 let sequence_len = 2 + params.iter().map(|p| p.len()).sum::<usize>()
                     + params.len().saturating_sub(1) + if _bel_terminated { 1 } else { 2 };

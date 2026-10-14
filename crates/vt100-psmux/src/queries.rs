@@ -18,9 +18,9 @@ pub(crate) fn csi_query(
     }
 }
 
-pub(crate) fn osc_query(params: &[&[u8]]) -> Option<TerminalQuery> {
+pub(crate) fn osc_query(params: &[&[u8]], program_status: bool) -> Option<TerminalQuery> {
     match params {
-        [b"7501", b"?"] => Some(TerminalQuery::ProgramStatus),
+        [b"7501", b"?"] if program_status => Some(TerminalQuery::ProgramStatus),
         _ => None,
     }
 }
@@ -42,11 +42,18 @@ impl QueryDetector {
         self.parser.advance(&mut self.requests, bytes);
         std::mem::take(&mut self.requests.pending)
     }
+
+    /// Mirror the live screen's [`crate::Screen::set_program_status_enabled`]:
+    /// off, an OSC 7501 query is not a reply request.
+    pub fn set_program_status_enabled(&mut self, enabled: bool) {
+        self.requests.program_status = enabled;
+    }
 }
 
 #[derive(Default)]
 struct ReplyRequests {
     pending: bool,
+    program_status: bool,
 }
 
 impl vte::Perform for ReplyRequests {
@@ -61,6 +68,6 @@ impl vte::Perform for ReplyRequests {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.pending |= osc_query(params).is_some();
+        self.pending |= osc_query(params, self.program_status).is_some();
     }
 }
