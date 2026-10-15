@@ -988,7 +988,7 @@ fn every_command_does_not_panic_embedded_mode() {
     ];
     for cmd in &safe_commands {
         let mut app = mock_app_with_windows(&["test1", "test2"]);
-        app.paste_buffers.push("buffer_data".to_string());
+        app.paste_add("buffer_data".to_string());
         let result = execute_command_string(&mut app, cmd);
         assert!(result.is_ok(), "command '{}' panicked or returned error: {:?}", cmd, result);
         // Some of these start a real shell; end it before the state drops.

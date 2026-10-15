@@ -190,14 +190,14 @@ fn a_drag_yanks_the_letters_the_pointer_covered() {
     handle_pane_mouse(&mut plain, 41, 0, 2, 0, true);
     handle_pane_mouse(&mut plain, 41, 32, 5, 0, true);
     handle_pane_mouse(&mut plain, 41, 0, 5, 0, false);
-    assert_eq!(plain.paste_buffers.first().map(String::as_str), Some("CDEF"));
+    assert_eq!(plain.paste_top(), Some("CDEF"));
 
     let mut numbered = app_with("absolute");
     handle_pane_mouse(&mut numbered, 41, 0, 2 + GUTTER as i16, 0, true);
     handle_pane_mouse(&mut numbered, 41, 32, 5 + GUTTER as i16, 0, true);
     handle_pane_mouse(&mut numbered, 41, 0, 5 + GUTTER as i16, 0, false);
     assert_eq!(
-        numbered.paste_buffers.first().map(String::as_str),
+        numbered.paste_top(),
         Some("CDEF"),
         "the gutter must not shift what a drag copies"
     );
@@ -215,7 +215,7 @@ fn the_raw_verbs_take_the_gutter_off_too() {
     remote_mouse_drag(&mut app, 5 + GUTTER, 0);
     assert_eq!(app.copy_pos, Some((0, 5)));
     remote_mouse_up(&mut app, 5 + GUTTER, 0);
-    assert_eq!(app.paste_buffers.first().map(String::as_str), Some("CDEF"));
+    assert_eq!(app.paste_top(), Some("CDEF"));
     assert!(matches!(app.mode, Mode::Passthrough), "a mouse yank leaves copy mode");
 }
 
@@ -227,7 +227,7 @@ fn the_raw_verbs_are_unchanged_without_a_gutter() {
     remote_mouse_drag(&mut app, 5, 0);
     assert_eq!(app.copy_pos, Some((0, 5)));
     remote_mouse_up(&mut app, 5, 0);
-    assert_eq!(app.paste_buffers.first().map(String::as_str), Some("CDEF"));
+    assert_eq!(app.paste_top(), Some("CDEF"));
 }
 
 // Two panes side by side, copy mode in the left one.
@@ -321,5 +321,5 @@ fn a_drag_on_another_pane_yanks_the_letters_under_the_pointer() {
     handle_pane_mouse(&mut app, 42, 0, 2 + GUTTER as i16, 0, true);
     handle_pane_mouse(&mut app, 42, 32, 5 + GUTTER as i16, 0, true);
     handle_pane_mouse(&mut app, 42, 0, 5 + GUTTER as i16, 0, false);
-    assert_eq!(app.paste_buffers.first().map(String::as_str), Some("cdef"));
+    assert_eq!(app.paste_top(), Some("cdef"));
 }

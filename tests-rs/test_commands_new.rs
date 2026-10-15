@@ -74,36 +74,35 @@ fn list_buffers_empty_says_no_buffers() {
 #[test]
 fn list_buffers_shows_all_buffer_details() {
     let mut app = mock_app_with_window();
-    app.paste_buffers.push("hello world".to_string());
-    app.paste_buffers.push("short".to_string());
-    app.paste_buffers.push("a longer buffer with more text for preview".to_string());
+    // Newest first. Each buffer keeps the name it was added with, so the
+    // oldest is buffer0 (issue #818, paste.c:178).
+    app.paste_set_stack(&["hello world", "short", "a longer buffer with more text for preview"]);
     execute_command_string(&mut app, "list-buffers").unwrap();
     let (_, out) = extract_popup(&app);
     let lines: Vec<&str> = out.lines().collect();
     // Must have exactly 3 lines (one per buffer)
     assert_eq!(lines.len(), 3, "should list all 3 buffers, got:\n{}", out);
-    // Buffer 0: verify index, byte count, content
-    assert!(lines[0].starts_with("buffer0:"), "first line should start with buffer0");
-    assert!(lines[0].contains("11 bytes"), "buffer0 should show 11 bytes for 'hello world'");
-    assert!(lines[0].contains("hello world"), "buffer0 should show content preview");
-    // Buffer 1
+    // The newest: its name, byte count, content
+    assert!(lines[0].starts_with("buffer2:"), "first line should be the newest, buffer2");
+    assert!(lines[0].contains("11 bytes"), "buffer2 should show 11 bytes for 'hello world'");
+    assert!(lines[0].contains("hello world"), "buffer2 should show content preview");
     assert!(lines[1].starts_with("buffer1:"), "second line should start with buffer1");
     assert!(lines[1].contains("5 bytes"), "buffer1 should show 5 bytes for 'short'");
-    // Buffer 2
-    assert!(lines[2].starts_with("buffer2:"), "third line should start with buffer2");
-    assert!(lines[2].contains("42 bytes"), "buffer2 should show 42 bytes");
+    // The oldest
+    assert!(lines[2].starts_with("buffer0:"), "third line should be the oldest, buffer0");
+    assert!(lines[2].contains("42 bytes"), "buffer0 should show 42 bytes");
 }
 
 #[test]
 fn lsb_alias_produces_identical_output_to_list_buffers() {
     let mut app1 = mock_app_with_window();
-    app1.paste_buffers.push("test data".to_string());
+    app1.paste_add("test data".to_string());
     execute_command_string(&mut app1, "list-buffers").unwrap();
     let (_, out1) = extract_popup(&app1);
     let out1 = out1.to_string();
 
     let mut app2 = mock_app_with_window();
-    app2.paste_buffers.push("test data".to_string());
+    app2.paste_add("test data".to_string());
     execute_command_string(&mut app2, "lsb").unwrap();
     let (cmd2, out2) = extract_popup(&app2);
     assert_eq!(cmd2, "list-buffers", "lsb should report command as list-buffers");
@@ -117,8 +116,7 @@ fn lsb_alias_produces_identical_output_to_list_buffers() {
 #[test]
 fn show_buffer_displays_first_buffer_content_verbatim() {
     let mut app = mock_app_with_window();
-    app.paste_buffers.push("line1\nline2\nline3".to_string());
-    app.paste_buffers.push("this should NOT appear".to_string());
+    app.paste_set_stack(&["line1\nline2\nline3", "this should NOT appear"]);
     execute_command_string(&mut app, "show-buffer").unwrap();
     let (cmd, out) = extract_popup(&app);
     assert_eq!(cmd, "show-buffer");
@@ -136,7 +134,7 @@ fn show_buffer_empty_does_not_crash() {
 #[test]
 fn showb_alias_same_as_show_buffer() {
     let mut app = mock_app_with_window();
-    app.paste_buffers.push("alias test".to_string());
+    app.paste_add("alias test".to_string());
     execute_command_string(&mut app, "showb").unwrap();
     let (_, out) = extract_popup(&app);
     assert_eq!(out, "alias test");
@@ -427,8 +425,8 @@ fn set_buffer_caps_at_10_evicts_oldest() {
     assert_eq!(app.paste_buffers[0], "item11", "latest should be first");
     assert_eq!(app.paste_buffers[9], "item2", "oldest surviving should be item2");
     // item0 and item1 should have been evicted
-    assert!(!app.paste_buffers.contains(&"item0".to_string()), "item0 should be evicted");
-    assert!(!app.paste_buffers.contains(&"item1".to_string()), "item1 should be evicted");
+    assert!(!app.paste_buffers.iter().any(|b| b.data == "item0"), "item0 should be evicted");
+    assert!(!app.paste_buffers.iter().any(|b| b.data == "item1"), "item1 should be evicted");
 }
 
 #[test]
@@ -441,7 +439,7 @@ fn setb_alias_inserts_same_as_set_buffer() {
 #[test]
 fn delete_buffer_removes_first_buffer() {
     let mut app = mock_app_with_window();
-    app.paste_buffers = vec!["a".into(), "b".into(), "c".into()];
+    app.paste_set_stack(&["a", "b", "c"]);
     execute_command_string(&mut app, "delete-buffer").unwrap();
     assert_eq!(app.paste_buffers, vec!["b", "c"], "delete-buffer should remove index 0");
 }
@@ -449,7 +447,7 @@ fn delete_buffer_removes_first_buffer() {
 #[test]
 fn deleteb_alias_works() {
     let mut app = mock_app_with_window();
-    app.paste_buffers = vec!["only".into()];
+    app.paste_set_stack(&["only"]);
     execute_command_string(&mut app, "deleteb").unwrap();
     assert!(app.paste_buffers.is_empty());
 }

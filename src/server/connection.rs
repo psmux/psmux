@@ -3619,6 +3619,7 @@ match cmd {
         // Parse -b name, -w (clipboard propagation), -H hex content, and content
         let mut buf_name: Option<String> = None;
         let mut propagate_to_clipboard = false;
+        let mut append = false;
         let mut hex_content: Option<&str> = None;
         let mut i = 0;
         let mut content_parts: Vec<&str> = Vec::new();
@@ -3628,6 +3629,9 @@ match cmd {
                     buf_name = Some(name.to_string());
                 }
                 i += 2; // skip -b and its value (buffer name)
+            } else if args[i] == "-a" {
+                append = true;
+                i += 1;
             } else if args[i] == "-w" {
                 propagate_to_clipboard = true;
                 i += 1;
@@ -3668,8 +3672,15 @@ match cmd {
                 if propagate_to_clipboard {
                     crate::clipboard::copy_to_system_clipboard(&content);
                 }
-                if let Some(name) = buf_name {
-                    let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
+                // Empty data adds no buffer and changes none (paste.c:165,
+                // cmd-set-buffer.c:110).
+                if content.is_empty() {
+                } else if let Some(name) = buf_name {
+                    if append {
+                        let _ = tx.send(CtrlReq::AppendNamedBuffer(name, content));
+                    } else {
+                        let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
+                    }
                 } else {
                     let _ = tx.send(CtrlReq::SetBuffer(content));
                 }
@@ -3734,14 +3745,12 @@ match cmd {
     }
     "show-buffer" | "showb" => {
         let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
+        // By name only (paste_get_name): `-b 1` is the buffer named 1, and a
+        // name no buffer has is an error (cmd-save-buffer.c:92).
         let text: String = if let Some(name) = buf_name {
             let (rtx, rrx) = mpsc::channel::<Option<String>>();
-            if let Ok(idx) = name.parse::<usize>() {
-                let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
-            } else {
-                let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name));
-            }
-            rrx.recv().ok().flatten().unwrap_or_default()
+            let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
+            rrx.recv().ok().flatten().unwrap_or_else(|| format!("ERROR: no buffer {}", name))
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowBuffer(rtx));
@@ -3757,10 +3766,18 @@ match cmd {
     "delete-buffer" => {
         let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
         if let Some(name) = buf_name {
-            if let Ok(idx) = name.parse::<usize>() {
-                let _ = tx.send(CtrlReq::DeleteBufferAt(idx));
-            } else {
-                let _ = tx.send(CtrlReq::DeleteNamedBuffer(name));
+            // By name only; a name no buffer has is an error
+            // (cmd-set-buffer.c:73).
+            let (rtx, rrx) = mpsc::channel::<bool>();
+            let _ = tx.send(CtrlReq::DeleteNamedBuffer(name.clone(), Some(rtx)));
+            if rrx.recv() == Ok(false) {
+                let err = format!("unknown buffer: {}", name);
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("delete-buffer".to_string(), format!("ERROR: {}", err)));
+                } else {
+                    let _ = write!(write_stream, "ERROR: {}\n", err);
+                    let _ = write_stream.flush();
+                }
             }
         } else {
             let _ = tx.send(CtrlReq::DeleteBuffer);
@@ -3776,8 +3793,14 @@ match cmd {
     "paste-buffer-at" => {
         if let Some(idx_str) = args.get(0) {
             if let Ok(idx) = idx_str.parse::<usize>() {
-                let _ = tx.send(CtrlReq::PasteBufferAt(idx));
+                let _ = tx.send(CtrlReq::PasteBufferAt(None, idx));
             }
+        }
+    }
+    // The chooser's paste, by the buffer's name (#818).
+    "paste-buffer-named" => {
+        if let Some(name) = args.get(0) {
+            let _ = tx.send(CtrlReq::PasteBufferAt(Some(name.to_string()), 0));
         }
     }
     "choose-buffer" | "chooseb" => {
@@ -7003,11 +7026,8 @@ fn dispatch_control_command(
             let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
             let text: Option<String> = if let Some(name) = buf_name {
                 let (rtx, rrx) = mpsc::channel::<Option<String>>();
-                if let Ok(idx) = name.parse::<usize>() {
-                    let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
-                } else {
-                    let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
-                }
+                // By name only (paste_get_name): `-b 1` is the buffer named 1.
+                let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
                 match rrx.recv_timeout(Duration::from_secs(5)) {
                     Ok(Some(text)) => Some(text),
                     // A missing buffer is tmux's error (cmd-save-buffer.c:92),

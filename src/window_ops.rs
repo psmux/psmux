@@ -3199,7 +3199,7 @@ mod window_ops_tests {
         // comparison.
         super::remote_mouse_up(&mut app, 5, 2);
         assert!(!app.paste_buffers.is_empty(), "release must yank the selection");
-        assert!(app.paste_buffers[0].contains('\n'), "yank must span the scrolled lines");
+        assert!(app.paste_buffers[0].data.contains('\n'), "yank must span the scrolled lines");
         // A mouse yank cancels copy mode and returns to live view (#62),
         // same as the pane-mouse release path.
         assert!(matches!(app.mode, Mode::Passthrough), "mouse yank must exit copy mode");
@@ -3239,7 +3239,7 @@ mod window_ops_tests {
         );
         app.paste_buffers
             .first()
-            .cloned()
+            .map(|b| b.data.clone())
             .expect("a real drag must yank on release")
     }
 
@@ -3282,7 +3282,7 @@ mod window_ops_tests {
             super::remote_mouse_up(&mut app, release_x, 2);
             app.paste_buffers
                 .first()
-                .cloned()
+                .map(|b| b.data.clone())
                 .expect("a real drag must yank on release")
         }
         assert_eq!(
@@ -3313,7 +3313,7 @@ mod window_ops_tests {
         super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true); // re-pin: what the client painted
         super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false); // release
         assert_eq!(
-            app.paste_buffers.first().map(String::as_str),
+            app.paste_top(),
             Some("histo"),
             "the copy must match the highlight, not the cell the frame carried"
         );
@@ -3334,7 +3334,7 @@ mod window_ops_tests {
         let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
         super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false);
         assert_eq!(
-            app.paste_buffers.first().map(String::as_str),
+            app.paste_top(),
             Some("histor"),
             "without a re-pin the newest drag stands"
         );
@@ -3357,7 +3357,7 @@ mod window_ops_tests {
             super::remote_mouse_up(&mut app, 10, 2);
             app.paste_buffers
                 .first()
-                .cloned()
+                .map(|b| b.data.clone())
                 .expect("a real drag must yank on release")
         }
         assert_ne!(
@@ -3523,7 +3523,7 @@ mod window_ops_tests {
 
         super::handle_pane_mouse(&mut app, 41, 0, 2, 1, false); // release on the drag cell
         assert_eq!(
-            app.paste_buffers.first().map(String::as_str),
+            app.paste_top(),
             Some("story-74\nhistory-75\nhistory-76\nhistory"),
             "the copy must be the range the frame above points at (the frame's\n             rows are client-relative, the yank's are parser-relative, so this\n             pins the text)"
         );

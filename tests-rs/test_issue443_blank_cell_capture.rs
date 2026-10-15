@@ -147,7 +147,7 @@ fn first_line(text: &str) -> String {
 }
 
 fn newest_buffer(app: &AppState) -> String {
-    app.paste_buffers.first().cloned().unwrap_or_default()
+    app.paste_top().unwrap_or_default().to_string()
 }
 
 /// The Win32 clipboard is a single process-global resource, and reading it

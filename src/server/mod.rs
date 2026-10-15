@@ -1912,7 +1912,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
             if !cancel && !no_clear {
                 copy_selection_done(app);
             }
-            if let Some(text) = app.paste_buffers.first().cloned() {
+            if let Some(text) = app.paste_top().map(str::to_string) {
                 pipe_copy_text(pipe_cmd, &text);
             }
             if cancel {
@@ -1989,7 +1989,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
             if pipe {
                 let pipe_cmd = s.split_once(char::is_whitespace).map(|(_, a)| a.trim()).unwrap_or("");
-                if let Some(text) = app.paste_buffers.first().cloned() {
+                if let Some(text) = app.paste_top().map(str::to_string) {
                     pipe_copy_text(pipe_cmd, &text);
                 }
             }
@@ -2020,22 +2020,22 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
         "clear-selection" => { crate::copy_mode::clear_selection(app); }
         "append-selection" => {
             // Append to existing buffer instead of replacing
+            // tmux adds the selection to the top buffer, which keeps its
+            // name (window_copy_append_selection).
+            let prev = app.paste_buffers.first().map(|b| b.name.clone());
             let _ = yank_selection(app);
+            app.paste_append_new_top_to(prev);
             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
-            if app.paste_buffers.len() >= 2 {
-                let appended = format!("{}{}", app.paste_buffers[1], app.paste_buffers[0]);
-                app.paste_buffers[0] = appended;
-            }
             // tmux window_copy_cmd_append_selection: clear and stay.
             copy_selection_done(app);
         }
         "append-selection-and-cancel" => {
+            // tmux adds the selection to the top buffer, which keeps its
+            // name (window_copy_append_selection).
+            let prev = app.paste_buffers.first().map(|b| b.name.clone());
             let _ = yank_selection(app);
+            app.paste_append_new_top_to(prev);
             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
-            if app.paste_buffers.len() >= 2 {
-                let appended = format!("{}{}", app.paste_buffers[1], app.paste_buffers[0]);
-                app.paste_buffers[0] = appended;
-            }
             // The canonical exit: it clears the selection and the pane's
             // saved copy state too.
             crate::copy_mode::exit_copy_mode(app);
@@ -5577,28 +5577,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::SetBuffer(content) => {
-                    app.paste_buffers.insert(0, content);
-                    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+                    app.paste_add(content);
                 }
                 CtrlReq::SetNamedBuffer(name, content) => {
-                    app.named_buffers.insert(name, content);
+                    app.paste_set(&name, content);
+                }
+                CtrlReq::AppendNamedBuffer(name, content) => {
+                    // set-buffer -a -b: the old data and then the new, under
+                    // the same name (cmd-set-buffer.c:113 to :121).
+                    let data = format!("{}{}", app.paste_get(&name).unwrap_or(""), content);
+                    app.paste_set(&name, data);
                 }
                 CtrlReq::ListBuffers(resp) => {
-                    let mut output = String::new();
-                    // List auto-named buffers (positional stack)
-                    for (i, buf) in app.paste_buffers.iter().enumerate() {
-                        let preview: String = buf.chars().take(50).collect();
-                        output.push_str(&format!("buffer{}: {} bytes: \"{}\"\n", i, buf.len(), preview));
-                    }
-                    // List named buffers
-                    let mut names: Vec<&String> = app.named_buffers.keys().collect();
-                    names.sort();
-                    for name in names {
-                        let buf = &app.named_buffers[name];
-                        let preview: String = buf.chars().take(50).collect();
-                        output.push_str(&format!("{}: {} bytes: \"{}\"\n", name, buf.len(), preview));
-                    }
-                    let _ = resp.send(output);
+                    let _ = resp.send(app.paste_listing(false));
                 }
                 CtrlReq::ListBuffersFormat(resp, fmt) => {
                     let mut output = Vec::new();
@@ -5618,16 +5609,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output.join("\n"));
                 }
                 CtrlReq::ShowBuffer(resp) => {
-                    let content = app.paste_buffers.first().cloned().unwrap_or_default();
-                    let _ = resp.send(content);
-                }
-                CtrlReq::ShowBufferAt(resp, idx) => {
-                    let content = app.paste_buffers.get(idx).cloned();
+                    let content = app.paste_top().unwrap_or_default().to_string();
                     let _ = resp.send(content);
                 }
                 CtrlReq::ShowNamedBuffer(resp, name) => {
-                    let content = app.named_buffers.get(&name).cloned();
-                    let _ = resp.send(content);
+                    let _ = resp.send(app.paste_get(&name).map(str::to_string));
                 }
                 CtrlReq::DeleteBuffer => {
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
@@ -5635,12 +5621,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DeleteBufferAt(idx) => {
                     if idx < app.paste_buffers.len() { app.paste_buffers.remove(idx); }
                 }
-                CtrlReq::DeleteNamedBuffer(name) => {
-                    app.named_buffers.remove(&name);
+                CtrlReq::DeleteNamedBuffer(name, resp) => {
+                    let found = app.paste_delete(&name);
+                    if let Some(resp) = resp { let _ = resp.send(found); }
                 }
-                CtrlReq::PasteBufferAt(idx) => {
-                    if idx < app.paste_buffers.len() {
-                        let text = app.paste_buffers[idx].clone();
+                CtrlReq::PasteBufferAt(name, idx) => {
+                    // The chooser pastes by name; an index is the older form.
+                    let text = match name {
+                        Some(name) => app.paste_get(&name).map(str::to_string),
+                        None => app.paste_buffers.get(idx).map(|b| b.data.clone()),
+                    };
+                    if let Some(text) = text {
                         let win = &mut app.windows[app.active_idx];
                         // Not into an input-off pane (cmd-paste-buffer.c
                         // checks PANE_INPUTOFF before it writes).
@@ -7482,16 +7473,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     std::thread::sleep(Duration::from_millis(ms.min(60_000)));
                 }
                 CtrlReq::SaveBuffer(path) => {
-                    if let Some(content) = app.paste_buffers.first() {
+                    if let Some(content) = app.paste_top() {
                         let _ = std::fs::write(&path, content);
                     }
                 }
                 CtrlReq::LoadBuffer(path) => {
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        app.paste_buffers.insert(0, content);
-                        if app.paste_buffers.len() > 10 {
-                            app.paste_buffers.pop();
-                        }
+                        app.paste_add(content);
                     }
                 }
                 CtrlReq::SetEnvironment(args) => {
@@ -7823,21 +7811,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     ));
                 }
                 CtrlReq::ChooseBuffer(resp) => {
-                    let mut output = String::new();
-                    for (i, buf) in app.paste_buffers.iter().enumerate() {
-                        let preview: String = buf.chars().take(50).collect();
-                        let preview = preview.replace('\n', "\\n").replace('\r', "");
-                        output.push_str(&format!("buffer{}: {} bytes: \"{}\"\n", i, buf.len(), preview));
-                    }
-                    let mut names: Vec<&String> = app.named_buffers.keys().collect();
-                    names.sort();
-                    for name in names {
-                        let buf = &app.named_buffers[name];
-                        let preview: String = buf.chars().take(50).collect();
-                        let preview = preview.replace('\n', "\\n").replace('\r', "");
-                        output.push_str(&format!("{}: {} bytes: \"{}\"\n", name, buf.len(), preview));
-                    }
-                    let _ = resp.send(output);
+                    let _ = resp.send(app.paste_listing(true));
                 }
                 CtrlReq::ServerInfo(resp) => {
                     let info = format!(

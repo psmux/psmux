@@ -390,7 +390,7 @@ fn the_interactive_route_signals_are_not_stamped_on_an_input_off_pane() {
 fn paste_buffer_writes_nothing_but_d_still_deletes_the_buffer() {
     let mut f = fixture();
     f.set(1, true);
-    f.app.paste_buffers = vec!["from the buffer\n".to_string(), "older".to_string()];
+    f.app.paste_set_stack(&["from the buffer\n", "older"]);
     let pb = crate::commands::PasteBufferArgs { delete: true, ..Default::default() };
     assert_eq!(crate::commands::run_paste_buffer(&mut f.app, &pb).unwrap(), None, "not an error in tmux");
     assert_eq!(f.sent(1), "");

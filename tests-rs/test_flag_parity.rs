@@ -1540,7 +1540,7 @@ fn copy_mode_dispatches() {
 #[test]
 fn paste_buffer_dispatches() {
     let mut app = mock_app_with_window();
-    app.paste_buffers.push("test paste".to_string());
+    app.paste_add("test paste".to_string());
     execute_command_string(&mut app, "paste-buffer").unwrap();
 }
 
@@ -1565,7 +1565,7 @@ fn show_buffer_dispatches() {
 #[test]
 fn delete_buffer_dispatches() {
     let mut app = mock_app_with_window();
-    app.paste_buffers.push("to delete".to_string());
+    app.paste_add("to delete".to_string());
     execute_command_string(&mut app, "delete-buffer").unwrap();
 }
 

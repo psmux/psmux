@@ -3830,6 +3830,7 @@ fn run_main() -> io::Result<()> {
                 let mut buffer_name: Option<String> = None;
                 let mut data: Option<String> = None;
                 let mut propagate_to_clipboard = false;
+                let mut append = false;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
@@ -3846,6 +3847,7 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                         "-w" => { propagate_to_clipboard = true; }
+                        "-a" => { append = true; }
                         s if !s.starts_with('-') => {
                             data = Some(s.to_string());
                         }
@@ -3859,6 +3861,7 @@ fn run_main() -> io::Result<()> {
                     }
                 }
                 let mut cmd = "set-buffer".to_string();
+                if append { cmd.push_str(" -a"); }
                 if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
                 // Same byte-exact wire as load-buffer: `set-buffer "a  'b'"`
                 // reached the server as three bare words and came back out of
@@ -3914,9 +3917,10 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 let mut cmd = "show-buffer".to_string();
-                if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
+                if let Some(ref b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
                 cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
+                exit_on_missing_buffer(&resp, buffer_name.as_deref());
                 print!("{}", resp);
                 return Ok(());
             }
@@ -3939,7 +3943,12 @@ fn run_main() -> io::Result<()> {
                 let mut cmd = "delete-buffer".to_string();
                 if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // An unknown -b name is an error (cmd-set-buffer.c:73).
+                let resp = send_control_with_response(cmd)?;
+                if let Some(msg) = resp.strip_prefix("ERROR: ") {
+                    eprintln!("psmux: {}", msg.trim_end());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // display-message - Display a message
@@ -5231,11 +5240,16 @@ fn run_main() -> io::Result<()> {
                 }
                 if let Some(path) = file_path {
                     let mut cmd = "show-buffer".to_string();
-                    if let Some(b) = buffer_name {
+                    if let Some(ref b) = buffer_name {
                         cmd.push_str(&format!(" -b {}", b));
                     }
                     cmd.push('\n');
                     let content = send_control_with_response(cmd)?;
+                    exit_on_missing_buffer(&content, buffer_name.as_deref());
+                    // The reply ends with one line break of its own, which is
+                    // not the buffer's: tmux writes the buffer exactly
+                    // (cmd-save-buffer.c).
+                    let content = content.strip_suffix('\n').unwrap_or(&content).to_string();
                     if path == "-" {
                         print!("{}", content);
                     } else if append {
@@ -6654,6 +6668,19 @@ fn control_mode_finish(mode: u8, exit_line: Option<&str>) -> bool {
     }
     let _ = out.flush();
     true
+}
+
+/// show-buffer and save-buffer with a `-b` name no buffer has: the server
+/// answers with exactly this line, which tmux reports as an error with exit 1
+/// (cmd-save-buffer.c:92). The whole reply is compared, so a buffer whose own
+/// text starts with `ERROR:` is still printed.
+fn exit_on_missing_buffer(resp: &str, name: Option<&str>) {
+    if let Some(name) = name {
+        if resp.trim_end_matches(['\r', '\n']) == format!("ERROR: no buffer {}", name) {
+            eprintln!("psmux: no buffer {}", name);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Returns `true` when stdout is a Windows console handle (ConPTY).

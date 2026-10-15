@@ -187,7 +187,7 @@ fn search_input(app: &AppState) -> String {
 fn the_copy_mode_search_prompt_pastes_the_top_buffer() {
     let mut app = app_with_pane();
     app.mode_keys = "vi".to_string();
-    app.paste_buffers = vec!["SRCH".to_string(), "OLDER".to_string()];
+    app.paste_set_stack(&["SRCH", "OLDER"]);
     crate::copy_mode::enter_copy_mode(&mut app);
     crate::input::send_text_to_active(&mut app, "/").unwrap();
     crate::input::send_text_to_active(&mut app, "s").unwrap();
@@ -200,7 +200,7 @@ fn the_copy_mode_search_prompt_pastes_the_top_buffer() {
 fn a_cut_does_not_carry_over_to_the_next_search_prompt() {
     let mut app = app_with_pane();
     app.mode_keys = "vi".to_string();
-    app.paste_buffers = vec!["BUF1".to_string()];
+    app.paste_set_stack(&["BUF1"]);
     crate::copy_mode::enter_copy_mode(&mut app);
     crate::input::send_text_to_active(&mut app, "/").unwrap();
     crate::input::send_text_to_active(&mut app, "aa bb").unwrap();
@@ -215,7 +215,7 @@ fn a_cut_does_not_carry_over_to_the_next_search_prompt() {
 fn the_goto_line_prompt_pastes_the_top_buffer() {
     let mut app = app_with_pane();
     app.mode_keys = "vi".to_string();
-    app.paste_buffers = vec!["12".to_string()];
+    app.paste_set_stack(&["12"]);
     crate::copy_mode::enter_copy_mode(&mut app);
     crate::input::send_text_to_active(&mut app, ":").unwrap();
     crate::input::send_key_to_active(&mut app, "C-y").unwrap();
@@ -229,7 +229,7 @@ fn the_goto_line_prompt_pastes_the_top_buffer() {
 fn a_prompt_opened_by_a_copy_mode_binding_pastes_the_top_buffer() {
     let mut app = app_with_pane();
     app.mode_keys = "vi".to_string();
-    app.paste_buffers = vec!["BUF1".to_string()];
+    app.paste_set_stack(&["BUF1"]);
     crate::config::parse_config_line(&mut app,
         "bind -T copy-mode-vi Z command-prompt -p 'p' \"send -X search-forward -- '%%'\"");
     crate::copy_mode::enter_copy_mode(&mut app);

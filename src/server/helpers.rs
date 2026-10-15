@@ -797,10 +797,7 @@ pub(crate) fn drain_osc52(app: &mut AppState) {
     // (input.c, the `!= 2` guard). The forward below is not gated on `on`:
     // see the doc comment for why psmux still forwards on `external`.
     if app.set_clipboard == "on" {
-        app.paste_buffers.insert(0, text.clone());
-        if app.paste_buffers.len() > 10 {
-            app.paste_buffers.pop();
-        }
+        app.paste_add(text.clone());
     }
     app.clipboard_osc52 = Some(text);
 }

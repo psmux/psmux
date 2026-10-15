@@ -1564,12 +1564,9 @@ fn run_paste_buffer_here(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result
 
     let text = match &pb.buffer {
         Some(name) => {
-            let found = if let Ok(idx) = name.parse::<usize>() {
-                app.paste_buffers.get(idx).cloned()
-            } else {
-                app.named_buffers.get(name).cloned()
-            };
-            match found {
+            // By name only, automatic or named (paste_get_name,
+            // cmd-paste-buffer.c:80): `-b 1` is the buffer named 1.
+            match app.paste_get(name).map(str::to_string) {
                 Some(t) => t,
                 None => {
                     // tmux: "no buffer <name>" (cmd-paste-buffer.c:82).
@@ -1578,7 +1575,7 @@ fn run_paste_buffer_here(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result
             }
         }
         None => {
-            let top = app.paste_buffers.first().cloned().unwrap_or_default();
+            let top = app.paste_top().unwrap_or_default().to_string();
             if top.is_empty() {
                 // Issue #428: an empty stack falls back to the OS clipboard, the
                 // same fallback server/connection.rs applies.
@@ -1594,13 +1591,7 @@ fn run_paste_buffer_here(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result
     if pb.delete {
         match &pb.buffer {
             Some(name) => {
-                if let Ok(idx) = name.parse::<usize>() {
-                    if idx < app.paste_buffers.len() {
-                        app.paste_buffers.remove(idx);
-                    }
-                } else {
-                    app.named_buffers.remove(name);
-                }
+                app.paste_delete(name);
             }
             None => {
                 if !app.paste_buffers.is_empty() {
@@ -2356,6 +2347,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             let mut buf_name: Option<String> = None;
             let mut content: Option<String> = None;
             let mut propagate_to_clipboard = false;
+            let mut append = false;
             while i < parts.len() {
                 if parts[i] == "-b" {
                     if let Some(name) = parts.get(i + 1) {
@@ -2364,6 +2356,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     i += 2; // skip -b and its value (buffer name)
                 } else if parts[i] == "-w" {
                     propagate_to_clipboard = true;
+                    i += 1;
+                } else if parts[i] == "-a" {
+                    append = true;
                     i += 1;
                 } else if parts[i].starts_with('-') {
                     i += 1; // skip unknown flags
@@ -2377,55 +2372,44 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 if propagate_to_clipboard {
                     crate::clipboard::copy_to_system_clipboard(text);
                 }
-                if let Some(name) = buf_name {
-                    app.named_buffers.insert(name, text.clone());
-                } else {
-                    app.paste_buffers.insert(0, text.clone());
-                    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+                // -b replaces the buffer of that name, automatic or named, and
+                // -a appends to it (cmd-set-buffer.c:113 to :121).
+                match buf_name {
+                    Some(name) if append => {
+                        let data = format!("{}{}", app.paste_get(&name).unwrap_or(""), text);
+                        app.paste_set(&name, data);
+                    }
+                    Some(name) => app.paste_set(&name, text.clone()),
+                    None => app.paste_add(text.clone()),
                 }
             }
         }
         "delete-buffer" | "deleteb" => {
             let buf_name: Option<String> = parts.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
             if let Some(name) = buf_name {
-                if let Ok(idx) = name.parse::<usize>() {
-                    if idx < app.paste_buffers.len() { app.paste_buffers.remove(idx); }
-                } else {
-                    app.named_buffers.remove(&name);
+                if !app.paste_delete(&name) {
+                    // cmd-set-buffer.c:73
+                    app.status_message = Some((format!("unknown buffer: {}", name), std::time::Instant::now(), None));
                 }
             } else {
                 if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
             }
         }
         "list-buffers" | "lsb" => {
-            let mut output = String::new();
-            for (i, buf) in app.paste_buffers.iter().enumerate() {
-                output.push_str(&format!("buffer{}: {} bytes: \"{}\"\n", i,
-                    buf.len(), &buf.chars().take(50).collect::<String>()));
-            }
-            // List named buffers
-            let mut names: Vec<&String> = app.named_buffers.keys().collect();
-            names.sort();
-            for name in names {
-                let buf = &app.named_buffers[name];
-                let preview: String = buf.chars().take(50).collect();
-                output.push_str(&format!("{}: {} bytes: \"{}\"\n", name, buf.len(), preview));
-            }
+            let mut output = app.paste_listing(false);
             if output.is_empty() { output.push_str("(no buffers)\n"); }
             show_output_popup(app, "list-buffers", output);
         }
         "show-buffer" | "showb" => {
             let buf_name: Option<String> = parts.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
             if let Some(name) = buf_name {
-                if let Ok(idx) = name.parse::<usize>() {
-                    if let Some(buf) = app.paste_buffers.get(idx) {
-                        show_output_popup(app, "show-buffer", buf.clone());
-                    }
-                } else if let Some(buf) = app.named_buffers.get(&name) {
-                    show_output_popup(app, "show-buffer", buf.clone());
+                match app.paste_get(&name).map(str::to_string) {
+                    Some(buf) => show_output_popup(app, "show-buffer", buf),
+                    // cmd-save-buffer.c:92
+                    None => app.status_message = Some((format!("no buffer {}", name), std::time::Instant::now(), None)),
                 }
-            } else if let Some(buf) = app.paste_buffers.first() {
-                show_output_popup(app, "show-buffer", buf.clone());
+            } else if let Some(buf) = app.paste_top().map(str::to_string) {
+                show_output_popup(app, "show-buffer", buf);
             }
         }
         "choose-buffer" | "chooseb" => {
@@ -2495,8 +2479,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         "load-buffer" | "loadb" => {
             if let Some(path) = parts.get(1) {
                 if let Ok(data) = std::fs::read_to_string(path) {
-                    app.paste_buffers.insert(0, data);
-                    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+                    app.paste_add(data);
                 }
             }
         }

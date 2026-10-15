@@ -136,7 +136,7 @@ fn show_buffer_named_retrieves_correct_content() {
     let mut app = mock_app_with_window();
     app.control_port = None;
     app.named_buffers.insert("test_buf".to_string(), "TEST_CONTENT".to_string());
-    app.paste_buffers.insert(0, "STACK_TOP".to_string());
+    app.paste_add("STACK_TOP".to_string());
     let _ = execute_command_string(&mut app, "show-buffer -b test_buf");
     let (cmd, out) = extract_popup(&app);
     assert_eq!(cmd, "show-buffer");
@@ -147,7 +147,7 @@ fn show_buffer_named_retrieves_correct_content() {
 fn show_buffer_without_name_shows_stack_top() {
     let mut app = mock_app_with_window();
     app.control_port = None;
-    app.paste_buffers.insert(0, "STACK_TOP".to_string());
+    app.paste_add("STACK_TOP".to_string());
     app.named_buffers.insert("other".to_string(), "OTHER_CONTENT".to_string());
     let _ = execute_command_string(&mut app, "show-buffer");
     let (_, out) = extract_popup(&app);
@@ -166,14 +166,98 @@ fn show_buffer_named_nonexistent_no_popup() {
     );
 }
 
+// Issue #818: tmux has no index form of -b. `-b 1` is the buffer named 1
+// (paste_get_name), and an automatic buffer is found by the name it was
+// added with.
 #[test]
-fn show_buffer_numeric_index_shows_stack_position() {
+fn show_buffer_numeric_name_is_a_name_not_an_index() {
     let mut app = mock_app_with_window();
     app.control_port = None;
-    app.paste_buffers = vec!["ZERO".into(), "ONE".into(), "TWO".into()];
+    app.paste_set_stack(&["ZERO", "ONE", "TWO"]);
+    let _ = execute_command_string(&mut app, "show-buffer -b 1");
+    assert!(!matches!(app.mode, Mode::PopupMode { .. }), "no buffer is named 1");
+    let _ = execute_command_string(&mut app, "set-buffer -b 1 NAMED_ONE");
     let _ = execute_command_string(&mut app, "show-buffer -b 1");
     let (_, out) = extract_popup(&app);
-    assert_eq!(out, "ONE", "Numeric -b should index the positional stack");
+    assert_eq!(out, "NAMED_ONE");
+}
+
+#[test]
+fn show_buffer_finds_an_automatic_buffer_by_its_name() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "set-buffer AUTO1");
+    let _ = execute_command_string(&mut app, "set-buffer AUTO2");
+    let _ = execute_command_string(&mut app, "show-buffer -b buffer0");
+    let (_, out) = extract_popup(&app);
+    assert_eq!(out, "AUTO1", "buffer0 is the oldest and keeps its name");
+}
+
+#[test]
+fn automatic_names_are_fixed_count_up_and_skip_names_in_use() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "set-buffer -b buffer0 TAKEN");
+    let _ = execute_command_string(&mut app, "set-buffer A");
+    let _ = execute_command_string(&mut app, "set-buffer B");
+    let names: Vec<&str> = app.paste_buffers.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, vec!["buffer2", "buffer1"], "buffer0 is in use, so A is buffer1");
+    let _ = execute_command_string(&mut app, "delete-buffer -b buffer2");
+    let _ = execute_command_string(&mut app, "set-buffer C");
+    assert_eq!(app.paste_buffers[0].name, "buffer3", "the counter never goes back");
+    assert_eq!(app.paste_buffers[1].name, "buffer1", "an older buffer is not renamed");
+}
+
+#[test]
+fn set_buffer_named_replaces_an_automatic_buffer_of_that_name() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "set-buffer AUTO1");
+    let _ = execute_command_string(&mut app, "set-buffer AUTO2");
+    let _ = execute_command_string(&mut app, "set-buffer -b buffer0 REPLACED");
+    assert_eq!(app.paste_get("buffer0"), Some("REPLACED"));
+    assert_eq!(app.paste_buffers.len() + app.named_buffers.len(), 2, "no second buffer0");
+    let _ = execute_command_string(&mut app, "set-buffer -a -b buffer1 +APP");
+    assert_eq!(app.paste_get("buffer1"), Some("AUTO2+APP"));
+    assert_eq!(app.paste_buffers.len() + app.named_buffers.len(), 2);
+}
+
+#[test]
+fn set_buffer_empty_adds_nothing() {
+    let mut app = mock_app_with_window();
+    app.paste_add(String::new());
+    assert!(app.paste_buffers.is_empty(), "paste.c:165: empty data adds no buffer");
+    app.paste_set("n", String::new());
+    assert!(app.named_buffers.is_empty());
+}
+
+#[test]
+fn list_buffers_names_match_buffer_name_format() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "set-buffer AUTO1");
+    let _ = execute_command_string(&mut app, "set-buffer AUTO2");
+    let listing = app.paste_listing(false);
+    let plain: Vec<&str> = listing.lines().map(|l| l.split(':').next().unwrap()).collect();
+    let mut formatted = Vec::new();
+    for i in 0..app.paste_buffers.len() {
+        crate::format::set_buffer_idx_override(Some(i));
+        formatted.push(crate::format::expand_format("#{buffer_name}", &app));
+        crate::format::set_buffer_idx_override(None);
+    }
+    assert_eq!(plain, vec!["buffer1", "buffer0"]);
+    assert_eq!(formatted, vec!["buffer1".to_string(), "buffer0".to_string()]);
+}
+
+#[test]
+fn chooser_line_parses_back_to_its_name() {
+    let mut app = mock_app_with_window();
+    app.paste_add("two\nlines".to_string());
+    app.paste_set("my: odd", "x".to_string());
+    let listing = app.paste_listing(true);
+    let parsed: Vec<_> = listing.lines().filter_map(crate::client::parse_buffer_line).collect();
+    assert_eq!(parsed[0], ("buffer0".to_string(), 9, "two\\nlines".to_string()));
+    assert_eq!(parsed[1], ("my: odd".to_string(), 1, "x".to_string()));
 }
 
 // ========================================================================
@@ -196,20 +280,24 @@ fn delete_buffer_named_removes_only_that_name() {
 fn delete_buffer_without_name_removes_stack_top() {
     let mut app = mock_app_with_window();
     app.control_port = None;
-    app.paste_buffers = vec!["A".into(), "B".into()];
+    app.paste_set_stack(&["A", "B"]);
     app.named_buffers.insert("named".to_string(), "NAMED".to_string());
     let _ = execute_command_string(&mut app, "delete-buffer");
     assert_eq!(app.paste_buffers, vec!["B"], "Should remove stack top");
     assert!(app.named_buffers.contains_key("named"), "Named buffers should be untouched");
 }
 
+// Issue #818: `-b 1` is the buffer named 1. With the stack C, B, A
+// (buffer2, buffer1, buffer0) it removes nothing; `-b buffer1` removes B.
 #[test]
-fn delete_buffer_numeric_index_removes_stack_position() {
+fn delete_buffer_numeric_name_is_a_name_not_an_index() {
     let mut app = mock_app_with_window();
     app.control_port = None;
-    app.paste_buffers = vec!["A".into(), "B".into(), "C".into()];
+    app.paste_set_stack(&["A", "B", "C"]);
     let _ = execute_command_string(&mut app, "delete-buffer -b 1");
-    assert_eq!(app.paste_buffers, vec!["A", "C"], "Should remove index 1");
+    assert_eq!(app.paste_buffers, vec!["A", "B", "C"], "no buffer is named 1");
+    let _ = execute_command_string(&mut app, "delete-buffer -b buffer1");
+    assert_eq!(app.paste_buffers, vec!["A", "C"], "buffer1 holds B");
 }
 
 #[test]
@@ -229,7 +317,7 @@ fn deleteb_alias_named() {
 fn list_buffers_shows_both_stack_and_named() {
     let mut app = mock_app_with_window();
     app.control_port = None;
-    app.paste_buffers = vec!["STACK_DATA".into()];
+    app.paste_set_stack(&["STACK_DATA"]);
     app.named_buffers.insert("custom".to_string(), "CUSTOM_DATA".to_string());
     let _ = execute_command_string(&mut app, "list-buffers");
     let (_, out) = extract_popup(&app);

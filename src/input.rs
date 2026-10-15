@@ -748,7 +748,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
                         let buffers = &app.paste_buffers;
                         match command_prompt_edit(input, cursor, &mut app.prompt_saved, &name,
-                            || buffers.first().cloned()) {
+                            || buffers.first().map(|b| b.data.clone())) {
                             crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
                             crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
                             _ => {}
@@ -1128,13 +1128,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     // Append to buffer (yank + append to buffer 0)
                     if let (Some(_), Some(_)) = (app.copy_anchor, app.copy_pos) {
                         // Save current buffer 0
-                        let prev = app.paste_buffers.first().cloned().unwrap_or_default();
+                        let prev = app.paste_buffers.first().map(|b| b.name.clone());
                         yank_selection(app)?;
-                        // buffer 0 is now the new yank; prepend old text
-                        if let Some(buf) = app.paste_buffers.first_mut() {
-                            let new_text = buf.clone();
-                            *buf = format!("{}{}", prev, new_text);
-                        }
+                        // The new yank goes onto the end of the old top buffer.
+                        app.paste_append_new_top_to(prev);
                         exit_copy_mode(app);
                     }
                 }
@@ -1680,7 +1677,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Enter => {
                     // Paste selected buffer
                     if selected < app.paste_buffers.len() {
-                        let text = app.paste_buffers[selected].clone();
+                        let text = app.paste_buffers[selected].data.clone();
                         app.mode = Mode::Passthrough;
                         let win = &mut app.windows[app.active_idx];
                         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -3890,12 +3887,9 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
         }
         'A' => {
             if let (Some(_), Some(_)) = (app.copy_anchor, app.copy_pos) {
-                let prev = app.paste_buffers.first().cloned().unwrap_or_default();
+                let prev = app.paste_buffers.first().map(|b| b.name.clone());
                 yank_selection(app)?;
-                if let Some(buf) = app.paste_buffers.first_mut() {
-                    let new_text = buf.clone();
-                    *buf = format!("{}{}", prev, new_text);
-                }
+                app.paste_append_new_top_to(prev);
                 exit_copy_mode(app);
             }
         }
@@ -4044,7 +4038,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 if let Mode::CopySearch { ref mut input, .. } = app.mode {
                     let buffers = &app.paste_buffers;
                     match crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, k,
-                        || buffers.first().cloned()) {
+                        || buffers.first().map(|b| b.data.clone())) {
                         crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
                         crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
                         _ => {}
@@ -4102,7 +4096,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 if let Mode::CopyGoto { ref mut input } = app.mode {
                     let buffers = &app.paste_buffers;
                     crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, k,
-                        || buffers.first().cloned());
+                        || buffers.first().map(|b| b.data.clone()));
                 }
                 app.copy_prompt_back = back;
                 refresh_goto_prompt(app);

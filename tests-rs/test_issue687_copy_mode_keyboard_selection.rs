@@ -183,7 +183,7 @@ fn visible_lines(app: &AppState, first: u16, last: u16) -> String {
 }
 
 fn yanked(app: &AppState) -> String {
-    app.paste_buffers.first().cloned().unwrap_or_default()
+    app.paste_top().unwrap_or_default().to_string()
 }
 
 // The reported defect.

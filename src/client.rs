@@ -3315,7 +3315,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut session_page_h: usize = 10;
     let mut buffer_page_h: usize = 10;
     let mut buffer_chooser = false;
-    let mut buffer_entries: Vec<(usize, usize, String)> = Vec::new();  // (index, byte_len, preview)
+    let mut buffer_entries: Vec<(String, usize, String)> = Vec::new();  // (name, byte_len, preview)
     let mut buffer_selected: usize = 0;
     let mut buffer_scroll: usize = 0;
     // Digit-jump buffer for the choose-buffer picker.
@@ -5498,29 +5498,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             Duration::from_millis(200),
                                         ) {
                                             {
-                                                // Parse "buffer0: 17 bytes: "content"\nbuffer1: ..."
-                                                for line in buf_line.trim().split('\n') {
-                                                    let line = line.trim();
-                                                    if line.is_empty() { continue; }
-                                                    // Format: "bufferN: M bytes: "preview""
-                                                    if let Some(rest) = line.strip_prefix("buffer") {
-                                                        if let Some(colon_pos) = rest.find(':') {
-                                                            if let Ok(idx) = rest[..colon_pos].parse::<usize>() {
-                                                                let after_colon = &rest[colon_pos+1..].trim_start();
-                                                                let byte_len = after_colon.split_whitespace().next()
-                                                                    .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                                                                // Extract preview (after "bytes: ")
-                                                                let preview = if let Some(bp) = after_colon.find('"') {
-                                                                    let p = &after_colon[bp+1..];
-                                                                    p.trim_end_matches('"').to_string()
-                                                                } else {
-                                                                    after_colon.to_string()
-                                                                };
-                                                                buffer_entries.push((idx, byte_len, preview));
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                                // One "name: 17 bytes: "content"" per buffer.
+                                                buffer_entries.extend(buf_line.trim().split('\n').filter_map(parse_buffer_line));
                                             }
                                         }
                                     }
@@ -6072,8 +6051,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     };
                                     if let Some(sel) = target_idx {
                                         if sel < buffer_entries.len() {
-                                            let (idx, _, _) = &buffer_entries[sel];
-                                            cmd_batch.push(format!("paste-buffer-at {}\n", idx));
+                                            let (name, _, _) = &buffer_entries[sel];
+                                            cmd_batch.push(format!("paste-buffer-named {}\n",
+                                                crate::util::quote_arg_if_needed(name)));
                                             buffer_chooser = false;
                                             buffer_num_buffer.clear();
                                         }
@@ -6082,13 +6062,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('d') | KeyCode::Delete if buffer_chooser => {
                                     // Delete selected buffer
                                     if buffer_selected < buffer_entries.len() {
-                                        let (idx, _, _) = &buffer_entries[buffer_selected];
-                                        cmd_batch.push(format!("delete-buffer-at {}\n", idx));
+                                        let (name, _, _) = &buffer_entries[buffer_selected];
+                                        cmd_batch.push(format!("delete-buffer -b {}\n",
+                                            crate::util::quote_arg_if_needed(name)));
                                         buffer_entries.remove(buffer_selected);
-                                        // Re-index remaining entries
-                                        for (i, entry) in buffer_entries.iter_mut().enumerate() {
-                                            entry.0 = i;
-                                        }
                                         if buffer_selected >= buffer_entries.len() && buffer_selected > 0 {
                                             buffer_selected -= 1;
                                         }
@@ -6367,26 +6344,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                         Duration::from_millis(200),
                                                     ) {
                                                         {
-                                                            for line in buf_line.trim().split('\n') {
-                                                                let line = line.trim();
-                                                                if line.is_empty() { continue; }
-                                                                if let Some(rest) = line.strip_prefix("buffer") {
-                                                                    if let Some(colon_pos) = rest.find(':') {
-                                                                        if let Ok(idx) = rest[..colon_pos].parse::<usize>() {
-                                                                            let after_colon = &rest[colon_pos+1..].trim_start();
-                                                                            let byte_len = after_colon.split_whitespace().next()
-                                                                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                                                                            let preview = if let Some(bp) = after_colon.find('"') {
-                                                                                let p = &after_colon[bp+1..];
-                                                                                p.trim_end_matches('"').to_string()
-                                                                            } else {
-                                                                                after_colon.to_string()
-                                                                            };
-                                                                            buffer_entries.push((idx, byte_len, preview));
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
+                                                            buffer_entries.extend(buf_line.trim().split('\n').filter_map(parse_buffer_line));
                                                         }
                                                     }
                                                 }
@@ -9189,11 +9147,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
                 let num_width = buffer_entries.len().to_string().len();
                 let mut lines: Vec<Line> = Vec::new();
-                for (i, (idx, byte_len, preview)) in buffer_entries.iter().enumerate().skip(buffer_scroll).take(visible_h) {
+                for (i, (name, byte_len, preview)) in buffer_entries.iter().enumerate().skip(buffer_scroll).take(visible_h) {
                     // 1-based jump-row number on the left, then the existing
-                    // tmux-style "bufferN: M bytes: ..." label.
-                    let label = format!("{:>w$}. buffer{}: {} bytes: \"{}\"",
-                        i + 1, idx, byte_len, preview, w = num_width);
+                    // tmux-style "name: M bytes: ..." label, the name list-buffers shows.
+                    let label = format!("{:>w$}. {}: {} bytes: \"{}\"",
+                        i + 1, name, byte_len, preview, w = num_width);
                     let line = if i == buffer_selected {
                         Line::from(Span::styled(label, sel_style))
                     } else {
@@ -10821,6 +10779,23 @@ pub(crate) fn rename_overlay_ctrl_key(
 /// (`copy_mode::prompt_paste_line`), so only the first line is read, and it is
 /// read as sent: the usual reply helpers trim it, and a buffer can start or
 /// end with spaces. None when the server does not answer in time.
+/// One line of the server's `choose-buffer` reply, `name: size bytes:
+/// "sample"`, as (name, size, sample). The chooser acts on a buffer by its
+/// name, which stays the same while other buffers come and go (#818).
+pub(crate) fn parse_buffer_line(line: &str) -> Option<(String, usize, String)> {
+    let line = line.trim();
+    let at = line.find(" bytes: ")?;
+    let head = &line[..at];
+    let colon = head.rfind(": ")?;
+    let name = head[..colon].to_string();
+    let size = head[colon + 2..].trim().parse::<usize>().ok()?;
+    let rest = &line[at + " bytes: ".len()..];
+    let sample = rest.strip_prefix('"').unwrap_or(rest);
+    let sample = sample.strip_suffix('"').unwrap_or(sample).to_string();
+    if name.is_empty() { return None; }
+    Some((name, size, sample))
+}
+
 fn top_paste_buffer(port: u16, session_key: &str) -> Option<String> {
     crate::session::fetch_authed_first_line_raw(
         &format!("127.0.0.1:{}", port),

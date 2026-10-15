@@ -1566,11 +1566,15 @@ pub struct AppState {
     /// open with the live preview pane already visible (no need to press `p`).
     /// Default: off (matches tmux which has no preview-on-by-default option).
     pub choose_tree_preview: bool,
-    pub paste_buffers: Vec<String>,
+    /// Automatic paste buffers, newest first. Each keeps the name it was given
+    /// when it was added (`paste_add`), so a newer buffer never renames an
+    /// older one (issue #818).
+    pub paste_buffers: Vec<PasteBuffer>,
     /// Named paste buffers (HashMap<name, content>). Named buffers are separate
-    /// from the positional stack and are accessed via `set-buffer -b name`.
+    /// from the automatic stack and are made by `set-buffer -b name`.
     pub named_buffers: std::collections::HashMap<String, String>,
-    /// Auto-increment counter for unnamed buffer names (buffer0, buffer1, etc.)
+    /// The number the next automatic buffer is named with, `buffer<n>`. It only
+    /// goes up (tmux's paste_next_index, paste.c:178).
     pub paste_next_index: u32,
     pub status_left: String,
     pub status_right: String,
@@ -2157,7 +2161,137 @@ pub enum NewWindowPlan {
     Create { index: Option<usize>, kill_pos: Option<usize> },
 }
 
+/// An automatic paste buffer and the name it got when it was added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasteBuffer {
+    pub name: String,
+    pub data: String,
+}
+
+impl PartialEq<&str> for PasteBuffer {
+    fn eq(&self, other: &&str) -> bool { self.data == *other }
+}
+
+impl PartialEq<str> for PasteBuffer {
+    fn eq(&self, other: &str) -> bool { self.data == other }
+}
+
+impl PartialEq<String> for PasteBuffer {
+    fn eq(&self, other: &String) -> bool { &self.data == other }
+}
+
+/// How many automatic buffers are kept; the oldest goes first.
+pub const PASTE_BUFFER_LIMIT: usize = 10;
+
 impl AppState {
+    /// Whether a buffer of this name exists, automatic or named.
+    pub fn paste_name_in_use(&self, name: &str) -> bool {
+        self.named_buffers.contains_key(name) || self.paste_buffers.iter().any(|b| b.name == name)
+    }
+
+    /// Add an automatic buffer, as tmux's paste_add does (paste.c:160 to
+    /// :208): empty data adds nothing, the oldest automatic buffer goes when
+    /// the limit is reached, and the new one is named `buffer<n>` from a
+    /// counter that only goes up, skipping any name in use.
+    pub fn paste_add(&mut self, data: String) {
+        if data.is_empty() {
+            return;
+        }
+        while self.paste_buffers.len() >= PASTE_BUFFER_LIMIT {
+            self.paste_buffers.pop();
+        }
+        let name = loop {
+            let n = format!("buffer{}", self.paste_next_index);
+            self.paste_next_index = self.paste_next_index.wrapping_add(1);
+            if !self.paste_name_in_use(&n) {
+                break n;
+            }
+        };
+        self.paste_buffers.insert(0, PasteBuffer { name, data });
+    }
+
+    /// Tests: make the automatic buffers exactly these, newest first, named as
+    /// if they had been added one by one from the oldest.
+    #[cfg(test)]
+    pub fn paste_set_stack(&mut self, newest_first: &[&str]) {
+        self.paste_buffers.clear();
+        for d in newest_first.iter().rev() {
+            self.paste_add(d.to_string());
+        }
+    }
+
+    /// The newest automatic buffer's data (tmux's paste_get_top, which skips
+    /// named buffers, paste.c:107).
+    pub fn paste_top(&self) -> Option<&str> {
+        self.paste_buffers.first().map(|b| b.data.as_str())
+    }
+
+    /// A buffer's data by name, automatic or named (tmux's paste_get_name,
+    /// paste.c:124).
+    pub fn paste_get(&self, name: &str) -> Option<&str> {
+        if let Some(b) = self.paste_buffers.iter().find(|b| b.name == name) {
+            return Some(b.data.as_str());
+        }
+        self.named_buffers.get(name).map(String::as_str)
+    }
+
+    /// Store `data` under `name`, replacing any buffer of that name, automatic
+    /// or named, as tmux's paste_set does (paste.c:269 to :316). Empty data
+    /// changes nothing.
+    pub fn paste_set(&mut self, name: &str, data: String) {
+        if data.is_empty() {
+            return;
+        }
+        self.paste_buffers.retain(|b| b.name != name);
+        self.named_buffers.insert(name.to_string(), data);
+    }
+
+    /// Delete the buffer of this name. False when there is none.
+    pub fn paste_delete(&mut self, name: &str) -> bool {
+        if let Some(i) = self.paste_buffers.iter().position(|b| b.name == name) {
+            self.paste_buffers.remove(i);
+            return true;
+        }
+        self.named_buffers.remove(name).is_some()
+    }
+
+    /// Every buffer as list-buffers prints it, `name: size bytes: "sample"`,
+    /// the automatic ones newest first and then the named ones by name.
+    /// `escape` writes line breaks in the sample as `\n`, for the chooser,
+    /// which reads one buffer per line.
+    pub fn paste_listing(&self, escape: bool) -> String {
+        let line = |name: &str, data: &str| {
+            let preview: String = data.chars().take(50).collect();
+            let preview = if escape { preview.replace('\n', "\\n").replace('\r', "") } else { preview };
+            format!("{}: {} bytes: \"{}\"\n", name, data.len(), preview)
+        };
+        let mut output = String::new();
+        for b in &self.paste_buffers {
+            output.push_str(&line(&b.name, &b.data));
+        }
+        let mut names: Vec<&String> = self.named_buffers.keys().collect();
+        names.sort();
+        for name in names {
+            output.push_str(&line(name, &self.named_buffers[name]));
+        }
+        output
+    }
+
+    /// After a copy made a new top buffer, append it to the buffer that was on
+    /// top before (`prev`, its name) instead of keeping both, as tmux's
+    /// append-selection does: it adds the selection to the top buffer
+    /// (window_copy_append_selection). Nothing happens if the copy added no
+    /// buffer or there was none before it.
+    pub fn paste_append_new_top_to(&mut self, prev: Option<String>) {
+        let Some(prev) = prev else { return };
+        if self.paste_buffers.first().map(|b| b.name != prev).unwrap_or(false) {
+            let new = self.paste_buffers.remove(0);
+            if let Some(b) = self.paste_buffers.iter_mut().find(|b| b.name == prev) {
+                b.data.push_str(&new.data);
+            }
+        }
+    }
+
     /// Whether this is the hidden `__warm__` pre-spawn server: a server started
     /// ahead of time so the next `new-session` can claim it instead of paying a
     /// cold-start. It has no client and no visible session until it is claimed
@@ -3537,21 +3671,25 @@ pub enum CtrlReq {
     SwapPanePosition(String),
     ResizePane(String, u16),
     SetBuffer(String),
-    /// Set a named buffer: (name, content)
+    /// Set a named buffer: (name, content). It replaces any buffer of that
+    /// name, automatic or named.
     SetNamedBuffer(String, String),
+    /// `set-buffer -a -b name`: append to the buffer of that name, or make it.
+    AppendNamedBuffer(String, String),
     ListBuffers(mpsc::Sender<String>),
     ListBuffersFormat(mpsc::Sender<String>, String),
     ShowBuffer(mpsc::Sender<String>),
-    /// `None` means no buffer exists at that index (issue #264: lets callers
-    /// like paste-buffer distinguish "buffer not found" from "empty buffer").
-    ShowBufferAt(mpsc::Sender<Option<String>>, usize),
-    /// Show a named buffer by name. `None` means no such named buffer exists.
+    /// Show a buffer by name, automatic or named. `None` means no buffer has
+    /// that name (issue #264: lets callers tell "no buffer" from "empty").
     ShowNamedBuffer(mpsc::Sender<Option<String>>, String),
     DeleteBuffer,
     DeleteBufferAt(usize),
-    /// Delete a named buffer by name
-    DeleteNamedBuffer(String),
-    PasteBufferAt(usize),
+    /// Delete a buffer by name; the reply, when asked for, says whether one
+    /// was found.
+    DeleteNamedBuffer(String, Option<mpsc::Sender<bool>>),
+    /// Paste into the active pane the buffer of this name, or else the
+    /// automatic buffer at this index (the chooser's older wire form).
+    PasteBufferAt(Option<String>, usize),
     DisplayMessage(mpsc::Sender<String>, String, Option<usize>, bool, Option<u64>, Option<ClientSel>, DisplayFlags),  // resp, format, target_pane_idx, set_status_bar, duration_override_ms, -c client, -l/-N
     /// Like DisplayMessage but resolves -t %N pane ID instead of position. (Issue #332.)
     DisplayMessageById(mpsc::Sender<String>, String, usize, bool, Option<u64>, Option<ClientSel>, DisplayFlags),  // resp, format, pane_id, set_status_bar, duration_override_ms, -c client, -l/-N

@@ -310,9 +310,9 @@ fn copy_line_family_stays_unless_cancel() {
 #[test]
 fn copy_line_copies_the_whole_line_and_end_of_line_the_rest() {
     let (a, _) = at_line("copy-line");
-    let line = a.paste_buffers[0].clone();
+    let line = a.paste_buffers[0].data.clone();
     let (b, _) = at_line("copy-end-of-line");
-    let rest = b.paste_buffers[0].clone();
+    let rest = b.paste_buffers[0].data.clone();
     assert!(line.starts_with("line"), "{:?}", line);
     assert!(line.ends_with(&rest) && rest.len() + 2 == line.len(), "line {:?} rest {:?}", line, rest);
 }

@@ -1121,12 +1121,12 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
     }
     // Restore original scrollback
     parser.screen_mut().set_scrollback(current_scroll);
+    drop(parser);
     // Store in named register if one was selected
     if let Some(reg) = app.copy_register.take() {
         app.named_registers.insert(reg, text.clone());
     }
-    app.paste_buffers.insert(0, text.clone());
-    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+    app.paste_add(text.clone());
     copy_to_system_clipboard(&text);
     // Stage text for OSC 52 delivery to the client (works over SSH)
     if app.set_clipboard != "off" {
@@ -1176,7 +1176,7 @@ pub fn paste_latest(app: &mut AppState) -> io::Result<()> {
     }
     // Issue #428: fall back to the OS clipboard when the internal paste-buffer
     // stack is empty, so prefix+] pastes externally-copied text.
-    let internal = app.paste_buffers.first().cloned().unwrap_or_default();
+    let internal = app.paste_top().unwrap_or_default().to_string();
     let text = if internal.is_empty() {
         crate::clipboard::read_from_system_clipboard().unwrap_or_default()
     } else {
@@ -1199,8 +1199,8 @@ pub fn capture_active_pane(app: &mut AppState) -> io::Result<()> {
         text.push_str(capture_row_text(screen, r, 0..p.last_cols).trim_end());
         text.push('\n');
     }
-    app.paste_buffers.insert(0, text);
-    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+    drop(parser);
+    app.paste_add(text);
     Ok(())
 }
 
@@ -1298,7 +1298,7 @@ pub fn capture_active_pane_text(app: &mut AppState, pane_id: Option<usize>, pres
 }
 
 pub fn save_latest_buffer(app: &mut AppState, file: &str) -> io::Result<()> {
-    if let Some(buf) = app.paste_buffers.first() { std::fs::write(file, buf)?; }
+    if let Some(buf) = app.paste_top() { std::fs::write(file, buf)?; }
     Ok(())
 }
 
@@ -2153,8 +2153,8 @@ pub fn copy_end_of_line(app: &mut AppState) -> io::Result<()> {
     let screen = parser.screen();
     let cols = p.last_cols;
     let text = capture_row_text(screen, r, c..cols).trim_end().to_string();
-    app.paste_buffers.insert(0, text.clone());
-    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+    drop(parser);
+    app.paste_add(text.clone());
     copy_to_system_clipboard(&text);
     Ok(())
 }
@@ -2168,8 +2168,8 @@ pub fn copy_line(app: &mut AppState) -> io::Result<()> {
     let screen = parser.screen();
     let cols = p.last_cols;
     let text = capture_row_text(screen, r, 0..cols).trim_end().to_string();
-    app.paste_buffers.insert(0, text.clone());
-    if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
+    drop(parser);
+    app.paste_add(text.clone());
     copy_to_system_clipboard(&text);
     Ok(())
 }
