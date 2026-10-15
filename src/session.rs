@@ -2488,6 +2488,71 @@ pub fn classify_sessions_parallel(
     })
 }
 
+/// What one server answered to a registry wide listing (`list-sessions`,
+/// `list-windows -a`, `list-panes -a`), which talk to every server in the
+/// namespace over their own raw socket instead of `send_control_with_response`.
+#[derive(Debug, PartialEq)]
+pub enum RegistryReply {
+    /// The first reply line after the AUTH ack (possibly empty: a `-F` format
+    /// may legitimately expand to nothing).
+    Line(String),
+    /// The server refused the connection; holds its reason without `ERROR:`.
+    Refused(String),
+    /// Nothing came back in time, or the connection closed without a reply.
+    NoReply,
+}
+
+/// Read the AUTH ack and the first reply line of a registry listing.
+///
+/// A refusal is recognised by the MISSING `OK` ack, not by matching its text:
+/// the server writes `ERROR: Authentication required` or `ERROR: Invalid
+/// session key` INSTEAD of the ack, while a `-F` reply that starts with the
+/// word ERROR still comes after it. The old exact string check let the
+/// invalid key refusal through as a session row, and the discarded read result
+/// made a timed out read look like an empty `-F` expansion (issue #809).
+pub fn read_registry_reply<R: io::BufRead>(br: &mut R) -> RegistryReply {
+    let mut ack = String::new();
+    match br.read_line(&mut ack) {
+        Ok(0) | Err(_) => return RegistryReply::NoReply,
+        Ok(_) => {}
+    }
+    let ack = ack.trim();
+    if ack != "OK" {
+        return RegistryReply::Refused(
+            ack.strip_prefix("ERROR:").map(str::trim).unwrap_or(ack).to_string(),
+        );
+    }
+    let mut line = String::new();
+    match br.read_line(&mut line) {
+        // The server ends every reply with a newline, so even an empty
+        // expansion is Ok(1); EOF here means the reply never came.
+        Ok(0) | Err(_) => RegistryReply::NoReply,
+        Ok(_) => RegistryReply::Line(line),
+    }
+}
+
+/// Report a server that a registry listing could not read, unless it turned
+/// out to be shutting down meanwhile (its pid anchor is dead or its `.port`
+/// is gone), which is a normal race with `kill-server` and not a failure.
+/// Returns true when it reported one, so the caller exits non-zero.
+pub fn report_unreadable_registry_server(cmd: &str, base: &str, display_name: &str, reply: &RegistryReply) -> bool {
+    if registry_pid_anchor_alive(base) == Some(false) {
+        return false;
+    }
+    if let Some(p) = crate::paths::port_file_opt(base) {
+        if !Path::new(&p).exists() {
+            return false;
+        }
+    }
+    let reason = match reply {
+        RegistryReply::Refused(r) if !r.is_empty() => r.to_lowercase(),
+        RegistryReply::Refused(_) => "refused".to_string(),
+        _ => "no response from server (timed out)".to_string(),
+    };
+    eprintln!("psmux: {}: session {}: {}", cmd, display_name, reason);
+    true
+}
+
 /// PID-anchor liveness for the session registered under `base`, for
 /// enumeration paths (e.g. CLI `list-sessions`) that would otherwise pay a
 /// TCP connect timeout per dead entry. Some(false) = definitively dead
@@ -3354,3 +3419,7 @@ mod tests_namespaced_session_identity;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue774_session_name_case.rs"]
 mod tests_issue774_session_name_case;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue809_registry_reply.rs"]
+mod tests_issue809_registry_reply;

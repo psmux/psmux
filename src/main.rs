@@ -1658,6 +1658,8 @@ fn run_main() -> io::Result<()> {
                 // matches nothing on a live server is an empty listing at
                 // exit 0, and the two must stay distinguishable to scripts.
                 let mut live_servers: usize = 0;
+                // Servers we could not read (#809): reported on stderr as found.
+                let mut unreadable_servers: usize = 0;
                 if let Ok(entries) = std::fs::read_dir(&dir) {
                     for e in entries.flatten() {
                         if let Some(name) = e.file_name().to_str() {
@@ -1714,17 +1716,23 @@ fn run_main() -> io::Result<()> {
                                                 };
                                                 let _ = std::io::Write::write_all(&mut s, query.as_bytes());
                                                 let mut br = std::io::BufReader::new(s);
-                                                let mut line = String::new();
-                                                // Skip "OK" response from AUTH
-                                                let _ = br.read_line(&mut line);
-                                                if line.trim() == "OK" {
-                                                    line.clear();
-                                                    let _ = br.read_line(&mut line);
-                                                }
-                                                if line.trim() == "ERROR: Authentication required" {
-                                                    // Auth failed, skip this session
-                                                    continue;
-                                                }
+                                                // A server that refused us or did not answer in
+                                                // time gets no row: an empty row or its ERROR
+                                                // reply would read as a session (issue #809). It
+                                                // is named on stderr and the exit code is 1, while
+                                                // the servers that answered are still listed.
+                                                let line = match crate::session::read_registry_reply(&mut br) {
+                                                    crate::session::RegistryReply::Line(l) => l,
+                                                    other => {
+                                                        let shown = ns_prefix.as_ref()
+                                                            .and_then(|p| base.strip_prefix(p.as_str()))
+                                                            .unwrap_or(base);
+                                                        if crate::session::report_unreadable_registry_server("list-sessions", base, shown, &other) {
+                                                            unreadable_servers += 1;
+                                                        }
+                                                        continue;
+                                                    }
+                                                };
                                                 live_servers += 1;
                                                 // When -F format is provided, the server already
                                                 // expanded it; use the result even if empty (tmux
@@ -1780,6 +1788,17 @@ fn run_main() -> io::Result<()> {
                                                 // set: dropping the `.port` alone would strand its
                                                 // siblings where no sweep can reach them (#530).
                                                 crate::session::remove_session_registry_files(&e.path());
+                                            } else if crate::session::registry_pid_anchor_alive(base) == Some(true) {
+                                                // Its server is alive but did not accept in time:
+                                                // as unreadable as a stalled reply (#809).
+                                                let shown = ns_prefix.as_ref()
+                                                    .and_then(|p| base.strip_prefix(p.as_str()))
+                                                    .unwrap_or(base);
+                                                if crate::session::report_unreadable_registry_server(
+                                                    "list-sessions", base, shown, &crate::session::RegistryReply::NoReply,
+                                                ) {
+                                                    unreadable_servers += 1;
+                                                }
                                             }
                                         }
                                     }
@@ -1795,6 +1814,11 @@ fn run_main() -> io::Result<()> {
                     l_socket_name.as_deref(),
                 )
                 .is_some();
+                if unreadable_servers > 0 {
+                    // A listing with a server missing is not a complete answer.
+                    let _ = io::stdout().flush();
+                    std::process::exit(1);
+                }
                 if live_servers == 0 && !held_server {
                     // Nothing answered: no user session in this namespace (a
                     // `__warm__` standby is not a session). tmux prints
@@ -3142,6 +3166,7 @@ fn run_main() -> io::Result<()> {
                     // Iterate over all session port files (like list-sessions does)
                     let dir = crate::paths::psmux_dir();
                     let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
+                    let mut unreadable_servers: usize = 0;
                     if let Ok(entries) = std::fs::read_dir(&dir) {
                         for e in entries.flatten() {
                             if let Some(name) = e.file_name().to_str() {
@@ -3176,13 +3201,21 @@ fn run_main() -> io::Result<()> {
                                                 let _ = std::io::Write::write_all(&mut s, query.as_bytes());
                                                 let _ = s.flush();
                                                 let mut br = std::io::BufReader::new(s);
-                                                let mut line = String::new();
-                                                let _ = std::io::BufRead::read_line(&mut br, &mut line);
-                                                if line.trim() == "OK" {
-                                                    line.clear();
-                                                    let _ = std::io::BufRead::read_line(&mut br, &mut line);
-                                                }
-                                                if line.trim() == "ERROR: Authentication required" { continue; }
+                                                // A refusal or a stalled server is named on
+                                                // stderr and fails the listing, instead of its
+                                                // ERROR reply being printed as a row (#809).
+                                                let line = match crate::session::read_registry_reply(&mut br) {
+                                                    crate::session::RegistryReply::Line(l) => l,
+                                                    other => {
+                                                        let shown = ns_prefix.as_ref()
+                                                            .and_then(|p| base.strip_prefix(p.as_str()))
+                                                            .unwrap_or(base);
+                                                        if crate::session::report_unreadable_registry_server("list-panes", base, shown, &other) {
+                                                            unreadable_servers += 1;
+                                                        }
+                                                        continue;
+                                                    }
+                                                };
                                                 // Print all lines from this session
                                                 if !line.trim().is_empty() {
                                                     print!("{}", line);
@@ -3208,6 +3241,10 @@ fn run_main() -> io::Result<()> {
                                 }
                             }
                         }
+                    }
+                    if unreadable_servers > 0 {
+                        let _ = io::stdout().flush();
+                        std::process::exit(1);
                     }
                 } else {
                     // Single session: build command and send to target session
@@ -3260,6 +3297,7 @@ fn run_main() -> io::Result<()> {
                     // Iterate over all session port files (like list-sessions does)
                     let dir = crate::paths::psmux_dir();
                     let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
+                    let mut unreadable_servers: usize = 0;
                     if let Ok(entries) = std::fs::read_dir(&dir) {
                         for e in entries.flatten() {
                             if let Some(name) = e.file_name().to_str() {
@@ -3296,13 +3334,21 @@ fn run_main() -> io::Result<()> {
                                                 let _ = std::io::Write::write_all(&mut s, query.as_bytes());
                                                 let _ = s.flush();
                                                 let mut br = std::io::BufReader::new(s);
-                                                let mut line = String::new();
-                                                let _ = std::io::BufRead::read_line(&mut br, &mut line);
-                                                if line.trim() == "OK" {
-                                                    line.clear();
-                                                    let _ = std::io::BufRead::read_line(&mut br, &mut line);
-                                                }
-                                                if line.trim() == "ERROR: Authentication required" { continue; }
+                                                // A refusal or a stalled server is named on
+                                                // stderr and fails the listing, instead of its
+                                                // ERROR reply being printed as a row (#809).
+                                                let line = match crate::session::read_registry_reply(&mut br) {
+                                                    crate::session::RegistryReply::Line(l) => l,
+                                                    other => {
+                                                        let shown = ns_prefix.as_ref()
+                                                            .and_then(|p| base.strip_prefix(p.as_str()))
+                                                            .unwrap_or(base);
+                                                        if crate::session::report_unreadable_registry_server("list-windows", base, shown, &other) {
+                                                            unreadable_servers += 1;
+                                                        }
+                                                        continue;
+                                                    }
+                                                };
                                                 if !line.trim().is_empty() {
                                                     print!("{}", line);
                                                 }
@@ -3327,6 +3373,10 @@ fn run_main() -> io::Result<()> {
                                 }
                             }
                         }
+                    }
+                    if unreadable_servers > 0 {
+                        let _ = io::stdout().flush();
+                        std::process::exit(1);
                     }
                 } else {
                     // Single session: build command and send to target session
