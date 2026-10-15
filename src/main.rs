@@ -1788,17 +1788,6 @@ fn run_main() -> io::Result<()> {
                                                 // set: dropping the `.port` alone would strand its
                                                 // siblings where no sweep can reach them (#530).
                                                 crate::session::remove_session_registry_files(&e.path());
-                                            } else if crate::session::registry_pid_anchor_alive(base) == Some(true) {
-                                                // Its server is alive but did not accept in time:
-                                                // as unreadable as a stalled reply (#809).
-                                                let shown = ns_prefix.as_ref()
-                                                    .and_then(|p| base.strip_prefix(p.as_str()))
-                                                    .unwrap_or(base);
-                                                if crate::session::report_unreadable_registry_server(
-                                                    "list-sessions", base, shown, &crate::session::RegistryReply::NoReply,
-                                                ) {
-                                                    unreadable_servers += 1;
-                                                }
                                             }
                                         }
                                     }
