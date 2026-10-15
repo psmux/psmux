@@ -12,9 +12,11 @@
 #   detached+pg  DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 #   nowindow     CREATE_NO_WINDOW (a hidden console of its own)
 #   nowindow+pg  CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-# Each round is a fresh server in its own namespace, because what matters is
-# the pane the server creates first (later panes were never affected). The
-# round starts `ping -t 127.0.0.1` in that pane, checks pane_current_command is
+#   ssh          (opt in) `ssh localhost <psmux> new-session -d ...`, exactly
+#                the reporter's context; needs sshd and key auth to localhost
+# Each round is a fresh server in its own namespace, because the first C-c a
+# server relays happens to clear its own inherited "ignore Ctrl+C" bit, so
+# only panes born before that first C-c show the bug. The round starts `ping -t 127.0.0.1` in that pane, checks pane_current_command is
 # PING, sends C-c, and checks that the pane's command is back to cmd and that
 # no new "Reply from" line appears.
 #
@@ -28,6 +30,8 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+# `pwsh -File ... -Contexts a,b` arrives as the single string "a,b"
+$Contexts = @($Contexts | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if (-not $Bin) { $Bin = (Get-Command psmux -ErrorAction Stop).Source }
 Write-Host "binary: $Bin"
 
@@ -120,6 +124,9 @@ foreach ($ctx in $Contexts) {
         $s = 'clit'
         if ($ctx -eq 'console') {
             & $Bin -L $ns new-session -d -s $s -x 100 -y 30 cmd.exe
+        } elseif ($ctx -eq 'ssh') {
+            ssh -o BatchMode=yes -o ConnectTimeout=5 localhost "`"$Bin`" -L $ns new-session -d -s $s -x 100 -y 30 cmd.exe" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Host "  [ssh] ssh to localhost failed (exit $LASTEXITCODE)" }
         } else {
             $rc = [Issue812Launch]::Run("`"$Bin`" -L $ns new-session -d -s $s -x 100 -y 30 cmd.exe",
                 [uint32]$flagsFor[$ctx], 15000)
