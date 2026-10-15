@@ -802,7 +802,14 @@ fn run_command_list_on(
         shared += 1;
     }
     if shared > 0 {
-        let line = crate::cli::command_list_wire_line(&commands[0], &commands[1..shared]);
+        // Spawning commands of the list give their panes this client's PATH
+        // (#829), as each would run alone.
+        let path = env::var_os("PATH");
+        let with_path: Vec<Vec<String>> = commands[..shared]
+            .iter()
+            .map(|c| crate::cli::with_client_path(c, path.as_deref()))
+            .collect();
+        let line = crate::cli::command_list_wire_line(&with_path[0], &with_path[1..]);
         let reply = match send_control_with_response(format!("{}\n", line)) {
             Ok(reply) => reply,
             Err(e) => {
@@ -2736,6 +2743,10 @@ fn run_main() -> io::Result<()> {
                         start_dir = Some(cwd.to_string_lossy().into_owned());
                     }
                 }
+                // The new pane gets this client's PATH (#829, tmux spawn.c).
+                if let Some(kv) = crate::cli::client_path_env_value(&cmd_args, std::env::var_os("PATH").as_deref()) {
+                    env_args.insert(0, kv);
+                }
                 let cmd_arg = nw_positional.join(" ");
                 let cmd_arg = cmd_arg.as_str();
                 let mut cmd_line = "new-window".to_string();
@@ -2838,6 +2849,10 @@ fn run_main() -> io::Result<()> {
                     if let Ok(cwd) = std::env::current_dir() {
                         start_dir = Some(cwd.to_string_lossy().into_owned());
                     }
+                }
+                // The new pane gets this client's PATH (#829, tmux spawn.c).
+                if let Some(kv) = crate::cli::client_path_env_value(&cmd_args, std::env::var_os("PATH").as_deref()) {
+                    env_args.insert(0, kv);
                 }
                 let cmd_arg = sw_positional.join(" ");
                 let cmd_arg = cmd_arg.as_str();
@@ -4214,6 +4229,10 @@ fn run_main() -> io::Result<()> {
             // respawn-pane - Restart the pane's process
             "respawn-pane" | "respawnp" | "resp" => {
                 let mut cmd = "respawn-pane".to_string();
+                // The respawned process gets this client's PATH (#829).
+                if let Some(kv) = crate::cli::client_path_env_value(&cmd_args, std::env::var_os("PATH").as_deref()) {
+                    cmd.push_str(&format!(" -e {}", crate::util::quote_arg(&kv)));
+                }
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
@@ -5536,7 +5555,10 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             "new-pane" | "newp" => {
-                let parts: Vec<String> = cmd_args.iter().map(|s| {
+                // The floating pane gets this client's PATH (#829).
+                let owned: Vec<String> = cmd_args.iter().map(|s| s.to_string()).collect();
+                let owned = crate::cli::with_client_path(&owned, std::env::var_os("PATH").as_deref());
+                let parts: Vec<String> = owned.iter().map(|s| {
                     crate::util::quote_arg_if_needed(s)
                 }).collect();
                 let line = format!("{}\n", parts.join(" "));
@@ -5735,6 +5757,10 @@ fn run_main() -> io::Result<()> {
                 // server (#580). Forward them the way respawn-pane does, with
                 // the opaque command quoted into one wire token.
                 let mut cmd = "respawn-window".to_string();
+                // The respawned process gets this client's PATH (#829).
+                if let Some(kv) = crate::cli::client_path_env_value(&cmd_args, std::env::var_os("PATH").as_deref()) {
+                    cmd.push_str(&format!(" -e {}", crate::util::quote_arg(&kv)));
+                }
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {

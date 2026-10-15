@@ -984,6 +984,10 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
 /// process only, after the session environment, so `-e` wins over
 /// `set-environment`.
 pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>, empty: bool, extra_env: &[(String, String)]) -> io::Result<()> {
+    // A caller's PATH that the pane inherits anyway changes nothing (#829):
+    // drop it so the warm pool below stays usable.
+    let extra_env_kept = client_path_override(extra_env, inherited_path(app).as_deref());
+    let extra_env = extra_env_kept.as_slice();
     // #607: the new window's pane becomes the active one, so hand the pane
     // that is losing focus its own copy mode back before that happens and let
     // the new pane adopt its own (a fresh pane has none) afterwards.  Without
@@ -1826,9 +1830,45 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     split_active_with_env(app, kind, command, pty_system_ref, start_dir, &[])
 }
 
+/// The PATH a new pane inherits when no `-e` sets it: the session's
+/// `set-environment PATH` if there is one, else the server's own (the merged
+/// global view, see environ.rs), and None when PATH is removed or hidden.
+pub fn inherited_path(app: &AppState) -> Option<String> {
+    let is_path = |k: &String| k.eq_ignore_ascii_case("PATH");
+    if app.env_scopes.child_removals(&app.environment).iter().any(is_path) {
+        return None;
+    }
+    if let Some((_, v)) = app.environment.iter().find(|(k, _)| is_path(k)) {
+        return Some(v.clone());
+    }
+    std::env::var_os("PATH").map(|v| v.to_string_lossy().into_owned())
+}
+
+/// `extra_env` without a PATH entry whose value is the one the pane inherits
+/// anyway (`inherited`).
+///
+/// A one-shot CLI sends its own PATH with every spawning command (#829, tmux
+/// spawn.c gives an unattached client's PATH to the new pane). When it is the
+/// same PATH the pane would get, setting it again changes nothing, but any
+/// `-e` makes a pane skip the warm pool, whose spare shells were started with
+/// the server's environment. Dropping the no-op entry keeps the pool fast in
+/// the common case; a PATH that differs stays and forces a cold spawn, since a
+/// running spare cannot have its environment changed.
+pub fn client_path_override(extra_env: &[(String, String)], inherited: Option<&str>) -> Vec<(String, String)> {
+    extra_env
+        .iter()
+        .filter(|(k, v)| !(k.eq_ignore_ascii_case("PATH") && Some(v.as_str()) == inherited))
+        .cloned()
+        .collect()
+}
+
 /// `split_active_with_command` plus per-pane environment from
 /// `split-window -e KEY=VALUE` (tmux parity, issue #489).
 pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Option<&str>, pty_system_ref: Option<&dyn portable_pty::PtySystem>, start_dir: Option<&str>, extra_env: &[(String, String)]) -> io::Result<()> {
+    // A caller's PATH that the pane inherits anyway changes nothing (#829):
+    // drop it so the warm pool below stays usable.
+    let extra_env_kept = client_path_override(extra_env, inherited_path(app).as_deref());
+    let extra_env = extra_env_kept.as_slice();
     // #607: the split's new pane becomes the active one.  Park the copy mode
     // on the pane it was entered in first, then let the new pane adopt its
     // own (none), so the split does not open in copy mode and the pane the

@@ -990,6 +990,95 @@ pub fn split_cli_command_list<S: AsRef<str>>(
     Some((first, queued))
 }
 
+/// Commands whose new pane process takes the PATH of the one-shot client that
+/// ran them (issue #829). tmux's spawn_pane (spawn.c) replaces the session's
+/// PATH with the issuing client's when that client is not attached
+/// (`c->session == NULL`), "because otherwise running tmux new myprogram
+/// wouldn't work if myprogram isn't in the session's path". Every pane spawn
+/// goes through spawn_pane there: new-window, split-window (and its new-pane
+/// form) and respawn-pane/respawn-window. run-shell and display-popup build
+/// their environment from the session alone (job.c), so they are not here.
+pub fn spawns_pane_with_client_path(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "new-window" | "neww"
+            | "split-window" | "splitw" | "split-pane" | "splitp"
+            | "new-pane" | "newp"
+            | "respawn-pane" | "respawnp" | "resp"
+            | "respawn-window" | "respawnw"
+    )
+}
+
+/// Does this spawning command's own `-e` already set PATH? Only the options
+/// before a `--` are read; what follows it is the pane's command.
+fn has_own_path_env<S: AsRef<str>>(args: &[S]) -> bool {
+    let is_path = |kv: &str| {
+        kv.trim_matches('"')
+            .split_once('=')
+            .map_or(false, |(k, _)| k.eq_ignore_ascii_case("PATH"))
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_ref();
+        if a == "--" {
+            break;
+        }
+        if a == "-e" {
+            if args.get(i + 1).map_or(false, |v| is_path(v.as_ref())) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("-e") {
+            if is_path(v) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The `KEY=VALUE` operand of the `-e` a one-shot CLI adds to a spawning
+/// command so its pane gets the caller's PATH (issue #829), or None.
+///
+/// `args` is the whole command, `args[0]` its name. None when the command
+/// spawns nothing, the caller has no PATH, or the caller's own `-e` already
+/// names PATH: an explicit `-e PATH=...` keeps working as it always has.
+/// `-e` is the carrier because every server that knows these commands already
+/// applies it to the new pane, so a newer CLI talking to an older running
+/// server still gets the caller's PATH into the pane. The server drops it
+/// again when it equals what the pane inherits anyway, so the warm pane pool
+/// stays usable in the common case (see `pane::client_path_override`).
+pub fn client_path_env_value<S: AsRef<str>>(args: &[S], path: Option<&std::ffi::OsStr>) -> Option<String> {
+    let cmd = args.first()?.as_ref();
+    if !spawns_pane_with_client_path(cmd) || has_own_path_env(&args[1..]) {
+        return None;
+    }
+    let path = path?.to_string_lossy();
+    if path.is_empty() {
+        return None;
+    }
+    Some(format!("PATH={}", path))
+}
+
+/// `command` with the caller's PATH added as `-e PATH=...` right after the
+/// command name when [`client_path_env_value`] asks for it.
+pub fn with_client_path(command: &[String], path: Option<&std::ffi::OsStr>) -> Vec<String> {
+    match client_path_env_value(command, path) {
+        Some(kv) => {
+            let mut out = Vec::with_capacity(command.len() + 2);
+            out.push(command[0].clone());
+            out.push("-e".to_string());
+            out.push(kv);
+            out.extend(command[1..].iter().cloned());
+            out
+        }
+        None => command.to_vec(),
+    }
+}
+
 /// The one line a CLI command list goes to the server as: each command's
 /// arguments quoted where the server's tokenizer needs it (the same
 /// [`crate::util::quote_arg_if_needed`] rule the CLI arms use, so a value such
@@ -2233,3 +2322,7 @@ mod tests_issue734_command_queue;
 #[cfg(test)]
 #[path = "../tests-rs/test_cli_command_list.rs"]
 mod tests_cli_command_list;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue829_client_path.rs"]
+mod tests_issue829_client_path;
