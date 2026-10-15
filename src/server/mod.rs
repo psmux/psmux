@@ -5167,8 +5167,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::session::remove_session_id_file(&app.port_file_base());
+                    // A control client of a destroyed session gets a bare
+                    // `%exit` (tmux server_destroy_session sets CLIENT_EXIT,
+                    // MSG_EXIT carries no message: client.c:416-421), not a
+                    // dropped connection read as `server exited unexpectedly`
+                    // (#825). The DETACH wait below gives the writers time to
+                    // send it.
+                    if !app.control_clients.is_empty() {
+                        control::emit_notification(
+                            &app,
+                            crate::types::ControlNotification::Exit { reason: None },
+                        );
+                    }
                     crate::types::send_directive_to_all_clients("DETACH");
-                    std::thread::sleep(Duration::from_millis(50));
+                    std::thread::sleep(Duration::from_millis(if app.control_clients.is_empty() { 50 } else { 80 }));
                     crate::types::shutdown_persistent_streams();
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
@@ -6992,6 +7004,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         info.readonly = readonly;
                     }
                 }
+                CtrlReq::SetClientIgnoreSize(cid, ignore) => {
+                    // Only an attached client carries the flag; it goes with
+                    // the client (reap_client).
+                    let changed = if ignore {
+                        app.client_registry.contains_key(&cid) && app.ignore_size_clients.insert(cid)
+                    } else {
+                        app.ignore_size_clients.remove(&cid)
+                    };
+                    if changed && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
+                        resize_all_panes(&mut app);
+                        state_dirty = true;
+                        meta_dirty = true;
+                    }
+                }
                 CtrlReq::SetClientFocus(cid, focused) => {
                     if let Some(info) = app.client_registry.get_mut(&cid) {
                         info.focused = focused;
@@ -7022,7 +7048,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     // Shut down the TCP stream to force disconnect
-                    crate::types::shutdown_client_stream(target_cid);
+                    if !control::detach_control_client(&mut app, target_cid) { crate::types::shutdown_client_stream(target_cid); }
                     // Recompute dynamic windows from the remaining clients.
                     if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                         resize_all_panes(&mut app);
@@ -7083,7 +7109,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if app.latest_client_id == Some(cid) {
                             app.latest_client_id = app.client_registry.keys().max().copied();
                         }
-                        crate::types::shutdown_client_stream(cid);
+                        if !control::detach_control_client(&mut app, cid) { crate::types::shutdown_client_stream(cid); }
                         if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                             resize_all_panes(&mut app);
                         }
@@ -7116,7 +7142,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if app.client_registry.remove(cid).is_some() {
                             app.attached_clients = app.attached_clients.saturating_sub(1);
                         }
-                        crate::types::shutdown_client_stream(*cid);
+                        if !control::detach_control_client(&mut app, *cid) { crate::types::shutdown_client_stream(*cid); }
                         control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
                             client: tty.clone(),
                         });
@@ -7170,7 +7196,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if app.client_registry.remove(cid).is_some() {
                             app.attached_clients = app.attached_clients.saturating_sub(1);
                         }
-                        crate::types::shutdown_client_stream(*cid);
+                        if !control::detach_control_client(&mut app, *cid) { crate::types::shutdown_client_stream(*cid); }
                         control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
                             client: tty.clone(),
                         });

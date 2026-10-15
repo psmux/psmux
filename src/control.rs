@@ -116,6 +116,7 @@ pub fn format_notification(notif: &ControlNotification) -> String {
                 "%exit".to_string()
             }
         }
+        ControlNotification::Detached => "%exit".to_string(),
         ControlNotification::PasteBufferChanged { name } => {
             format!("%paste-buffer-changed {}", name)
         }
@@ -230,6 +231,27 @@ pub fn emit_initial_state(app: &AppState, client_id: u64) {
             name: app.session_name.clone(),
         },
     );
+}
+
+/// Detach a control client the way tmux does (server_client_detach): it
+/// stops being a control client of this session at once, and its connection
+/// writes a bare `%exit` and closes once the command in flight has answered.
+/// Returns false for a client that is not a control client, which the caller
+/// then disconnects as before.
+///
+/// Closing the stream here instead, as the TUI path does, cut the control
+/// client off with no `%exit`, so it reported `server exited unexpectedly`
+/// for a plain detach (#825).
+pub fn detach_control_client(app: &mut AppState, client_id: u64) -> bool {
+    match app.control_clients.remove(&client_id) {
+        Some(client) => {
+            // Dropping the client's sender after this ends its writer, so
+            // the connection closes even when the channel is full.
+            let _ = client.notification_tx.try_send(ControlNotification::Detached);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Check if any control mode clients are connected.
@@ -619,3 +641,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue811_window_notifications.rs"]
 mod tests_issue811_window_notifications;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue825_control_detach.rs"]
+mod tests_issue825_control_detach;

@@ -108,9 +108,16 @@ pub fn resolve_client_sel(app: &AppState, sel: &crate::types::ClientSel) -> Opti
 
 /// `#{client_flags}`, in the order tmux's server_client_get_flags lists them.
 pub fn client_flags_string(ci: &crate::types::ClientInfo) -> String {
+    client_flags_string_with(ci, false)
+}
+
+/// [`client_flags_string`] for a client that may have set `ignore-size`
+/// (server-client.c server_client_get_flags lists it after control-mode).
+pub fn client_flags_string_with(ci: &crate::types::ClientInfo, ignore_size: bool) -> String {
     let mut flags: Vec<&str> = vec!["attached"];
     if ci.focused { flags.push("focused"); }
     if ci.is_control { flags.push("control-mode"); }
+    if ignore_size { flags.push("ignore-size"); }
     if ci.readonly { flags.push("read-only"); }
     // Every psmux client speaks UTF-8 (the client forces the console code page).
     flags.push("UTF-8");
@@ -1525,7 +1532,7 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
             .unwrap_or_default(),
         "client_readonly" => format_client(app).map(|ci| if ci.readonly { "1".into() } else { "0".into() }).unwrap_or_default(),
         "client_control_mode" => format_client(app).map(|ci| if ci.is_control { "1".into() } else { "0".into() }).unwrap_or_default(),
-        "client_flags" => format_client(app).map(client_flags_string).unwrap_or_default(),
+        "client_flags" => format_client(app).map(|ci| client_flags_string_with(ci, app.ignore_size_clients.contains(&ci.id))).unwrap_or_default(),
         "client_prefix" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) { "1".into() } else { "0".into() },
         "client_activity" => match format_client(app) {
             Some(ci) => epoch_secs_ago(ci.last_activity.elapsed()).to_string(),
@@ -1705,7 +1712,9 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
     match var {
         // ── Session ──
         "session_name" => app.session_name.clone(),
-        "session_attached" => if app.attached_clients > 0 { "1".into() } else { "0".into() },
+        // tmux counts the attached clients (format.c format_cb_session_attached,
+        // s->attached), not whether there is one (#825).
+        "session_attached" => app.attached_clients.to_string(),
         "session_windows" => app.windows.len().to_string(),
         "session_id" => format!("${}", app.session_id),
         "session_created" => app.created_at.timestamp().to_string(),

@@ -3491,13 +3491,15 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 // Apply -L namespace prefix to -s session lookup so users can
-                // target a namespaced session by its short name.
+                // target a namespaced session by its short name. -s is a target
+                // session in tmux (cmd-detach-client.c, CMD_FIND_SESSION), so
+                // `=name` (exact match) and `$N` resolve as they do for
+                // kill-session -t (#825).
                 let session_for_routing = if let Some(s) = &s_target {
-                    if let Some(ref l) = l_socket_name {
-                        format!("{}__{}", l, s)
-                    } else {
-                        s.clone()
-                    }
+                    let resolved = crate::cli::parse_target(s)
+                        .session
+                        .unwrap_or_else(|| crate::cli::strip_exact_match_prefix(s).to_string());
+                    crate::session::namespaced_session_base(l_socket_name.as_deref(), &resolved)
                 } else {
                     env::var("PSMUX_TARGET_SESSION").unwrap_or_else(|_| {
                         if let Some(ref l) = l_socket_name {

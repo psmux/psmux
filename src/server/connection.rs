@@ -2107,9 +2107,23 @@ if control_echo || control_noecho {
     // Spawn notification writer thread BEFORE writing DCS or registering,
     // so it is ready to drain notifications as soon as they arrive.
     let ws_notif = write_lock.clone();
+    // Set while a command is between its dispatch and its written reply, so
+    // a detach's `%exit` follows the `%end` of the command that caused it,
+    // as in tmux (server_client_check_exit runs after the command).
+    let cmd_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cmd_busy_notif = cmd_busy.clone();
     let notif_thread = std::thread::spawn(move || {
         while let Ok(notif) = notif_rx.recv() {
-            let is_exit = matches!(notif, ControlNotification::Exit { .. });
+            let is_detach = matches!(notif, ControlNotification::Detached);
+            let is_exit = is_detach || matches!(notif, ControlNotification::Exit { .. });
+            if is_detach {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while cmd_busy_notif.load(std::sync::atomic::Ordering::Acquire)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
             let formatted = control::format_notification(&notif);
             let mut ws = match ws_notif.lock() {
                 Ok(ws) => ws,
@@ -2122,6 +2136,15 @@ if control_echo || control_noecho {
             // iTerm2 receive it as a DCS message and close native windows
             // immediately.  Then we break so the server can close the TCP.
             if is_exit { break; }
+        }
+        // The client is gone from this session: it was detached (%exit
+        // written above), the server is ending, or it left (stdin EOF, its
+        // ControlDeregister dropped the sender after everything queued was
+        // written). Close the connection so the client's reader sees EOF
+        // now; nothing else ever closed it, so a client that closed stdin
+        // waited out its 2 s drain before printing %exit (#825).
+        if let Ok(ws) = ws_notif.lock() {
+            let _ = ws.shutdown(std::net::Shutdown::Both);
         }
     });
 
@@ -2575,6 +2598,8 @@ if control_echo || control_noecho {
         // item. Built after the job, a 7 s run-shell showed nothing at all
         // for 7 s and then `%begin` and `%end` together (issue #793 follow
         // up). Notifications may arrive between the two lines, as in tmux.
+        // From here to the written reply no `continue` leaves the iteration.
+        cmd_busy.store(true, std::sync::atomic::Ordering::Release);
         let early_begin = focus_err.is_none()
             && matches!(cmd_name, "run-shell" | "run" | "if-shell" | "if");
         if early_begin {
@@ -2682,6 +2707,7 @@ if control_echo || control_noecho {
         let _ = ws.write_all(out.as_bytes());
         let _ = ws.flush();
         drop(ws);
+        cmd_busy.store(false, std::sync::atomic::Ordering::Release);
         // A failed command drops the rest of its line: tmux removes the
         // remaining items of the command list (cmd-queue.c cmdq_next,
         // cmdq_remove_group after CMD_RETURN_ERROR), so `set-buffer ... ;
@@ -2696,6 +2722,9 @@ if control_echo || control_noecho {
     // The CLIENT emits %exit + ST to stdout (matching real tmux's
     // client.c), so the server does not need to write ST here.
     let _ = tx.send(CtrlReq::ControlDeregister { client_id: ctrl_client_id });
+    // The writer closes the socket once it has drained (see above); the
+    // registry clone only has to go, or it leaks for the server's life.
+    crate::types::deregister_persistent_stream(ctrl_client_id);
     drop(notif_thread);
     return;
 }
@@ -7380,30 +7409,34 @@ fn dispatch_control_command(
             true
         }
         "detach-client" | "detach" => {
-            // One-shot CLI dispatch path (issue #275).  No "current client" since
-            // the caller is a short-lived `psmux detach-client` process, not an
-            // attached TUI client.  Default behavior: detach EVERY attached client
-            // of this session.
+            // Sent by a CONTROL client: `client_id` is that client. tmux
+            // (cmd-detach-client.c): -s detaches every client of the target
+            // session, -a every client but the sender, -t the named client,
+            // and no flag the sender itself. This arm used to detach every
+            // client of the session for no flag and for `-t <self>`, because
+            // the outer `-t` had already been peeled off into `raw_target`
+            // (#825).
             let kill_parent = args.iter().any(|a| *a == "-P");
-            let detach_all = args.iter().any(|a| *a == "-a");
+            let detach_all_others = args.iter().any(|a| *a == "-a");
             let detach_session = args.windows(2).any(|w| w[0] == "-s");
-            let target_str: Option<String> = extract_flag_value(&args, "-t").map(|s| s.to_string());
-            let target_cid_numeric: Option<u64> = target_str.as_ref()
-                .and_then(|t| t.trim_start_matches('%').parse::<u64>().ok());
+            let target_str: Option<String> = raw_target
+                .map(|s| s.to_string())
+                .or_else(|| extract_flag_value(&args, "-t").map(|s| s.to_string()));
 
-            if let Some(cid) = target_cid_numeric {
-                if kill_parent {
-                    let _ = crate::types::send_directive_to_client(cid, "DETACH-KILL-PARENT");
-                }
-                let _ = tx.send(CtrlReq::ForceDetachClient(cid));
-            } else if let Some(tty) = target_str {
+            if detach_session {
+                let _ = tx.send(CtrlReq::DetachAllClients(kill_parent));
+            } else if detach_all_others {
+                let _ = tx.send(CtrlReq::DetachAllOtherClients(client_id, kill_parent));
+            } else if let Some(t) = target_str {
+                // `%N` and `N` name the client listed as /dev/pts/N, as on
+                // the attached route.
+                let tty = match t.trim_start_matches('%').parse::<u64>() {
+                    Ok(n) => format!("/dev/pts/{}", n),
+                    Err(_) => t,
+                };
                 let _ = tx.send(CtrlReq::ForceDetachClientByTty(tty, kill_parent));
-            } else if detach_all || detach_session {
-                // -a from CLI = no current to exclude → detach all.
-                let _ = tx.send(CtrlReq::DetachAllClients(kill_parent));
             } else {
-                // No flags from CLI: detach all clients of this session.
-                let _ = tx.send(CtrlReq::DetachAllClients(kill_parent));
+                let _ = tx.send(CtrlReq::ForceDetachClient(client_id));
             }
             let _ = resp_tx.send(String::new());
             true
@@ -7801,18 +7834,27 @@ fn dispatch_control_command(
                 // Parse -f flags (e.g. pause-after=N)
                 if args[i] == "-f" {
                     if let Some(flag_val) = args.get(i + 1) {
-                        let flag_val = flag_val.trim_matches('"');
-                        if let Some(stripped) = flag_val.strip_prefix("pause-after=") {
-                            let secs = stripped.parse::<u64>().ok();
-                            let _ = tx.send(CtrlReq::ControlSetPauseAfter {
-                                client_id,
-                                pause_after_secs: secs,
-                            });
-                        } else if flag_val == "no-pause" {
-                            let _ = tx.send(CtrlReq::ControlSetPauseAfter {
-                                client_id,
-                                pause_after_secs: None,
-                            });
+                        // A comma list, each flag turned off by a leading `!`
+                        // (server-client.c server_client_set_flags).
+                        for flag_val in flag_val.trim_matches('"').split(',') {
+                            if let Some(stripped) = flag_val.strip_prefix("pause-after=") {
+                                let secs = stripped.parse::<u64>().ok();
+                                let _ = tx.send(CtrlReq::ControlSetPauseAfter {
+                                    client_id,
+                                    pause_after_secs: secs,
+                                });
+                            } else if flag_val == "no-pause" {
+                                let _ = tx.send(CtrlReq::ControlSetPauseAfter {
+                                    client_id,
+                                    pause_after_secs: None,
+                                });
+                            } else if flag_val == "ignore-size" || flag_val == "!ignore-size" {
+                                // #825: the flag was accepted and dropped.
+                                let _ = tx.send(CtrlReq::SetClientIgnoreSize(
+                                    client_id,
+                                    !flag_val.starts_with('!'),
+                                ));
+                            }
                         }
                     }
                     i += 2;

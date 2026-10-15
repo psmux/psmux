@@ -288,6 +288,16 @@ fn clamp_to_window_limit(app: &AppState, window_id: usize, size: (u16, u16)) -> 
         .unwrap_or(size)
 }
 
+/// tmux resize.c ignore_client_size: a client that set `ignore-size` is left
+/// out of the window size while any attached client has not set it (#825).
+pub(crate) fn client_size_ignored(app: &AppState, client_id: u64) -> bool {
+    app.ignore_size_clients.contains(&client_id)
+        && app
+            .client_registry
+            .keys()
+            .any(|id| !app.ignore_size_clients.contains(id))
+}
+
 fn client_sizes_for_window(app: &AppState, window_id: usize) -> Vec<(u64, (u16, u16))> {
     let mut sizes: Vec<(u64, (u16, u16))> = app
         .client_sizes
@@ -301,10 +311,14 @@ fn client_sizes_for_window(app: &AppState, window_id: usize) -> Vec<(u64, (u16, 
                 control_size_for_window(client, window_id).map(|size| (*client_id, size))
             }),
     );
+    sizes.retain(|(client_id, _)| !client_size_ignored(app, *client_id));
     sizes
 }
 
 fn default_client_size(app: &AppState, client_id: u64) -> Option<(u16, u16)> {
+    if client_size_ignored(app, client_id) {
+        return None;
+    }
     app.client_sizes.get(&client_id).copied().or_else(|| {
         app.control_clients
             .get(&client_id)
@@ -433,12 +447,14 @@ pub fn refresh_dynamic_window_sizes(app: &mut AppState) -> bool {
         .or_else(|| {
             app.client_sizes
                 .iter()
+                .filter(|(client_id, _)| !client_size_ignored(app, **client_id))
                 .max_by_key(|(client_id, _)| *client_id)
                 .map(|(_, size)| *size)
         })
         .or_else(|| {
             app.control_clients
                 .iter()
+                .filter(|(client_id, _)| !client_size_ignored(app, **client_id))
                 .filter_map(|(client_id, client)| client.size.map(|size| (*client_id, size)))
                 .max_by_key(|(client_id, _)| *client_id)
                 .map(|(_, size)| size)

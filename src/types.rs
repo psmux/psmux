@@ -64,6 +64,11 @@ pub enum ControlNotification {
         value: String,
     },
     Exit { reason: Option<String> },
+    /// This control client was detached (detach-client). Written as a bare
+    /// `%exit`, as tmux's client prints it for a control client
+    /// (client.c:416-421), once the command in flight has written its
+    /// reply; the connection then closes (#825).
+    Detached,
     PasteBufferChanged { name: String },
     PasteBufferDeleted { name: String },
     ClientSessionChanged { client: String, session_id: usize, name: String },
@@ -2033,6 +2038,10 @@ pub struct AppState {
     pub pending_plugin_scripts: Vec<String>,
     /// Connected control mode clients (keyed by client_id).
     pub control_clients: HashMap<u64, ControlClient>,
+    /// Clients that set `refresh-client -f ignore-size` (tmux
+    /// CLIENT_IGNORESIZE): left out of the window size while any attached
+    /// client has not set it (resize.c ignore_client_size, #825).
+    pub ignore_size_clients: HashSet<u64>,
     /// The window list as control clients were last told about it
     /// (control::sync_window_changes), so any change, whatever made it, is
     /// announced once (#811).
@@ -2472,6 +2481,7 @@ impl AppState {
     /// `ClientAttach` incrementing and inserting together).
     pub fn reap_client(&mut self, cid: u64) -> bool {
         self.client_sizes.remove(&cid);
+        self.ignore_size_clients.remove(&cid);
         // A prompt request for a client that is gone can never be answered:
         // drop it and let the command line waiting on it go.
         if self.prompt_request.as_ref().is_some_and(|r| r.client_id == cid) {
@@ -3232,6 +3242,7 @@ impl AppState {
             warm_refill_rx: None,
             pending_plugin_scripts: Vec::new(),
             control_clients: HashMap::new(),
+            ignore_size_clients: HashSet::new(),
             control_windows_seen: None,
             session_group: None,
             defaults_suppressed: false,
@@ -4094,6 +4105,8 @@ pub enum CtrlReq {
     ListClientsFormat(mpsc::Sender<String>, String, Option<String>),
     /// `attach -r` / `client-flags read-only`: (client id, read only).
     SetClientReadonly(u64, bool),
+    /// `refresh-client -f [!]ignore-size`: (client id, ignore size) (#825).
+    SetClientIgnoreSize(u64, bool),
     /// focus-in / focus-out from one attached client: (client id, focused).
     SetClientFocus(u64, bool),
     ForceDetachClient(u64),
