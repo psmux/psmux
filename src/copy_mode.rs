@@ -264,11 +264,20 @@ pub fn sync_copy_snapshot(app: &mut AppState) {
 /// Save the current global copy-mode state into the active pane.
 /// Called whenever we are about to switch away from a pane that is in copy mode.
 pub fn save_copy_state_to_pane(app: &mut AppState) {
+    let state = live_copy_state(app);
+    let win = &mut app.windows[app.active_idx];
+    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+        p.copy_state = Some(state);
+    }
+}
+
+/// The live copy mode held in `AppState`, as the state a pane parks.
+fn live_copy_state(app: &AppState) -> CopyModeState {
     let (in_search, search_input, search_input_forward) = match &app.mode {
         Mode::CopySearch { input, forward } => (true, input.clone(), *forward),
         _ => (false, String::new(), true),
     };
-    let state = CopyModeState {
+    CopyModeState {
         anchor: app.copy_anchor,
         anchor_scroll_offset: app.copy_anchor_scroll_offset,
         pos: app.copy_pos,
@@ -289,10 +298,6 @@ pub fn save_copy_state_to_pane(app: &mut AppState) {
         in_search,
         search_input,
         search_input_forward,
-    };
-    let win = &mut app.windows[app.active_idx];
-    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-        p.copy_state = Some(state);
     }
 }
 
@@ -344,12 +349,16 @@ pub fn switch_with_copy_save<F: FnOnce(&mut AppState)>(app: &mut AppState, switc
     let previous = crate::program_status::focused_identity(app);
     let was_copy = in_copy_mode(app);
     let had_prompt = copy_prompt_text(&app.mode).is_some();
+    let prev_pane = active_pane_id(app);
     if was_copy {
         save_copy_state_to_pane(app);
     }
     switch_fn(app);
     if crate::program_status::focused_identity(app) != previous {
         crate::program_status::acknowledge_focused(app);
+    }
+    if active_pane_id(app) != prev_pane {
+        park_clock(app, prev_pane);
     }
     // After switching, check if the new pane has copy state to restore.
     let win = &app.windows[app.active_idx];
@@ -361,6 +370,7 @@ pub fn switch_with_copy_save<F: FnOnce(&mut AppState)>(app: &mut AppState, switc
         // We were in copy mode but new pane is not — switch to passthrough.
         app.mode = Mode::Passthrough;
     }
+    adopt_clock(app);
     sync_copy_prompt_status(app, had_prompt);
 }
 
@@ -473,8 +483,69 @@ pub fn retarget_mode_to_active_pane(app: &mut AppState, prev: Option<usize>) {
         return;
     }
     let had_prompt = copy_prompt_text(&app.mode).is_some();
+    park_clock(app, prev);
     retarget_mode_inner(app);
     sync_copy_prompt_status(app, had_prompt);
+}
+
+/// Move the focus for one -t request without moving the focused pane's mode
+/// with it (#828).  `switch_fn` changes the active pane; the pane that loses
+/// focus keeps its own copy or clock mode parked, and the pane that gains it
+/// brings its own back, as `window_pane_key` in tmux sends a key to the mode
+/// of the pane it targets.  The status line is left alone: the switch is
+/// undone after the request.
+///
+/// Only a pane's own mode moves.  A popup, menu, confirm or command prompt
+/// belongs to the client in tmux, never to a pane, and stays where it is.
+/// `prompts` says whether a copy mode prompt (search, goto line, a copy mode
+/// command prompt) moves too: not when the request starts, so a prompt the
+/// user is typing into is never touched by a script's -t command, but yes
+/// when it ends, so a prompt opened under the target stays on the target.
+/// Returns whether the modes moved.
+pub fn switch_focus_keeping_modes<F: FnOnce(&mut AppState)>(app: &mut AppState, prompts: bool, switch_fn: F) -> bool {
+    let prev = active_pane_id(app);
+    let pane_mode = matches!(app.mode, Mode::Passthrough | Mode::ClockMode | Mode::CopyMode)
+        || (prompts && app.mode.in_copy());
+    switch_fn(app);
+    if !pane_mode || active_pane_id(app) == prev {
+        return false;
+    }
+    // The live state still belongs to `prev`: park it there by id.
+    if in_copy_mode(app) {
+        if let Some(id) = prev {
+            let state = live_copy_state(app);
+            if let Some(p) = crate::tree::find_pane_mut_by_id_global(app, id) {
+                p.copy_state = Some(state);
+            }
+        }
+    }
+    park_clock(app, prev);
+    retarget_mode_inner(app);
+    true
+}
+
+/// The focus is leaving pane `prev`: if it is in clock mode, the mode stays
+/// with that pane instead of following the focus.
+fn park_clock(app: &mut AppState, prev: Option<usize>) {
+    if matches!(app.mode, Mode::ClockMode) {
+        if let Some(id) = prev {
+            if !app.clock_panes.contains(&id) {
+                app.clock_panes.push(id);
+            }
+        }
+        app.mode = Mode::Passthrough;
+    }
+}
+
+/// The focused pane takes back a clock mode it had parked.
+fn adopt_clock(app: &mut AppState) {
+    let Some(id) = active_pane_id(app) else { return };
+    if let Some(i) = app.clock_panes.iter().position(|&p| p == id) {
+        if matches!(app.mode, Mode::Passthrough) {
+            app.clock_panes.swap_remove(i);
+            app.mode = Mode::ClockMode;
+        }
+    }
 }
 
 fn retarget_mode_inner(app: &mut AppState) {
@@ -494,6 +565,7 @@ fn retarget_mode_inner(app: &mut AppState) {
         app.copy_scroll_offset = 0;
         app.copy_mouse_down_cell = None;
     }
+    adopt_clock(app);
 }
 
 pub fn current_prompt_pos(app: &mut AppState) -> Option<(u16,u16)> {

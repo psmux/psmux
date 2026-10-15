@@ -2044,7 +2044,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 } else {
                     "0".into()
                 }
-            } else if target_pane().map_or(false, |p| p.copy_state.is_some()) {
+            } else if target_pane().map_or(false, |p| p.copy_state.is_some() || app.clock_panes.contains(&p.id)) {
                 "1".into()
             } else {
                 "0".into()
@@ -2062,6 +2062,8 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 }
             } else if target_pane().map_or(false, |p| p.copy_state.is_some()) {
                 "copy-mode".into()
+            } else if target_pane().map_or(false, |p| app.clock_panes.contains(&p.id)) {
+                "clock-mode".into()
             } else {
                 String::new()
             }

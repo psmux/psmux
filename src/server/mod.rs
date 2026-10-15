@@ -3184,6 +3184,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // switched (one whose arm skipped the restore at the end
                     // of its iteration) is put back before this one runs.
                     temp_target::restore_temp_focus(&mut app, &mut temp_focus_restore);
+                    // #828: does this request name a window or pane of its
+                    // own?  A send-keys that does is input for that pane,
+                    // never for an overlay the client has open.
+                    let names_pane = matches!(&req, CtrlReq::Targeted(t, _)
+                        if t.win.is_some() || t.win_name.is_some() || t.pane.is_some());
                     let req = match req {
                         CtrlReq::Targeted(target, inner) => {
                             match temp_target::apply_temp_target(&mut app, &mut temp_focus_restore, &target) {
@@ -4527,6 +4532,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     send_bytes_to_active(&mut app, &bytes)?;
                 }
                 CtrlReq::SendKeys(keys, literal) => {
+                    // #828: tmux's send-keys hands its keys to the target
+                    // pane (`window_pane_key`, window.c), and a popup, menu
+                    // or confirm prompt belongs to a client, which only that
+                    // client's own keystrokes reach (server_client_handle_key).
+                    // So a send-keys aimed at a window or pane goes past the
+                    // overlay to the pane, and the overlay stays open.  An
+                    // untargeted or session-only send-keys still drives the
+                    // overlay, as psmux scripts have long relied on (closing
+                    // a popup with `send-keys Escape`).
+                    let overlay = if names_pane && matches!(app.mode,
+                        Mode::PopupMode { .. } | Mode::MenuMode { .. } | Mode::ConfirmMode { .. })
+                    {
+                        Some(std::mem::replace(&mut app.mode, Mode::Passthrough))
+                    } else {
+                        None
+                    };
                     let in_copy = app.mode.in_copy();
                     if in_copy {
                         // In copy/search mode — route through mode-aware handlers
@@ -4783,6 +4804,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     echo_pending_until = Some(Instant::now());
+                    if let Some(m) = overlay {
+                        app.mode = m;
+                    }
                 }
                 CtrlReq::SendKeysX(cmd) => {
                     // A copy-mode key binding's `send-keys -X` (queued by

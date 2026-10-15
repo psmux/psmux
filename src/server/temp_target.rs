@@ -129,6 +129,9 @@ pub(crate) struct SavedFocus {
     pub active_idx: usize,
     pub pane_id: usize,
     pub floating: Vec<(usize, Option<usize>)>,
+    /// The focused pane's copy or clock mode was parked and the target's own
+    /// adopted (#828), so restoring must move them back.
+    pub modes_moved: bool,
 }
 
 /// Switch the focus to `t` for one request, remembering the real focus in
@@ -151,19 +154,29 @@ pub(crate) fn apply_temp_target(
         let floating = app.windows.iter()
             .map(|w| (w.id, w.floating_focus.and_then(|fi| w.floating.get(fi)).map(|fp| fp.id)))
             .collect();
-        *saved = Some(SavedFocus { active_idx: app.active_idx, pane_id, floating });
+        *saved = Some(SavedFocus { active_idx: app.active_idx, pane_id, floating, modes_moved: false });
         // The REAL active window, so #{window_active} and the `*` flag are
         // not fooled by the temporary switch (issue #551).
         app.temp_focus_saved_active = Some(app.active_idx);
     }
-    if let Some(wid) = r.win {
-        if let Some(i) = app.windows.iter().position(|x| x.id == wid) {
-            app.active_idx = i;
+    // #828: the target pane answers with its OWN copy or clock mode, and
+    // the pane that had focus keeps its own, as tmux's `window_pane_key`
+    // sends a key to the mode of the pane it targets.
+    let moved = crate::copy_mode::switch_focus_keeping_modes(app, false, |app| {
+        if let Some(wid) = r.win {
+            if let Some(i) = app.windows.iter().position(|x| x.id == wid) {
+                app.active_idx = i;
+            }
         }
-    }
-    if let Some(p) = r.pane {
-        // No MRU update: a -t target is not the user visiting the pane (#71).
-        crate::tree::focus_pane_by_id_no_mru(app, p);
+        if let Some(p) = r.pane {
+            // No MRU update: a -t target is not the user visiting the pane (#71).
+            crate::tree::focus_pane_by_id_no_mru(app, p);
+        }
+    });
+    if moved {
+        if let Some(s) = saved.as_mut() {
+            s.modes_moved = true;
+        }
     }
     app.last_window_area = app.windows[app.active_idx].area;
     Ok(())
@@ -175,12 +188,20 @@ pub(crate) fn apply_temp_target(
 pub(crate) fn restore_temp_focus(app: &mut AppState, saved: &mut Option<SavedFocus>) {
     if let Some(s) = saved.take() {
         if s.active_idx < app.windows.len() {
-            app.active_idx = s.active_idx;
-            let win = &mut app.windows[s.active_idx];
-            if let Some(path) = crate::tree::find_path_by_id(&win.root, s.pane_id) {
-                win.active_path = path;
+            // #828: each pane's mode goes back with the focus (see above).
+            let switch = |app: &mut AppState| {
+                app.active_idx = s.active_idx;
+                let win = &mut app.windows[s.active_idx];
+                if let Some(path) = crate::tree::find_path_by_id(&win.root, s.pane_id) {
+                    win.active_path = path;
+                }
+            };
+            if s.modes_moved {
+                crate::copy_mode::switch_focus_keeping_modes(app, true, switch);
+            } else {
+                switch(app);
             }
-            app.last_window_area = win.area;
+            app.last_window_area = app.windows[s.active_idx].area;
         }
         for (wid, float_id) in s.floating {
             if let Some(w) = app.windows.iter_mut().find(|w| w.id == wid) {
@@ -194,3 +215,7 @@ pub(crate) fn restore_temp_focus(app: &mut AppState, saved: &mut Option<SavedFoc
 #[cfg(test)]
 #[path = "../../tests-rs/test_stalled_target_routing.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue828_temp_focus_modes.rs"]
+mod tests_issue828;

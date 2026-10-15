@@ -1495,6 +1495,12 @@ pub struct AppState {
     /// temporary focus is in effect.
     pub temp_focus_saved_active: Option<usize>,
     pub mode: Mode,
+    /// Ids of panes in clock mode while another pane holds focus (#828).
+    /// Clock mode belongs to one pane in tmux (`window_pane_set_mode`), but
+    /// psmux keeps the live mode in `mode`, so the focused pane's clock is
+    /// `Mode::ClockMode` and every other pane's is parked here, the same
+    /// split `Pane::copy_state` gives copy mode.
+    pub clock_panes: Vec<usize>,
     pub escape_time_ms: u64,
     pub repeat_time_ms: u64,
     /// True when prefix mode was re-armed by a repeatable binding (not initial prefix press).
@@ -3020,6 +3026,7 @@ impl AppState {
             active_idx: 0,
             temp_focus_saved_active: None,
             mode: Mode::Passthrough,
+            clock_panes: Vec::new(),
             escape_time_ms: 500,
             repeat_time_ms: 500,
             prefix_repeating: false,

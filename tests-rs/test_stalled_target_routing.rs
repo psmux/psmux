@@ -104,7 +104,7 @@ fn make_window(id: usize, name: &str, pane_ids: &[usize]) -> crate::types::Windo
 
 /// Session `s`: window 0 (@10, "main") with panes %1 %2 %3, window 1
 /// (@11, "other") with pane %4.  Active: window 0, pane %1.
-fn app() -> AppState {
+pub(super) fn app() -> AppState {
     let mut app = AppState::new("s".to_string());
     app.window_base_index = 0;
     app.pane_base_index = 0;
@@ -114,7 +114,7 @@ fn app() -> AppState {
     app
 }
 
-fn active(app: &AppState) -> (usize, usize) {
+pub(super) fn active(app: &AppState) -> (usize, usize) {
     let w = &app.windows[app.active_idx];
     (app.active_idx, crate::tree::get_active_pane_id(&w.root, &w.active_path).unwrap())
 }
