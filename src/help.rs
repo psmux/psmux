@@ -13,6 +13,11 @@
 /// `bind-key -n PageUp copy-mode -u`.
 pub const ROOT_DEFAULTS: &[(&str, &str)] = &[];
 
+/// The arguments of the `'` entry in PREFIX_DEFAULTS after `command-prompt`.
+/// The client opens the window index prompt from these when the key arrives
+/// before the first state sync, and for the old `select-window-index` name.
+pub const WINDOW_INDEX_PROMPT_ARGS: &str = "-T window-target -p index \"select-window -t ':%%'\"";
+
 /// Default prefix-table keybindings.
 /// Each entry is `(key_string, command_string)`.
 /// The overlay and `list-keys` both use this as the canonical source
@@ -34,7 +39,15 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("w",       "choose-tree"),
     ("&",       "confirm-before -p 'kill-window #W? (y/n)' kill-window"),
     (",",       "rename-window"),
-    ("'",       "select-window-index"),
+    // tmux binds `'` to a plain prompt (key-bindings.c:364, tag 3.7c):
+    //     command-prompt -T window-target -pindex { select-window -t ':%%' }
+    // so the answer goes through the prompt editor every other prompt uses,
+    // with its history, and `select-window` resolves an index or a name. It
+    // used to be `select-window-index`, a box of the client's own that took
+    // four keys and let the rest reach the pane (#821). `-T window-target` is
+    // kept for the reason given for `.` below. The client opens the same
+    // prompt from WINDOW_INDEX_PROMPT_ARGS before the first state sync.
+    ("'",       "command-prompt -T window-target -p index \"select-window -t ':%%'\""),
     // tmux binds `.` by default: prompt for an index and move the current
     // window there. Measured on tmux 3.6a, `list-keys -T prefix` renders it as
     //     command-prompt -T target { move-window -t "%%" }

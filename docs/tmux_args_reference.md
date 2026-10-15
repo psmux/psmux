@@ -138,7 +138,7 @@ The server also matches a set of internal wire commands that the client sends on
 
 Five mouse wire commands are an exception and are genuinely usable for scripting: `mouse-down`, `mouse-drag`, `mouse-up`, `mouse-down-right` and `mouse-up-right` are accepted at the CLI as well as on the socket.
 
-`select-window-index` appears in the default prefix bindings but is a client side pseudo command. `psmux select-window-index` fails with "unknown command" and it cannot be used from a config line, a hook or `run-shell`.
+`select-window-index` is a client side pseudo command. The default `Prefix + '` binding was this name before #821 and is tmux's `command-prompt` now; a key bound to the old name opens the same prompt. `psmux select-window-index` fails with "unknown command" and it cannot be used from a config line, a hook or `run-shell`.
 
 ## Flag details by command
 

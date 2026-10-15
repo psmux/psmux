@@ -20,19 +20,17 @@ use super::{route_paste_to_overlay, PasteGesture};
 /// Nothing is open, so a paste has nowhere to go but the pane. The second
 /// field is the command prompt's cursor, counted in characters from the END of
 /// its line, the way the shared prompt editor counts.
-fn no_overlay() -> (String, usize, String, String, String) {
-    (String::new(), 0, String::new(), String::new(), String::new())
+fn no_overlay() -> (String, usize, String) {
+    (String::new(), 0, String::new())
 }
 
 #[test]
 fn with_no_overlay_open_nothing_is_consumed() {
-    let (mut cmd, cur, mut rename, mut title, mut idx) = no_overlay();
+    let (mut cmd, cur, mut rename) = no_overlay();
     let consumed = route_paste_to_overlay(
         "ls -la",
         false, &mut cmd, cur,
         false, &mut rename,
-        false, &mut title,
-        false, &mut idx,
     );
     assert!(!consumed, "the caller has to fall back to send-paste");
     assert_eq!(cmd, "");
@@ -40,15 +38,13 @@ fn with_no_overlay_open_nothing_is_consumed() {
 
 #[test]
 fn the_command_prompt_takes_it_at_the_cursor() {
-    let (mut cmd, _, mut rename, mut title, mut idx) = no_overlay();
+    let (mut cmd, _, mut rename) = no_overlay();
     cmd.push_str("kill-session");
     let cur = 7usize; // "session" follows the cursor, so it sits after "kill-"
     let consumed = route_paste_to_overlay(
         "XX",
         true, &mut cmd, cur,
         false, &mut rename,
-        false, &mut title,
-        false, &mut idx,
     );
     assert!(consumed, "an open prompt keeps the paste");
     assert_eq!(cmd, "kill-XXsession");
@@ -57,30 +53,13 @@ fn the_command_prompt_takes_it_at_the_cursor() {
 }
 
 #[test]
-fn the_other_prompts_take_it_too() {
-    let (mut cmd, cur, mut rename, mut title, mut idx) = no_overlay();
+fn the_rename_prompt_takes_it_too() {
+    // The window index prompt is the command prompt since #821, so the test
+    // above covers it.
+    let (mut cmd, cur, mut rename) = no_overlay();
     assert!(route_paste_to_overlay("win", false, &mut cmd, cur,
-        true, &mut rename, false, &mut title, false, &mut idx));
+        true, &mut rename));
     assert_eq!(rename, "win");
-
-    let (mut cmd, cur, mut rename, mut title, mut idx) = no_overlay();
-    assert!(route_paste_to_overlay("pane", false, &mut cmd, cur,
-        false, &mut rename, true, &mut title, false, &mut idx));
-    assert_eq!(title, "pane");
-
-    // The window index prompt is tmux's plain `command-prompt -pindex`
-    // (key-bindings.c:394): it takes any text, because `select-window -t
-    // ':%%'` resolves a name as well as an index. Only line breaks and other
-    // control characters stay out of the one line target.
-    let (mut cmd, cur, mut rename, mut title, mut idx) = no_overlay();
-    assert!(route_paste_to_overlay("1a2", false, &mut cmd, cur,
-        false, &mut rename, false, &mut title, true, &mut idx));
-    assert_eq!(idx, "1a2");
-
-    let (mut cmd, cur, mut rename, mut title, mut idx) = no_overlay();
-    assert!(route_paste_to_overlay("my win\r\n", false, &mut cmd, cur,
-        false, &mut rename, false, &mut title, true, &mut idx));
-    assert_eq!(idx, "my win");
 }
 
 #[test]

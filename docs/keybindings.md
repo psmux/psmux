@@ -91,12 +91,14 @@ rebind the prefix, the new key is bound to `send-prefix` for you.
 | `Prefix + .` | Prompt for an index and move the current window there (`move-window`) |
 | `Prefix + 0-9` | Select window by number |
 
-**Gotcha: `select-window-index` is not a real command.** `Prefix + '` is bound to
-`select-window-index`, which looks like a command but is a client only pseudo command. It exists
-solely so the client can open the window index prompt. It is not accepted by any command dispatcher,
-so `psmux select-window-index` fails with "unknown command", and it cannot be used from a config
-line, from a hook, or from `run-shell`. Rebinding another key to it does work, because key bindings
-go through the client.
+`Prefix + '` is bound to `command-prompt -T window-target -p index "select-window -t ':%%'"`, as in
+tmux, so the prompt has the same editing keys and history as any other prompt.
+
+**Gotcha: `select-window-index` is not a real command.** Before #821 `Prefix + '` was bound to
+`select-window-index`, a client only name for a window index box of the client's own. A key bound
+to that name still opens the prompt above, so a config that binds it keeps working, but no command
+dispatcher accepts it: `psmux select-window-index` fails with "unknown command", and it cannot be
+used from a config line, from a hook, or from `run-shell`.
 
 ### Pane Splitting
 
