@@ -1010,9 +1010,93 @@ pub fn format_action(action: &Action) -> String {
 }
 
 /// Parse a command line string, respecting quoted arguments
+///
+/// Used by config files, `source-file`, the command prompt, key bindings and
+/// the CLI wire. Inside double quotes only `\"` and `\\` are decoded: every
+/// other backslash stays literal, because double quoted Windows paths such as
+/// `set -g default-shell "C:\Program Files\Git\bin\bash.exe"` are documented
+/// and common, and tmux's full escape set would turn `\b`, `\t`, `\n` in them
+/// into control characters. Control mode, whose clients escape the tmux way,
+/// uses [`parse_command_line_tmux`] instead.
 pub fn parse_command_line(line: &str) -> Vec<String> {
+    parse_command_line_impl(line, false)
+}
+
+/// Parse a control mode command line with tmux's escape rules inside double
+/// quotes (cmd-parse.y yylex_token_escape): `\n \r \t \e \a \b \f \v \s`,
+/// octal `\NNN`, `\uXXXX`, `\UXXXXXXXX`, and any other `\c` is `c` (so `\\`,
+/// `\"`, `\$`, `\~`). A control client is a program that escapes text the
+/// tmux way, so a buffer can carry a newline (issue #823). Single quoted and
+/// unquoted text follow the same rules as [`parse_command_line`].
+pub fn parse_command_line_tmux(line: &str) -> Vec<String> {
+    parse_command_line_impl(line, true)
+}
+
+/// Decode one tmux escape inside double quotes. `chars[i]` is the backslash.
+/// Pushes the decoded bytes and returns how many chars after the backslash
+/// were consumed, or `None` when tmux would reject the escape (bad octal,
+/// bad `\u`, backslash at the end); the caller then keeps the backslash
+/// literal instead of failing the whole command.
+fn decode_tmux_escape(chars: &[char], i: usize, out: &mut Vec<u8>) -> Option<usize> {
+    let c = *chars.get(i + 1)?;
+    let simple = match c {
+        'a' => Some(0x07u8),
+        'b' => Some(0x08),
+        'e' => Some(0x1b),
+        'f' => Some(0x0c),
+        's' => Some(b' '),
+        'v' => Some(0x0b),
+        'r' => Some(b'\r'),
+        'n' => Some(b'\n'),
+        't' => Some(b'\t'),
+        _ => None,
+    };
+    if let Some(b) = simple {
+        out.push(b);
+        return Some(1);
+    }
+    match c {
+        // Octal: exactly three digits, the first 0 to 3 (one byte).
+        '0'..='3' => {
+            let o2 = chars.get(i + 2)?.to_digit(8)?;
+            let o3 = chars.get(i + 3)?.to_digit(8)?;
+            let v = c.to_digit(8)? * 64 + o2 * 8 + o3;
+            out.push(v as u8);
+            Some(3)
+        }
+        '4'..='7' => None,
+        'u' | 'U' => {
+            let size = if c == 'u' { 4 } else { 8 };
+            let hex: String = chars.get(i + 2..i + 2 + size)?.iter().collect();
+            if !hex.chars().all(|h| h.is_ascii_hexdigit()) {
+                return None;
+            }
+            let ch = char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?;
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            Some(1 + size)
+        }
+        other => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            Some(1)
+        }
+    }
+}
+
+fn parse_command_line_impl(line: &str, tmux_escapes: bool) -> Vec<String> {
     let mut args = Vec::new();
-    let mut current = String::new();
+    // Bytes, so an octal escape can add one byte of a UTF-8 sequence.
+    let mut current: Vec<u8> = Vec::new();
+    let push = |cur: &mut Vec<u8>, c: char| {
+        let mut buf = [0u8; 4];
+        cur.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    };
+    let finish = |cur: &mut Vec<u8>| -> String {
+        let s = String::from_utf8_lossy(cur).into_owned();
+        cur.clear();
+        s
+    };
     let mut in_double_quotes = false;
     let mut in_single_quotes = false;
     // Track whether the current token contained an explicit quote, so an
@@ -1032,7 +1116,12 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
             if c == '\'' {
                 in_single_quotes = false;
             } else {
-                current.push(c);
+                push(&mut current, c);
+            }
+        } else if c == '\\' && in_double_quotes && tmux_escapes {
+            match decode_tmux_escape(&chars, i, &mut current) {
+                Some(n) => i += n,
+                None => push(&mut current, c),
             }
         } else if c == '\\' && in_double_quotes {
             // Inside double quotes, recognise two escape sequences:
@@ -1042,14 +1131,22 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
             // Windows-native tool where backslash is the normal path
             // separator (e.g. "C:\Program Files\Git\bin\bash.exe").
             if i + 1 < chars.len() && chars[i + 1] == '"' {
-                current.push('"');
+                push(&mut current, '"');
                 i += 1; // skip the quote
             } else if i + 1 < chars.len() && chars[i + 1] == '\\' {
-                current.push('\\');
+                push(&mut current, '\\');
                 i += 1; // skip the second backslash
             } else {
-                current.push(c); // literal backslash
+                push(&mut current, c); // literal backslash
             }
+        } else if c == '\\' && matches!(chars.get(i + 1), Some('\'') | Some('"')) {
+            // Outside quotes `\'` and `\"` are a literal quote that joins the
+            // token, as in tmux (cmd-parse.y yylex_token: a `\` outside
+            // single quotes is an escape), so the POSIX idiom 'a'\''b' is
+            // one argument a'b (issue #823). Every other unquoted backslash
+            // stays literal for Windows paths (C:\Users\x, \\server\share).
+            push(&mut current, chars[i + 1]);
+            i += 1;
         } else if c == '"' {
             in_double_quotes = !in_double_quotes;
             had_quote = true;
@@ -1058,18 +1155,17 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
             had_quote = true;
         } else if c.is_whitespace() && !in_double_quotes {
             if !current.is_empty() || had_quote {
-                args.push(current.clone());
-                current.clear();
+                args.push(finish(&mut current));
             }
             had_quote = false;
         } else {
-            current.push(c);
+            push(&mut current, c);
         }
         i += 1;
     }
 
     if !current.is_empty() || had_quote {
-        args.push(current);
+        args.push(finish(&mut current));
     }
 
     args

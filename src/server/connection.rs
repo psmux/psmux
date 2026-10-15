@@ -2271,7 +2271,10 @@ if control_echo || control_noecho {
         }
 
         // Dispatch the command (before acquiring write lock)
-        let parsed = crate::cli::normalize_flag_equals(parse_command_line(trimmed));
+        // tmux's escapes inside double quotes: a control client escapes text
+        // the tmux way, `"L1\nL2"` is two lines (issue #823).
+        let parsed = crate::cli::normalize_flag_equals(
+            crate::commands::parse_command_line_tmux(trimmed));
         let raw_cmd = parsed.first().map(|s| s.as_str()).unwrap_or("");
 
         if raw_cmd.is_empty() {

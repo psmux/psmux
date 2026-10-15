@@ -1387,6 +1387,14 @@ fn tokens_with_offsets(line: &str) -> Vec<(usize, String)> {
                     cur.push(n);
                 }
             }
+            // Outside quotes `\'` and `\"` are a literal quote, not a quote
+            // that opens (parse_command_line, issue #823).
+            '\\' if !in_single && matches!(line[idx + 1..].chars().next(), Some('\'' | '"')) => {
+                cur.push(c);
+                if let Some((_, n)) = it.next() {
+                    cur.push(n);
+                }
+            }
             '\'' if !in_double => {
                 in_single = !in_single;
                 cur.push(c);
@@ -1449,6 +1457,12 @@ fn extract_option_value(rest: &str) -> String {
             // rather than silently claiming half of it.
             if rest[idx + c.len_utf8()..].trim().is_empty() {
                 return out;
+            }
+            // Adjacent quoted and escaped parts that make ONE argument, such
+            // as 'a'\''b' or 'it'"'"'s', join as tmux joins them (issue #823).
+            let joined = crate::commands::parse_command_line(rest);
+            if joined.len() == 1 {
+                return joined.into_iter().next().unwrap_or_default();
             }
             return strip_wrapping_quotes(rest).to_string();
         }
@@ -3679,3 +3693,7 @@ mod tests_issue734_side_bind_notes;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue734_followup_queue.rs"]
 mod tests_issue734_followup_queue;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue823_quote_escapes.rs"]
+mod test_issue823_quote_escapes;
