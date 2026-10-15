@@ -237,9 +237,11 @@ set PSMUX_NO_WARM=1
                     Check ((Mode-Of "${S}:0") -eq '0') "the client's own q still leaves copy mode"
 
                     P confirm-before -p 'really?' set -g status-left KEYS-RAN; Start-Sleep -Milliseconds 700
-                    Set-Content $log ''
+                    # The reader holds its log open: compare what is appended.
+                    $base = Received $log
                     Send-Text
-                    Check ((Received $log) -eq "${TextHex}0d") "a script's send to window 1 passes the client's prompt (got '$(Received $log)')"
+                    $more = (Received $log).Substring($base.Length)
+                    Check ($more -eq "${TextHex}0d") "a script's send to window 1 passes the client's prompt (got '$more')"
                     Check ("$(P show-options -g -v status-left)".Trim() -ne 'KEYS-RAN') "the script's text did not answer the prompt"
                     & $keyInj $cpid "y" 2>&1 | Out-Null
                     Start-Sleep -Milliseconds 1000
