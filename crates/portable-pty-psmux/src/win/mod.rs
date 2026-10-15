@@ -18,7 +18,7 @@ pub(crate) mod spawn_trace;
 
 /// Which ConPTY implementation this process loaded: the system one, or a
 /// conpty.dll named by `PSMUX_CONPTY_DIR`.  Diagnostics only.
-pub use psuedocon::{conpty_source, ConPtySource};
+pub use psuedocon::{conpty_requested_dir, conpty_source, ConPtySource};
 
 use filedescriptor::OwnedHandle;
 

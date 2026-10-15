@@ -382,6 +382,36 @@ fn warm_debug(msg: &str) {
     }
 }
 
+/// #817: the standby's console host choice and the claiming client's, when
+/// they differ.  `None` (claim may go ahead) when they agree, when the client
+/// sent no readable environment, or when the standby is HELD (#734): a held
+/// standby is the server `start-server` made, and a session must land in it
+/// whatever the client's environment says, just as tmux never re-picks a
+/// running server's terminal.
+#[cfg(windows)]
+fn conpty_host_mismatch(
+    app: &AppState,
+    client_env_file: Option<&str>,
+) -> Option<(Option<std::ffi::OsString>, Option<std::ffi::OsString>)> {
+    let want = crate::client_env::client_conpty_dir(client_env_file?)?;
+    let have = portable_pty::win::conpty_requested_dir().map(|p| p.into_os_string());
+    if crate::client_env::same_conpty_dir(have.as_deref(), want.as_deref()) {
+        return None;
+    }
+    if std::path::Path::new(&crate::paths::held_file(app.port_file_base())).is_file() {
+        return None;
+    }
+    Some((have, want))
+}
+
+#[cfg(not(windows))]
+fn conpty_host_mismatch(
+    _app: &AppState,
+    _client_env_file: Option<&str>,
+) -> Option<(Option<std::ffi::OsString>, Option<std::ffi::OsString>)> {
+    None
+}
+
 /// Check if the active pane is currently squelched (hiding injected cd+cls).
 /// Uses the non-consuming `squelch_cleared()` so the layout serialiser can
 /// still properly consume the sentinel via `take_squelch_cleared()`.
@@ -5199,6 +5229,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if app.session_name != "__warm__" {
                         warm_debug(&format!("CLAIM REFUSED: this server is '{}' (port={:?}), requested name='{}'", app.session_name, app.control_port, name));
                         let _ = resp.send("ERR: not a warm server (already claimed)\n".to_string());
+                    } else if let Some((have, want)) = conpty_host_mismatch(&app, client_env_file.as_deref()) {
+                        // #817: this standby picked its console host (inbox
+                        // conhost, or the OpenConsole that PSMUX_CONPTY_DIR
+                        // names) from its OWN environment when it opened its
+                        // first pane, and that choice is fixed for the life
+                        // of the process: window 0, the spare pool and every
+                        // later pane would ignore the client's value. A cold
+                        // spawn chooses from the client's environment, so
+                        // refuse, and go away so the server the client cold
+                        // spawns replaces this standby with one that matches.
+                        warm_debug(&format!(
+                            "CLAIM REFUSED: PSMUX_CONPTY_DIR differs (standby {:?}, client {:?}); exiting",
+                            have, want
+                        ));
+                        let _ = resp.send("ERR: warm server uses another console host (PSMUX_CONPTY_DIR)\n".to_string());
+                        shutdown_this_server(&mut app);
                     } else {
                     warm_debug(&format!("CLAIM ACCEPT: __warm__ (port={:?}) -> '{}'", app.control_port, name));
                     // The `new-session -n NAME` window name is applied FIRST,

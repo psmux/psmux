@@ -124,6 +124,9 @@ pub struct ConPtyApi {
     /// Holds the kernel32 `DynamicLibrary` guard alive on the default path.
     _guard: Option<ConPtyFuncs>,
     pub source: ConPtySource,
+    /// The `PSMUX_CONPTY_DIR` value this process resolved with, whether or
+    /// not it loaded.  A warm standby compares it with a claiming client's.
+    pub requested_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ConPtyApi {
@@ -169,6 +172,7 @@ fn load_conpty_kernel32() -> ConPtyApi {
             ),
             _guard: Some(funcs),
             source: ConPtySource::Kernel32,
+            requested_dir: None,
         }
     }
 }
@@ -231,6 +235,7 @@ fn load_conpty_from_dir(dir: &Path) -> Result<ConPtyApi, String> {
             ClosePseudoConsole: mem::transmute::<*mut (), ClosePseudoConsoleFn>(close),
             _guard: None,
             source: ConPtySource::Directory,
+            requested_dir: None,
         }
     })
 }
@@ -240,6 +245,13 @@ fn load_conpty_from_dir(dir: &Path) -> Result<ConPtyApi, String> {
 /// directory that cannot be loaded logs the reason and falls back to kernel32
 /// rather than failing the pane.
 fn resolve_conpty(dir: Option<PathBuf>) -> ConPtyApi {
+    let requested_dir = dir.clone();
+    let mut api = resolve_conpty_inner(dir);
+    api.requested_dir = requested_dir;
+    api
+}
+
+fn resolve_conpty_inner(dir: Option<PathBuf>) -> ConPtyApi {
     if let Some(dir) = dir {
         match load_conpty_from_dir(&dir) {
             Ok(api) => {
@@ -280,6 +292,13 @@ lazy_static! {
 /// Which ConPTY implementation this process ended up with.  Diagnostics only.
 pub fn conpty_source() -> ConPtySource {
     CONPTY.source
+}
+
+/// The `PSMUX_CONPTY_DIR` this process chose its ConPTY with (`None` when it
+/// was unset or empty).  Fixed for the life of the process: every pane it
+/// ever opens uses that choice.
+pub fn conpty_requested_dir() -> Option<PathBuf> {
+    CONPTY.requested_dir.clone()
 }
 
 pub struct PsuedoCon {
@@ -670,6 +689,10 @@ mod tests {
             ConPtySource::Kernel32
         );
         assert!(load_conpty_from_dir(&missing).is_err());
+        // What was asked for is remembered even when it did not load (#817):
+        // a standby compares the request, not the outcome, with a client's.
+        assert_eq!(resolve_conpty(Some(missing.clone())).requested_dir, Some(missing));
+        assert_eq!(resolve_conpty(None).requested_dir, None);
     }
 
     /// A directory with no conpty.dll in it falls back too.

@@ -255,6 +255,49 @@ pub fn adopt_from_file(path: &str) -> EnvPlan {
     plan
 }
 
+/// The variable that picks a pane's console host (#817).
+pub const CONPTY_DIR_VAR: &str = "PSMUX_CONPTY_DIR";
+
+/// `PSMUX_CONPTY_DIR` as a block carries it.  Empty means unset, exactly as
+/// the loader in portable-pty-psmux reads it.
+pub fn conpty_dir_in(entries: &[(OsString, OsString)]) -> Option<OsString> {
+    entries
+        .iter()
+        .find(|(k, _)| norm_key(k) == CONPTY_DIR_VAR)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
+}
+
+/// Do two `PSMUX_CONPTY_DIR` values name the same console host?  Paths on
+/// Windows are case insensitive and either separator works; a trailing one
+/// changes nothing.
+pub fn same_conpty_dir(a: Option<&OsStr>, b: Option<&OsStr>) -> bool {
+    fn norm(p: &OsStr) -> String {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    }
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => norm(a) == norm(b),
+        _ => false,
+    }
+}
+
+/// The `PSMUX_CONPTY_DIR` a claiming client's handoff file at `path` asks for,
+/// read WITHOUT consuming the file.  The outer `None` means "cannot tell" (no
+/// file, or a payload adoption would ignore anyway), which never refuses a
+/// claim.
+pub fn client_conpty_dir(path: &str) -> Option<Option<OsString>> {
+    let bytes = std::fs::read(path).ok()?;
+    let incoming = decode_env_block(&bytes)?;
+    if !is_sane(&incoming) {
+        return None;
+    }
+    Some(conpty_dir_in(&incoming))
+}
+
 /// Client side: write this process's environment where the server it is about
 /// to claim can read it.  Returns the path on success.
 pub fn write_own_environment(path: &str) -> Option<String> {
@@ -295,3 +338,7 @@ fn from_wide(u: &[u16]) -> OsString {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue659_claim_environment.rs"]
 mod test_issue659_claim_environment;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue817_claim_conpty_dir.rs"]
+mod test_issue817_claim_conpty_dir;
