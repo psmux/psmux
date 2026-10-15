@@ -4005,7 +4005,7 @@ fn run_main() -> io::Result<()> {
                 cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
                 exit_on_missing_buffer(&resp, buffer_name.as_deref());
-                print!("{}", resp);
+                print!("{}", buffer_from_show_reply(&resp));
                 return Ok(());
             }
             // delete-buffer - Delete a paste buffer
@@ -5338,10 +5338,7 @@ fn run_main() -> io::Result<()> {
                     cmd.push('\n');
                     let content = send_control_with_response(cmd)?;
                     exit_on_missing_buffer(&content, buffer_name.as_deref());
-                    // The reply ends with one line break of its own, which is
-                    // not the buffer's: tmux writes the buffer exactly
-                    // (cmd-save-buffer.c).
-                    let content = content.strip_suffix('\n').unwrap_or(&content).to_string();
+                    let content = buffer_from_show_reply(&content).to_string();
                     if path == "-" {
                         print!("{}", content);
                     } else if append {
@@ -6775,6 +6772,14 @@ fn exit_on_missing_buffer(resp: &str, name: Option<&str>) {
     }
 }
 
+/// The buffer in the server's `show-buffer` reply. The reply ends with one
+/// line break of its own, which is not the buffer's: tmux writes the buffer
+/// exactly, with no line break added, for both `show-buffer` and
+/// `save-buffer` (cmd-save-buffer.c:108 and :115).
+fn buffer_from_show_reply(resp: &str) -> &str {
+    resp.strip_suffix('\n').unwrap_or(resp)
+}
+
 /// Returns `true` when stdout is a Windows console handle (ConPTY).
 /// When stdout is a pipe (e.g. `ssh -T`), returns `false`.
 #[cfg(windows)]
@@ -6912,3 +6917,7 @@ mod tests_issue627_unqualified_targets;
 #[cfg(test)]
 #[path = "../tests-rs/test_ready_poll_backoff.rs"]
 mod tests_ready_poll_backoff;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue830_show_buffer_newline.rs"]
+mod tests_issue830_show_buffer_newline;
