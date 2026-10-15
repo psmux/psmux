@@ -303,5 +303,4 @@ Remove-Item $TMP -Recurse -Force -EA SilentlyContinue
 
 Write-Host ""
 Write-Host "passed: $script:TestsPassed  failed: $script:TestsFailed" -ForegroundColor Cyan
-if ($script:TestsFailed -gt 0) { exit 1 }
-exit 0
+exit $script:TestsFailed

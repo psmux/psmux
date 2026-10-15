@@ -117,8 +117,9 @@ if ($helpOut -match "prefix \+ '.*Select window by index|prefix \+ '.*window.*in
 } else {
     # Also check list-keys output if available
     $keysOut = Psmux list-keys 2>&1 | Out-String
-    if ($keysOut -match "'.*select-window-index") {
-        Write-Pass "list-keys shows ' bound to select-window-index"
+    # tmux's binding since #821 (key-bindings.c:364, tag 3.7c)
+    if ($keysOut -match "'.*command-prompt.*-p index.*select-window -t ':%%'") {
+        Write-Pass "list-keys shows ' bound to command-prompt -p index select-window"
     } else {
         Write-Fail "Help/list-keys does not mention prefix + ' binding"
     }
