@@ -5675,6 +5675,7 @@ match cmd {
         } else {
             if background {
                 let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+                crate::commands::null_job_output(&mut c);
                 // `-b` means "don't wait for it", not "don't tell me it never
                 // started". Swallowing this made a broken background bind
                 // indistinguishable from an unbound key.
@@ -7563,6 +7564,7 @@ fn dispatch_control_command(
             let mut c = crate::commands::build_run_shell_command(&shell_cmd);
             if background {
                 // -b does not wait; only a spawn failure is reported.
+                crate::commands::null_job_output(&mut c);
                 match c.spawn() {
                     Ok(_) => { let _ = resp_tx.send(String::new()); }
                     Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}: {}", shell_cmd, e)); }

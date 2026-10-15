@@ -480,6 +480,9 @@ fn format_job_command(cmd: &str) -> std::process::Command {
         c
     };
     crate::commands::apply_job_env(&mut c);
+    // output() would null stdin anyway; said here so no caller inherits the
+    // server's, which is dead after a C-c relay (#819).
+    c.stdin(std::process::Stdio::null());
     c
 }
 

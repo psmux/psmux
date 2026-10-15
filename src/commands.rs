@@ -188,12 +188,29 @@ fn prepend_if_absent(old: &str, dir: &str) -> Option<String> {
 /// binary reachable from the child process (`ensure_psmux_on_path`). Every
 /// run-shell path funnels through here: hooks, key bindings, `run` config
 /// lines, client-forwarded commands and the CLI fallback.
+///
+/// stdin is the null device. A job never reads the server's stdin in tmux
+/// (job.c:156 gives it the job socket), and in psmux that slot holds a dead
+/// console handle once a C-c relay has detached the server, so inheriting
+/// it fails CreateProcess with os error 6 (#819). Callers that spawn
+/// without capturing output must null stdout and stderr too
+/// ([`null_job_output`]).
 pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
     let mut c = build_run_shell_command_inner(shell_cmd);
     #[cfg(windows)]
     ensure_psmux_on_path(&mut c);
     apply_job_env(&mut c);
+    c.stdin(std::process::Stdio::null());
     c
+}
+
+/// stdout and stderr for a job whose output nobody reads (`run-shell -b`, an
+/// if-shell condition). Inheriting the server's would fail after a C-c relay
+/// for the reason in [`build_run_shell_command`] (#819); `output()` callers
+/// need nothing, it pipes both itself.
+pub fn null_job_output(c: &mut std::process::Command) {
+    c.stdout(std::process::Stdio::null());
+    c.stderr(std::process::Stdio::null());
 }
 
 /// The session identity this server adds to every job child (#804): run-shell,
@@ -2704,6 +2721,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                             shell_args.push(shell_condition);
                             let mut cmd = std::process::Command::new(&shell_prog);
                             cmd.args(shell_args)
+                            .stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null());
                             apply_job_env(&mut cmd);
@@ -3324,6 +3342,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 if background {
                     // -b flag: fire and forget, no output capture
                     let mut c = build_run_shell_command(&shell_cmd);
+                    null_job_output(&mut c);
                     if !target_session.is_empty() {
                         c.env("PSMUX_TARGET_SESSION", &target_session);
                     }

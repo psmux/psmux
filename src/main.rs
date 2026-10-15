@@ -4787,6 +4787,7 @@ fn run_main() -> io::Result<()> {
                                 let mut c = std::process::Command::new(&shell_prog);
                                 for a in &shell_args { c.arg(a); }
                                 c.arg(&cond);
+                                c.stdin(std::process::Stdio::null());
                                 c.stdout(std::process::Stdio::null());
                                 c.stderr(std::process::Stdio::null());
                                 if let Some(env) = &job_env {
@@ -4822,6 +4823,7 @@ fn run_main() -> io::Result<()> {
                             let mut c = std::process::Command::new(&shell_prog);
                             for a in &shell_args { c.arg(a); }
                             c.arg(&cond);
+                            c.stdin(std::process::Stdio::null());
                             c.stdout(std::process::Stdio::null());
                             c.stderr(std::process::Stdio::null());
                             if let Some(env) = &job_env {

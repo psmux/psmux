@@ -2435,6 +2435,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             if !target_session.is_empty() {
                 cmd.env("PSMUX_TARGET_SESSION", &target_session);
             }
+            cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
             { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }

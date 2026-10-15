@@ -991,6 +991,9 @@ fn process_brace_if_shell(app: &mut AppState, bb: &parse_config_content_types::B
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(&condition);
+        // Never the server's own stdio: dead after a C-c relay (#819).
+        c.stdin(std::process::Stdio::null());
+        crate::commands::null_job_output(&mut c);
         crate::commands::apply_job_env(&mut c);
         { use crate::platform::HideWindowCommandExt; c.hide_window(); }
         c.status().map(|s| s.success()).unwrap_or(false)
@@ -3256,6 +3259,7 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // (especially important when using -L socket namespaces like in tppanel preview).
     let target_session = app.port_file_base();
     let mut cmd = crate::commands::build_run_shell_command(&shell_cmd);
+    crate::commands::null_job_output(&mut cmd);
     if !target_session.is_empty() {
         cmd.env("PSMUX_TARGET_SESSION", &target_session);
     }
@@ -3521,6 +3525,9 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(condition);
+        // Never the server's own stdio: dead after a C-c relay (#819).
+        c.stdin(std::process::Stdio::null());
+        crate::commands::null_job_output(&mut c);
         crate::commands::apply_job_env(&mut c);
         { use crate::platform::HideWindowCommandExt; c.hide_window(); }
         c.status().map(|s| s.success()).unwrap_or(false)

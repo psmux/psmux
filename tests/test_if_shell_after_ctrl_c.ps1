@@ -1,95 +1,90 @@
-param(
-    [Parameter(Mandatory)][string]$PsmuxBinary
-)
+# Issue #819 (PR #820 by GiorgoLazaridis): a server side if-shell condition
+# must still run after send-keys C-c.
+#
+# A condition holding #{pid} is forwarded to the server, which expands it and
+# runs the shell there. Relaying C-c to a cmd pane detaches the server from
+# its console, which leaves its stdin slot holding a dead handle; a condition
+# child that inherited it failed to start (os error 6) and if-shell took the
+# false branch even for a guard that matches the server it runs in.
+#
+# This is the identity guard oh-my-claudecode uses at worker shutdown: the
+# condition compares #{pid} with the server pid it recorded. The broader
+# sweep over every job kind is test_issue819_job_stdin_after_ctrl_c.ps1.
+#
+# Runs in its own -L namespace with a private PSMUX_DATA_DIR, and checks that
+# the server and pane it started are gone after its own kill-server.
 
-$ErrorActionPreference = 'Stop'
-if (-not $IsWindows) { throw 'This regression requires Windows.' }
-$PsmuxBinary = (Resolve-Path -LiteralPath $PsmuxBinary).Path
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('psmux-if-shell-stdin-' + [guid]::NewGuid().ToString('N'))
-$null = New-Item -ItemType Directory -Path $testRoot
-$dataDirectory = Join-Path $testRoot 'data'
-$null = New-Item -ItemType Directory -Path $dataDirectory
-$socket = 'psmux-if-shell-stdin-' + [guid]::NewGuid().ToString('N')
-$config = Join-Path $testRoot 'psmux.conf'
-[IO.File]::WriteAllText($config, "set -g default-shell cmd.exe`nset -g remain-on-exit on`n")
-$records = [Collections.Generic.List[object]]::new()
-$ownedProcesses = [Collections.Generic.List[object]]::new()
-$sessionStarted = $false
-
-function Invoke-TestPsmux([string[]]$Arguments) {
-    $start = [Diagnostics.ProcessStartInfo]::new($PsmuxBinary)
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardInput = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $start.Environment['PSMUX_DATA_DIR'] = $dataDirectory
-    foreach ($key in @($start.Environment.Keys)) {
-        if ($key -eq 'TMUX' -or $key -eq 'TMUX_PANE' -or ($key.StartsWith('PSMUX_') -and $key -ne 'PSMUX_DATA_DIR')) {
-            $null = $start.Environment.Remove($key)
-        }
-    }
-    foreach ($argument in @('-L', $socket, '-f', $config) + $Arguments) { $start.ArgumentList.Add($argument) }
-    $child = [Diagnostics.Process]::Start($start)
-    try {
-        # The launcher has pipe stdin that closes, then the launcher exits.
-        $child.StandardInput.Close()
-        $stdout = $child.StandardOutput.ReadToEndAsync()
-        $stderr = $child.StandardError.ReadToEndAsync()
-        if (-not $child.WaitForExit(20000)) { $child.Kill(); throw 'Private psmux command timed out.' }
-        $result = [pscustomobject]@{ command = $Arguments; exitCode = $child.ExitCode; stdout = $stdout.Result; stderr = $stderr.Result }
-        $records.Add($result)
-        if ($result.exitCode -ne 0) { throw "Private psmux command failed: $($result.stderr)" }
-        return $result.stdout.Trim()
-    } finally { $child.Dispose() }
+$ErrorActionPreference = "Continue"
+$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
+if (-not $env:PSMUX_DATA_DIR) {
+    $env:PSMUX_DATA_DIR = Join-Path $env:TEMP ("psmux_ifctrlc_data_" + $PID)
+    New-Item -ItemType Directory -Force -Path $env:PSMUX_DATA_DIR | Out-Null
 }
+$dataDir = $env:PSMUX_DATA_DIR
+$TMP = Join-Path $env:TEMP ("psmux_ifctrlc_" + $PID)
+New-Item -ItemType Directory -Force -Path $TMP | Out-Null
+$SOCK = "ifctrlc_$PID"
+$script:Pass = 0; $script:Fail = 0
+function Write-Pass($m) { Write-Host "  [PASS] $m" -ForegroundColor Green; $script:Pass++ }
+function Write-Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:Fail++ }
+function Write-Info($m) { Write-Host "  [INFO] $m" -ForegroundColor DarkCyan }
+function P { & $PSMUX -L $SOCK @args 2>&1 | Out-String | ForEach-Object { $_.Trim() } }
+function Check([string]$what, [string]$got, [string]$want) {
+    if ($got -ceq $want) { Write-Pass "$what = '$want'" } else { Write-Fail "$what = '$got' (expected '$want')" }
+}
+function Wait-Port([string]$sess) {
+    for ($i = 0; $i -lt 80; $i++) { if (Test-Path "$dataDir\${SOCK}__$sess.port") { return }; Start-Sleep -Milliseconds 250 }
+}
+
+Write-Host "binary:  $PSMUX" -ForegroundColor Cyan
+Write-Host "socket:  $SOCK" -ForegroundColor Cyan
+$conf = Join-Path $TMP "psmux.conf"
+[IO.File]::WriteAllText($conf, "set -g default-shell cmd.exe`nset -g remain-on-exit on`n")
+$owned = @()
 
 try {
-    $null = Invoke-TestPsmux @('new-session', '-d', '-s', 'stdin', '--', 'cmd.exe', '/d', '/k')
-    $sessionStarted = $true
-    foreach ($format in @('#{pid}', '#{pane_pid}')) {
-        $processId = [int](Invoke-TestPsmux @('display-message', '-p', $format))
-        $process = Get-Process -Id $processId
-        $ownedProcesses.Add([pscustomobject]@{ pid = $processId; startTicks = $process.StartTime.ToUniversalTime().Ticks })
+    & $PSMUX -L $SOCK -f $conf new-session -d -s stdin -- cmd.exe /d /k 2>&1 | Out-Null
+    Wait-Port stdin; Start-Sleep -Milliseconds 800
+    foreach ($f in '#{pid}', '#{pane_pid}') {
+        $id = [int](P display-message -p $f)
+        $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if ($proc) { $owned += [pscustomobject]@{ pid = $id; start = $proc.StartTime.ToUniversalTime().Ticks } }
     }
-    $serverPid = $ownedProcesses[0].pid
-    # #{pid} forces the CLI to forward the condition to the server, where
-    # format expansion and condition execution must both take place.
-    $condition = "if ([int]'#{pid}' -eq $serverPid) { exit 0 } exit 1"
-    if ((Invoke-TestPsmux @('if-shell', $condition, 'display-message -p ACCEPTED', 'display-message -p REJECTED')) -ne 'ACCEPTED') {
-        throw 'Initial forwarded condition rejected the current server.'
+    $serverPid = $owned[0].pid
+    Write-Info "server pid $serverPid, pane pid $($owned[1].pid)"
+
+    # #{pid} makes the CLI forward the condition, so the server expands it
+    # and runs the shell.
+    $guard = "if ([int]'#{pid}' -eq $serverPid) { exit 0 } exit 1"
+    Check "guard before C-c" (P if-shell $guard 'display-message -p ACCEPTED' 'display-message -p REJECTED') "ACCEPTED"
+
+    P send-keys -t stdin:0.0 -l 'echo benign' | Out-Null
+    P send-keys -t stdin:0.0 Enter | Out-Null
+    $ready = $false
+    for ($i = 0; $i -lt 40; $i++) {
+        if ((P capture-pane -p -t stdin:0.0) -split "`n" | Where-Object { $_.Trim() -eq 'benign' }) { $ready = $true; break }
+        Start-Sleep -Milliseconds 125
     }
-    $null = Invoke-TestPsmux @('send-keys', '-t', 'stdin:0.0', '-l', 'echo benign')
-    $null = Invoke-TestPsmux @('send-keys', '-t', 'stdin:0.0', 'Enter')
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
-    do {
-        $pane = Invoke-TestPsmux @('capture-pane', '-p', '-t', 'stdin:0.0')
-        $ready = ($pane -split "`n" | Where-Object { $_.Trim() -eq 'benign' }).Count -gt 0
-        if (-not $ready) { Start-Sleep -Milliseconds 50 }
-    } while (-not $ready -and [DateTime]::UtcNow -lt $deadline)
-    if (-not $ready) { throw 'The benign pane command did not execute.' }
-    $null = Invoke-TestPsmux @('send-keys', '-t', 'stdin:0.0', 'C-c')
-    # A run-shell request also establishes that the input dispatch has run.
-    if ((Invoke-TestPsmux @('run-shell', "Write-Output '#{pid}'")) -ne "$serverPid") { throw 'Server format expansion changed.' }
-    if ((Invoke-TestPsmux @('if-shell', $condition, 'display-message -p ACCEPTED', 'display-message -p REJECTED')) -ne 'ACCEPTED') {
-        throw 'Forwarded if-shell could not launch its condition after Ctrl+C.'
-    }
-    if ((Invoke-TestPsmux @('if-shell', "exit 1 # #{pid}", 'display-message -p ACCEPTED', 'display-message -p REJECTED')) -ne 'REJECTED') {
-        throw 'A failed condition must still select the false branch.'
-    }
-    Write-Output 'PASS: forwarded if-shell survives Ctrl+C console detachment and retains its exit-code verdict.'
+    if ($ready) { Write-Pass "pane ran 'echo benign'" } else { Write-Fail "pane never printed 'benign'" }
+    P send-keys -t stdin:0.0 C-c | Out-Null
+
+    # run-shell also proves the C-c dispatch has been handled.
+    Check "run-shell expands #{pid} after C-c" (P run-shell "Write-Output '#{pid}'") "$serverPid"
+    Check "guard after C-c" (P if-shell $guard 'display-message -p ACCEPTED' 'display-message -p REJECTED') "ACCEPTED"
+    Check "failing condition after C-c" (P if-shell 'exit 1 # #{pid}' 'display-message -p ACCEPTED' 'display-message -p REJECTED') "REJECTED"
 } finally {
-    if ($sessionStarted) { $null = Invoke-TestPsmux @('kill-server') }
-    foreach ($owned in $ownedProcesses) {
-        $deadline = [DateTime]::UtcNow.AddSeconds(5)
-        do {
-            $current = Get-Process -Id $owned.pid -ErrorAction SilentlyContinue
-            $same = $null -ne $current -and $current.StartTime.ToUniversalTime().Ticks -eq $owned.startTicks
+    & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null
+    foreach ($o in $owned) {
+        $same = $true
+        for ($i = 0; $i -lt 100 -and $same; $i++) {
+            $cur = Get-Process -Id $o.pid -ErrorAction SilentlyContinue
+            $same = $null -ne $cur -and $cur.StartTime.ToUniversalTime().Ticks -eq $o.start
             if ($same) { Start-Sleep -Milliseconds 50 }
-        } while ($same -and [DateTime]::UtcNow -lt $deadline)
-        if ($same) { throw "Owned process $($owned.pid) remained alive after private cleanup." }
+        }
+        if ($same) { Write-Fail "process $($o.pid) outlived kill-server" } else { Write-Pass "process $($o.pid) gone after kill-server" }
     }
-    [IO.File]::WriteAllText((Join-Path $testRoot 'results.json'), ($records | ConvertTo-Json -Depth 5))
-    [IO.File]::WriteAllText((Join-Path $testRoot 'process-identities.json'), ($ownedProcesses | ConvertTo-Json))
-    Write-Output "Artifacts retained: $testRoot"
+    Remove-Item -Recurse -Force $TMP -ErrorAction SilentlyContinue
 }
+
+Write-Host "`nResults: $script:Pass passed, $script:Fail failed" -ForegroundColor $(if ($script:Fail) { "Red" } else { "Green" })
+exit $script:Fail
