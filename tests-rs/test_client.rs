@@ -686,8 +686,6 @@ fn pwsh_mouse_selection_option_default_off() {
 fn paste_into_command_prompt_inserts_at_the_cursor() {
     let mut command_buf = String::new();
     let mut rename_buf = String::new();
-    let mut pane_title_buf = String::new();
-    let mut window_idx_buf = String::new();
     // The prompt counts its cursor in characters from the END of the line, as
     // the shared prompt editor does, so a cursor at the end is zero and stays
     // zero across an insert: the text went in before whatever follows it.
@@ -695,8 +693,6 @@ fn paste_into_command_prompt_inserts_at_the_cursor() {
         "hello",
         true, &mut command_buf, 0,
         false, &mut rename_buf,
-        false, &mut pane_title_buf,
-        false, &mut window_idx_buf,
     );
     assert!(consumed, "command_input overlay must consume paste");
     assert_eq!(command_buf, "hello");
@@ -708,14 +704,10 @@ fn paste_into_command_prompt_inserts_at_cursor_position() {
     // Three characters follow the cursor, so `command_back` is 3.
     let mut command_buf = String::from("abdef");
     let mut rename_buf = String::new();
-    let mut pane_title_buf = String::new();
-    let mut window_idx_buf = String::new();
     let consumed = super::route_paste_to_overlay(
         "c",
         true, &mut command_buf, 3,
         false, &mut rename_buf,
-        false, &mut pane_title_buf,
-        false, &mut window_idx_buf,
     );
     assert!(consumed);
     assert_eq!(command_buf, "abcdef");
@@ -726,77 +718,27 @@ fn paste_with_no_overlay_active_is_not_consumed() {
     // Caller must forward via send-paste when this returns false.
     let mut command_buf = String::new();
     let mut rename_buf = String::new();
-    let mut pane_title_buf = String::new();
-    let mut window_idx_buf = String::new();
     let consumed = super::route_paste_to_overlay(
         "hello",
         false, &mut command_buf, 0,
         false, &mut rename_buf,
-        false, &mut pane_title_buf,
-        false, &mut window_idx_buf,
     );
     assert!(!consumed);
     assert!(command_buf.is_empty());
     assert!(rename_buf.is_empty());
-    assert!(pane_title_buf.is_empty());
-    assert!(window_idx_buf.is_empty());
 }
 
 #[test]
 fn paste_into_rename_prompt_appends() {
     let mut command_buf = String::new();
     let mut rename_buf = String::from("foo");
-    let mut pane_title_buf = String::new();
-    let mut window_idx_buf = String::new();
     let consumed = super::route_paste_to_overlay(
         "bar",
         false, &mut command_buf, 0,
         true, &mut rename_buf,
-        false, &mut pane_title_buf,
-        false, &mut window_idx_buf,
     );
     assert!(consumed);
     assert_eq!(rename_buf, "foobar");
-}
-
-#[test]
-fn paste_into_pane_title_appends() {
-    let mut command_buf = String::new();
-    let mut rename_buf = String::new();
-    let mut pane_title_buf = String::from("title");
-    let mut window_idx_buf = String::new();
-    let consumed = super::route_paste_to_overlay(
-        "-suffix",
-        false, &mut command_buf, 0,
-        false, &mut rename_buf,
-        true, &mut pane_title_buf,
-        false, &mut window_idx_buf,
-    );
-    assert!(consumed);
-    assert_eq!(pane_title_buf, "title-suffix");
-}
-
-#[test]
-fn paste_into_window_idx_prompt_keeps_the_text_as_typed() {
-    // The window index prompt used to keep digits only, so "1a2b3" became
-    // "123" and any letter typed there fell through to the pane. tmux binds
-    // the key as a plain `command-prompt -pindex { select-window -t ':%%' }`
-    // (key-bindings.c:394), which takes any text and lets a window NAME
-    // resolve too, so since the #744 follow up the prompt keeps the paste as
-    // typed. Control characters are still dropped.
-    let mut command_buf = String::new();
-    let mut rename_buf = String::new();
-    let mut pane_title_buf = String::new();
-    let mut window_idx_buf = String::new();
-    let consumed = super::route_paste_to_overlay(
-        "1a2b3",
-        false, &mut command_buf, 0,
-        false, &mut rename_buf,
-        false, &mut pane_title_buf,
-        true, &mut window_idx_buf,
-    );
-    assert!(consumed);
-    assert_eq!(window_idx_buf, "1a2b3");
 }
 
 #[test]
@@ -805,20 +747,14 @@ fn paste_command_prompt_takes_precedence_over_other_overlays() {
     // (matches the if/else-if order in the helper).
     let mut command_buf = String::new();
     let mut rename_buf = String::new();
-    let mut pane_title_buf = String::new();
-    let mut window_idx_buf = String::new();
     let consumed = super::route_paste_to_overlay(
         "x",
         true, &mut command_buf, 0,
         true, &mut rename_buf,
-        true, &mut pane_title_buf,
-        true, &mut window_idx_buf,
     );
     assert!(consumed);
     assert_eq!(command_buf, "x");
     assert!(rename_buf.is_empty());
-    assert!(pane_title_buf.is_empty());
-    assert!(window_idx_buf.is_empty());
 }
 
 // ─── Duplicate paste read-back guard ───────────────────────────────────────

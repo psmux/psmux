@@ -3224,8 +3224,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // only one of them is open at a time, and each opening clears it. The
     // next prompt of a `-p a,b` keeps it, as tmux's status_prompt_update does.
     let mut prompt_saved: Option<String> = None;
-    let mut pane_renaming = false;
-    let mut pane_title_buf = String::new();
     let mut command_input = false;
     let mut command_buf = String::new();
     // Characters from the END of `command_buf`, the way the shared prompt
@@ -3288,8 +3286,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     }
     // Track active window name from last dump-state for #W expansion
     let mut active_window_name = String::new();
-    let mut window_idx_input = false;
-    let mut window_idx_buf = String::new();
 
     let mut tree_chooser = false;
     // The VISIBLE rows of the chooser, which is what tmux calls line_list:
@@ -4865,7 +4861,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // A `-k` prompt is answered by Escape like any other
                         // key ("Escape", status.c:1438), so it is left to the
                         // prompt's own arm.
-                        else if matches!(key.code, KeyCode::Esc) && ((command_input && !command_key_answer && !command_numeric) || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
+                        else if matches!(key.code, KeyCode::Esc) && ((command_input && !command_key_answer && !command_numeric) || renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
                             if chooser_kill.is_some() {
                                 // Escape answers a chooser's kill question with
                                 // "no" and leaves the chooser open, which is
@@ -4898,7 +4894,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // down that clears both never runs, because
                                 // this branch takes Escape first.
                                 session_renaming = false;
-                                pane_renaming = false;
                                 tree_chooser = false;
                                 buffer_chooser = false;
                                 session_chooser = false;
@@ -4932,9 +4927,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // prefix instead, which left the prompt's own `C-b`
                         // unreachable on a default configuration and ate the
                         // next key as a prefix command. Only the two prompts
-                        // with an editor are excluded here; the pane title and
-                        // window index prompts and the choosers keep what they
-                        // had.
+                        // with an editor are excluded here; the choosers keep
+                        // what they had. The window index prompt is the
+                        // command prompt since #821, so it is one of the two.
                         // A prompt the SERVER has open (a copy mode prompt) takes
                         // it too: the client sees that prompt only as a status
                         // line with a cursor, and used to arm the prefix on C-b,
@@ -4969,7 +4964,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // A pending `switch-client -T` latch is checked before
                         // the root table, so `key_table_latch.is_none()` gates
                         // this arm and lets the dispatch arm below run instead.
-                        else if !prefix_armed && key_table_latch.is_none() && !command_input && !renaming && !srv_prompt_open && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
+                        else if !prefix_armed && key_table_latch.is_none() && !command_input && !renaming && !srv_prompt_open && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             synced_bindings.iter().any(|b| {
                                 b.t == key_table_sync.default_table() && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
@@ -5013,7 +5008,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                         }
                         else if prefix_armed
-                            || (key_table_latch.is_some() && !command_input && !renaming && !pane_renaming
+                            || (key_table_latch.is_some() && !command_input && !renaming
                                 && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer
                                 && confirm_cmd.is_none())
                         {
@@ -5126,7 +5121,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     keys_viewer_lines = help::build_overlay_lines(&user_binds, defaults_suppressed);
                                     keys_viewer = true;
                                 } else if cmd == "select-window-index" {
-                                    window_idx_input = true; window_idx_buf.clear();
+                                    // The name the key had before it became
+                                    // tmux's prompt (#821), kept for a config
+                                    // that binds it: it opens the same prompt
+                                    // as the default `'` binding.
+                                    let spec = parse_command_prompt_args(help::WINDOW_INDEX_PROMPT_ARGS);
+                                    open_command_prompt!(spec.prompts(), spec.template, spec.key, spec.single, spec.numeric, spec.search);
                                 } else if cmd == "choose-tree" || cmd == "choose-window" {
                                     do_choose_tree = true;
                                 } else if cmd == "choose-buffer" || cmd == "chooseb" {
@@ -5236,7 +5236,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // this table is read before the first state dump
                                 // has a chance to rebuild either prompt.
                                 KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; prompt_saved = None; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; command_key_answer = false; command_single = false; }
-                                KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
+                                // Same command as the PREFIX_DEFAULTS entry for
+                                // `'`, for the moment before the first state
+                                // sync arrives.
+                                KeyCode::Char('\'') => {
+                                    let spec = parse_command_prompt_args(help::WINDOW_INDEX_PROMPT_ARGS);
+                                    open_command_prompt!(spec.prompts(), spec.template, spec.key, spec.single, spec.numeric, spec.search);
+                                }
                                 // Same command as the PREFIX_DEFAULTS entry for
                                 // `.`, so the key is not dead for the moment
                                 // before the first state sync arrives.
@@ -6137,14 +6143,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     crate::copy_mode::prompt_insert(&mut rename_buf, rename_back, c.encode_utf8(&mut buf));
                                     paste_gesture.record_char(c);
                                 }
-                                KeyCode::Char(c) if pane_renaming && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { pane_title_buf.push(c); paste_gesture.record_char(c); }
-                                // tmux binds the window index prompt as a plain
-                                // `command-prompt -pindex` (key-bindings.c:394), so it takes any text and
-                                // `select-window -t ':%%'` resolves an index or a
-                                // name. It used to take digits only and let every
-                                // other character fall through to the pane, so a
-                                // letter typed or pasted here reached the shell.
-                                KeyCode::Char(c) if window_idx_input && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { window_idx_buf.push(c); paste_gesture.record_char(c); }
                                 // Text goes in at the cursor, through the same
                                 // helper the rename overlay uses. AltGr is the
                                 // exception to the CONTROL guard: Windows reports
@@ -6255,8 +6253,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::End if renaming => {
                                     let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "end", || None);
                                 }
-                                KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
-                                KeyCode::Backspace if window_idx_input => { let _ = window_idx_buf.pop(); }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
                                         cmd_batch.push(format!("rename-session {}\n", quote_arg(&rename_buf)));
@@ -6275,13 +6271,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         cmd_batch.push(format!("rename-window {}\n", quote_arg(&rename_buf)));
                                     }
                                     renaming = false;
-                                }
-                                KeyCode::Enter if pane_renaming => { cmd_batch.push(format!("set-pane-title {}\n", quote_arg(&pane_title_buf))); pane_renaming = false; }
-                                KeyCode::Enter if window_idx_input => {
-                                    if !window_idx_buf.is_empty() {
-                                        cmd_batch.push(format!("select-window -t {}\n", crate::util::quote_arg_if_needed(&format!(":{}", window_idx_buf))));
-                                    }
-                                    window_idx_input = false;
                                 }
                                 // `-p a,b`: Enter answers this prompt and asks
                                 // the next one (cmd_command_prompt_callback,
@@ -6381,8 +6370,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     command_prompt_label = None;
                                 }
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
-                                KeyCode::Esc if pane_renaming => { pane_renaming = false; }
-                                KeyCode::Esc if window_idx_input => { window_idx_input = false; }
                                 KeyCode::Esc if command_input => { command_input = false; command_back = 0; command_template = None; command_prompt_label = None; }
 
                                 // Every key the rename overlay has no use for
@@ -6748,8 +6735,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             &data,
                             command_input, &mut command_buf, command_back,
                             renaming, &mut rename_buf,
-                            pane_renaming, &mut pane_title_buf,
-                            window_idx_input, &mut window_idx_buf,
                         );
                         let duplicate = !consumed && paste_event_is_duplicate(&paste_gesture, &data);
                         if duplicate {
@@ -7868,8 +7853,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     &paste_pend,
                     command_input, &mut command_buf, command_back,
                     renaming, &mut rename_buf,
-                    pane_renaming, &mut pane_title_buf,
-                    window_idx_input, &mut window_idx_buf,
                 );
                 if !consumed {
                     let encoded = base64_encode(&paste_pend);
@@ -7918,8 +7901,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 &text,
                                 command_input, &mut command_buf, command_back,
                                 renaming, &mut rename_buf,
-                                pane_renaming, &mut pane_title_buf,
-                                window_idx_input, &mut window_idx_buf,
                             );
                             if !consumed {
                                 let encoded = base64_encode(&text);
@@ -8065,7 +8046,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
+        let overlays_active = command_input || renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
         // An overlay that closes without the server changing anything (n at
         // `kill-pane? (y/n)`, Escape out of a prompt) leaves no new frame to
         // draw, and the skip checks below used to `continue` on exactly that
@@ -8206,7 +8187,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if let Some(req) = state.prompt_request {
             if req.id > last_prompt_request_id && (req.pid == 0 || req.pid == std::process::id()) {
                 last_prompt_request_id = req.id;
-                let busy = command_input || renaming || pane_renaming || window_idx_input
+                let busy = command_input || renaming
                     || tree_chooser || buffer_chooser || session_chooser || keys_viewer
                     || confirm_cmd.is_some();
                 if busy {
@@ -9603,20 +9584,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 let (shown, cur_col) = crate::util::prompt_window(&rename_buf, at, avail);
                 let para = Paragraph::new(format!("name: {}", shown));
                 f.render_widget(para, inner);
-                // An open prompt owns the cursor, as the command prompt and the
-                // window index prompt have since #741 and #746. Without it the
+                // An open prompt owns the cursor, as the command prompt has
+                // since #741 and #746. Without it the
                 // overlay gave no sign of where the next character would land.
                 let cx = inner.x + 6 + cur_col as u16;
                 f.set_cursor_position((cx, inner.y));
                 prompt_cursor_pos = Some((cx, inner.y));
-            }
-            if pane_renaming {
-                let overlay = Block::default().borders(Borders::ALL).title("set pane title");
-                let oa = centered_rect(60, 3, content_chunk);
-                f.render_widget(Clear, oa);
-                f.render_widget(&overlay, oa);
-                let para = Paragraph::new(format!("title: {}", pane_title_buf));
-                f.render_widget(para, overlay.inner(oa));
             }
             if command_input {
                 let title = command_prompt_label.as_deref().unwrap_or("command");
@@ -9645,18 +9618,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 let para = Paragraph::new(format!(": {}", shown));
                 f.render_widget(para, inner);
                 let cx = inner.x + 2 + cur_col as u16;
-                f.set_cursor_position((cx, inner.y));
-                prompt_cursor_pos = Some((cx, inner.y));
-            }
-            if window_idx_input {
-                let overlay = Block::default().borders(Borders::ALL).title("select window");
-                let oa = centered_rect(50, 3, content_chunk);
-                f.render_widget(Clear, oa);
-                f.render_widget(&overlay, oa);
-                let inner = overlay.inner(oa);
-                let para = Paragraph::new(format!("index: {}", window_idx_buf));
-                f.render_widget(para, inner);
-                let cx = inner.x + 7 + unicode_width::UnicodeWidthStr::width(window_idx_buf.as_str()) as u16;
                 f.set_cursor_position((cx, inner.y));
                 prompt_cursor_pos = Some((cx, inner.y));
             }
@@ -9951,7 +9912,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 srv_popup_cursor.and_then(|c| {
                     popup_cursor_screen_pos_framed(content_chunk, srv_popup_width, srv_popup_height, srv_popup_scroll, c, srv_popup_frame.has_border())
                 })
-            } else if command_input || window_idx_input || status_prompt_open || renaming {
+            } else if command_input || status_prompt_open || renaming {
                 // An open prompt owns the cursor, and the pane only gets it
                 // when no prompt is up: tmux settles the cursor on
                 // `c->prompt_cursor` first and takes the pane in the else
@@ -10003,7 +9964,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             if cursor_visible.is_none()
                 && !(srv_popup_active && srv_popup_has_pty)
                 && !command_input
-                && !window_idx_input
                 && !status_prompt_open
                 && !renaming
                 && !srv_floats.iter().any(|fl| fl.focused)
@@ -10600,7 +10560,7 @@ impl PasteGesture {
     }
 
     /// Remember one character handed to a client overlay (the command prompt,
-    /// the rename prompts, the window index prompt).
+    /// the rename prompts).
     ///
     /// The pane path records whole bursts, because that is how it forwards
     /// them. An overlay consumes the characters one at a time, so nothing was
@@ -10839,7 +10799,7 @@ fn overlay_initial_name(port: u16, session_key: &str, fmt: &str, fallback: &str)
 }
 
 /// Route a clipboard paste into the active client-side text overlay
-/// (command prompt, rename prompt, pane title, window-index prompt).
+/// (command prompt, rename prompt).
 /// Returns `true` when an overlay consumed the paste — callers must skip
 /// the `send-paste` forwarding in that case so the text does not also leak
 /// into the underlying pane (fixes issue #290).
@@ -10850,27 +10810,12 @@ fn route_paste_to_overlay(
     command_back: usize,
     renaming: bool,
     rename_buf: &mut String,
-    pane_renaming: bool,
-    pane_title_buf: &mut String,
-    window_idx_input: bool,
-    window_idx_buf: &mut String,
 ) -> bool {
     if command_input {
         crate::copy_mode::prompt_insert(command_buf, command_back, data);
         true
     } else if renaming {
         rename_buf.push_str(data);
-        true
-    } else if pane_renaming {
-        pane_title_buf.push_str(data);
-        true
-    } else if window_idx_input {
-        // Any text, as tmux's `command-prompt -pindex` takes it
-        // (key-bindings.c:394); only line breaks and other control
-        // characters are left out of a one line target.
-        for c in data.chars() {
-            if !c.is_control() { window_idx_buf.push(c); }
-        }
         true
     } else {
         false
@@ -11086,6 +11031,10 @@ mod test_switch_client_target_routing;
 #[cfg(test)]
 #[path = "../tests-rs/test_prefix_dot_move_window.rs"]
 mod test_prefix_dot_move_window;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue821_window_index_prompt.rs"]
+mod test_issue821_window_index_prompt;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue789_followup_client_prompt.rs"]
