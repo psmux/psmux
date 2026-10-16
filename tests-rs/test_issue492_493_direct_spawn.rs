@@ -166,10 +166,19 @@ fn build_command_direct_spawn_has_no_shell_wrapper() {
     // target the exe itself, not pwsh/powershell/cmd wrapping it.
     let cmd = format!("{}\\System32\\cmd.exe", windir());
     let builder = build_command(Some(&cmd), false, false);
-    let line = format!("{:?}", builder);
+    // The arguments the pane will be spawned with. The builder's Debug text
+    // also carries its environment and working directory, so a branch or a
+    // checkout path with "command" in its name (GITHUB_HEAD_REF in CI) read
+    // as a `-Command` wrapper there.
+    let argv: Vec<String> = builder
+        .get_argv()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     assert!(
-        !line.to_lowercase().contains("-command"),
-        "no `-Command` wrapper expected for a plain exe, got: {}",
-        line
+        !argv.iter().any(|a| a.eq_ignore_ascii_case("-command")),
+        "no `-Command` wrapper expected for a plain exe, got: {:?}",
+        argv
     );
+    assert_eq!(argv.first().map(String::as_str), Some(cmd.as_str()), "the exe itself is spawned: {:?}", argv);
 }
