@@ -416,7 +416,7 @@ A psmux extension that creates a pane floating above the tiled layout.
 
 **set-buffer** (`setb`)
 - Boolean: `-a` (append to the `-b` buffer), `-w` (also write to the Windows clipboard)
-- Value: `-b` (buffer name), `-n` (rename the `-b` buffer, or the newest automatic buffer, to this name; any data is not used), `-t` (target client. tmux uses it only with `-w`. psmux keeps buffers per session, so a `-t` that names a session picks that session's buffers, and any other value is ignored)
+- Value: `-b` (buffer name), `-n` (rename the `-b` buffer, or the newest automatic buffer, to this name; any data is not used), `-t` (target client. tmux uses it only with `-w`. psmux keeps buffers per session, so on the CLI a `-t` that names a session picks that session's buffers, and any other value is ignored. Inside a server (the command prompt, a key binding, `if-shell`, a hook, control mode) a `-t` that names another session is refused with `set-buffer: NAME is another session`, because that server cannot reach the other session's buffers)
 - With no data the command fails with `no data specified`. Empty data changes nothing.
 
 **delete-buffer** (`deleteb`) and **show-buffer** (`showb`)
