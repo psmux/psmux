@@ -565,6 +565,38 @@ pub(crate) fn chooser_kill_session_prompt(current_session: &str, row: &str) -> S
     format!("kill-session {}", crate::session::display_session_name(ns, row))
 }
 
+/// The registry base (port file stem) of this client's own session, once a
+/// frame has said what the session is called now.
+///
+/// tmux's client holds its session by pointer (`server_client_set_session`,
+/// server-client.c), and cmd-rename-session.c only replaces `s->name`, so a
+/// rename never changes which session a client is in. psmux's client names its
+/// session by the base it attached with, and a rename moves the .port and .key
+/// files to the new base, so the base has to follow the name or every lookup
+/// by it (choose-buffer, prefix ( and ), the choosers' own row) misses.
+///
+/// The frame carries the short name; the base is `<ns>__<name>` under `-L ns`,
+/// prefixed whatever the name looks like, as `AppState::port_file_base` and
+/// RenameSession build it. A warm standby's base `<ns>____warm__` has no
+/// namespace for `session_namespace`, so it is read off the warm suffix. An
+/// empty name, or a standby that has not been claimed yet, leaves the base as
+/// it is.
+pub(crate) fn session_base_after_rename(current_base: &str, live_name: &str) -> String {
+    use crate::session::is_warm_session;
+    if live_name.is_empty() || is_warm_session(live_name) {
+        return current_base.to_string();
+    }
+    let ns = if is_warm_session(current_base) {
+        current_base.strip_suffix("____warm__")
+    } else {
+        crate::session::session_namespace(current_base)
+    };
+    match ns {
+        Some(n) => format!("{}__{}", n, live_name),
+        None => live_name.to_string(),
+    }
+}
+
 /// Classify every row of a choose-tree model so the tmux line rules in
 /// `crate::choose_tree` can be applied to it.
 pub(crate) fn tree_row_kinds(rows: &[TreeRow]) -> Vec<crate::choose_tree::RowKind> {
@@ -3154,7 +3186,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     crate::session::touch_session_activity(&name);
     // The name this client keeps restamping while the user types. `None` for a
     // warm (standby) session, which is internal and never a routing candidate.
-    let activity_name: Option<String> =
+    // A rename-session moves it along with `current_session` (below), as the
+    // server moves the stamp itself (carry_session_activity_file).
+    let mut activity_name: Option<String> =
         if crate::session::is_warm_session(&name) { None } else { Some(name.clone()) };
 
     // ── Open persistent TCP connection ───────────────────────────────────
@@ -3316,6 +3350,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut buffer_scroll: usize = 0;
     // Digit-jump buffer for the choose-buffer picker.
     let mut buffer_num_buffer = String::new();
+    // Open the buffer chooser: the one place prefix = and the prompt's
+    // choose-buffer fetch its rows. With no buffers there is no chooser.
+    macro_rules! open_buffer_chooser {
+        () => {{
+            buffer_chooser = true;
+            buffer_selected = 0;
+            buffer_scroll = 0;
+            buffer_num_buffer.clear();
+            buffer_entries = fetch_buffer_entries(port, &session_key);
+            if buffer_entries.is_empty() {
+                buffer_chooser = false;
+            }
+        }};
+    }
     let mut session_chooser = false;
     let mut session_entries: Vec<(String, String)> = Vec::new();
     let mut session_selected: usize = 0;
@@ -3358,13 +3406,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Whether any overlay was up on the previous loop pass, so the pass that
     // closes one still draws a frame (#767): see `overlay_closed` below.
     let mut prev_overlays_active = false;
-    let current_session = name.clone();
+    // The port file base of this client's own session: under `-L ns` it reads
+    // `ns__name`. The choosers, prefix ( and ) and choose-buffer find "this
+    // session" by it, so it follows a rename-session: each parsed frame carries
+    // the live name (`session_name`) and session_base_after_rename turns it
+    // back into a base. The port and key this client attached with (`port`,
+    // `session_key`) need no such care, because a rename keeps both.
+    let mut current_session = name.clone();
     // What the session is CALLED, as against `current_session`, which is the
-    // port file base: under `-L ns` the base reads `ns__name`, and it is read
-    // once at attach, so a later `rename-session` never reaches it. The server
-    // puts the live name in every frame (`session_name`, issue #7 batch D), so
-    // this follows a rename. Until the first frame lands there is nothing
-    // better than the base to show.
+    // port file base. The server puts the live name in every frame
+    // (`session_name`, issue #7 batch D), so this follows a rename. Until the
+    // first frame lands there is nothing better than the base to show.
     let mut session_label = name.clone();
     let mut last_sent_size: (u16, u16) = SIZE_NOT_REPORTED;
     let mut last_status_lines: u16 = 1; // track server's status_lines for correct client-size height
@@ -5485,35 +5537,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             if do_choose_buffer {
-                                buffer_chooser = true;
-                                buffer_entries.clear();
-                                buffer_selected = 0;
-                                buffer_scroll = 0;
-                                buffer_num_buffer.clear();
-                                // Fetch buffer list from server via TCP
-                                let port_file = crate::paths::port_file(&current_session);
-                                if let Ok(port_str) = std::fs::read_to_string(&port_file) {
-                                    if let Ok(p) = port_str.trim().parse::<u16>() {
-                                        let sess_key = read_session_key(&current_session).unwrap_or_default();
-                                        let addr = format!("127.0.0.1:{}", p);
-                                        if let Some(buf_line) = crate::session::fetch_authed_response_multi(
-                                            &addr,
-                                            &sess_key,
-                                            b"choose-buffer\n",
-                                            Duration::from_millis(100),
-                                            Duration::from_millis(200),
-                                        ) {
-                                            {
-                                                // One "name: 17 bytes: "content"" per buffer.
-                                                buffer_entries.extend(buf_line.trim().split('\n').filter_map(parse_buffer_line));
-                                            }
-                                        }
-                                    }
-                                }
-                                if buffer_entries.is_empty() {
-                                    // No buffers — don't show chooser
-                                    buffer_chooser = false;
-                                }
+                                open_buffer_chooser!();
                             }
                             if let Some(dir_next) = do_session_nav {
                                 let dir = crate::paths::psmux_dir();
@@ -6264,7 +6288,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         // in between would open on the old name
                                         // again. The frame still has the last
                                         // word, so a name the server refuses
-                                        // corrects itself.
+                                        // corrects itself. `current_session`
+                                        // waits for that frame: a refused name
+                                        // can be another live session's, and
+                                        // taking it here would make that row
+                                        // this client's own in the choosers,
+                                        // where `x` kills it as if it were.
                                         session_label = rename_buf.clone();
                                         session_renaming = false;
                                     } else {
@@ -6315,30 +6344,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         let first_word = final_cmd.split_whitespace().next().unwrap_or("");
                                         if first_word == "choose-buffer" || first_word == "chooseb" {
                                             // Open interactive buffer chooser instead of sending to server
-                                            buffer_chooser = true;
-                                            buffer_entries.clear();
-                                            buffer_selected = 0;
-                                            buffer_scroll = 0;
-                                            buffer_num_buffer.clear();
-                                            let port_file = crate::paths::port_file(&current_session);
-                                            if let Ok(port_str) = std::fs::read_to_string(&port_file) {
-                                                if let Ok(p) = port_str.trim().parse::<u16>() {
-                                                    let sess_key = read_session_key(&current_session).unwrap_or_default();
-                                                    let addr = format!("127.0.0.1:{}", p);
-                                                    if let Some(buf_line) = crate::session::fetch_authed_response_multi(
-                                                        &addr,
-                                                        &sess_key,
-                                                        b"choose-buffer\n",
-                                                        Duration::from_millis(100),
-                                                        Duration::from_millis(200),
-                                                    ) {
-                                                        {
-                                                            buffer_entries.extend(buf_line.trim().split('\n').filter_map(parse_buffer_line));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            if buffer_entries.is_empty() { buffer_chooser = false; }
+                                            open_buffer_chooser!();
                                         } else {
                                             // Split on \; or ; to support command chaining (issue #192)
                                             let sub_cmds = crate::config::split_chained_commands_pub(&final_cmd);
@@ -8128,6 +8134,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Same reason as the window name above: the rename overlay and `#S`
         // open on it, so it has to be the name the session has now.
         if let Some(sn) = state.session_name {
+            // The base follows the name here and nowhere earlier. The server
+            // writes the new .port before it changes the name it sends, so a
+            // frame with the new name never arrives before the file moved,
+            // and a rename it refuses (`duplicate session`) never changes the
+            // name it sends at all.
+            let base = session_base_after_rename(&current_session, &sn);
+            if base != current_session {
+                current_session = base;
+                activity_name = if crate::session::is_warm_session(&current_session) {
+                    None
+                } else {
+                    Some(current_session.clone())
+                };
+                // The switch loop in main.rs reads this as the session being
+                // left, for `switch-client -l` (issue #566).
+                env::set_var("PSMUX_SESSION_NAME", &current_session);
+            }
             session_label = sn;
         }
         last_tree = state.tree;
@@ -10756,6 +10779,25 @@ pub(crate) fn parse_buffer_line(line: &str) -> Option<(String, usize, String)> {
     Some((name, size, sample))
 }
 
+/// The buffer chooser's rows, asked of the server this client is attached to.
+/// Like top_paste_buffer and overlay_initial_name it goes to the port and key
+/// the client attached with: a lookup by the session's name went to the
+/// pre-rename base after a rename-session, found no .port file and left the
+/// chooser closed although the session had buffers. Empty when the server has
+/// no buffers or does not answer in time.
+fn fetch_buffer_entries(port: u16, session_key: &str) -> Vec<(String, usize, String)> {
+    crate::session::fetch_authed_response_multi(
+        &format!("127.0.0.1:{}", port),
+        session_key,
+        b"choose-buffer\n",
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+    )
+    // One "name: 17 bytes: "content"" per buffer.
+    .map(|reply| reply.trim().split('\n').filter_map(parse_buffer_line).collect())
+    .unwrap_or_default()
+}
+
 fn top_paste_buffer(port: u16, session_key: &str) -> Option<String> {
     crate::session::fetch_authed_first_line_raw(
         &format!("127.0.0.1:{}", port),
@@ -11055,3 +11097,7 @@ mod test_keytable_switch_client;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue783_prompt_edit_unify.rs"]
 mod test_issue783_prompt_edit_unify;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue839_rename_session_identity.rs"]
+mod test_issue839_rename_session_identity;
