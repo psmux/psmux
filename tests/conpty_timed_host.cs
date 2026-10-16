@@ -3,6 +3,7 @@
 // stamping each write with GetSystemTimePreciseAsFileTime.
 // Usage: conpty_timed_host.exe <logfile> <scriptfile> <outbin> -- <cmdline>
 // Script lines: S <ms> | H <label> <hex> | T <label> <text>
+//   | X <label> <command line>   (runs it through cmd /c, waits, logs its output)
 // Each write logs "<unix ms> <label>" to logfile.
 using System;
 using System.Collections.Generic;
@@ -67,6 +68,13 @@ class ConptyTimedHost
             if (line.Length == 0 || line.StartsWith("#")) continue;
             var p = line.Split(new[] { ' ' }, 3);
             if (p[0] == "S") { Thread.Sleep(int.Parse(p[1])); continue; }
+            if (p[0] == "X") {
+                var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + p[2]);
+                psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.CreateNoWindow = true;
+                var pr = System.Diagnostics.Process.Start(psi); string o = pr.StandardOutput.ReadToEnd(); pr.WaitForExit();
+                lines.Add(string.Format("{0:F3} {1} => {2}", Now(), p[1], o.Trim().Replace("\r", "").Replace("\n", " | ")));
+                File.WriteAllLines(log, lines); continue;
+            }
             byte[] data = p[0] == "H" ? Hex(p[2]) : System.Text.Encoding.UTF8.GetBytes(p[2]);
             double t = Now();
             WriteFile(inW, data, data.Length, out w, IntPtr.Zero);

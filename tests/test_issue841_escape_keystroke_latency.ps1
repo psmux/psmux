@@ -165,6 +165,54 @@ Write-Host "`n[Part 3] VT route follows escape-time (tmux: a lone ESC byte waits
 Assert-Route "VT route, escape-time 10" (Invoke-PtyRoute 'vt' 'set -g escape-time 10') -EscCeiling 30
 Assert-Route "VT route, escape-time 0" (Invoke-PtyRoute 'vt' 'set -g escape-time 0')
 
+# The default is tmux 3.5's 10 ms (it was tmux 3.4's 500, capped at a 50 ms
+# hold, so 60.1 ms measured on the VT route before the default changed).
+Write-Host "`n[Part 4] VT route at the default escape-time" -ForegroundColor Yellow
+Assert-Route "VT route, default escape-time" (Invoke-PtyRoute 'vt' '') -EscCeiling 30
+
+# ── Part 5: prefix keys still work with the short escape-time ──────────────
+# A bottom pane is active; prefix Up must select the top one, prefix Down
+# written as `ESC`, then `[B` 4 ms later (a sequence split across two reads,
+# inside escape-time) must come back down, and prefix Alt+Up must resize.
+function W32Rec($vk, $sc, $uc, $down, $cs) { "H k $(W32Hex $vk $sc $uc $down $cs)" }
+function Invoke-PrefixCheck([string]$route) {
+    $ns = "i841p$PID" + (Get-Random -Maximum 999)
+    $q = "`"$PSMUX`" -L $ns display -p -t m #{pane_index}:#{pane_height}"
+    if ($route -eq 'vt') {
+        $prefix = @('H k 02'); $up = @('H k 1b5b41'); $down = @('H k 1b', 'S 4', 'H k 5b42'); $altUp = @('H k 1b5b313b3341')
+    } else {
+        $prefix = @((W32Rec 17 29 0 1 8), (W32Rec 66 48 2 1 8), (W32Rec 66 48 2 0 8), (W32Rec 17 29 0 0 0))
+        $up = @((W32Rec 38 72 0 1 256), (W32Rec 38 72 0 0 256))
+        $down = @((W32Rec 40 80 0 1 256), (W32Rec 40 80 0 0 256))
+        $altUp = @((W32Rec 18 56 0 1 2), (W32Rec 38 72 0 1 258), (W32Rec 38 72 0 0 258), (W32Rec 18 56 0 0 0))
+    }
+    $lines = @('S 3000', "X split `"$PSMUX`" -L $ns split-window -v -t m", 'S 800', "X start $q") +
+        $prefix + $up + @('S 700', "X up $q") + $prefix + $down + @('S 700', "X down $q") +
+        $prefix + $altUp + @('S 700', "X altup $q", 'S 300')
+    $script = Join-Path $work "prefix_$route.txt"; $lines | Set-Content $script
+    $hlog = Join-Path $work "prefixlog_$route.txt"
+    $cfg = Join-Path $work "prefix_$route.conf"; [IO.File]::WriteAllText($cfg, "set -g status off`n")
+    if ($route -eq 'vt') { $env:PSMUX_VT_INPUT = '1' }
+    $h = Start-Process $host_ -ArgumentList $hlog, $script, (Join-Path $work "prefix_$route.bin"), '--', "`"$PSMUX`" -L $ns -f `"$cfg`" new-session -s m" -PassThru -WindowStyle Minimized
+    Remove-Item env:PSMUX_VT_INPUT -EA SilentlyContinue
+    if (-not $h.WaitForExit(40000)) { Stop-Process -Id $h.Id -Force -EA SilentlyContinue }
+    & $PSMUX -L $ns kill-server 2>&1 | Out-Null
+    $r = @{}
+    Get-Content $hlog -EA SilentlyContinue | ForEach-Object { if ($_ -match '^\S+ (\w+) => (\d+):(\d+)') { $r[$Matches[1]] = @([int]$Matches[2], [int]$Matches[3]) } }
+    $r
+}
+foreach ($route in 'w32', 'vt') {
+    Write-Host "`n[Part 5] prefix keys on the $route route" -ForegroundColor Yellow
+    $r = Invoke-PrefixCheck $route
+    if (-not $r['start'] -or -not $r['altup']) { Write-Fail "$route prefix check: no pane readings ($(($r.Keys) -join ','))"; continue }
+    if ($r['start'][0] -eq 1 -and $r['up'][0] -eq 0) { Write-Pass "$route prefix Up selected the pane above (1 -> 0)" }
+    else { Write-Fail "$route prefix Up: pane $($r['start'][0]) -> $($r['up'][0])" }
+    if ($r['down'][0] -eq 1) { Write-Pass "$route prefix Down came back (0 -> 1)$(if ($route -eq 'vt') { ', written as ESC then [B 4 ms apart' })" }
+    else { Write-Fail "$route prefix Down: pane $($r['up'][0]) -> $($r['down'][0])" }
+    if ($r['altup'][1] -ne $r['down'][1]) { Write-Pass "$route prefix Alt+Up resized the pane (height $($r['down'][1]) -> $($r['altup'][1]))" }
+    else { Write-Fail "$route prefix Alt+Up left the height at $($r['altup'][1])" }
+}
+
 if (-not $env:PSMUX_841_KEEP) { Remove-Item $work -Recurse -Force -EA SilentlyContinue }
 Write-Host "`n=== Issue #841 keystroke latency results: $($script:TestsPassed) passed, $($script:TestsFailed) failed ===" -ForegroundColor Cyan
 if ($script:TestsFailed -gt 0) { exit 1 }
