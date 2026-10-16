@@ -3772,15 +3772,10 @@ pub enum CtrlReq {
     SetNamedBuffer(String, String),
     /// `set-buffer -a -b name`: append to the buffer of that name, or make it.
     AppendNamedBuffer(String, String),
-    /// A whole control mode `set-buffer` (-a, -b, -n and the data), run by
-    /// commands::run_set_buffer; the reply is tmux's error, if any (#813).
-    SetBufferCmd {
-        name: Option<String>,
-        data: String,
-        append: bool,
-        new_name: Option<String>,
-        resp: mpsc::Sender<Result<(), String>>,
-    },
+    /// A whole parsed `set-buffer` (-a, -b, -n, -t, -w and the data), run by
+    /// commands::run_set_buffer_args; the reply is tmux's error, if any
+    /// (#813).
+    SetBufferCmd(crate::commands::SetBufferArgs, mpsc::Sender<Result<(), String>>),
     /// Control mode `delete-buffer [-b name]`, run by
     /// commands::run_delete_buffer (#813).
     DeleteBufferCmd(Option<String>, mpsc::Sender<Result<(), String>>),
