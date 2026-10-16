@@ -4583,7 +4583,23 @@ fn run_main() -> io::Result<()> {
                         // inserted commands before the item continues).
                         let resp = crate::session::send_control_with_response_wait(
                             format!("source-file {}\n", crate::util::quote_arg(&expanded)))?;
-                        if !resp.is_empty() { print!("{}", resp); }
+                        // The commands' output goes to stdout. A command that
+                        // failed is an `ERROR:` line: its message goes to
+                        // stderr and the exit status is 1, as tmux's client
+                        // reports cmdq_error (issue #842).
+                        let mut failed = false;
+                        let mut out = String::new();
+                        for l in resp.split_inclusive('\n') {
+                            match l.strip_prefix("ERROR: ") {
+                                Some(msg) => {
+                                    eprintln!("psmux: {}", msg.trim_end());
+                                    failed = true;
+                                }
+                                None => out.push_str(l),
+                            }
+                        }
+                        if !out.is_empty() { print!("{}", out); }
+                        if failed { std::process::exit(1); }
                     }
                 }
                 return Ok(());

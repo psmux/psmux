@@ -1078,6 +1078,22 @@ Like tmux, `source-file` only runs the file's commands: bindings made before it 
 the CLI survives, and files sourced one after another (a plugin manager's, for example) all keep
 their bindings.
 
+The file's commands run in order, each once the one before it has finished, as tmux runs them: a
+`split-window` after a `new-window` splits the new window. The options and bindings before the file's
+first command apply at once; everything from that command on waits its turn. `psmux source-file`
+returns once the commands have run and prints what they print. Every problem in the file is an
+error, as in tmux: a command that fails, a nested file that cannot be read, an unknown option or a
+bad value. `source-file` prints each on stderr and exits 1, and the rest of the file still runs.
+With `-q`, a file that does not exist is skipped without a word.
+
+A file may source other files, and a path may be a glob. A nested file's commands run where its
+`source-file` line stands, before the rest of the outer file, down to 50 levels as in tmux (deeper
+is `too many nested files`). A file that would source a file already being sourced, itself or one
+further out, is an error. When the `source-file` line always runs, `source-file` refuses the whole
+file before any of its lines take effect; one in a key binding, a `%if` block or an `if-shell` block
+is checked only if and when it runs, so a reload key such as `bind r { source-file ~/.tmux.conf }` is
+fine. tmux has no such check and runs a self-sourcing file until the nesting limit.
+
 One deliberate difference from tmux: sourcing the config file the server **started with** (the `-f`
 file or `PSMUX_CONFIG_FILE`, otherwise the first of `~/.psmux.conf`, `~/.psmuxrc`, `~/.tmux.conf`,
 `~/.config/psmux/psmux.conf` that existed) is a reload, and it starts from the default bindings. The

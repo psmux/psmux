@@ -3,6 +3,7 @@ pub(crate) mod options;
 pub(crate) mod option_catalog;
 pub(crate) mod connection;
 pub(crate) mod temp_target;
+pub(crate) mod source_job;
 
 use std::io::{self, Write};
 use std::sync::mpsc;
@@ -37,8 +38,7 @@ use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remot
     swap_pane, swap_pane_with_path, unzoom_if_zoomed, resize_pane_vertical,
     resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane,
     handle_pane_mouse, copy_drag_begin, handle_split_set_sizes, handle_split_resize_done};
-use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
-    parse_config_content};
+use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding};
 use crate::commands::{parse_command_to_action, parse_menu_definition, execute_command_string};
 use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
 use crate::control;
@@ -6422,9 +6422,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::SourceFile(path, done) => {
-                    // `done` is dropped at the end of this arm, after the
-                    // file has run: that is the one-shot source-file's answer.
-                    let _done = done;
+                    // `done` is the one-shot source-file's answer: sent at the
+                    // end of this arm when the file kept no command, or by the
+                    // source job once the file's commands have run.
                     // tmux's source-file only runs the file's commands
                     // (cmd-source-file.c): bindings made before it stay, so
                     // a `bind` from the CLI and the files a plugin manager
@@ -6439,26 +6439,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.key_tables.clear();
                         crate::config::populate_default_bindings(&mut app);
                     }
-                    // Use config helper for standard source-file behavior (-F support,
-                    // nested parse context). Keep direct glob handling for wildcard sources.
-                    let is_format_expand = path.starts_with("-F ") || path.starts_with("-F\t");
-                    let path_for_glob = if is_format_expand { path[3..].trim() } else { &path };
-                    if !is_format_expand && (path_for_glob.contains('*') || path_for_glob.contains('?')) {
-                        let expanded = if path_for_glob.starts_with('~') {
-                            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                            path_for_glob.replacen('~', &home, 1)
-                        } else {
-                            path_for_glob.to_string()
-                        };
-                        if let Ok(entries) = glob::glob(&expanded) {
-                            for entry in entries.flatten() {
-                                if let Ok(contents) = std::fs::read_to_string(&entry) {
-                                    parse_config_content(&mut app, &contents);
-                                }
-                            }
-                        }
-                    } else {
-                        crate::config::source_file(&mut app, &path);
+                    // Options and bindings before the file's first command
+                    // apply now; the commands, and every line after the first
+                    // of them, come back in file order for the source job,
+                    // which runs them one after another as tmux's queue does
+                    // (issue #842). The -F form and globs are handled there.
+                    let parsed = crate::config::source_runtime(&mut app, &path);
+                    // A sourced file can set command-alias, which the
+                    // connection dispatcher reads from its own copy.
+                    if let Ok(mut map) = shared_aliases_main.write() {
+                        *map = app.command_aliases.clone();
                     }
                     // A runtime source-file can record warnings (e.g. an
                     // unreadable path); flush them like the startup load does
@@ -6472,6 +6462,54 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // dump-state instead of getting an NC fast-path reply.
                     state_dirty = true;
                     meta_dirty = true;
+                    match (parsed.lines.is_empty(), app.control_port, app.control_tx.clone()) {
+                        (false, Some(port), Some(job_tx)) => {
+                            // The job answers `done` once the last line ran.
+                            source_job::spawn_source_job(
+                                port,
+                                app.session_key.clone(),
+                                job_tx,
+                                parsed.lines,
+                                app.config_warnings.clone(),
+                                parsed.errors,
+                                done,
+                            );
+                        }
+                        _ => {
+                            // Nothing to run, or a file that sources itself,
+                            // refused before any of it took effect.
+                            if let Some(done) = done {
+                                let _ = done.send(crate::types::SourceOutcome {
+                                    output: String::new(),
+                                    errors: parsed.errors,
+                                });
+                            }
+                        }
+                    }
+                }
+                CtrlReq::SourceReplay(item, resp) => {
+                    // A config line a source job kept, now that the commands
+                    // before it have run (issue #842).
+                    let result = crate::config::replay_deferred_line(&mut app, &item);
+                    if let Ok(mut map) = shared_aliases_main.write() {
+                        *map = app.command_aliases.clone();
+                    }
+                    resize_all_panes(&mut app);
+                    state_dirty = true;
+                    meta_dirty = true;
+                    let _ = resp.send(result);
+                }
+                CtrlReq::SourceJobDone { warnings, outcome, waiter } => {
+                    // The source's warnings, the parse's and the commands',
+                    // are reported now that the whole file has run.
+                    app.config_warnings = warnings;
+                    write_config_warnings_log(&app.config_warnings);
+                    crate::config::summarize_config_warnings(&mut app);
+                    state_dirty = true;
+                    meta_dirty = true;
+                    if let Some(waiter) = waiter {
+                        let _ = waiter.send(outcome);
+                    }
                 }
                 CtrlReq::MoveWindow { src, dst, detach, kill, renumber, after, before, resp } => {
                     // tmux cmd-move-window.c. Both outcomes mark the state

@@ -2027,6 +2027,11 @@ pub struct AppState {
     /// `file:line: message` (file comes from config::current_config_file()).
     /// None when parsing a single runtime command.
     pub config_warn_line: Option<usize>,
+    /// Set while a runtime source-file is parsed (config::source_runtime): from
+    /// the file's first command on, its lines are kept here in order for the
+    /// source job instead of being applied or dropped (issue #842). None for
+    /// every other parse, the startup config included.
+    pub source_defer: Option<SourceDefer>,
     /// set-clipboard: "on", "off", "external" (default "external", as tmux)
     pub set_clipboard: String,
     /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
@@ -3282,6 +3287,7 @@ impl AppState {
             terminal_overrides: Vec::new(),
             config_warnings: Vec::new(),
             config_warn_line: None,
+            source_defer: None,
             set_clipboard: "external".to_string(),
             clipboard_osc52: None,
             bell_forward: false,
@@ -3487,6 +3493,67 @@ pub struct DisplayFlags {
     pub literal: bool,
     /// `-N`: key presses do not close the message; only its delay does.
     pub ignore_keys: bool,
+}
+
+/// The lines of a runtime source-file kept for the source job (issue #842).
+/// tmux runs a sourced file's commands one at a time after the parse
+/// (cfg.c:155 to :204); psmux keeps them here from the first command on, the
+/// option lines after it too, so they still run in file order.
+#[derive(Debug, Default)]
+pub struct SourceDefer {
+    /// The first command has been reached: every line from here on is kept.
+    pub triggered: bool,
+    pub lines: Vec<DeferredConfigLine>,
+}
+
+/// One kept line, with the file and line it came from for its warnings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredConfigLine {
+    pub file: String,
+    pub line: Option<usize>,
+    pub kind: DeferredKind,
+    /// The files being sourced where this line was read, outermost first
+    /// (config::source_key). A `source-file` it runs later is checked
+    /// against them, so a file cannot source itself through the job either.
+    pub ancestors: Vec<String>,
+}
+
+/// What config::source_runtime returns: the lines kept for the source job,
+/// and the errors found while parsing, which are every warning the parse
+/// recorded: in a runtime source each is an error for the client, as tmux
+/// reports a missing file or an invalid option (issue #842).
+#[derive(Debug, Default)]
+pub struct SourceParse {
+    pub lines: Vec<DeferredConfigLine>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeferredKind {
+    /// A command, run through the connection dispatcher.
+    Command(String),
+    /// A line the config parser applies itself (`set`, `bind`, `source-file`,
+    /// `if-shell`, ...), parsed again on the server loop when its turn comes.
+    Directive(String),
+    /// A whole `if-shell ... { } { }` block, as text for parse_config_content,
+    /// so its condition is tested when its turn comes, not at parse time.
+    Block(String),
+}
+
+/// What a client that ran `source-file` is told once the file has run: the
+/// output of its commands and the errors they reported.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SourceOutcome {
+    pub output: String,
+    pub errors: Vec<String>,
+}
+
+/// The result of parsing one kept config line: its warnings, and any lines it
+/// kept in turn (a `source-file`'s commands, an `if-shell` branch).
+#[derive(Debug, Default)]
+pub struct SourceReplayResult {
+    pub warnings: Vec<String>,
+    pub deferred: Vec<DeferredConfigLine>,
 }
 
 pub enum CtrlReq {
@@ -4020,9 +4087,20 @@ pub enum CtrlReq {
     /// so `-g` was dropped on the floor and a plain `-w` printed every name
     /// including the ones the window does not own (#648, #655).
     ShowWindowOptionsFor(mpsc::Sender<String>, String, crate::server::options::WindowListing),
-    /// `(path, done)`: `done` is dropped once the file has run, which is how a
-    /// one-shot `source-file` knows when to answer (#734 follow up).
-    SourceFile(String, Option<mpsc::Sender<()>>),
+    /// `(path, done)`: `done` answers once the file and its commands have run,
+    /// which is how a one-shot `source-file` knows when to answer (#734 follow
+    /// up). With commands to run, the source job answers it (issue #842).
+    SourceFile(String, Option<mpsc::Sender<SourceOutcome>>),
+    /// A config line a source job kept, parsed now on the server loop with its
+    /// file and line (issue #842, config::replay_deferred_line).
+    SourceReplay(DeferredConfigLine, mpsc::Sender<SourceReplayResult>),
+    /// A source job has run its last line: its warnings, and the answer for
+    /// the client that ran `source-file`, if that client waits.
+    SourceJobDone {
+        warnings: Vec<String>,
+        outcome: SourceOutcome,
+        waiter: Option<mpsc::Sender<SourceOutcome>>,
+    },
     /// Expand `#{...}` format variables against the live server state and send
     /// the result back: `(format_string, reply)`.
     ///
