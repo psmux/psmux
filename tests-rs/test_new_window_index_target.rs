@@ -50,7 +50,7 @@ fn app_from(spec: &[(usize, &str)]) -> AppState {
     }
     app.window_indices = spec.iter().map(|(idx, _)| *idx).collect();
     app.window_base_index = 0;
-    app.next_win_id = spec.len() + 1;
+    app.ids.set_next_window(spec.len() + 1);
     app
 }
 
@@ -73,8 +73,7 @@ fn apply(app: &mut AppState, plan: NewWindowPlan, name: &str) {
             app.windows.remove(kp);
             app.on_window_removed(kp);
         }
-        let id = app.next_win_id;
-        app.next_win_id += 1;
+        let id = app.ids.alloc_window();
         app.windows.push(make_window(name, id));
         app.on_window_appended();
         if let Some(i) = index {

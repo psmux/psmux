@@ -119,7 +119,7 @@ fn app_with_windows(windows: &[&[usize]]) -> AppState {
         app.window_indices.push(w);
         next_id = next_id.max(w + 1);
     }
-    app.next_win_id = next_id;
+    app.ids.set_next_window(next_id);
     app.active_idx = 0;
     app
 }

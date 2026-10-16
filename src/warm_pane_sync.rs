@@ -346,7 +346,7 @@ fn respawn(app: &mut AppState, _pty_system: &dyn portable_pty::PtySystem, refuse
     // (#659) has a real chance of arriving inside that window; the spare then
     // landed with the standby's environment and `new-window` handed it out
     // (test_issue659_warm_claim_environment, 3 of 10 runs). Every spare issued
-    // so far has an id below `next_pane_id`, so raising the floor there makes
+    // so far has an id below `ids.next_pane`, so raising the floor there makes
     // `WarmPool::push` refuse and kill each one on arrival, the same gate a
     // cold creation uses against late arrivals (ebce952).
     //
@@ -356,7 +356,7 @@ fn respawn(app: &mut AppState, _pty_system: &dyn portable_pty::PtySystem, refuse
     // so refusing it there cost the first creation its warm shell.
     let inflight = app.warm_pane.inflight;
     if refuse_inflight {
-        let floor = app.next_pane_id;
+        let floor = app.ids.peek_pane();
         let refused_floor = app.warm_pane.set_issued_floor(floor);
         crate::warm_trace!(
             "pool: respawn requested, killed {} spare(s), {} in flight refused below floor {} (dropped {}), target={}",

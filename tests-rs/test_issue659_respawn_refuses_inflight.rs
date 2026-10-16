@@ -13,7 +13,7 @@
 //! 270 ms inside `CreateProcessW`, and a claim arriving inside that window gave
 //! the next window the standby's environment in 3 of 10 runs on dd695eaf.
 //!
-//! Every spare issued so far carries an id below `next_pane_id`, so raising
+//! Every spare issued so far carries an id below `ids.next_pane`, so raising
 //! the pool's issued floor there makes `WarmPool::push` refuse each late
 //! arrival, the gate a cold creation already uses (ebce952).
 
@@ -61,7 +61,7 @@ fn app_mid_trickle() -> AppState {
     app.warm_pane = crate::types::WarmPool::default();
     app.warm_pane.push(spare(2));
     app.warm_pane.inflight = 1;
-    app.next_pane_id = 4;
+    app.ids.set_next_pane(4);
     app
 }
 
@@ -99,8 +99,7 @@ fn a_spare_issued_after_the_respawn_is_pooled() {
     let mut app = app_mid_trickle();
     respawn_now(&mut app);
     // The refill the server loop issues for the deficit takes the next id.
-    let id = app.next_pane_id;
-    app.next_pane_id += 1;
+    let id = app.ids.alloc_pane();
     app.warm_pane.push(spare(id));
     assert_eq!(app.warm_pane.len(), 1, "a spare spawned after the respawn has the new environment and is kept");
     let (claimed, _) = app.warm_pane.claim();
@@ -112,7 +111,7 @@ fn the_floor_is_the_next_pane_id_so_ids_keep_going_forward() {
     let mut app = app_mid_trickle();
     respawn_now(&mut app);
     assert_eq!(app.warm_pane.issued_floor(), 4, "the floor is raised to next_pane_id, nothing beyond it");
-    assert_eq!(app.next_pane_id, 4, "the respawn allocates no id of its own");
+    assert_eq!(app.ids.peek_pane(), 4, "the respawn allocates no id of its own");
 }
 
 #[test]
@@ -121,7 +120,7 @@ fn a_respawn_with_nothing_in_flight_still_refuses_nothing_new() {
     // ordinary refill that follows.
     let mut app = AppState::new("test_session".to_string());
     app.warm_pane = crate::types::WarmPool::default();
-    app.next_pane_id = 7;
+    app.ids.set_next_pane(7);
     respawn_now(&mut app);
     app.warm_pane.push(spare(7));
     assert_eq!(app.warm_pane.len(), 1);

@@ -3361,9 +3361,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let inner_w = sw.saturating_sub(2).max(1);
                         let cmdstr = cmd.clone().unwrap_or_default();
                         let sd = start_dir.clone().map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                        let pane_id = app.next_pane_id;
+                        let pane_id = app.ids.peek_pane();
                         if let Some(mut pane) = crate::popup::create_popup_pane(&cmdstr, sd.as_deref(), inner_h, inner_w, pane_id, &app.session_name, &app.environment, &app.env_scopes.child_removals(&app.environment), app.host_colors.as_ref()) {
-                            app.next_pane_id += 1;
+                            app.ids.commit_pane(pane_id);
                             let t = title.clone().unwrap_or_default();
                             if !t.is_empty() { pane.title = t.clone(); pane.title_locked = true; }
                             let win = &mut app.windows[app.active_idx];
@@ -7795,7 +7795,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let sd = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let inner_h = fh.saturating_sub(2).max(1);
                     let inner_w = fw.saturating_sub(2).max(1);
-                    let pane_id = app.next_pane_id;
+                    let pane_id = app.ids.peek_pane();
                     // -E: an empty pane has no process (blank until respawn-pane).
                     let pane_opt = if empty {
                         crate::popup::create_empty_pane(inner_h, inner_w, pane_id)
@@ -7819,7 +7819,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         )
                     };
                     if let Some(mut pane) = pane_opt {
-                        app.next_pane_id += 1;
+                        app.ids.commit_pane(pane_id);
                         let title_str = title.clone().unwrap_or_default();
                         if !title_str.is_empty() {
                             pane.title = title_str.clone();

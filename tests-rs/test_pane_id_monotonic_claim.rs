@@ -7,7 +7,7 @@
 //! claim order is the visible id order.
 //!
 //! `WarmPool::push` already refuses a spare whose id is below the floor, and
-//! the cold spawn path raised that floor before taking `next_pane_id` for
+//! the cold spawn path raised that floor before taking `ids.next_pane` for
 //! itself. What nothing raised was the floor for an id handed out FROM the
 //! pool. That normally cannot matter, because the pool is sorted and a claim
 //! takes its front, but refills are spawned concurrently and land in whatever

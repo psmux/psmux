@@ -23,9 +23,9 @@ use crate::types::{FloatingPane, Window};
 /// A pane with no child process, the same thing `new-pane -E` builds. None
 /// when a pseudo console cannot be opened, so the test is skipped instead.
 fn empty_pane(app: &mut AppState, rows: u16, cols: u16) -> Option<Pane> {
-    let id = app.next_pane_id;
+    let id = app.ids.peek_pane();
     let pane = crate::popup::create_empty_pane(rows, cols, id)?;
-    app.next_pane_id += 1;
+    app.ids.commit_pane(id);
     Some(pane)
 }
 

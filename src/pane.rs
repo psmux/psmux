@@ -1001,11 +1001,10 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
         let area = app.client_area;
         let rows = (if area.height > 1 { area.height } else { 30 }).max(MIN_PANE_DIM);
         let cols = (if area.width > 1 { area.width } else { 120 }).max(MIN_PANE_DIM);
-        let pane_id = app.next_pane_id;
+        let pane_id = app.ids.peek_pane();
         if let Some(pane) = crate::popup::create_empty_pane(rows, cols, pane_id) {
-            app.next_pane_id += 1;
-            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: hostname_cached(), id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
-            app.next_win_id += 1;
+            app.ids.commit_pane(pane_id);
+            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: hostname_cached(), id: app.ids.alloc_window(), area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
             app.active_idx = app.windows.len() - 1;
             app.on_window_appended();
         }
@@ -1060,17 +1059,17 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     }
     if claimed.is_none() {
         // Nothing to hand over, so the cold path below is about to take
-        // `next_pane_id` for itself. Every id the in flight refills already
+        // `ids.next_pane` for itself. Every id the in flight refills already
         // reserved is lower than that, so those spares may no longer be handed
         // out: doing so walked the visible sequence backwards (`%2 %3 %12 %4`).
         // Retire them now and refuse them on arrival. Applies whether the pool
         // was empty or the transplant was bypassed outright (a command, `-e`, a
         // dynamic default-shell).
-        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
+        let dropped = app.warm_pane.set_issued_floor(app.ids.peek_pane());
         if dropped > 0 {
             crate::warm_trace!(
                 "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
-                app.next_pane_id, dropped
+                app.ids.peek_pane(), dropped
             );
         }
     }
@@ -1136,8 +1135,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             }
             let win_name = default_shell_name(None, configured_shell);
             let initial_pane_id = wp.pane_id;
-            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
-            app.next_win_id += 1;
+            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.ids.alloc_window(), area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
             app.active_idx = app.windows.len() - 1;
             app.on_window_appended();
             crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
@@ -1178,7 +1176,8 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             shell_cmd.cwd(usable);
         }
     }
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    let pane_id = app.ids.peek_pane();
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
@@ -1220,19 +1219,17 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id, child_pid);
 
     let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let pane_id = app.next_pane_id;
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None };
-    app.next_pane_id += 1;
+    app.ids.commit_pane(pane_id);
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
-    app.next_win_id += 1;
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.ids.alloc_window(), area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();
     crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
@@ -1594,8 +1591,7 @@ pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
     // Expand format variables like #{pane_current_path} at spawn time (#111).
     // Must happen here, on the loop thread, while `app` is in hand.
     let expanded_shell = crate::format::expand_format(&app.default_shell, app);
-    let pane_id = app.next_pane_id;
-    app.next_pane_id += 1;
+    let pane_id = app.ids.alloc_pane();
     // Track the spawn from the moment it is issued, so a teardown that happens
     // while it is still inside CreateProcessW can still reap the shell (#686).
     crate::warm_pane_sync::inflight::issue(pane_id);
@@ -1730,7 +1726,8 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
 
     let mut shell_cmd = build_raw_command(raw_args);
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    let pane_id = app.ids.peek_pane();
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
@@ -1763,18 +1760,16 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id, child_pid);
 
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let raw_pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw_argv(raw_args), cwd_hint: None };
-    app.next_pane_id += 1;
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw_argv(raw_args), cwd_hint: None };
+    app.ids.commit_pane(pane_id);
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
-    app.next_win_id += 1;
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.ids.alloc_window(), area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();
     crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
@@ -1975,11 +1970,11 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
         // Applies whether the pool was empty or the transplant was bypassed
         // outright (a command, `-e`, a dynamic default-shell); either way this
         // pane takes an id above every reserved one.
-        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
+        let dropped = app.warm_pane.set_issued_floor(app.ids.peek_pane());
         if dropped > 0 {
             crate::warm_trace!(
                 "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
-                app.next_pane_id, dropped
+                app.ids.peek_pane(), dropped
             );
         }
     }
@@ -2061,7 +2056,8 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
             shell_cmd.cwd(usable);
         }
     }
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    let pane_id = app.ids.peek_pane();
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
@@ -2088,7 +2084,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     let cq_writer = color_query_pending.clone();
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id, child_pid);
     // Queued like every other pane (78cebea missed this cold split path), so a
     // paste or keys into a split that was given a command never write the
     // pipe from the server thread.
@@ -2096,16 +2092,15 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let split_pane_id = app.next_pane_id;
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None });
-    app.next_pane_id += 1;
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None });
+    app.ids.commit_pane(pane_id);
     let win = &mut app.windows[app.active_idx];
     replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
     let mut new_path = win.active_path.clone();
     new_path.push(1);
     win.active_path = new_path;
     // Add new pane to MRU (most recent)
-    crate::tree::touch_mru(&mut win.pane_mru, split_pane_id);
+    crate::tree::touch_mru(&mut win.pane_mru, pane_id);
     crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
     Ok(())
 }
