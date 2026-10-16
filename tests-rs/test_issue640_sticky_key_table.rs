@@ -185,9 +185,11 @@ fn issue640_bare_switch_client_is_still_session_navigation() {
         dispatch_binding_commands("switch-client -p"),
         BindingDispatch::SessionNav { next: false }
     );
+    // -l is this client's own last session, which only the server knows; as
+    // client-side navigation it ran as -p.
     assert_eq!(
         dispatch_binding_commands("switch-client -l"),
-        BindingDispatch::SessionNav { next: false }
+        BindingDispatch::Commands { cmds: vec!["switch-client -l".to_string()], latch: None }
     );
 }
 

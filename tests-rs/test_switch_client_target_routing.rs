@@ -117,15 +117,24 @@ fn switch_client_next_is_still_client_side_navigation() {
 }
 
 #[test]
-fn switch_client_previous_and_last_are_still_client_side_navigation() {
+fn switch_client_previous_is_still_client_side_navigation() {
     assert!(
         !nav_of(dispatch_binding_commands("switch-client -p")),
         "-p is not next"
     );
-    assert!(
-        !nav_of(dispatch_binding_commands("switch-client -l")),
-        "-l is not next"
-    );
+}
+
+#[test]
+fn switch_client_last_reaches_the_server() {
+    // `-l` is the client's own previous session (tmux: tc->last_session,
+    // cmd-switch-client.c), which the server keeps per client (issue #566).
+    // As client-side navigation it ran as -p: with sessions a, b, c and the
+    // client in c after a, a binding of `switch-client -l` went to b.
+    let (cmds, latch) = cmds_of(dispatch_binding_commands("switch-client -l"));
+    assert_eq!(cmds, vec!["switch-client -l".to_string()]);
+    assert_eq!(latch, None);
+    let (cmds, _) = cmds_of(dispatch_binding_commands("switchc -l"));
+    assert_eq!(cmds, vec!["switchc -l".to_string()]);
 }
 
 #[test]

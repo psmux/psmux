@@ -75,3 +75,14 @@ fn the_server_lists_its_own_namespace() {
     assert_eq!(resolve_switch_client('n', "", "ns__a", &ns, None, Some("ns")), Some("ns__b".into()));
 }
 
+// ── the default L binding ───────────────────────────────────────────────────
+
+#[test]
+fn prefix_l_is_switch_client_last_by_default() {
+    // tmux: bind -N 'Switch to the last client' L { switch-client -l }
+    // (key-bindings.c). Uppercase L, distinct from l (last-window).
+    let d = crate::help::PREFIX_DEFAULTS;
+    assert!(d.iter().any(|(k, c)| *k == "L" && *c == "switch-client -l"));
+    assert!(d.iter().any(|(k, c)| *k == "l" && *c == "last-window"));
+    assert_eq!(d.iter().filter(|(k, _)| *k == "L").count(), 1);
+}

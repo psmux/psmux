@@ -140,6 +140,10 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("s",       "choose-session"),
     ("(",       "switch-client -p"),
     (")",       "switch-client -n"),
+    // tmux: bind -N 'Switch to the last client' L { switch-client -l }
+    // (key-bindings.c:419). The server resolves it from this client's own
+    // history (issue #566), so it is sent there, never cycled client side.
+    ("L",       "switch-client -l"),
     ("v",       "rectangle-toggle"),
     ("y",       "copy-yank"),
 ];

@@ -179,18 +179,23 @@ pub fn dispatch_binding_commands(binding: &str) -> BindingDispatch {
             Some("switch-client") | Some("switchc")
         );
         if is_switch && switch_client_table_arg(only).is_none() {
-            // Only `-n` / `-p` / `-l` are session navigation the client performs
+            // Only `-n` / `-p` are session navigation the client performs
             // itself. `switch-client -t <target>` names an explicit destination
             // and must reach the server, which resolves the session, validates
             // any window/pane component and signals the re-attach (#483, #555).
-            // Deciding this by `contains("-n")` over the whole string also
-            // misread any target that merely contained those two characters, so
-            // the flags are matched as parsed tokens.
+            // So must `-l`: the last session is this client's own history,
+            // which the server keeps (issue #566). Taken here it ran as `-p`,
+            // the previous session by name, which is a different session as
+            // soon as there are three. Deciding this by `contains("-n")` over
+            // the whole string also misread any target that merely contained
+            // those two characters, so the flags are matched as parsed tokens.
             let has_target = argv.iter().any(|a| a == "-t");
+            let has_last = argv.iter().any(|a| a == "-l");
             let nav = argv
                 .iter()
-                .find(|a| matches!(a.as_str(), "-n" | "-p" | "-l"))
-                .map(|a| a == "-n");
+                .find(|a| matches!(a.as_str(), "-n" | "-p"))
+                .map(|a| a == "-n")
+                .filter(|_| !has_last);
             if !has_target {
                 if let Some(next) = nav {
                     return BindingDispatch::SessionNav { next };
