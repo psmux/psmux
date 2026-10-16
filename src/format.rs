@@ -1486,8 +1486,12 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
         // and could neither predict what `-l` would do nor verify what it did
         // (issue #566). tmux reports empty for a client with no last session,
         // which is what an unset value gives here.
+        // The registry keeps the base (`ns__name` under -L), which is what
+        // `switch-client -l` resolves; the format shows the session's name,
+        // as #{client_session} and tmux's `s->name` do.
         "client_last_session" => format_client(app)
-            .and_then(|info| info.last_session.clone())
+            .and_then(|info| info.last_session.as_deref())
+            .map(|base| crate::session::display_session_name(app.socket_name.as_deref(), base).to_string())
             .unwrap_or_default(),
         // tmux leaves these empty when there is no client (ft->c == NULL).
         "client_name" | "client_tty" => format_client(app).map(|ci| ci.tty_name.clone()).unwrap_or_default(),

@@ -173,6 +173,50 @@ pub fn namespaced_session_base(ns: Option<&str>, name: &str) -> String {
     }
 }
 
+/// The session `switch-client -t/-n/-p/-l` goes to, as a registry base.
+///
+/// `all_sessions` is the sorted list of bases in this server's namespace `ns`
+/// and `current` is this server's own base. `-t` takes the name a user types
+/// (`sess`) or the base (`ns__sess`), exactly or as a prefix. `-n`/`-p` step
+/// through the list and wrap, as tmux's session_next_session and
+/// session_previous_session do (cmd-switch-client.c). `-l` is the client's
+/// own previous session, while it is still alive and is not this one (tmux:
+/// `tc->last_session != NULL && session_alive(tc->last_session)`).
+pub fn resolve_switch_client(
+    flag: char,
+    target: &str,
+    current: &str,
+    all_sessions: &[String],
+    last: Option<&str>,
+    ns: Option<&str>,
+) -> Option<String> {
+    match flag {
+        't' => {
+            if target.is_empty() {
+                return None;
+            }
+            let want = namespaced_session_base(ns, target);
+            if all_sessions.iter().any(|s| s == &want) {
+                Some(want)
+            } else {
+                all_sessions.iter().find(|s| s.starts_with(&want)).cloned()
+            }
+        }
+        'n' => match all_sessions.iter().position(|s| s == current) {
+            Some(i) if i + 1 < all_sessions.len() => Some(all_sessions[i + 1].clone()),
+            _ => all_sessions.first().cloned(),
+        },
+        'p' => match all_sessions.iter().position(|s| s == current) {
+            Some(i) if i > 0 => Some(all_sessions[i - 1].clone()),
+            _ => all_sessions.last().cloned(),
+        },
+        'l' => last
+            .filter(|s| !s.is_empty() && *s != current && all_sessions.iter().any(|a| a == s))
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 /// Whether two session names denote the same session under namespace `ns`.
 ///
 /// Either side may be the short name or the namespaced registry base. This is
@@ -3453,3 +3497,7 @@ mod tests_issue774_session_name_case;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue809_registry_reply.rs"]
 mod tests_issue809_registry_reply;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_switch_client_last_namespace.rs"]
+mod tests_switch_client_last_namespace;

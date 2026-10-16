@@ -7273,62 +7273,29 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SwitchClient(target, flag, resp_tx) => {
                     // Resolve the target session name based on the flag
                     let current = app.port_file_base();
-                    let all_sessions = crate::session::list_session_names();
-                    let resolved = match flag {
-                        't' => {
-                            // Direct target: validate it exists
-                            if target.is_empty() {
-                                None
-                            } else if all_sessions.contains(&target) {
-                                Some(target.clone())
-                            } else {
-                                // Try partial match (prefix)
-                                all_sessions.iter().find(|s| s.starts_with(&target)).cloned()
-                            }
-                        }
-                        'n' => {
-                            // Next session (alphabetically after current)
-                            let pos = all_sessions.iter().position(|s| s == &current);
-                            match pos {
-                                Some(i) if i + 1 < all_sessions.len() => Some(all_sessions[i + 1].clone()),
-                                Some(_) => all_sessions.first().cloned(), // wrap around
-                                None => all_sessions.first().cloned(),
-                            }
-                        }
-                        'p' => {
-                            // Previous session (alphabetically before current)
-                            let pos = all_sessions.iter().position(|s| s == &current);
-                            match pos {
-                                Some(0) => all_sessions.last().cloned(), // wrap around
-                                Some(i) => Some(all_sessions[i - 1].clone()),
-                                None => all_sessions.last().cloned(),
-                            }
-                        }
-                        'l' => {
-                            // Last session, taken from THIS client's own history.
-                            //
-                            // This used to read the data-dir-global
-                            // `last_session` file, which every attach overwrites
-                            // with the session being ENTERED. The `!= current`
-                            // filter then guaranteed that the only value able to
-                            // survive was one written by a DIFFERENT client, so
-                            // `-l` relocated this client into a session it had
-                            // never visited, chosen by whoever attached most
-                            // recently anywhere on the machine (issue #566).
-                            // The file keeps its real job as the routing hint
-                            // consumed by resolve_last_session_name_ns.
-                            //
-                            // No recorded previous session is reported as "no
-                            // last session" rather than borrowed from elsewhere,
-                            // which is what tmux does for a client that has not
-                            // moved.
-                            app.latest_client_id
-                                .and_then(|cid| app.client_registry.get(&cid))
-                                .and_then(|info| info.last_session.clone())
-                                .filter(|s| !s.is_empty() && s != &current && all_sessions.contains(s))
-                        }
-                        _ => None,
-                    };
+                    // This server's own `-L` namespace, as tmux's switch-client
+                    // only ever sees the sessions of the server it runs on. The
+                    // unscoped listing held only default namespace bases, so
+                    // under -L `-l` never found the (namespaced) last session
+                    // and `-n`/`-p`, finding no current session in the list,
+                    // moved the client into the DEFAULT namespace's first one.
+                    let all_sessions = crate::session::list_session_names_ns(app.socket_name.as_deref());
+                    // Last session, taken from THIS client's own history
+                    // (issue #566): never the data-dir-global `last_session`
+                    // file, which every attach overwrites with the session
+                    // being entered. No recorded previous session is "no last
+                    // session", as tmux reports for a client that has not moved.
+                    let last = app.latest_client_id
+                        .and_then(|cid| app.client_registry.get(&cid))
+                        .and_then(|info| info.last_session.clone());
+                    let resolved = crate::session::resolve_switch_client(
+                        flag,
+                        &target,
+                        &current,
+                        &all_sessions,
+                        last.as_deref(),
+                        app.socket_name.as_deref(),
+                    );
                     // #566: every branch now reports its outcome on the optional
                     // channel as well as on the TUI status line, because a
                     // one-shot CLI caller never sees a status line and so could

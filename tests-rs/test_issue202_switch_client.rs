@@ -1,7 +1,9 @@
 // Tests for issue #202: switch-client is non-functional
 // Verifies the session resolution logic used by the SwitchClient handler.
 
-/// Helper: resolve switch-client target given flag, target, current session, and all sessions.
+/// The handler's own resolver (crate::session::resolve_switch_client) in the
+/// default namespace. This used to be a copy of the handler's match, which
+/// kept passing while the handler itself looked in the wrong namespace.
 fn resolve_switch_target(
     flag: char,
     target: &str,
@@ -9,39 +11,8 @@ fn resolve_switch_target(
     all_sessions: &[&str],
     last_session: Option<&str>,
 ) -> Option<String> {
-    match flag {
-        't' => {
-            if target.is_empty() {
-                None
-            } else if all_sessions.contains(&target) {
-                Some(target.to_string())
-            } else {
-                all_sessions.iter().find(|s| s.starts_with(target)).map(|s| s.to_string())
-            }
-        }
-        'n' => {
-            let pos = all_sessions.iter().position(|s| *s == current);
-            match pos {
-                Some(i) if i + 1 < all_sessions.len() => Some(all_sessions[i + 1].to_string()),
-                Some(_) => all_sessions.first().map(|s| s.to_string()),
-                None => all_sessions.first().map(|s| s.to_string()),
-            }
-        }
-        'p' => {
-            let pos = all_sessions.iter().position(|s| *s == current);
-            match pos {
-                Some(0) => all_sessions.last().map(|s| s.to_string()),
-                Some(i) => Some(all_sessions[i - 1].to_string()),
-                None => all_sessions.last().map(|s| s.to_string()),
-            }
-        }
-        'l' => {
-            last_session
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty() && s != current && all_sessions.iter().any(|a| a == s))
-        }
-        _ => None,
-    }
+    let all: Vec<String> = all_sessions.iter().map(|s| s.to_string()).collect();
+    crate::session::resolve_switch_client(flag, target, current, &all, last_session, None)
 }
 
 #[test]

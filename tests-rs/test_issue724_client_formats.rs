@@ -205,3 +205,17 @@ fn read_only_clients_keep_their_protocol_and_lose_their_input() {
         assert!(!may(refused), "{refused} must be refused");
     }
 }
+
+#[test]
+fn client_last_session_shows_the_session_name_under_l() {
+    // The registry keeps the base `ns__alpha`, which switch-client -l resolves;
+    // the format shows the name, as #{client_session} and tmux's s->name do.
+    let mut app = app_with_two_clients();
+    app.socket_name = Some("ns".to_string());
+    app.client_registry.get_mut(&3).unwrap().last_session = Some("ns__alpha".to_string());
+    assert_eq!(expand_format("#{client_last_session}", &app), "alpha");
+    // The default namespace has nothing to strip.
+    let mut app = app_with_two_clients();
+    app.client_registry.get_mut(&3).unwrap().last_session = Some("alpha".to_string());
+    assert_eq!(expand_format("#{client_last_session}", &app), "alpha");
+}
