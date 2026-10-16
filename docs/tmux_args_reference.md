@@ -21,7 +21,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 
 **`-t` is global at the CLI.** psmux scans the whole command line for `-t <target>` before the command name is even dispatched, so `psmux -t work:1 kill-pane` and `psmux kill-pane -t work:1` both work even for commands whose own parser ignores `-t`.
 
-**Combined short flags** are expanded for `new-session` (`-As main` is `-A -s main`), for `set-option` and `show-options` (`-ga`, `-gu`, `-gq`), for `set-hook` (`-ga`, `-ug`) and for the config file forms of `if-shell` (`-bF`, `-Fb`). Elsewhere flags must be given separately.
+**Combined short flags** are expanded for `new-session` (`-As main` is `-A -s main`), for `set-option` and `show-options` (`-ga`, `-gu`, `-gq`), for `set-hook` (`-ga`, `-ug`), for `set-buffer` (`-ab NAME`, `-bNAME`, `-nNEW`) and for the config file forms of `if-shell` (`-bF`, `-Fb`). Elsewhere flags must be given separately.
 
 ## Complete command table
 
@@ -104,7 +104,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `send-prefix` | *(none)* | none | CLI, SRV, CFG |
 | `send-text` | *(none)* | none, takes the text as positional arguments | SRV |
 | `server-info` | `info` | none | CLI, SRV, CFG, CTL |
-| `set-buffer` | `setb` | `wb:` | CLI, SRV, CFG |
+| `set-buffer` | `setb` | `ab:t:n:w` | CLI, SRV, CFG, CTL |
 | `set-environment` | `setenv` | `grhut:` | CLI, SRV, CFG, CTL |
 | `set-hook` | *(none)* | `gua` | CLI, SRV, CFG, CTL |
 | `set-option` | `set` | `guaqopswUt:` plus `--` | CLI, SRV, CFG, CTL |
@@ -415,9 +415,9 @@ A psmux extension that creates a pane floating above the tiled layout.
 - When the buffer stack is empty, psmux falls back to the Windows clipboard.
 
 **set-buffer** (`setb`)
-- Boolean: `-w` (also write to the Windows clipboard)
-- Value: `-b` (buffer name)
-- Not accepted: `-a`, `-n`, `-t`
+- Boolean: `-a` (append to the `-b` buffer), `-w` (also write to the Windows clipboard)
+- Value: `-b` (buffer name), `-n` (rename the `-b` buffer, or the newest automatic buffer, to this name; any data is not used), `-t` (target client. tmux uses it only with `-w`. psmux keeps buffers per session, so a `-t` that names a session picks that session's buffers, and any other value is ignored)
+- With no data the command fails with `no data specified`. Empty data changes nothing.
 
 **delete-buffer** (`deleteb`) and **show-buffer** (`showb`)
 - Value: `-b` (buffer name)

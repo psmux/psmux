@@ -1272,6 +1272,13 @@ fn run_main() -> io::Result<()> {
     let target_position = command_index.and_then(|index| process_target_position(&args, index));
     // command-prompt's -t names a client (cmd-command-prompt.c:84) and its own
     // arm routes and forwards it, so it stays on the line (#789 follow up).
+    // set-buffer's own -t (not one before the command) names a client,
+    // CMD_CLIENT_TFLAG|CMD_CLIENT_CANFAIL in cmd-set-buffer.c:40. Its arm
+    // sends it on, so the server can refuse one that names another session.
+    let set_buffer_own_target = command_index.is_some_and(|index| {
+        matches!(args[index].as_str(), "set-buffer" | "setb")
+            && target_position.is_some_and(|position| position > index)
+    });
     let strip_target_position = command_index
         .filter(|index| !matches!(args[*index].as_str(), "detach-client" | "detach" | "command-prompt"))
         .and(target_position);
@@ -1382,7 +1389,19 @@ fn run_main() -> io::Result<()> {
             let bare_window_or_pane = window_or_pane_command
                 && crate::cli::bare_target_token(&target)
                 && !std::path::Path::new(&crate::paths::port_file(&port_file_base)).exists();
-            if has_explicit_session && !is_switch_client && !is_detach_client && !bare_window_or_pane {
+            // set-buffer's -t is only used for -w in tmux, and a client that
+            // does not exist is not an error. psmux keeps buffers per session,
+            // so a -t naming a session still picks that session's buffers;
+            // anything else routes like no -t at all instead of ending in
+            // "no server running on session '<ns>__<client>'". The -t itself
+            // still goes on the line, and that server refuses it if it names
+            // another session after all.
+            let set_buffer_client = set_buffer_own_target
+                && !std::path::Path::new(&crate::paths::port_file(&port_file_base)).exists();
+            if set_buffer_client {
+                env::remove_var("PSMUX_TARGET_FULL");
+            }
+            if has_explicit_session && !is_switch_client && !is_detach_client && !bare_window_or_pane && !set_buffer_client {
                 // tmux matches a session name exactly and case-sensitively
                 // (`session_find` is a strcmp, and the prefix and fnmatch
                 // fallbacks of `cmd_find_get_session` are case-sensitive too).
@@ -3928,48 +3947,33 @@ fn run_main() -> io::Result<()> {
             }
             // set-buffer - Set buffer contents
             "set-buffer" | "setb" => {
-                let mut buffer_name: Option<String> = None;
-                let mut data: Option<String> = None;
-                let mut propagate_to_clipboard = false;
-                let mut append = false;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        // End of options: the next token is the data even
-                        // when it starts with `-` (issue #795).
-                        "--" => {
-                            data = cmd_args.get(i + 1).map(|s| s.to_string());
-                            break;
-                        }
-                        "-b" => {
-                            if let Some(b) = cmd_args.get(i + 1) {
-                                buffer_name = Some(b.to_string());
-                                i += 1;
-                            }
-                        }
-                        "-w" => { propagate_to_clipboard = true; }
-                        "-a" => { append = true; }
-                        s if !s.starts_with('-') => {
-                            data = Some(s.to_string());
-                        }
-                        _ => {}
+                // The parser every route shares: `-n` renames, a bundled
+                // `-ab NAME` keeps its `-a`, and `-t` names a client, not data.
+                let mut set = match crate::commands::parse_set_buffer_args(&cmd_args[1..]) {
+                    Ok(Some(set)) => set,
+                    // Empty data changes nothing (cmd-set-buffer.c:110).
+                    Ok(None) => return Ok(()),
+                    Err(msg) => {
+                        eprintln!("psmux: {}", msg);
+                        std::process::exit(1);
                     }
-                    i += 1;
+                };
+                // The -t came off the line with the routing scan, which finds
+                // it anywhere on the line (`set-buffer -b b data -t s` too).
+                // Send it on, so the server can refuse another session's.
+                if set.target.is_none() && set_buffer_own_target {
+                    set.target = target_position.and_then(|position| args.get(position + 1)).cloned();
                 }
-                if propagate_to_clipboard {
-                    if let Some(ref d) = data {
-                        crate::clipboard::copy_to_system_clipboard(d);
-                    }
+                if set.clipboard && set.new_name.is_none() {
+                    crate::clipboard::copy_to_system_clipboard(&set.content);
                 }
-                let mut cmd = "set-buffer".to_string();
-                if append { cmd.push_str(" -a"); }
-                if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
-                // Same byte-exact wire as load-buffer: `set-buffer "a  'b'"`
-                // reached the server as three bare words and came back out of
-                // paste-buffer as `a b`.
-                if let Some(d) = data { cmd.push_str(&format!(" -H {}", crate::util::hex_encode(d.as_bytes()))); }
-                cmd.push('\n');
-                send_control(cmd)?;
+                // A rename can fail ("unknown buffer: X", "no buffer"), and
+                // tmux reports it with exit 1.
+                let resp = send_control_with_response(crate::commands::set_buffer_wire_line(&set))?;
+                if let Some(msg) = resp.strip_prefix("ERROR: ") {
+                    eprintln!("psmux: {}", msg.trim_end());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // list-buffers - List paste buffers

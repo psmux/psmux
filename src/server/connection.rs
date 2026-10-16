@@ -473,6 +473,9 @@ fn target_session_must_be_ours(cmd: &str) -> bool {
             | "join-pane" | "joinp" | "move-pane" | "movep"
             | "swap-window" | "swapw" | "swap-pane" | "swapp"
             | "set-option" | "set" | "set-window-option" | "setw"
+            // set-buffer's -t is a client; its arm refuses one that names
+            // another session (commands::set_buffer_foreign_session).
+            | "set-buffer" | "setb"
     )
 }
 
@@ -892,105 +895,16 @@ fn capture_pane_special(
     })
 }
 
-/// A parsed control mode `set-buffer` (#813), run on the server by
-/// commands::run_set_buffer.
-pub(crate) struct SetBufferArgs {
-    /// `-b`: the buffer by name; none means a new automatic buffer.
-    pub name: Option<String>,
-    pub content: String,
-    /// `-w`: also put the text on the system clipboard.
-    pub clipboard: bool,
-    /// `-a`: append to the buffer instead of replacing it.
-    pub append: bool,
-    /// `-n`: rename the buffer instead of setting it.
-    pub new_name: Option<String>,
-}
-
-/// Parse `set-buffer [-aw] [-b name] [-n new-name] [-H hex] [--] data`.
-///
-/// `Ok(None)` is an empty data argument, which tmux accepts and ignores
-/// (cmd-set-buffer.c returns before paste_set when the length is 0); no data
-/// at all is its "no data specified" error.
-pub(crate) fn parse_set_buffer_args(args: &[&str]) -> Result<Option<SetBufferArgs>, String> {
-    let mut buf_name: Option<String> = None;
-    let mut new_name: Option<String> = None;
-    let mut append = false;
-    let mut propagate_to_clipboard = false;
-    let mut hex_content: Option<&str> = None;
-    let mut i = 0;
-    let mut content_parts: Vec<&str> = Vec::new();
-    while i < args.len() {
-        if args[i] == "-b" {
-            if let Some(name) = args.get(i + 1) {
-                buf_name = Some(name.to_string());
-            }
-            i += 2; // skip -b and its value (buffer name)
-        } else if args[i] == "-n" {
-            new_name = args.get(i + 1).map(|n| n.to_string());
-            i += 2;
-        } else if args[i] == "-a" {
-            append = true;
-            i += 1;
-        } else if args[i] == "-w" {
-            propagate_to_clipboard = true;
-            i += 1;
-        } else if args[i] == "-H" {
-            // Byte-exact content, hex encoded. Bare words cannot carry a
-            // buffer: this line has already been split on `;`, tokenized
-            // with quote grouping stripped, and had runs of whitespace
-            // collapsed, so quotes, tabs, control bytes and newlines are
-            // gone before the handler runs. tmux's paste is verbatim, and
-            // for a buffer pasted at a shell prompt the lost quoting is a
-            // DIFFERENT command, not cosmetic damage.
-            hex_content = args.get(i + 1).copied();
-            i += 2;
-        } else if args[i] == "--" {
-            // End of options: the data follows even when it starts with
-            // `-` (issue #795: `set-buffer -- -x=foo` stored nothing).
-            content_parts.extend_from_slice(&args[i + 1..]);
-            break;
-        } else if args[i].starts_with('-') {
-            i += 1; // skip unknown flags
-        } else {
-            content_parts.extend_from_slice(&args[i..]);
-            break;
-        }
-    }
-    let clipboard = propagate_to_clipboard;
-    if new_name.is_some() {
-        return Ok(Some(SetBufferArgs { name: buf_name, content: String::new(), clipboard, append, new_name }));
-    }
-    // A control-mode client is an external boundary, so a bad payload is
-    // refused loudly rather than stored half-decoded. psmux buffers are
-    // Rust `String`s, so non-UTF-8 bytes are rejected here too (the CLI
-    // never sends them: load-buffer reads the file as UTF-8 and errors on
-    // the file itself).
-    let content = match hex_content {
-        Some(hex) => crate::util::hex_decode(hex)
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .ok_or_else(|| "set-buffer: -H requires hex-encoded UTF-8".to_string())?,
-        None if content_parts.is_empty() => return Err("no data specified".to_string()),
-        None => content_parts.join(" "),
-    };
-    if content.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(SetBufferArgs { name: buf_name, content, clipboard, append, new_name }))
-}
-
 /// Run a parsed set-buffer on the server: `Err` is tmux's error text.
-fn run_set_buffer(tx: &TargetedSender, set: SetBufferArgs) -> Result<(), String> {
-    if set.clipboard && set.new_name.is_none() {
-        crate::clipboard::copy_to_system_clipboard(&set.content);
+/// `raw_target` is the `-t` the dispatcher peeled off the line, which is
+/// set-buffer's target client (a session name is refused when it is another
+/// session's, commands::set_buffer_foreign_session).
+fn run_set_buffer(tx: &TargetedSender, mut set: crate::commands::SetBufferArgs, raw_target: Option<&str>) -> Result<(), String> {
+    if set.target.is_none() {
+        set.target = raw_target.map(str::to_string);
     }
     let (rtx, rrx) = mpsc::channel();
-    let _ = tx.send(CtrlReq::SetBufferCmd {
-        name: set.name,
-        data: set.content,
-        append: set.append,
-        new_name: set.new_name,
-        resp: rtx,
-    });
+    let _ = tx.send(CtrlReq::SetBufferCmd(set, rtx));
     rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(Ok(()))
 }
 
@@ -2512,7 +2426,9 @@ if control_echo || control_noecho {
             | "kill-window" | "killw" | "detach-client" | "detach"
             // command-prompt's -t is a target CLIENT (cmd-command-prompt.c:84),
             // resolved by its own arm (#789 follow up).
-            | "command-prompt");
+            | "command-prompt"
+            // So is set-buffer's (cmd-set-buffer.c:40).
+            | "set-buffer" | "setb");
         // capture-pane -t %N resolves the pane id inside the capture itself;
         // swap-pane resolves its own target and swaps it with the *current*
         // active pane (temp-focusing the target would make active == target
@@ -3119,7 +3035,9 @@ let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "mov
     | "kill-window" | "killw" | "detach-client" | "detach"
             // command-prompt's -t is a target CLIENT (cmd-command-prompt.c:84),
             // resolved by its own arm (#789 follow up).
-            | "command-prompt");
+            | "command-prompt"
+            // So is set-buffer's (cmd-set-buffer.c:40).
+            | "set-buffer" | "setb");
 let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
     target_pane
 } else {
@@ -4040,84 +3958,21 @@ match cmd {
             let _ = tx.send(CtrlReq::ResizePane(dir.to_string(), amount));
         }
     }
-    "set-buffer" => {
-        // Parse -b name, -w (clipboard propagation), -H hex content, and content
-        let mut buf_name: Option<String> = None;
-        let mut propagate_to_clipboard = false;
-        let mut append = false;
-        let mut hex_content: Option<&str> = None;
-        let mut i = 0;
-        let mut content_parts: Vec<&str> = Vec::new();
-        while i < args.len() {
-            if args[i] == "-b" {
-                if let Some(name) = args.get(i + 1) {
-                    buf_name = Some(name.to_string());
-                }
-                i += 2; // skip -b and its value (buffer name)
-            } else if args[i] == "-a" {
-                append = true;
-                i += 1;
-            } else if args[i] == "-w" {
-                propagate_to_clipboard = true;
-                i += 1;
-            } else if args[i] == "-H" {
-                // Byte-exact content, hex encoded. Bare words cannot carry a
-                // buffer: this line has already been split on `;`, tokenized
-                // with quote grouping stripped, and had runs of whitespace
-                // collapsed, so quotes, tabs, control bytes and newlines are
-                // gone before the handler runs. tmux's paste is verbatim, and
-                // for a buffer pasted at a shell prompt the lost quoting is a
-                // DIFFERENT command, not cosmetic damage.
-                hex_content = args.get(i + 1).copied();
-                i += 2;
-            } else if args[i] == "--" {
-                // End of options: the data follows even when it starts with
-                // `-` (issue #795: `set-buffer -- -x=foo` stored nothing).
-                content_parts.extend_from_slice(&args[i + 1..]);
-                break;
-            } else if args[i].starts_with('-') {
-                i += 1; // skip unknown flags
+    "set-buffer" | "setb" => {
+        // The parser and executor control mode uses (#813), so `-n` renames
+        // here too instead of storing the new name as data, a bundled `-ab
+        // NAME` keeps its `-a`, and an empty data argument changes nothing
+        // while no data at all is tmux's "no data specified".
+        let result = crate::commands::parse_set_buffer_args(&args).and_then(|set| match set {
+            Some(set) => run_set_buffer(&tx, set, raw_target.as_deref()),
+            None => Ok(()),
+        });
+        if let Err(err) = result {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("set-buffer".to_string(), format!("ERROR: {}", err)));
             } else {
-                content_parts.extend_from_slice(&args[i..]);
-                break;
-            }
-        }
-        // A control-mode client is an external boundary, so a bad payload is
-        // refused loudly rather than stored half-decoded. psmux buffers are
-        // Rust `String`s, so non-UTF-8 bytes are rejected here too (the CLI
-        // never sends them: load-buffer reads the file as UTF-8 and errors on
-        // the file itself).
-        let content: Option<String> = match hex_content {
-            Some(hex) => crate::util::hex_decode(hex)
-                .and_then(|bytes| String::from_utf8(bytes).ok()),
-            None => Some(content_parts.join(" ")),
-        };
-        match content {
-            Some(content) => {
-                if propagate_to_clipboard {
-                    crate::clipboard::copy_to_system_clipboard(&content);
-                }
-                // Empty data adds no buffer and changes none (paste.c:165,
-                // cmd-set-buffer.c:110).
-                if content.is_empty() {
-                } else if let Some(name) = buf_name {
-                    if append {
-                        let _ = tx.send(CtrlReq::AppendNamedBuffer(name, content));
-                    } else {
-                        let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
-                    }
-                } else {
-                    let _ = tx.send(CtrlReq::SetBuffer(content));
-                }
-            }
-            None => {
-                let err = "set-buffer: -H requires hex-encoded UTF-8\n";
-                if persistent {
-                    let _ = tx.send(CtrlReq::ShowTextPopup("set-buffer".to_string(), format!("ERROR: {}", err)));
-                } else {
-                    let _ = write!(write_stream, "ERROR: {}\n", err);
-                    let _ = write_stream.flush();
-                }
+                let _ = write!(write_stream, "ERROR: {}\n", err);
+                let _ = write_stream.flush();
             }
         }
     }
@@ -8121,8 +7976,8 @@ fn dispatch_control_command(
         // here (issue #813) although the CLI route has them; a client that
         // pastes with `set-buffer` + `paste-buffer -p` could not paste.
         "set-buffer" | "setb" => {
-            match parse_set_buffer_args(args).and_then(|set| match set {
-                Some(set) => run_set_buffer(tx, set),
+            match crate::commands::parse_set_buffer_args(args).and_then(|set| match set {
+                Some(set) => run_set_buffer(tx, set, raw_target),
                 None => Ok(()),
             }) {
                 Ok(()) => { let _ = resp_tx.send(String::new()); }

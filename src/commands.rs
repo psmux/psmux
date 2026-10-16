@@ -1802,6 +1802,169 @@ fn run_paste_buffer_here(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result
     Ok(None)
 }
 
+/// A parsed `set-buffer`, run by run_set_buffer. Every route parses with
+/// parse_set_buffer_args: the CLI, the server's command dispatch (if-shell, a
+/// key binding), execute_command_string (hooks, menus) and control mode
+/// (#813).
+pub(crate) struct SetBufferArgs {
+    /// `-b`: the buffer by name; none means a new automatic buffer.
+    pub name: Option<String>,
+    pub content: String,
+    /// `-w`: also put the text on the system clipboard.
+    pub clipboard: bool,
+    /// `-a`: append to the buffer instead of replacing it.
+    pub append: bool,
+    /// `-n`: rename the buffer instead of setting it.
+    pub new_name: Option<String>,
+    /// `-t`: the target client. Only a session name means anything here: see
+    /// set_buffer_foreign_session.
+    pub target: Option<String>,
+}
+
+/// Parse `set-buffer [-aw] [-b name] [-n new-name] [-t target-client]
+/// [-H hex] [--] data`, as tmux's `ab:t:n:w` (cmd-set-buffer.c:36). Flags
+/// may be bundled (`-ab NAME`, `-bNAME`, `-nNEW`), as args_parse_flags reads
+/// them. `-t` names the client whose terminal `-w` would set; psmux's `-w`
+/// sets the system clipboard, so the value is kept only to refuse one that
+/// names another session (set_buffer_foreign_session). `-H` is psmux's own
+/// byte-exact wire form of the data.
+///
+/// `Ok(None)` is an empty data argument, which tmux accepts and ignores
+/// (cmd-set-buffer.c returns before paste_set when the length is 0); no data
+/// at all is its "no data specified" error.
+pub(crate) fn parse_set_buffer_args<S: AsRef<str>>(args: &[S]) -> Result<Option<SetBufferArgs>, String> {
+    let args = crate::cli::expand_flag_clusters("set-buffer", args);
+    let mut buf_name: Option<String> = None;
+    let mut new_name: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut append = false;
+    let mut propagate_to_clipboard = false;
+    let mut hex_content: Option<&str> = None;
+    let mut i = 0;
+    let mut content_parts: Vec<&str> = Vec::new();
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "-b" {
+            if let Some(name) = args.get(i + 1) {
+                buf_name = Some(name.to_string());
+            }
+            i += 2; // skip -b and its value (buffer name)
+        } else if arg == "-n" {
+            new_name = args.get(i + 1).map(|n| n.to_string());
+            i += 2;
+        } else if arg == "-t" {
+            target = args.get(i + 1).map(|t| t.to_string());
+            i += 2;
+        } else if arg == "-a" {
+            append = true;
+            i += 1;
+        } else if arg == "-w" {
+            propagate_to_clipboard = true;
+            i += 1;
+        } else if arg == "-H" {
+            // Byte-exact content, hex encoded. Bare words cannot carry a
+            // buffer: this line has already been split on `;`, tokenized
+            // with quote grouping stripped, and had runs of whitespace
+            // collapsed, so quotes, tabs, control bytes and newlines are
+            // gone before the handler runs. tmux's paste is verbatim, and
+            // for a buffer pasted at a shell prompt the lost quoting is a
+            // DIFFERENT command, not cosmetic damage.
+            hex_content = args.get(i + 1).map(String::as_str);
+            i += 2;
+        } else if arg == "--" {
+            // End of options: the data follows even when it starts with
+            // `-` (issue #795: `set-buffer -- -x=foo` stored nothing).
+            content_parts.extend(args[i + 1..].iter().map(String::as_str));
+            break;
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            i += 1; // skip unknown flags
+        } else {
+            content_parts.extend(args[i..].iter().map(String::as_str));
+            break;
+        }
+    }
+    let clipboard = propagate_to_clipboard;
+    if new_name.is_some() {
+        return Ok(Some(SetBufferArgs { name: buf_name, content: String::new(), clipboard, append, new_name, target }));
+    }
+    // A control-mode client is an external boundary, so a bad payload is
+    // refused loudly rather than stored half-decoded. psmux buffers are
+    // Rust `String`s, so non-UTF-8 bytes are rejected here too (the CLI
+    // never sends them: load-buffer reads the file as UTF-8 and errors on
+    // the file itself).
+    let content = match hex_content {
+        Some(hex) => crate::util::hex_decode(hex)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or_else(|| "set-buffer: -H requires hex-encoded UTF-8".to_string())?,
+        None if content_parts.is_empty() => return Err("no data specified".to_string()),
+        None => content_parts.join(" "),
+    };
+    if content.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(SetBufferArgs { name: buf_name, content, clipboard, append, new_name, target }))
+}
+
+/// The line the CLI sends for a parsed set-buffer. The data goes as `-H` hex,
+/// the same byte-exact wire as load-buffer: `set-buffer "a  'b'"` reached the
+/// server as three bare words and came back out of paste-buffer as `a b`.
+/// `-w` stays with the CLI, which sets the clipboard itself. `-t` goes along,
+/// so the server can refuse one that names another session.
+pub(crate) fn set_buffer_wire_line(set: &SetBufferArgs) -> String {
+    let mut line = "set-buffer".to_string();
+    if set.append {
+        line.push_str(" -a");
+    }
+    if let Some(name) = &set.name {
+        line.push_str(&format!(" -b {}", crate::util::quote_arg(name)));
+    }
+    if let Some(target) = &set.target {
+        line.push_str(&format!(" -t {}", crate::util::quote_arg(target)));
+    }
+    if let Some(new) = &set.new_name {
+        line.push_str(&format!(" -n {}", crate::util::quote_arg(new)));
+    } else {
+        line.push_str(&format!(" -H {}", crate::util::hex_encode(set.content.as_bytes())));
+    }
+    line.push('\n');
+    line
+}
+
+/// The session a set-buffer `-t` names, when that is a live session other
+/// than the one `app` serves.
+///
+/// In tmux `-t` is a client and the buffers are server wide, so the command
+/// never reaches another store. psmux keeps paste buffers per session, one
+/// server each, so a server cannot set another session's buffer. Like the
+/// cross-session window and pane commands (foreign_session_in_spec), that is
+/// an error instead of a silent write to this session's buffers. Any other
+/// value, such as a client name, is tmux's missing client and is ignored
+/// (CMD_CLIENT_CANFAIL, cmd-set-buffer.c:40). The CLI routes a `-t` naming a
+/// session to that session's server, where it is this server's own.
+pub(crate) fn set_buffer_foreign_session(app: &AppState, target: &str) -> Option<String> {
+    let spec = if target.contains(':') { target.to_string() } else { format!("{}:", target) };
+    foreign_session_in_spec(app, &spec)
+}
+
+/// The error for a set-buffer whose `-t` names another session.
+pub(crate) fn set_buffer_cross_session_refusal(session: &str) -> String {
+    format!(
+        "set-buffer: {} is another session (cross-session set-buffer is not supported: each session runs in its own psmux server, with its own paste buffers)",
+        session
+    )
+}
+
+/// Refuse a set-buffer whose `-t` names another session, then run it.
+pub(crate) fn run_set_buffer_args(app: &mut AppState, set: &SetBufferArgs) -> Result<(), String> {
+    if let Some(session) = set.target.as_deref().and_then(|t| set_buffer_foreign_session(app, t)) {
+        return Err(set_buffer_cross_session_refusal(&session));
+    }
+    if set.clipboard && set.new_name.is_none() {
+        crate::clipboard::copy_to_system_clipboard(&set.content);
+    }
+    run_set_buffer(app, set.name.as_deref(), &set.content, set.append, set.new_name.as_deref())
+}
+
 /// set-buffer as cmd-set-buffer.c runs it: `-n` renames the `-b` buffer (or
 /// the newest one), otherwise the data replaces the `-b` buffer (`-a`
 /// appends to it) or becomes a new automatic buffer. Empty data changes
@@ -2639,46 +2802,15 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "set-buffer" | "setb" => {
-            // Parse -b name, -w (clipboard), and extract content
-            let mut i = 1;
-            let mut buf_name: Option<String> = None;
-            let mut content: Option<String> = None;
-            let mut propagate_to_clipboard = false;
-            let mut append = false;
-            while i < parts.len() {
-                if parts[i] == "-b" {
-                    if let Some(name) = parts.get(i + 1) {
-                        buf_name = Some(name.to_string());
-                    }
-                    i += 2; // skip -b and its value (buffer name)
-                } else if parts[i] == "-w" {
-                    propagate_to_clipboard = true;
-                    i += 1;
-                } else if parts[i] == "-a" {
-                    append = true;
-                    i += 1;
-                } else if parts[i].starts_with('-') {
-                    i += 1; // skip unknown flags
-                } else {
-                    // Everything from here is content
-                    content = Some(parts[i..].join(" "));
-                    break;
-                }
-            }
-            if let Some(ref text) = content {
-                if propagate_to_clipboard {
-                    crate::clipboard::copy_to_system_clipboard(text);
-                }
-                // -b replaces the buffer of that name, automatic or named, and
-                // -a appends to it (cmd-set-buffer.c:113 to :121).
-                match buf_name {
-                    Some(name) if append => {
-                        let data = format!("{}{}", app.paste_get(&name).unwrap_or(""), text);
-                        app.paste_set(&name, data);
-                    }
-                    Some(name) => app.paste_set(&name, text.clone()),
-                    None => app.paste_add(text.clone()),
-                }
+            // The parser and executor every other route uses, so a hook's
+            // `-n` renames instead of storing the new name as data, `-ab
+            // NAME` keeps its `-a`, and `-t` (a client) is not read as data.
+            let result = parse_set_buffer_args(&parts[1..]).and_then(|set| match set {
+                Some(set) => run_set_buffer_args(app, &set),
+                None => Ok(()),
+            });
+            if let Err(msg) = result {
+                app.status_message = Some((msg, std::time::Instant::now(), None));
             }
         }
         "delete-buffer" | "deleteb" => {
@@ -3861,3 +3993,7 @@ mod test_disc776_in_process_clients;
 #[cfg(test)]
 #[path = "../tests-rs/test_bare_window_target.rs"]
 mod tests_bare_window_target;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue836_set_buffer_flags.rs"]
+mod tests_issue836_set_buffer_flags;
