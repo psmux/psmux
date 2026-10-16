@@ -75,6 +75,21 @@ fn the_server_lists_its_own_namespace() {
     assert_eq!(resolve_switch_client('n', "", "ns__a", &ns, None, Some("ns")), Some("ns__b".into()));
 }
 
+// ── choose-tree shows session names, not registry bases ─────────────────────
+
+#[test]
+fn tree_header_shows_the_session_name_under_l() {
+    // tmux adds each session to the tree under s->name
+    // (window_tree_build_session, window-tree.c). Under -L ns the registry
+    // base reads `ns__name`.
+    assert_eq!(
+        crate::client::tree_session_header(Some("ns"), "ns__alpha", 2, true),
+        "alpha: 2 windows (attached)"
+    );
+    assert_eq!(crate::client::tree_session_header(Some("ns"), "ns__beta", 1, false), "beta: 1 windows");
+    assert_eq!(crate::client::tree_session_header(None, "alpha", 1, false), "alpha: 1 windows");
+}
+
 // ── the default L binding ───────────────────────────────────────────────────
 
 #[test]

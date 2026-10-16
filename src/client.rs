@@ -570,6 +570,19 @@ pub(crate) fn chooser_kill_session_prompt(current_session: &str, row: &str) -> S
     format!("kill-session {}", crate::session::display_session_name(ns, row))
 }
 
+/// The choose-tree header of one session: `name: N windows`, plus
+/// ` (attached)` on the client's own. `base` is the registry base, which reads
+/// `ns__name` under `-L ns`; the header shows the name, as choose-session and
+/// tmux's `#{session_name}` (window-tree.c) do.
+pub(crate) fn tree_session_header(ns: Option<&str>, base: &str, windows: usize, attached: bool) -> String {
+    format!(
+        "{}: {} windows{}",
+        crate::session::display_session_name(ns, base),
+        windows,
+        if attached { " (attached)" } else { "" }
+    )
+}
+
 /// The registry base (port file stem) of this client's own session, once a
 /// frame has said what the session is called now.
 ///
@@ -5415,10 +5428,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     let mut active_tree_row: Option<usize> = None;
                                     for (sess_name, wins) in &sessions {
                                         let is_current = sess_name == &current_session;
-                                        let attached = if is_current { " (attached)" } else { "" };
                                         let nw = wins.len();
+                                        // The row keeps the base to switch to and to
+                                        // kill; the label shows the session's name.
                                         tree_all.push((true, usize::MAX, 0,
-                                            format!("{}: {} windows{}", sess_name, nw, attached),
+                                            tree_session_header(tree_ns, sess_name, nw, is_current),
                                             sess_name.clone()));
                                         // Every session's windows carry their panes, as
                                         // tmux's window_tree_build_window builds pane items
