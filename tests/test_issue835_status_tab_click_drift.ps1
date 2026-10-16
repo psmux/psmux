@@ -6,9 +6,9 @@
 # checks exactly what a user sees and clicks. No focus needed.
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
+$PSMUX = if ($env:PSMUX_BIN) { $env:PSMUX_BIN } else { (Get-Command psmux -EA Stop).Source }
 $SOCK = "i835_$PID"
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
@@ -38,8 +38,9 @@ set PSMUX_PANE=
 set TMUX=
 set TMUX_PANE=
 set PSMUX=
+$(if ($env:PSMUX_DATA_DIR) { "set PSMUX_DATA_DIR=$env:PSMUX_DATA_DIR" })
 if not "%~3"=="" mode con: cols=%~3 lines=%~4
-psmux -L $SOCK -f "%~2" new-session -s %1
+"$PSMUX" -L $SOCK -f "%~2" new-session -s %1
 "@ | Set-Content -Path $launchCmd -Encoding ASCII
 $script:Cols = ""; $script:Lines = ""; $script:InWT = ""
 
@@ -141,7 +142,9 @@ function Run-EveryColumn {
     if (-not $cpid) { Write-Fail "$Label client did not start"; return }
     $s = Get-Tabs $cpid
     Write-Host "    status row $($s.Row): [$($s.Text.TrimEnd())]"
-    $starts = $s.Tabs.GetEnumerator() | Sort-Object Value
+    # Only window numbers: the status-right clock (" %H:%M ") also reads as
+    # "N:" and, between 10:00 and 23:59, as a tab number past the last window.
+    $starts = @($s.Tabs.GetEnumerator() | Where-Object { $_.Key -lt $Windows } | Sort-Object Value)
     $bad = 0; $checked = 0
     for ($k = 0; $k -lt $starts.Count; $k++) {
         $w = $starts[$k].Key
@@ -241,6 +244,107 @@ Run-AllTabs "VT (SGR) clicks, non-ASCII names" "s835h" $confDefault 12 0 {
     $names = @("caf$([char]0xe9)", "$([char]0x65e5)$([char]0x672c)", "build", "$([char]0x2192)log", "srv", "x", "longer-name-here", "db", "w8", "w9", "w10", "w11")
     for ($i = 0; $i -lt 12; $i++) { & $PSMUX -L $SOCK rename-window -t "${n}:$i" $names[$i] 2>&1 | Out-Null }
 }
+$script:UseVT = $false
+
+# The reporter's real config (issue comment 3): base-index 1, padded
+# window-status formats with #[fg=...,bold] style tokens and a conditional that
+# adds " <flags>" only to flagged windows (so tab widths change as the current
+# and last window move), status-left with U+258C and #{b:pane_current_path}
+# under status-left-length 80, status-right with U+2325 U+2261 U+2191 U+2590
+# under status-right-length 220, and the reporter's ten window names (spaces,
+# 'Workbench' last (-), 'mfb' current (*)). Every cell of every tab is clicked,
+# leading pad, number, name, flag and trailing pad, each from a state where
+# another window is current, and the tab is located again before every click
+# because its neighbours' flags move it.
+$confReporter = "$env:TEMP\psmux_835_reporter.conf"
+$reporterConf = @(
+    'set -g base-index 1'
+    'set -g pane-base-index 1'
+    'set -g mouse on'
+    'set -g pwsh-mouse-selection off'
+    'set -g mouse-selection on'
+    'set -g status-position bottom'
+    'set -g status-justify left'
+    'set -g status-interval 15'
+    'set -g status-left-length 80'
+    'set -g status-right-length 220'
+    "set -g status-left `"#[fg=#1a1b26,bg=#7aa2f7,bold] $([char]0x258C) #S #[fg=#7aa2f7,bg=#292e42,nobold] #{b:pane_current_path} #[default] `""
+    "set -g status-right `"#[fg=#565f89] $([char]0x2325) #{session_windows} $([char]0x2261) #{window_panes} $([char]0x2191) %H:%M #[fg=#7aa2f7]$([char]0x2590)`""
+    'set -g window-status-format "#[fg=#565f89]  #I #W#{?window_flags, #{window_flags},}  "'
+    'set -g window-status-current-format "#[fg=#9ece6a,bold]  #I #W#{?window_flags, #{window_flags},}  "'
+) -join "`n"
+[IO.File]::WriteAllText($confReporter, $reporterConf + "`n", (New-Object Text.UTF8Encoding $false))
+$reporterNames = @("MFB Cli", "EventBus Refactoring", "Brian Ops", "BodProcessor Refactoring", "DevOps",
+    "DigiSupportApp", "DevOps ERP", "Workbench", "CallCentreAPI", "mfb")
+
+function Find-ReporterTab($ClientPid, [int]$Idx, [string]$TabName) {
+    $s = Get-Tabs $ClientPid
+    # "  N name" then an optional " <flags>" then the two cell trailing pad.
+    $m = [regex]::Match($s.Text, "  $Idx " + [regex]::Escape($TabName) + '( [^ ]+)?  ')
+    if (-not $m.Success) { return $null }
+    return @{ Row = $s.Row; Start = $m.Index; End = $m.Index + $m.Length - 1; Text = $s.Text }
+}
+
+function Run-Reporter {
+    param([string]$Label,[string]$Name)
+    if ($env:PSMUX_835_ONLY -and $Label -notmatch $env:PSMUX_835_ONLY) { return }
+    Write-Host "`n[$Label]" -ForegroundColor Yellow
+    $cpid = Start-Scen $Name $confReporter 10
+    if (-not $cpid) { Write-Fail "$Label client did not start"; return }
+    $idx = @((& $PSMUX -L $SOCK list-windows -t $Name -F '#{window_index}' 2>&1) | ForEach-Object { "$_".Trim() })
+    if ($idx.Count -ne 10 -or $idx[0] -ne '1') { Write-Fail "$Label : expected windows 1..10, got [$($idx -join ',')]"; return }
+    for ($i = 0; $i -lt 10; $i++) { & $PSMUX -L $SOCK rename-window -t "${Name}:$($idx[$i])" $reporterNames[$i] 2>&1 | Out-Null }
+    & $PSMUX -L $SOCK select-window -t "${Name}:8" 2>&1 | Out-Null
+    & $PSMUX -L $SOCK select-window -t "${Name}:10" 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+    $first = Find-ReporterTab $cpid 1 $reporterNames[0]
+    if ($first) { Write-Host "    status row $($first.Row): [$($first.Text.TrimEnd())]" }
+    $bad = 0; $checked = 0
+    for ($k = 0; $k -lt 10; $k++) {
+        $w = [int]$idx[$k]
+        $other = if ($w -eq 1) { 2 } else { 1 }
+        for ($o = 0; $o -lt 64; $o++) {
+            & $PSMUX -L $SOCK select-window -t "${Name}:$other" 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 150
+            $tab = Find-ReporterTab $cpid $w $reporterNames[$k]
+            if (-not $tab) {
+                # A console host narrower than the reporter's 319 columns
+                # (conhost stops at the screen width) cuts the list short.
+                $cw = [int]((& $PSMUX -L $SOCK display -p -t $Name '#{client_width}' 2>&1 | Out-String).Trim())
+                if ($cw -lt 240) { Write-Host "    [SKIP] tab $w is past the edge of a $cw column client" -ForegroundColor DarkYellow }
+                else { $bad++; Write-Fail "$Label : tab $w ($($reporterNames[$k])) not rendered" }
+                break
+            }
+            $x = $tab.Start + $o
+            if ($x -gt $tab.End) { break }
+            if ($script:UseVT) {
+                & $vtinj $cpid "\e[<0;$($x+1);$($tab.Row+1)M" 1 | Out-Null
+                Start-Sleep -Milliseconds 40
+                & $vtinj $cpid "\e[<0;$($x+1);$($tab.Row+1)m" 1 | Out-Null
+            } else {
+                & $injector $cpid $x $tab.Row | Out-Null
+            }
+            Start-Sleep -Milliseconds 350
+            $got = WinIdx $Name
+            $checked++
+            if ($got -ne "$w") { $bad++; Write-Fail "$Label : col $x is tab $w ($($reporterNames[$k])), click gave $got" }
+        }
+    }
+    if ($bad -eq 0) { Write-Pass "$Label : all $checked cells of 10 tabs select their own window" }
+    & $PSMUX -L $SOCK kill-session -t $Name 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 600
+}
+
+$script:Cols = "319"; $script:Lines = "81"
+Run-Reporter "reporter's config, classic console" "s835r"
+$script:Cols = ""; $script:Lines = ""
+if (Get-Command wt.exe -EA SilentlyContinue) {
+    $script:InWT = "319,81"
+    Run-Reporter "reporter's config, Windows Terminal 319x81" "s835s"
+    $script:InWT = ""
+}
+$script:UseVT = $true
+Run-Reporter "reporter's config, VT (SGR) clicks" "s835t"
 $script:UseVT = $false
 
 # === TEARDOWN ===
