@@ -405,6 +405,44 @@ pub(crate) fn same_config_path(a: &str, b: &str) -> bool {
 }
 
 pub fn parse_config_content(app: &mut AppState, content: &str) {
+    parse_config_content_from(app, content, 1);
+}
+
+/// parse_config_content for text whose first line is line `first_line` of
+/// its file, so its warnings and kept lines carry the file's line numbers (a
+/// kept `if-shell` block, issue #842).
+/// Join continuation lines (ending with \). Track the original 1-based line
+/// number where each (possibly joined) logical line began, so config
+/// warnings can be reported as `file:line: message` (issue #370 follow-up).
+/// `first_line` is the file's line number of the first line of `content`.
+fn join_continuations(content: &str, first_line: usize) -> Vec<(usize, String)> {
+    let mut lines: Vec<(usize, String)> = Vec::new();
+    let mut continuation = String::new();
+    let mut cont_start: usize = 0;
+    for (idx, line) in content.lines().enumerate() {
+        let lineno = idx + first_line;
+        let trimmed = line.trim_end();
+        if trimmed.ends_with('\\') {
+            if continuation.is_empty() { cont_start = lineno; }
+            continuation.push_str(trimmed.trim_end_matches('\\'));
+            continuation.push(' ');
+        } else {
+            if !continuation.is_empty() {
+                continuation.push_str(trimmed);
+                lines.push((cont_start, continuation.clone()));
+                continuation.clear();
+            } else {
+                lines.push((lineno, trimmed.to_string()));
+            }
+        }
+    }
+    if !continuation.is_empty() {
+        lines.push((cont_start, continuation));
+    }
+    lines
+}
+
+fn parse_config_content_from(app: &mut AppState, content: &str, first_line: usize) {
     // Strip UTF-8 BOM if present (common on Windows when files are saved
     // with Notepad or other editors that prepend EF BB BF).
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
@@ -429,32 +467,7 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
 
     let mut if_stack: Vec<IfState> = Vec::new();
 
-    // Join continuation lines (ending with \). Track the original 1-based line
-    // number where each (possibly joined) logical line began, so config
-    // warnings can be reported as `file:line: message` (issue #370 follow-up).
-    let mut lines: Vec<(usize, String)> = Vec::new();
-    let mut continuation = String::new();
-    let mut cont_start: usize = 0;
-    for (idx, line) in content.lines().enumerate() {
-        let lineno = idx + 1;
-        let trimmed = line.trim_end();
-        if trimmed.ends_with('\\') {
-            if continuation.is_empty() { cont_start = lineno; }
-            continuation.push_str(trimmed.trim_end_matches('\\'));
-            continuation.push(' ');
-        } else {
-            if !continuation.is_empty() {
-                continuation.push_str(trimmed);
-                lines.push((cont_start, continuation.clone()));
-                continuation.clear();
-            } else {
-                lines.push((lineno, trimmed.to_string()));
-            }
-        }
-    }
-    if !continuation.is_empty() {
-        lines.push((cont_start, continuation));
-    }
+    let lines = join_continuations(content, first_line);
 
     // A command whose brace block spans several lines (`bind x {` ... `}`)
     // is one statement in tmux's grammar; make it one line here.
@@ -541,6 +554,7 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
                     else_lines: Vec::new(),
                     depth: 1,
                     in_else: false,
+                    start_line: Some(*orig_lineno),
                 });
             }
             continue;
@@ -919,6 +933,26 @@ pub(crate) fn split_brace_line(line: &str) -> Option<Vec<String>> {
 /// Process a collected if-shell brace block by evaluating the condition
 /// and executing the appropriate branch.
 fn process_brace_if_shell(app: &mut AppState, bb: &parse_config_content_types::BraceBlock) {
+    // Past a runtime source's first command, the block waits its turn whole:
+    // its condition has to see what the commands before it made (issue #842).
+    if source_deferring(app) {
+        let mut text = format!("{}\n", bb.if_line);
+        for l in &bb.true_lines {
+            text.push_str(l);
+            text.push('\n');
+        }
+        text.push_str("}\n");
+        if !bb.else_lines.is_empty() {
+            text.push_str("{\n");
+            for l in &bb.else_lines {
+                text.push_str(l);
+                text.push('\n');
+            }
+            text.push_str("}\n");
+        }
+        defer_line(app, bb.start_line, crate::types::DeferredKind::Block(text));
+        return;
+    }
     // Extract the condition from the if-shell line (strip "if-shell " or "if " and trailing "{")
     let line = bb.if_line.trim();
     let rest = if line.starts_with("if-shell ") {
@@ -1029,6 +1063,8 @@ mod parse_config_content_types {
         pub else_lines: Vec<String>,
         pub depth: usize,
         pub in_else: bool,
+        /// The line the block's `if-shell` stands on.
+        pub start_line: Option<usize>,
     }
 }
 
@@ -1105,6 +1141,34 @@ pub(crate) fn warn_config(app: &mut AppState, msg: impl Into<String>) {
         _ => m,
     };
     app.config_warnings.push(full);
+}
+
+/// Whether parse_config_line applies `l` itself (the chain at its head), as
+/// opposed to a command, which tmux runs from the queue. Matches that chain
+/// prefix for prefix, so the two cannot disagree about a line.
+pub(crate) fn is_config_directive(l: &str) -> bool {
+    const HEADS: [&str; 17] = [
+        "set-option ", "set ", "setw ", "set-window-option ",
+        "bind-key ", "bind ", "unbind-key ", "unbind ",
+        "source-file ", "source ", "run-shell ", "run ",
+        "if-shell ", "if ", "set-hook ", "set-environment ", "setenv ",
+    ];
+    HEADS.iter().any(|h| l.starts_with(h))
+}
+
+/// Whether a runtime source has reached its first command, so every line from
+/// here on is kept for the source job (issue #842).
+fn source_deferring(app: &AppState) -> bool {
+    app.source_defer.as_ref().is_some_and(|d| d.triggered)
+}
+
+/// Keep a line for the source job, with the file and line it came from.
+fn defer_line(app: &mut AppState, line: Option<usize>, kind: crate::types::DeferredKind) {
+    let file = current_config_file();
+    let ancestors = SOURCE_STACK.with(|s| s.borrow().clone());
+    if let Some(d) = app.source_defer.as_mut() {
+        d.lines.push(crate::types::DeferredConfigLine { file, line, kind, ancestors });
+    }
 }
 
 /// True if `name` is a recognized psmux command (canonical name or alias),
@@ -1195,6 +1259,23 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         }
     }
 
+    // A runtime source past its first command keeps every line, the options
+    // too, so they run in file order after the commands before them (issue
+    // #842). An unknown command is still reported here and never runs.
+    if source_deferring(app) {
+        let line = app.config_warn_line;
+        if is_config_directive(l) {
+            defer_line(app, line, crate::types::DeferredKind::Directive(l.to_string()));
+        } else {
+            let cmd = l.split_whitespace().next().unwrap_or("");
+            if is_known_command(app, cmd) {
+                defer_line(app, line, crate::types::DeferredKind::Command(l.to_string()));
+            } else {
+                warn_config(app, format!("unknown command: {}", cmd));
+            }
+        }
+        return;
+    }
 
     if l.starts_with("set-option ") || l.starts_with("set ") {
         parse_set_option(app, l, false);
@@ -1211,7 +1292,9 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     else if l.starts_with("source-file ") || l.starts_with("source ") {
         let parts: Vec<&str> = l.splitn(2, ' ').collect();
         if parts.len() > 1 {
-            source_file(app, parts[1].trim());
+            // Through source_spec, so a glob in a file is a glob, as it is
+            // in tmux (cmd-source-file.c:221), not a path with a `*` in it.
+            source_spec(app, parts[1].trim());
         }
     }
     else if l.starts_with("run-shell ") || l.starts_with("run ") {
@@ -1304,6 +1387,18 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         // command (a known-but-unrouted command like `new-window` stays silent
         // to match prior behavior; a genuine typo like `bnid-key` is surfaced).
         let cmd = l.split_whitespace().next().unwrap_or("");
+        // In a runtime source every command is kept for the source job, which
+        // runs it once the commands before it have finished, as tmux's queue
+        // does (issue #842). That takes in the three cases below too; they
+        // stay for the callers with no source job (menus, confirm prompts).
+        if app.source_defer.is_some() && is_known_command(app, cmd) {
+            if let Some(d) = app.source_defer.as_mut() {
+                d.triggered = true;
+            }
+            let line = app.config_warn_line;
+            defer_line(app, line, crate::types::DeferredKind::Command(l.to_string()));
+            return;
+        }
         // tmux runs a `copy-mode` line in a sourced file like any other
         // command (cfg.c queues every line), so `source-file` on a file that
         // says `copy-mode` enters copy mode. It needs a pane, and a startup
@@ -2949,50 +3044,46 @@ fn map_key_case(c: char, upper: bool) -> char {
 }
 
 thread_local! {
-    // Guards against runaway recursion when a config sources itself (directly or
-    // in a cycle). Without this a self-sourcing psmux.conf overflows the stack and
+    // The files being sourced right now, outermost first, by source_key.
+    // Without a guard a self-sourcing psmux.conf overflows the stack and
     // crashes the server, so the session never comes up ("no server running").
-    static SOURCE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    // A file already on it is a cycle and an error (issue #842); its length is
+    // the nesting depth.
+    static SOURCE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-const MAX_SOURCE_DEPTH: u32 = 16;
+/// tmux's CMD_SOURCE_FILE_DEPTH_LIMIT (cmd-source-file.c:33): deeper than this
+/// is "too many nested files".
+const MAX_SOURCE_DEPTH: usize = 50;
 
-struct SourceDepthGuard;
-impl Drop for SourceDepthGuard {
+struct SourceStackGuard;
+impl Drop for SourceStackGuard {
     fn drop(&mut self) {
-        SOURCE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        SOURCE_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
     }
 }
 
-pub fn source_file(app: &mut AppState, path: &str) {
-    let depth = SOURCE_DEPTH.with(|d| d.get());
-    if depth >= MAX_SOURCE_DEPTH {
-        eprintln!("psmux: source-file: maximum nesting depth ({}) exceeded; ignoring '{}' (recursive source-file?)", MAX_SOURCE_DEPTH, path);
-        return;
-    }
-    SOURCE_DEPTH.with(|d| d.set(depth + 1));
-    let _depth_guard = SourceDepthGuard; // decrements on every return path
+/// The name a sourced file is known by on the source stack: its canonical
+/// path, compared without regard to case or slash direction on Windows, as
+/// same_config_path compares config paths.
+pub(crate) fn source_key(path: &str) -> String {
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let s = p.to_string_lossy().replace('/', "\\");
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s).trim_end_matches('\\').to_string();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
 
-    let path = path.trim().trim_matches('"').trim_matches('\'');
-
-    // Handle -F flag: expand format strings in the path
-    let (path, format_expand) = if path.starts_with("-F ") || path.starts_with("-F\t") {
-        (path[3..].trim().trim_matches('"').trim_matches('\''), true)
-    } else {
-        (path, false)
-    };
-
-    let expanded_path = if format_expand {
-        crate::format::expand_format(path, app)
+/// A `source-file` path as source_file opens it: `~` expanded, slashes made
+/// native, and a `~/.psmux/` path that does not exist moved to its XDG
+/// equivalent when that one does (issue #135).
+fn expand_source_path(path: &str) -> String {
+    let expanded_path = if path.starts_with('~') {
+        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+        path.replacen('~', &home, 1)
     } else {
         path.to_string()
-    };
-
-    let expanded_path = if expanded_path.starts_with('~') {
-        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-        expanded_path.replacen('~', &home, 1)
-    } else {
-        expanded_path
     };
 
     // Normalize path separators for Windows
@@ -3000,7 +3091,7 @@ pub fn source_file(app: &mut AppState, path: &str) {
 
     // Fallback: if path references ~/.psmux/ but doesn't exist and the
     // XDG equivalent (~/.config/psmux/) does, use that instead (issue #135).
-    let expanded_path = if !std::path::Path::new(&expanded_path).exists() {
+    if !std::path::Path::new(&expanded_path).exists() {
         let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
         let classic = format!("{}\\.psmux\\", home);
         if expanded_path.starts_with(&classic) {
@@ -3013,11 +3104,214 @@ pub fn source_file(app: &mut AppState, path: &str) {
         }
     } else {
         expanded_path
+    }
+}
+
+/// The arguments of a `source-file` as the server and the config parser hand
+/// them over: tmux's flags (`Fnqv`, `-t target`, cmd-source-file.c:42), alone
+/// or in a cluster such as `-qF`, then the path. The path is the rest of the
+/// text as it stands, so a Windows path keeps its backslashes.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SourceSpec {
+    pub path: String,
+    /// `-F`: the path is a format.
+    pub format: bool,
+    /// `-q`: a file that does not exist is not an error (cmd-source-file.c:221
+    /// to :232).
+    pub quiet: bool,
+    /// `-n`: parse only, nothing is applied.
+    pub parse_only: bool,
+}
+
+pub(crate) fn parse_source_spec(spec: &str) -> SourceSpec {
+    let mut out = SourceSpec::default();
+    let mut rest = spec.trim();
+    let mut skip_value = false;
+    loop {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        if word.is_empty() {
+            break;
+        }
+        if skip_value {
+            skip_value = false;
+        } else if word == "--" {
+            rest = rest[end..].trim_start();
+            break;
+        } else if word.starts_with('-') && word.len() > 1 {
+            let flags = &word[1..];
+            for (pos, c) in flags.char_indices() {
+                match c {
+                    'F' => out.format = true,
+                    'q' => out.quiet = true,
+                    'n' => out.parse_only = true,
+                    // `-t target`: the value is the rest of this word or the next.
+                    't' => {
+                        skip_value = pos + 1 == flags.len();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            break;
+        }
+        rest = rest[end..].trim_start();
+    }
+    out.path = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+    out
+}
+
+/// The lines of a config file that always run, in order: continuation lines
+/// joined and a multi-line `bind x {` ... `}` made one statement, as
+/// parse_config_content reads them, and every line inside a `%if` block or an
+/// `if-shell { } { }` block left out, because whether those run is decided
+/// only when the file runs (issue #842).
+fn unconditional_lines(content: &str) -> Vec<String> {
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    let lines = join_brace_blocks(join_continuations(content, 1));
+    let mut out = Vec::new();
+    let mut if_depth = 0usize;
+    let mut block_depth = 0usize;
+    let mut else_may_follow = false;
+    for (_, line) in lines {
+        let l = strip_inline_comment(line.trim()).trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        if block_depth > 0 {
+            let opens = l.matches('{').count();
+            let closes = l.matches('}').count();
+            block_depth = (block_depth + opens).saturating_sub(closes);
+            else_may_follow = block_depth == 0;
+            continue;
+        }
+        if else_may_follow && l == "{" {
+            block_depth = 1;
+            else_may_follow = false;
+            continue;
+        }
+        else_may_follow = false;
+        if l.starts_with("%if ") || l.starts_with("%if\t") {
+            if_depth += 1;
+            continue;
+        }
+        if l == "%endif" {
+            if_depth = if_depth.saturating_sub(1);
+            continue;
+        }
+        if l.starts_with('%') || if_depth > 0 {
+            continue;
+        }
+        if (l.starts_with("if-shell ") || l.starts_with("if ")) && l.ends_with('{') {
+            block_depth = 1;
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    out
+}
+
+/// The error for `spec` when sourcing it would source a file that is already
+/// being sourced, found before anything in the file has run (issue #842).
+/// Only the `source-file` lines that always run are followed, in nested
+/// files too: one in a key binding, a `%if` block or an `if-shell` block runs
+/// only if and when its turn comes, and source_file checks it then. So does a
+/// `-F` path or a glob. tmux has no such check: it runs a self-sourcing file
+/// down to its nesting limit of 50 and then reports "too many nested files"
+/// (cmd-source-file.c:172 to :186). A file that sources itself is never
+/// wanted, so psmux refuses it before any of its lines take effect.
+fn find_source_cycle(spec: &str) -> Option<String> {
+    let spec = parse_source_spec(spec);
+    if spec.format || spec.parse_only || spec.path.contains('*') || spec.path.contains('?') {
+        return None;
+    }
+    let mut keys = SOURCE_STACK.with(|s| s.borrow().clone());
+    let mut names: Vec<String> = Vec::new();
+    scan_source_cycle(&expand_source_path(&spec.path), &mut keys, &mut names)
+}
+
+fn scan_source_cycle(path: &str, keys: &mut Vec<String>, names: &mut Vec<String>) -> Option<String> {
+    let key = source_key(path);
+    if keys.contains(&key) {
+        names.push(path.to_string());
+        return Some(format!(
+            "source-file: {} is already being sourced ({})",
+            path,
+            names.join(" -> ")
+        ));
+    }
+    if keys.len() >= MAX_SOURCE_DEPTH {
+        return None;
+    }
+    // A file that cannot be read is reported when source_file opens it.
+    let content = std::fs::read_to_string(path).ok()?;
+    keys.push(key);
+    names.push(path.to_string());
+    for l in unconditional_lines(&content) {
+        let (head, rest) = match l.find(char::is_whitespace) {
+            Some(end) => (&l[..end], &l[end..]),
+            None => (l.as_str(), ""),
+        };
+        if head != "source-file" && head != "source" {
+            continue;
+        }
+        let spec = parse_source_spec(rest);
+        if spec.format || spec.parse_only || spec.path.contains('*') || spec.path.contains('?') {
+            continue;
+        }
+        if let Some(msg) = scan_source_cycle(&expand_source_path(&spec.path), keys, names) {
+            return Some(msg);
+        }
+    }
+    keys.pop();
+    names.pop();
+    None
+}
+
+pub fn source_file(app: &mut AppState, path: &str) {
+    let depth = SOURCE_STACK.with(|s| s.borrow().len());
+
+    let spec = parse_source_spec(path);
+    // `-n` parses without running anything; nothing here applies it yet, so
+    // it does nothing, as the server's source-file has always done with it.
+    if spec.parse_only {
+        return;
+    }
+
+    let expanded_path = if spec.format {
+        crate::format::expand_format(&spec.path, app)
+    } else {
+        spec.path.clone()
     };
+    let expanded_path = expand_source_path(&expanded_path);
+
+    // `-q`: a file that does not exist is skipped without a word, as tmux's
+    // -q does (cmd-source-file.c:221 to :232).
+    if spec.quiet && !std::path::Path::new(&expanded_path).exists() {
+        return;
+    }
+
+    // A file that is already being sourced, here or further out, is a cycle:
+    // refused, whatever path or format named it (issue #842). Past tmux's
+    // nesting limit is "too many nested files", as tmux reports it.
+    let key = source_key(&expanded_path);
+    if SOURCE_STACK.with(|s| s.borrow().contains(&key)) {
+        warn_config(app, format!("source-file: {} is already being sourced", expanded_path));
+        return;
+    }
+    if depth >= MAX_SOURCE_DEPTH {
+        warn_config(app, "too many nested files");
+        return;
+    }
+    SOURCE_STACK.with(|s| s.borrow_mut().push(key));
+    let _stack_guard = SourceStackGuard; // pops on every return path
 
     // A runtime `source-file` (not part of a startup batch and not nested) owns
-    // its own warning batch and surfaces the result as a status message.
-    let outermost_runtime = depth == 0 && !in_startup_load();
+    // its own warning batch and surfaces the result as a status message. Under
+    // source_runtime the batch is that function's, and the source job reports
+    // it once the file's commands have run.
+    let outermost_runtime = depth == 0 && !in_startup_load() && app.source_defer.is_none();
     if outermost_runtime {
         app.config_warnings.clear();
     }
@@ -3055,17 +3349,130 @@ pub fn source_file(app: &mut AppState, path: &str) {
 
     set_current_config_file(&prev_file);
 
-    if outermost_runtime && !app.config_warnings.is_empty() {
-        let n = app.config_warnings.len();
-        let summary = if n == 1 {
-            format!("config warning: {}", app.config_warnings[0])
-        } else {
-            format!("{} config warnings (first: {})", n, app.config_warnings[0])
-        };
-        // Hold the message for 5s (vs the 750ms default) so a config problem is
-        // actually noticed rather than flashing past.
-        app.status_message = Some((summary, std::time::Instant::now(), Some(5000)));
+    if outermost_runtime {
+        summarize_config_warnings(app);
     }
+}
+
+/// Show the warning batch of a runtime source in the status line.
+pub(crate) fn summarize_config_warnings(app: &mut AppState) {
+    if app.config_warnings.is_empty() {
+        return;
+    }
+    let n = app.config_warnings.len();
+    let summary = if n == 1 {
+        format!("config warning: {}", app.config_warnings[0])
+    } else {
+        format!("{} config warnings (first: {})", n, app.config_warnings[0])
+    };
+    // Hold the message for 5s (vs the 750ms default) so a config problem is
+    // actually noticed rather than flashing past.
+    app.status_message = Some((summary, std::time::Instant::now(), Some(5000)));
+}
+
+/// Source `spec` (a path, `-F <format>`, or a glob) the way the server's
+/// `source-file` does.
+fn source_spec(app: &mut AppState, spec: &str) {
+    let parsed = parse_source_spec(spec);
+    let path_for_glob = parsed.path.as_str();
+    if !parsed.format && !parsed.parse_only && (path_for_glob.contains('*') || path_for_glob.contains('?')) {
+        let expanded = if path_for_glob.starts_with('~') {
+            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+            path_for_glob.replacen('~', &home, 1)
+        } else {
+            path_for_glob.to_string()
+        };
+        let mut matched = false;
+        if let Ok(entries) = glob::glob(&expanded) {
+            // Each match through source_file, so its lines carry its own name
+            // and line numbers in warnings and in #{current_file}.
+            for entry in entries.flatten() {
+                matched = true;
+                source_file(app, &entry.display().to_string());
+            }
+        }
+        // A pattern that matches nothing is tmux's "No such file or
+        // directory" unless -q is given (cmd-source-file.c:221 to :232).
+        if !matched && !parsed.quiet {
+            warn_config(app, format!("No such file or directory: {}", path_for_glob));
+        }
+    } else {
+        source_file(app, spec);
+    }
+}
+
+/// A `source-file` run on a live server (issue #842). Options and bindings
+/// before the file's first command apply now; from that command on, every line
+/// is kept, in file order, and returned for the source job
+/// (src/server/source_job.rs), which runs them one after another as tmux's
+/// queue runs a sourced file (cmd-source-file.c:119, cfg.c:155 to :204).
+///
+/// Nothing is kept on a server with no window yet (a plugin sourced during the
+/// startup drain) or on a warm standby, whose one window belongs to the next
+/// session: there the file runs as it always has. When nothing is kept, the
+/// warnings are reported now; otherwise the job reports them at its end.
+///
+/// A file that would source a file already being sourced is refused before
+/// any of it takes effect (find_source_cycle): nothing is applied or kept,
+/// and the error is the result.
+pub fn source_runtime(app: &mut AppState, spec: &str) -> crate::types::SourceParse {
+    if let Some(msg) = find_source_cycle(spec) {
+        app.config_warnings = vec![msg.clone()];
+        app.config_warn_line = None;
+        summarize_config_warnings(app);
+        return crate::types::SourceParse { lines: Vec::new(), errors: vec![msg] };
+    }
+    // Every warning of a runtime source is an error for the client that ran
+    // it, as tmux's client hears of a missing file, an invalid option or a bad
+    // value and exits 1 (issue #842); the rest of the file still runs.
+    if app.windows.is_empty() || app.is_warm_server() {
+        source_spec(app, spec);
+        return crate::types::SourceParse::default();
+    }
+    app.config_warnings.clear();
+    app.config_warn_line = None;
+    let outer = app.source_defer.replace(crate::types::SourceDefer::default());
+    source_spec(app, spec);
+    let kept = std::mem::replace(&mut app.source_defer, outer).unwrap_or_default();
+    if kept.lines.is_empty() {
+        summarize_config_warnings(app);
+    }
+    crate::types::SourceParse { lines: kept.lines, errors: app.config_warnings.clone() }
+}
+
+/// Parse one config line a source job kept, now that the commands before it
+/// have run (issue #842). The line's own file and line number are restored for
+/// its warnings and #{current_file}. Lines it keeps in turn (a nested
+/// `source-file`'s commands, an `if-shell` branch that is a command) come back
+/// with the warnings, for the job to run next. The server's own warning batch
+/// is left as it was.
+pub fn replay_deferred_line(
+    app: &mut AppState,
+    item: &crate::types::DeferredConfigLine,
+) -> crate::types::SourceReplayResult {
+    let saved_warnings = std::mem::take(&mut app.config_warnings);
+    let saved_line = app.config_warn_line;
+    let outer = app.source_defer.replace(crate::types::SourceDefer::default());
+    let prev_file = current_config_file();
+    set_current_config_file(&item.file);
+    app.config_warn_line = item.line;
+    // The files that were being sourced where the line was read, so a
+    // `source-file` it runs is checked against them and nests below them.
+    let saved_stack = SOURCE_STACK.with(|s| std::mem::replace(&mut *s.borrow_mut(), item.ancestors.clone()));
+    match &item.kind {
+        crate::types::DeferredKind::Block(text) => {
+            parse_config_content_from(app, text, item.line.unwrap_or(1));
+        }
+        crate::types::DeferredKind::Directive(l) | crate::types::DeferredKind::Command(l) => {
+            parse_config_line(app, l);
+        }
+    }
+    SOURCE_STACK.with(|s| *s.borrow_mut() = saved_stack);
+    set_current_config_file(&prev_file);
+    app.config_warn_line = saved_line;
+    let kept = std::mem::replace(&mut app.source_defer, outer).unwrap_or_default();
+    let warnings = std::mem::replace(&mut app.config_warnings, saved_warnings);
+    crate::types::SourceReplayResult { warnings, deferred: kept.lines }
 }
 
 /// Parse a key string like "C-a", "M-x", "F1", "Space" into (KeyCode, KeyModifiers)
@@ -3565,6 +3972,10 @@ mod tests_issue137_env_leak;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue157_bind_key_case.rs"]
 mod tests_issue157_bind_key_case;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue842_source_file_commands.rs"]
+mod test_issue842_source_file_commands;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue145_source_file.rs"]

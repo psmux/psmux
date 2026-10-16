@@ -2884,6 +2884,25 @@ fn send_control_with_response_bounded(line: String, read_timeout: Option<Duratio
     let path = crate::paths::port_file(&target);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
     let session_key = read_session_key(&target).unwrap_or_default();
+    exchange_on_port(port, &session_key, full_target.as_deref(), &line, read_timeout)
+}
+
+/// One request to the server on `port` and its whole reply: AUTH, an optional
+/// TARGET line, `line`, then a half-close, and the reply read until the server
+/// closes, which a one-shot connection does only once the command has run.
+/// The AUTH `OK` is taken off, an authentication refusal is an error, and so
+/// is a reply cut off by `read_timeout` (None waits for the server).
+///
+/// The CLI reaches its server through this, and a source job reaches its own
+/// server through it one command at a time (issue #842): the end of the reply
+/// is what tells the job that the command before the next one is done.
+pub fn exchange_on_port(
+    port: u16,
+    session_key: &str,
+    full_target: Option<&str>,
+    line: &str,
+    read_timeout: Option<Duration>,
+) -> io::Result<String> {
     // Bounded connect: against a saturated listen backlog, a bare connect()
     // fails only after the ~21s Windows SYN-retransmit and surfaces as the
     // notorious `os error 10060`. A 1s timeout turns that into a fast, retryable
@@ -2894,7 +2913,7 @@ fn send_control_with_response_bounded(line: String, read_timeout: Option<Duratio
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(read_timeout);
     let _ = write!(stream, "AUTH {}\n", session_key);
-    if let Some(ref ft) = full_target {
+    if let Some(ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
     }
     let _ = write!(stream, "{}", line);
