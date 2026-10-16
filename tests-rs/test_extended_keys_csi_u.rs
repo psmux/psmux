@@ -49,6 +49,13 @@ use std::time::{Duration, Instant};
 
 use super::{EscCoalesce, ESC_COALESCE_MS, TEXT_BURST_MS};
 
+/// The coalescer with its window pinned at the 
+/// [`ESC_COALESCE_MS`] ceiling, so these tests keep exercising the hold
+/// whatever the live escape-time default is (10 ms since the #841 follow up).
+fn pinned() -> EscCoalesce {
+    EscCoalesce::with_window(true, Duration::from_millis(ESC_COALESCE_MS))
+}
+
 fn press(code: KeyCode, mods: KeyModifiers) -> Event {
     Event::Key(KeyEvent {
         code,
@@ -164,7 +171,7 @@ fn parse_vt(seq: &str) -> Vec<Event> {
 
 #[test]
 fn csi_13_2_u_becomes_one_shift_enter() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
 
     let mut batch = Batch::from_sequence("\x1b[13;2u");
@@ -189,7 +196,7 @@ fn csi_13_2_u_becomes_one_shift_enter() {
 #[cfg(windows)]
 #[test]
 fn the_reassembled_key_encodes_to_esc_cr() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let out = Batch::from_sequence("\x1b[13;2u")
         .feed_into(&mut c, Instant::now())
         .unwrap();
@@ -201,7 +208,7 @@ fn the_reassembled_key_encodes_to_esc_cr() {
 /// the key: the held Escape is the sequence's introducer and goes with it.
 #[test]
 fn a_surviving_escape_is_consumed_by_the_sequence() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
 
     assert!(hold_escape(&mut c, t0).is_none());
@@ -235,7 +242,7 @@ fn the_modifier_parameter_is_decoded() {
         (9, KeyModifiers::ALT),
         (13, KeyModifiers::CONTROL | KeyModifiers::ALT),
     ] {
-        let mut c = EscCoalesce::new(true);
+        let mut c = pinned();
         let out = Batch::from_sequence(&format!("\x1b[13;{}u", param))
             .feed_into(&mut c, Instant::now())
             .expect("must produce a key");
@@ -247,7 +254,7 @@ fn the_modifier_parameter_is_decoded() {
 /// A code point with no modifier parameter at all is still a key.
 #[test]
 fn a_bare_code_point_needs_no_modifier_parameter() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let out = Batch::from_sequence("\x1b[13u")
         .feed_into(&mut c, Instant::now())
         .expect("must produce a key");
@@ -269,7 +276,7 @@ fn control_code_points_map_to_named_keys() {
         (32, KeyCode::Char(' ')),
         (97, KeyCode::Char('a')),
     ] {
-        let mut c = EscCoalesce::new(true);
+        let mut c = pinned();
         let out = Batch::from_sequence(&format!("\x1b[{};5u", code))
             .feed_into(&mut c, Instant::now())
             .expect("must produce a key");
@@ -286,7 +293,7 @@ fn key_releases_inside_a_sequence_are_ignored() {
         events.push(press(KeyCode::Char(ch), KeyModifiers::NONE));
         events.push(release(KeyCode::Char(ch), KeyModifiers::NONE));
     }
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let out = Batch::of(events)
         .feed_into(&mut c, Instant::now())
         .expect("the sequence must still complete");
@@ -300,7 +307,7 @@ fn key_releases_inside_a_sequence_are_ignored() {
 /// WezTerm workaround promotes back into a press, which would double the key.
 #[test]
 fn a_kitty_release_report_is_dropped() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     let mut batch = Batch::from_sequence("\x1b[13;2:3u");
     assert!(batch.feed_into(&mut c, t0).is_none());
@@ -319,7 +326,7 @@ fn a_kitty_release_report_is_dropped() {
 /// no hold, nothing queued, no deadline armed.
 #[test]
 fn a_typed_bracket_passes_straight_through() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
 
     let (out, left) = drain(&mut c, press(KeyCode::Char('['), KeyModifiers::NONE), vec![], t0);
@@ -335,7 +342,7 @@ fn a_typed_bracket_passes_straight_through() {
 /// turn.  `a` was pulled, and therefore had to come back out here.
 #[test]
 fn a_bracket_followed_by_typing_keeps_every_character() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let (out, left) = drain(
         &mut c,
         press(KeyCode::Char('['), KeyModifiers::NONE),
@@ -355,7 +362,7 @@ fn a_bracket_followed_by_typing_keeps_every_character() {
 /// decoder for input that cannot reach this code.
 #[test]
 fn an_undecoded_final_byte_replays_every_character() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let mut batch = Batch::from_sequence("\x1b[1;5A");
     let first = batch
         .feed_into(&mut c, Instant::now())
@@ -379,7 +386,7 @@ fn an_undecoded_final_byte_replays_every_character() {
 /// A held Escape in front of an abandoned sequence still comes out first.
 #[test]
 fn a_held_escape_precedes_an_abandoned_sequence() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
 
@@ -400,7 +407,7 @@ fn a_held_escape_precedes_an_abandoned_sequence() {
 /// A non-character event inside a sequence abandons it, and nothing is lost.
 #[test]
 fn a_foreign_event_inside_a_sequence_replays_it() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let (out, left) = drain(
         &mut c,
         press(KeyCode::Char('['), KeyModifiers::NONE),
@@ -423,7 +430,7 @@ fn a_foreign_event_inside_a_sequence_replays_it() {
 #[test]
 fn an_overlong_parameter_run_is_abandoned() {
     const SENT: usize = 64;
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let rest: Vec<Event> = (0..SENT)
         .map(|_| press(KeyCode::Char('1'), KeyModifiers::NONE))
         .collect();
@@ -449,7 +456,7 @@ fn an_overlong_parameter_run_is_abandoned() {
 /// A terminal query reply (`CSI ? … u`) is not a key.
 #[test]
 fn a_private_parameter_sequence_is_not_a_key() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let mut batch = Batch::from_sequence("\x1b[?1u");
     let first = batch.feed_into(&mut c, Instant::now()).expect("replayed");
     let mut out = vec![first];
@@ -471,7 +478,7 @@ fn a_private_parameter_sequence_is_not_a_key() {
 /// on a real keyboard) and must never open a sequence.
 #[test]
 fn a_modified_bracket_opens_nothing() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
         let out = c
@@ -490,7 +497,7 @@ fn a_modified_bracket_opens_nothing() {
 
 #[test]
 fn esc_then_enter_still_merges() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
     let out = c
@@ -502,7 +509,7 @@ fn esc_then_enter_still_merges() {
 
 #[test]
 fn a_lone_escape_still_comes_out_after_the_window() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
     assert!(c
@@ -582,7 +589,7 @@ fn the_vt_parser_agrees_on_named_keys() {
 /// the `[` follows the characters before it by microseconds.
 #[test]
 fn a_paste_carrying_the_sequence_stays_text() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
 
     for ch in ['P', 'A'] {
@@ -614,7 +621,7 @@ fn a_paste_carrying_the_sequence_stays_text() {
 /// arrives once the run has gone quiet still decodes.
 #[test]
 fn a_sequence_after_typing_still_decodes() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(c
         .feed(press(KeyCode::Char('a'), KeyModifiers::NONE), t0)
@@ -650,7 +657,7 @@ fn the_vt_parser_drops_a_kitty_release_too() {
 /// not count as text itself: every press has to decode.
 #[test]
 fn a_repeated_key_decodes_every_time() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     for press_number in 1..=3 {
         let out = Batch::from_sequence("\x1b[13;2u")

@@ -385,7 +385,7 @@ $val = $val.Trim()
 if ("$val" -eq "100") { Write-Pass "show-options -v reflects escape-time change: $val" }
 else { Write-Fail "show-options -v escape-time got: '$val'" }
 # Restore
-Psmux set-option -t feat3 escape-time 500 2>$null | Out-Null
+Psmux set-option -t feat3 escape-time 10 2>$null | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 Write-Test "display-message format with clock_mode"
 $val = Psmux display-message -p "mode=#{pane_mode}" -t feat3 | Out-String

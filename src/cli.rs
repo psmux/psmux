@@ -1421,7 +1421,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     prefix              Key  Prefix key (default: C-b)
     base-index          Int  First window number (default: 1)
     pane-base-index     Int  First pane number (default: 0)
-    escape-time         Int  Escape delay in ms (default: 500)
+    escape-time         Int  Escape delay in ms (default: 10)
     repeat-time         Int  Repeat key timeout in ms (default: 500)
     history-limit       Int  Scrollback lines (default: 2000)
     display-time        Int  Message display time in ms (default: 750)

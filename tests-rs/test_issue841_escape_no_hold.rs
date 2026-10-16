@@ -155,7 +155,7 @@ fn the_hold_follows_escape_time_like_tmux() {
     assert_eq!(escape_wait_for(0), 1);
     assert_eq!(escape_wait_for(10), 10);
     assert_eq!(escape_wait_for(25), 25);
-    // psmux still defaults escape-time to 500 (tmux 3.4); never hold that long.
+    // A large escape-time (tmux 3.4 defaulted to 500) is never held that long.
     assert_eq!(escape_wait_for(500), ESC_COALESCE_MS);
     assert_eq!(escape_wait_for(u64::MAX), ESC_COALESCE_MS);
 }

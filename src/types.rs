@@ -18,6 +18,12 @@ pub const GIT_HASH_FULL: &str = env!("PSMUX_GIT_HASH_FULL");
 pub const GIT_DATE: &str = env!("PSMUX_GIT_DATE");
 pub const GIT_DIRTY: &str = env!("PSMUX_GIT_DIRTY");
 
+/// Default `escape-time` in ms.  tmux lowered it from 500 to 10 in 3.5
+/// (options-table.c `.default_num = 10`, commit 2e9d7ebf: "500 is far too long
+/// for modern terminals and networks").  It bounds how long the client
+/// holds an ambiguous Escape (`ssh_input::escape_wait_ms`).
+pub const DEFAULT_ESCAPE_TIME_MS: u64 = 10;
+
 /// Human-readable build provenance line, e.g.
 ///
 ///   `psmux 3.3.7 (a1b2c3d 2026-07-20)`
@@ -3085,7 +3091,7 @@ impl AppState {
             temp_focus_saved_active: None,
             mode: Mode::Passthrough,
             clock_panes: Vec::new(),
-            escape_time_ms: 500,
+            escape_time_ms: DEFAULT_ESCAPE_TIME_MS,
             repeat_time_ms: 500,
             prefix_repeating: false,
             prefix_key: Some((crossterm::event::KeyCode::Char('b'), crossterm::event::KeyModifiers::CONTROL)),

@@ -17,6 +17,13 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::ssh_input::{frame_wake_release, EscCoalesce, ESC_COALESCE_MS};
 
+/// The coalescer with its window pinned at the 
+/// [`ESC_COALESCE_MS`] ceiling, so these tests keep exercising the hold
+/// whatever the live escape-time default is (10 ms since the #841 follow up).
+fn pinned() -> EscCoalesce {
+    EscCoalesce::with_window(true, Duration::from_millis(ESC_COALESCE_MS))
+}
+
 fn esc_key() -> Event {
     Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
 }
@@ -30,7 +37,7 @@ fn is_escape(ev: &Event) -> bool {
 
 /// A coalescer holding one bare Escape that arrived at `t0`.
 fn holding_an_escape(t0: Instant) -> EscCoalesce {
-    let mut esc = EscCoalesce::new(true);
+    let mut esc = pinned();
     // The DOWN arrives with its UP already queued: an Escape the console
     // synthesised, the only kind still held (issue #841 follow up).
     let mut up = Some(Event::Key(KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::empty(), KeyEventKind::Release)));
@@ -74,7 +81,7 @@ fn a_frame_wake_does_not_cut_the_window_short() {
 
 #[test]
 fn a_frame_wake_with_nothing_held_yields_nothing() {
-    let mut esc = EscCoalesce::new(true);
+    let mut esc = pinned();
     assert!(
         frame_wake_release(&mut esc, Instant::now()).is_none(),
         "no key is being held, so a frame wake returns to the caller empty handed \

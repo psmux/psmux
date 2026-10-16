@@ -326,7 +326,9 @@ fn option_catalog_entries_have_scope() {
 #[test]
 fn option_catalog_default_for_escape_time() {
     let def = crate::server::option_catalog::default_for("escape-time");
-    assert_eq!(def, Some("500"));
+    // tmux 3.5+ default (options-table.c `.default_num = 10`); psmux used
+    // tmux 3.4's 500 until the #841 follow up.
+    assert_eq!(def, Some("10"));
 }
 
 #[test]

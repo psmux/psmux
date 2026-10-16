@@ -3664,7 +3664,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     fn default_status_lines() -> usize { 1 }
     fn default_status_visible() -> bool { true }
     fn default_repeat_time() -> u64 { 500 }
-    fn default_escape_time() -> u64 { 500 }
+    fn default_escape_time() -> u64 { crate::types::DEFAULT_ESCAPE_TIME_MS }
     fn default_bold_is_bright() -> bool { true }
     fn default_paste_detection() -> bool { true }
     fn default_mouse_selection() -> bool { true }

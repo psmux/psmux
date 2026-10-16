@@ -339,7 +339,7 @@ foreach ($opt in $bools) {
 Write-Host "`n=== 2. NUMERIC OPTIONS VIA TUI ===" -ForegroundColor Cyan
 
 $nums = @(
-    @{n='escape-time'; v='100'; d='500'},
+    @{n='escape-time'; v='100'; d='10'},  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
     @{n='history-limit'; v='50000'; d='2000'},
     @{n='display-time'; v='3000'; d='750'},
     @{n='display-panes-time'; v='5000'; d='1000'},
@@ -429,7 +429,7 @@ Write-Host "`n=== 4. FLAG MATRIX VIA TUI ===" -ForegroundColor Cyan
 
 # -g (global) already tested above, verify one more
 Test-TuiOption "set-option -g escape-time 42" "escape-time" '42' "TUI flag -g"
-Send-PsmuxCommand "set-option -g escape-time 500"
+Send-PsmuxCommand "set-option -g escape-time 10"  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # -a (append) via TUI
 Send-PsmuxCommand "set-option -g status-right AAA"
@@ -797,7 +797,7 @@ if ($r.ok -and $r.resp -match '5') {
 }
 
 # Restore
-Send-PsmuxCommand "set-option -g escape-time 500"
+Send-PsmuxCommand "set-option -g escape-time 10"  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 Send-PsmuxCommand "set-option -g base-index 0"
 Remove-Item $tempSrc -Force -EA SilentlyContinue
 
@@ -900,7 +900,7 @@ if ($r.ok -and $r.resp -match 'tcpval') {
 }
 
 # Restore
-Send-PsmuxCommand "set-option -g escape-time 500"
+Send-PsmuxCommand "set-option -g escape-time 10"  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # =============================================================================
 # SECTION 17: Escape key cancels command prompt
@@ -1018,7 +1018,7 @@ if ($r.ok -and $r.resp -match 'mouse') {
 #
 # Left open it swallows the whole next command. That is what made section 20's
 # "rapid sequential sets" fail: prefix, colon, the text and Enter all landed on
-# this box, so escape-time stayed 500 while the checks reported a product bug.
+# this box, so escape-time stayed at its default while the checks reported a product bug.
 Send-PsmuxEscape
 Send-PsmuxEscape
 
@@ -1042,7 +1042,7 @@ foreach ($opt in $rapidOpts) {
 }
 
 # Restore
-Send-PsmuxCommand "set-option -g escape-time 500"
+Send-PsmuxCommand "set-option -g escape-time 10"  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 Send-PsmuxCommand "set-option -g history-limit 2000"
 Send-PsmuxCommand "set-option -g mouse on"
 Send-PsmuxCommand "set-option -g status-position bottom"

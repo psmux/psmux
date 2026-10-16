@@ -140,7 +140,7 @@ Details worth knowing:
 | `prefix2` | Key | `none` | Secondary prefix key (optional) |
 | `base-index` | Int | `0` | First window number |
 | `pane-base-index` | Int | `0` | First pane number |
-| `escape-time` | Int | `500` | Escape delay (ms) |
+| `escape-time` | Int | `10` | Escape delay (ms), tmux 3.5+ default |
 | `repeat-time` | Int | `500` | How long a key bound with `bind-key -r` keeps repeating without the prefix, in ms. Range `0` to `2000000`; `0` disables repeat |
 | `history-limit` | Int | `2000` | Scrollback lines per pane |
 | `priority` | Str | `above-normal` | Scheduling class for psmux's own processes: `normal`, `above-normal`, `high`. Pane shells and the programs you run are never raised. See [Process Priority](#process-priority) |

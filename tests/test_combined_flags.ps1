@@ -125,7 +125,7 @@ Send-Tcp "set-option -u @go-new-test" | Out-Null
 Send-Tcp "set-option -go @go-new-test first" | Out-Null
 $r = Send-Tcp "show-options -gqv @go-new-test"
 Test-Result "tcp-combined-go-new" ($r.ok -and $r.resp -eq 'first') "resp='$($r.resp)'"
-Send-Tcp "set-option -g escape-time 500" | Out-Null
+Send-Tcp "set-option -g escape-time 10" | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # ================================================================
 # SECTION 2: TCP separated flags (regression: must still work)
@@ -341,7 +341,7 @@ $r = Send-Tcp "show-options -gqv escape-time"
 Test-Result "cfg-combined-go" ($r.ok -and $r.resp -eq '42') "resp='$($r.resp)'"
 
 # Restore escape-time
-Send-Tcp "set-option -g escape-time 500" | Out-Null
+Send-Tcp "set-option -g escape-time 10" | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # ---------------------------------------------------------------
 # Cleanup

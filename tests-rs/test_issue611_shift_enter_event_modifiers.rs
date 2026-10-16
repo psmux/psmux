@@ -48,6 +48,13 @@ use std::time::{Duration, Instant};
 
 use super::{EscCoalesce, ESC_COALESCE_MS};
 
+/// The coalescer with its window pinned at the 
+/// [`ESC_COALESCE_MS`] ceiling, so these tests keep exercising the hold
+/// whatever the live escape-time default is (10 ms since the #841 follow up).
+fn pinned() -> EscCoalesce {
+    EscCoalesce::with_window(true, Duration::from_millis(ESC_COALESCE_MS))
+}
+
 fn press(code: KeyCode, mods: KeyModifiers) -> Event {
     Event::Key(KeyEvent {
         code,
@@ -164,7 +171,7 @@ mod event_time_modifiers {
 
 #[test]
 fn esc_then_enter_merges_into_one_alt_enter() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
 
     // The Escape is held, not forwarded.
@@ -197,7 +204,7 @@ fn esc_then_enter_merges_into_one_alt_enter() {
 #[cfg(windows)]
 #[test]
 fn the_merged_key_encodes_to_esc_cr() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
     let out = c
@@ -224,7 +231,7 @@ fn shift_enter_from_the_record_also_encodes_to_esc_cr() {
 
 #[test]
 fn a_lone_escape_is_delivered_after_the_window() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
 
@@ -247,7 +254,7 @@ fn a_lone_escape_is_delivered_after_the_window() {
 
 #[test]
 fn escape_then_another_key_keeps_both_in_order() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
 
@@ -267,7 +274,7 @@ fn escape_then_another_key_keeps_both_in_order() {
 /// Enter, exactly as tmux delivers it once `escape-time` has elapsed.
 #[test]
 fn enter_after_the_window_is_not_merged() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
     let esc = c
@@ -288,7 +295,7 @@ fn enter_after_the_window_is_not_merged() {
 /// a preceding Escape.
 #[test]
 fn ctrl_enter_after_escape_is_not_merged() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
     let first = c
@@ -306,7 +313,7 @@ fn ctrl_enter_after_escape_is_not_merged() {
 /// never held.
 #[test]
 fn a_modified_escape_is_passed_straight_through() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     let out = c
         .feed(press(KeyCode::Esc, KeyModifiers::ALT), t0)
@@ -319,7 +326,7 @@ fn a_modified_escape_is_passed_straight_through() {
 /// cannot add latency to ordinary typing.
 #[test]
 fn ordinary_keys_are_never_held() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     for code in [
         KeyCode::Char('a'),
@@ -410,7 +417,7 @@ mod send_keys_parity {
 /// Non-key events must not be swallowed while an Escape is held.
 #[test]
 fn a_resize_while_holding_flushes_the_escape_first() {
-    let mut c = EscCoalesce::new(true);
+    let mut c = pinned();
     let t0 = Instant::now();
     assert!(hold_escape(&mut c, t0).is_none());
     let first = c.feed(Event::Resize(80, 24), t0 + Duration::from_millis(1)).unwrap();

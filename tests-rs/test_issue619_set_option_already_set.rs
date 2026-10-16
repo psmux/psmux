@@ -398,10 +398,11 @@ fn unset_removes_window_style_which_has_no_catalog_default() {
 fn config_route_restores_the_default_not_an_empty_value() {
     // The config parser used to call parse_option_value(app, key, "") on -u, so
     // `set -gu escape-time` in a .tmux.conf left the old number where the CLI
-    // restored 500, and `set -gu status-style` produced a styleless status bar.
+    // restored the default, and `set -gu status-style` produced a styleless status bar.
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g escape-time 5\nset -gu escape-time\n");
-    assert_eq!(app.escape_time_ms, 500, "config -u must restore the 500 ms default");
+    // The default is 10 ms since the #841 follow up (tmux 3.5+), 500 before.
+    assert_eq!(app.escape_time_ms, crate::types::DEFAULT_ESCAPE_TIME_MS, "config -u must restore the default");
 
     let mut app2 = mock_app();
     parse_config_content(&mut app2, "set -g status-style fg=red\nset -gu status-style\n");

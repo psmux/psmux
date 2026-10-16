@@ -126,7 +126,7 @@ foreach ($opt in $bools) {
 # ============================================================
 
 $nums = @(
-    @{n='escape-time'; v='100'; d='500'},
+    @{n='escape-time'; v='100'; d='10'},  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
     @{n='history-limit'; v='50000'; d='2000'},
     @{n='display-time'; v='3000'; d='750'},
     @{n='display-panes-time'; v='5000'; d='1000'},
@@ -238,7 +238,7 @@ $show = CLI-Show $sess 'escape-time'
 Test-Result "cli-flag-t-target" ($show -match '99') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # ============================================================
 # SECTION 5: User/@- options lifecycle via CLI
@@ -436,7 +436,7 @@ $tcp = Send-Tcp $sess "show-options -g @cross-test"
 Test-Result "cli-cross-tcp-user" ($tcp -match 'clipal') "TCP verify: '$tcp'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # ============================================================
 # SECTION 17: Config file via source-file CLI + VERIFY loaded values
@@ -464,7 +464,7 @@ $show = CLI-Show $sess 'status-position'
 Test-Result "cfg-top" ($show -match 'top') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 CLI-Set $sess @('-g', 'base-index', '0')
 CLI-Set $sess @('-g', 'status-position', 'bottom')
 Remove-Item $tempConfig -Force -ErrorAction SilentlyContinue
@@ -492,7 +492,7 @@ $show = CLI-Show $sess 'status-left'
 Test-Result "cont-Hello" ($show -match 'HELLO') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 Remove-Item $tempCont -Force -ErrorAction SilentlyContinue
 
 # ============================================================
@@ -523,7 +523,7 @@ $show = CLI-Show $sess 'base-index'
 Test-Result "if-false-2" ($show -match '\b2\b') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 CLI-Set $sess @('-g', 'base-index', '0')
 Remove-Item $tempIf -Force -ErrorAction SilentlyContinue
 
@@ -544,7 +544,7 @@ $show = CLI-Show $sess 'escape-time'
 Test-Result "hidden-99" ($show -match '\b99\b') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 Remove-Item $tempHid -Force -ErrorAction SilentlyContinue
 
 # ============================================================
@@ -562,7 +562,7 @@ $show = CLI-Show $sess 'escape-time'
 Test-Result "bom-44" ($show -match '\b44\b') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 Remove-Item $tempBom -Force -ErrorAction SilentlyContinue
 
 # ============================================================
@@ -584,7 +584,7 @@ $show = CLI-Show $sess 'base-index'
 Test-Result "cli-source-bi-3" ($show -match '\b3\b') "show='$show'"
 
 # Restore
-CLI-Set $sess @('-g', 'escape-time', '500')
+CLI-Set $sess @('-g', 'escape-time', '10')  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 CLI-Set $sess @('-g', 'base-index', '0')
 Remove-Item $tempSrc -Force -ErrorAction SilentlyContinue
 

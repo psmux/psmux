@@ -609,7 +609,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("prefix",                     "C-b"),
     ("prefix2",                    "none"),
     // Behaviour
-    ("escape-time",                "500"),
+    ("escape-time",                "10"),
     ("base-index",                 "0"),
     ("pane-base-index",            "0"),
     ("history-limit",              "2000"),

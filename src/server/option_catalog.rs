@@ -207,7 +207,7 @@ const UNVALIDATED_CHOICE: OptionType = Choice(Unvalidated);
 
 pub static OPTION_CATALOG: &[OptionDef] = &[
     // ── Server options ──
-    OptionDef { name: "escape-time", scope: Server, option_type: Number(U64), default: "500", description: "Time in ms to wait for escape sequence" },
+    OptionDef { name: "escape-time", scope: Server, option_type: Number(U64), default: "10", description: "Time in ms to wait for escape sequence" },
     OptionDef { name: "focus-events", scope: Server, option_type: Boolean, default: "off", description: "Send focus events to applications" },
     OptionDef { name: "program-status", scope: Server, option_type: Boolean, default: "off", description: "Accept OSC 7501 program status reports and answer the OSC 7501 capability query (psmux extension)" },
     OptionDef { name: "bold-is-bright", scope: Server, option_type: Boolean, default: "on", description: "Rewrite crossterm's 256-indexed basic colors to standard SGR so the terminal applies bold-is-bright (issue #425); off keeps explicit 256-indexed low colors byte-accurate" },

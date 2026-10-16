@@ -38,8 +38,10 @@ fn mock_app() -> AppState {
 
 #[test]
 fn default_escape_time() {
+    // tmux 3.5+ default; 500 (tmux 3.4) until the #841 follow up.
     let app = mock_app();
-    assert_eq!(app.escape_time_ms, 500);
+    assert_eq!(app.escape_time_ms, crate::types::DEFAULT_ESCAPE_TIME_MS);
+    assert_eq!(app.escape_time_ms, 10);
 }
 
 #[test]
@@ -1300,13 +1302,13 @@ fn config_flag_u_unset_numeric_option() {
     // -u RESTORES THE TABLE DEFAULT (#619). This used to assert 100, pinning
     // the defect: the config parser applied an EMPTY value on -u, `"".parse()`
     // failed, and the number the user had set simply stayed. The same
-    // `set -gu escape-time` on the CLI route restored 500, so the two routes
+    // `set -gu escape-time` on the CLI route restored the default, so the two routes
     // disagreed about what an unset even means. tmux runs every unset through
     // options_remove_or_default (options.c), which writes the options-table
     // default at a global scope.
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g escape-time 100\nset -gu escape-time\n");
-    assert_eq!(app.escape_time_ms, 500);
+    assert_eq!(app.escape_time_ms, crate::types::DEFAULT_ESCAPE_TIME_MS);
 }
 
 #[test]
@@ -1809,7 +1811,7 @@ fn config_nested_if_outer_false() {
     let mut app = mock_app();
     parse_config_content(&mut app, "%if \"0\"\n%if \"1\"\nset -g escape-time 999\n%endif\n%endif\n");
     // Should remain default because outer %if is false
-    assert_eq!(app.escape_time_ms, 500);
+    assert_eq!(app.escape_time_ms, crate::types::DEFAULT_ESCAPE_TIME_MS);
 }
 
 #[test]
@@ -2293,7 +2295,7 @@ fn config_invalid_numeric_ignored() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g escape-time notanumber\n");
     // Should remain default
-    assert_eq!(app.escape_time_ms, 500);
+    assert_eq!(app.escape_time_ms, crate::types::DEFAULT_ESCAPE_TIME_MS);
 }
 
 #[test]

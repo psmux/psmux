@@ -118,7 +118,7 @@ foreach ($opt in $bools) {
 # ============================================================
 
 $nums = @(
-    @{n='escape-time'; v='100'; d='500'},
+    @{n='escape-time'; v='100'; d='10'},  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
     @{n='history-limit'; v='50000'; d='2000'},
     @{n='display-time'; v='3000'; d='750'},
     @{n='display-panes-time'; v='5000'; d='1000'},
@@ -229,7 +229,7 @@ $show = Send-Tcp $sess "show-options -g escape-time"
 Test-Result "flag-t-target" ($show -match '99') "show='$show'"
 
 # Restore
-Send-Tcp $sess "set-option -g escape-time 500" | Out-Null
+Send-Tcp $sess "set-option -g escape-time 10" | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # ============================================================
 # SECTION 5: User/@- options full lifecycle (all verified)
@@ -404,7 +404,7 @@ $show = Send-Tcp $sess "show-options -g base-index"
 Test-Result "source-bi-5" ($show -match '\b5\b') "show='$show'"
 
 # Restore
-Send-Tcp $sess "set-option -g escape-time 500" | Out-Null
+Send-Tcp $sess "set-option -g escape-time 10" | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 Send-Tcp $sess "set-option -g base-index 0" | Out-Null
 Remove-Item $tempSrc -Force -ErrorAction SilentlyContinue
 
@@ -467,7 +467,7 @@ $cli = & $psmux show-options -t $sess -g @cross-test 2>&1 | Out-String
 Test-Result "cross-tcp-cli-user" ($cli -match 'tcpval') "CLI verify: '$cli'"
 
 # Restore
-Send-Tcp $sess "set-option -g escape-time 500" | Out-Null
+Send-Tcp $sess "set-option -g escape-time 10" | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 # ============================================================
 # Cleanup

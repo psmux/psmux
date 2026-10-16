@@ -532,7 +532,7 @@ $r2 = Send-TcpCommand $SESSION 'set-option -go escape-time 999'
 $verify = Send-TcpCommand $SESSION 'show-options -gqv escape-time'
 if ($r.ok -and $r2.ok -and $verify.resp -match '42') { Write-Pass "set-option -go preserved existing: escape-time='$($verify.resp)'" }
 else { Write-Fail "set-option -go failed: verify='$($verify.resp)'" }
-Send-TcpCommand $SESSION 'set-option -g escape-time 500' | Out-Null
+Send-TcpCommand $SESSION 'set-option -g escape-time 10' | Out-Null  # escape-time default is 10 since the #841 follow up (tmux 3.5+), 500 before
 
 Write-Test "set-option -w (window scope)"
 $r = Send-TcpCommand $SESSION 'set-option -w mouse on'

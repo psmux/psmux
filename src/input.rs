@@ -570,6 +570,14 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     app.mode = Mode::Prefix { armed_at: Instant::now() };
                     app.prefix_repeating = true;
                 } else if !handled && elapsed < app.escape_time_ms {
+                    // An unbound key this close behind the prefix is a piece
+                    // of a burst, not a choice, so the prefix stays armed.
+                    // tmux has no such window: an unbound key leaves the
+                    // prefix table at once (server-client.c, "not found in
+                    // key table"), and with the 10 ms default this is the same
+                    // for anything a person types.  The live client resolves
+                    // prefix keys itself (client.rs); this route serves the
+                    // in-process handler.
                     return Ok(false);
                 } else {
                     app.mode = Mode::Passthrough;

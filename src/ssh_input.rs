@@ -586,10 +586,9 @@ pub fn keepalive_reasserts_mouse_input() -> bool {
 pub(crate) const ESC_COALESCE_MS: u64 = 50;
 
 /// The server's `escape-time`, pushed to the client with every state frame.
-/// Until the first frame arrives it reads as the ceiling, so nothing waits
-/// longer than it did before the option was honoured.
+/// Until the first frame arrives it reads as the default.
 static ESCAPE_TIME_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(ESC_COALESCE_MS);
+    std::sync::atomic::AtomicU64::new(crate::types::DEFAULT_ESCAPE_TIME_MS);
 
 /// Record the server's `escape-time` (client side).
 pub fn set_escape_time(ms: u64) {
@@ -598,9 +597,9 @@ pub fn set_escape_time(ms: u64) {
 
 /// How long an ambiguous Escape may be held: tmux's rule, `escape-time` with
 /// 0 read as 1 ms (tty-keys.c: `if (delay == 0) delay = 1`), capped at
-/// [`ESC_COALESCE_MS`] so the 500 ms default psmux inherited from tmux 3.4
-/// never turns into a half second hold.  tmux itself lowered that default to
-/// 10 ms in 3.5 (options-table.c, commit 2e9d7ebf).
+/// [`ESC_COALESCE_MS`] so a large escape-time (tmux 3.4's old 500 ms default)
+/// never turns into a half second hold.  The default is tmux 3.5's 10 ms
+/// ([`crate::types::DEFAULT_ESCAPE_TIME_MS`]).
 pub fn escape_wait_ms() -> u64 {
     escape_wait_for(ESCAPE_TIME_MS.load(std::sync::atomic::Ordering::Relaxed))
 }
