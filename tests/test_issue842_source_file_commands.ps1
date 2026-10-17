@@ -296,6 +296,23 @@ try {
         -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
     $e = ((Get-Content $err -Raw -EA SilentlyContinue) + "").Trim()
     Check (($p.ExitCode -eq 0) -and ($e -eq '')) "from the CLI: exit 0, nothing on stderr (tmux)" "exit $($p.ExitCode), stderr [$e]"
+
+    # ── O. -n ──
+    # tmux 3.7c: parse only, nothing in the file runs (cfg.c:182). The CLI
+    # dropped -n, so a syntax check ran the file's commands.
+    Write-Head "O. source-file -n runs nothing"
+    $fO = Conf "o.conf" @('new-window -n "o-win"', 'set -g @o1 1')
+    Reset-Session
+    $before = Windows
+    foreach ($flags in @(@('-n'), @('-nq'), @('-q', '-n'))) {
+        $out = Join-Path $TMP "no_out.txt"; $err = Join-Path $TMP "no_err.txt"
+        $p = Start-Process -FilePath $PSMUX -ArgumentList (@("-L", $NS, "source-file") + $flags + "`"$fO`"") `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+        Check ($p.ExitCode -eq 0) "source-file $($flags -join ' ') exits 0 (tmux)" "exit $($p.ExitCode)"
+    }
+    $after = Windows
+    Check ($after -eq $before) "no window was made (tmux: $before)" "windows [$before] became [$after]"
+    Check ((Opt '@o1') -ne '1') "no option was set (tmux)" "@o1 reads [$(Opt '@o1')]"
 } finally {
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500

@@ -4551,15 +4551,33 @@ fn run_main() -> io::Result<()> {
             // source-file - Load a configuration file
             "source-file" | "source" => {
                 let mut quiet = false;
+                // -n: parse only. tmux runs nothing from the file
+                // (cmd-source-file.c:193, cfg.c:182). The flag was
+                // read and then dropped here, so `source-file -n` ran the
+                // whole file, and since the server runs a file's commands
+                // (#842) a syntax check made windows and killed panes.
+                let mut parse_only = false;
                 let mut file_path: Option<String> = None;
                 let mut i = 1;
                 while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-q" => { quiet = true; }
-                        "-n" => { /* parse only, don't execute */ }
-                        "-v" => { /* verbose */ }
-                        s if !s.starts_with('-') => { file_path = Some(s.to_string()); }
-                        _ => {}
+                    let a = cmd_args[i].as_str();
+                    if a.starts_with('-') && a.len() > 1 && a != "--" {
+                        // tmux's flags `Fnqv` and `-t target`, alone or in a
+                        // cluster such as `-nq`; the value of -t is not a path.
+                        let flags = &a[1..];
+                        for (pos, c) in flags.char_indices() {
+                            match c {
+                                'q' => quiet = true,
+                                'n' => parse_only = true,
+                                't' => {
+                                    if pos + 1 == flags.len() { i += 1; }
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if a != "--" {
+                        file_path = Some(a.to_string());
                     }
                     i += 1;
                 }
@@ -4576,6 +4594,10 @@ fn run_main() -> io::Result<()> {
                             eprintln!("psmux: {}: {}", expanded, e);
                             std::process::exit(1);
                         }
+                    } else if parse_only {
+                        // Nothing is run or applied. psmux has no parse only
+                        // mode that reports the file's parse errors, so a
+                        // readable file is all -n checks here.
                     } else {
                         // The server answers once the file has run (#734 follow
                         // up), so this returns when its commands are done, as
