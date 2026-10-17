@@ -2357,6 +2357,43 @@ pub(crate) fn win32_input_key_seq(vk: u16, scan: u16, uchar: u16, ctrl_state: u3
     )
 }
 
+/// May a key go to this pane as a win32 input mode record at all?
+///
+/// Issue #845.  The record form is only meaningful to a console host that
+/// parses it, and a host that does announces so by asking its terminal for
+/// win32 input mode (`CSI ?9001h`) as the first bytes it writes.  Windows
+/// Terminal sends records only after that request, and so must psmux.  A host
+/// that predates the mode never asks, and does not parse the records either:
+/// measured with OpenConsole 1.0.2005 (May 2020, before win32 input mode) in
+/// front of a raw mode node child, every record arrived as its literal text
+/// (`ESC[38;72;0;1;256;1_ESC[38;72;0;0;256;1_` for Up), and the reporter's
+/// Windows 10 19045 inbox conhost delivered nothing at all for Up, Left,
+/// Home, F5, a latched Escape and `send-keys -l "ESC[A"`.  The very same keys
+/// as plain VT bytes, which is what tmux writes to a pane (input-keys.c
+/// `input_key_defaults`), arrive on both hosts.
+///
+/// `host_requested` is [`pane_host_parses_win32_input`]; `wanted` is the
+/// caller's own reason for the record form (#729 VT reader, #623 record
+/// reader, #305 Ctrl+letter, #588 latch).  Pure so the matrix is pinned by
+/// unit tests on any host.
+#[cfg(windows)]
+pub(crate) fn win32_key_record_allowed(host_requested: bool, wanted: bool) -> bool {
+    host_requested && wanted
+}
+
+/// Did this pane's console host ask for win32 input mode (`CSI ?9001h`)?
+///
+/// Read from the LIVE parser (copy mode swaps a frozen snapshot into `term`),
+/// where `vt100::Screen` records the request from the host's startup output.
+/// Issue #845: see [`win32_key_record_allowed`].
+#[cfg(windows)]
+pub(crate) fn pane_host_parses_win32_input(p: &crate::types::Pane) -> bool {
+    p.live_parser()
+        .lock()
+        .map(|parser| parser.screen().win32_input_requested())
+        .unwrap_or(false)
+}
+
 /// `LEFT_CTRL_PRESSED` in a console `KEY_EVENT_RECORD`'s control key state.
 #[cfg(windows)]
 pub(crate) const LEFT_CTRL_PRESSED: u32 = 0x0008;
@@ -2444,6 +2481,9 @@ pub(crate) fn ctrl_key_win32_seq(c: char, shift: bool) -> Option<String> {
 pub(crate) fn write_ctrl_key_as_record(p: &mut crate::types::Pane, c: char, shift: bool) -> bool {
     use std::io::Write as _;
     let Some(seq) = ctrl_key_win32_seq(c, shift) else { return false };
+    if !pane_host_parses_win32_input(p) {
+        return false;
+    }
     if !crate::window_ops::detect_key_record_reader(p) {
         return false;
     }
@@ -2603,6 +2643,11 @@ pub(crate) fn named_key_record(seq: &[u8]) -> Option<(u16, u16, u32)> {
 fn write_named_key_as_record(p: &mut crate::types::Pane, bytes: &[u8]) -> bool {
     use std::io::Write as _;
     let Some((vk, uchar, ctrl_state)) = named_key_record(bytes) else { return false };
+    // Issue #845: only a host that asked for win32 input mode parses the
+    // record; any other host gets the VT bytes, exactly as 3.3.8 and tmux.
+    if !pane_host_parses_win32_input(p) {
+        return false;
+    }
     if !crate::window_ops::pane_reads_vt_bytes(p) {
         return false;
     }
@@ -2647,7 +2692,9 @@ pub(crate) fn write_pane_input(p: &mut crate::types::Pane, bytes: &[u8]) {
         if write_named_key_as_record(p, bytes) {
             return;
         }
-        if bytes == b"\x1b" && p.win32_input_latched {
+        if bytes == b"\x1b"
+            && win32_key_record_allowed(pane_host_parses_win32_input(p), p.win32_input_latched)
+        {
             const VK_ESCAPE: u16 = 0x1B;
             let scan = crate::platform::mouse_inject::vk_to_scan(VK_ESCAPE);
             let seq = win32_input_key_seq(VK_ESCAPE, scan, VK_ESCAPE, 0);
@@ -2697,6 +2744,24 @@ pub fn mark_win32_input_latched(app: &mut AppState) {
         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
             p.win32_input_latched = true;
         }
+    }
+}
+
+/// [`pane_host_parses_win32_input`] for the pane that `send_text_to_active`
+/// would write to (a focused floating pane first, as in
+/// [`mark_win32_input_latched`]).  Issue #845: the scriptable `send-keys`
+/// paths that write a win32 record through `send_text_to_active` check it.
+#[cfg(windows)]
+pub fn active_pane_host_parses_win32_input(app: &mut AppState) -> bool {
+    let win = &mut app.windows[app.active_idx];
+    if let Some(fi) = win.floating_focus {
+        if let Some(fp) = win.floating.get(fi) {
+            return pane_host_parses_win32_input(&fp.pane);
+        }
+    }
+    match active_pane_mut(&mut win.root, &win.active_path) {
+        Some(p) => pane_host_parses_win32_input(p),
+        None => false,
     }
 }
 
@@ -4597,6 +4662,10 @@ mod tests_issue588_win32_input_escape;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue729_named_key_records.rs"]
 mod tests_issue729_named_key_records;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue845_win32_record_gate.rs"]
+mod tests_issue845_win32_record_gate;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue684_paste_route.rs"]

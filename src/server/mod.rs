@@ -184,7 +184,11 @@ fn file_sink_drive_is_remote(_path: &str) -> bool {
 #[cfg(windows)]
 fn ctrl_key_record_seq_for_active(app: &mut AppState, c: char, shift: bool) -> Option<String> {
     let seq = crate::input::ctrl_key_win32_seq(c, shift)?;
-    if crate::input::active_pane_is_record_reader(app) {
+    // Issue #845: a host that never asked for win32 input mode cannot parse
+    // the record, so the key falls back to tmux's byte.
+    if crate::input::active_pane_host_parses_win32_input(app)
+        && crate::input::active_pane_is_record_reader(app)
+    {
         Some(seq)
     } else {
         None
@@ -4751,6 +4755,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                             }
                                                         }
                                                     }
+                                                    send_text_to_active(&mut app, &String::from(ctrl as char))?;
+                                                } else if !crate::input::active_pane_host_parses_win32_input(&mut app) {
+                                                    // Issue #845: this pane's console host
+                                                    // predates win32 input mode (it never
+                                                    // asked for ?9001h) and would drop or
+                                                    // print the record, so the key goes as
+                                                    // tmux's control byte.
                                                     send_text_to_active(&mut app, &String::from(ctrl as char))?;
                                                 } else {
                                                     let vk = crate::platform::mouse_inject::char_to_vk(c);

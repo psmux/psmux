@@ -4019,7 +4019,11 @@ pub fn clear_active_pane_history(app: &mut AppState) {
     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
         p.leave_copy_snapshot();
         if let Ok(mut parser) = p.term.lock() {
+            let host_win32_input = parser.screen().win32_input_requested();
             *parser = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
+            // The console host is unchanged, and it asked for win32 input mode
+            // only once, at startup (issue #845).
+            parser.screen_mut().set_win32_input_requested(host_win32_input);
         }
     }
 }

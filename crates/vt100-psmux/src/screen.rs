@@ -220,6 +220,19 @@ pub struct Screen {
     /// tmux approach) does not preserve content on this platform.
     /// Copy-on-exit is the equivalent end-user behaviour.
     pub(crate) allow_alternate_screen: bool,
+
+    /// True once the output stream asked its terminal for win32 input mode
+    /// (`CSI ?9001h`).  On a psmux pane that request comes from the pane's
+    /// console host itself, as the very first bytes it writes (`ESC[?9001h
+    /// ESC[?1004h` on build 26200), and it is the host's way of saying it can
+    /// parse `ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _` key records written into its
+    /// input.  A host that predates win32 input mode (the Windows 10 19041
+    /// inbox conhost, OpenConsole 1.0) never sends it.  Issue #845.
+    ///
+    /// Sticky: `CSI ?9001l` does not clear it, because a program in the pane
+    /// that turns the mode off again on exit says nothing about the host, and
+    /// RIS keeps it because a reset of the screen is not a new host.
+    win32_input_requested: bool,
 }
 
 impl Screen {
@@ -258,6 +271,7 @@ impl Screen {
             squelch_clear_pending: false,
             audible_bell_count: 0,
             allow_alternate_screen: true,
+            win32_input_requested: false,
         }
     }
 
@@ -868,6 +882,20 @@ impl Screen {
     #[must_use]
     pub fn bracketed_paste(&self) -> bool {
         self.mode(MODE_BRACKETED_PASTE)
+    }
+
+    /// Whether the output stream has asked for win32 input mode
+    /// (`CSI ?9001h`) at any point.  See the field for why it is sticky.
+    #[must_use]
+    pub fn win32_input_requested(&self) -> bool {
+        self.win32_input_requested
+    }
+
+    /// Carry [`Self::win32_input_requested`] into a fresh screen that replaces
+    /// this one for the same output stream (clear-history swaps the parser
+    /// while the console host behind it stays the same).
+    pub fn set_win32_input_requested(&mut self, requested: bool) {
+        self.win32_input_requested = requested;
     }
 
     /// Returns the currently active [`MouseProtocolMode`].
@@ -1783,11 +1811,13 @@ impl Screen {
         let queries = std::mem::take(&mut self.pending_queries);
         let capture = self.capture_queries;
         let program_status_enabled = self.program_status_enabled;
+        let win32_input_requested = self.win32_input_requested;
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
         self.program_status = statuses;
         self.pending_queries = queries;
         self.capture_queries = capture;
         self.program_status_enabled = program_status_enabled;
+        self.win32_input_requested = win32_input_requested;
     }
 
     // csi codes
@@ -1965,6 +1995,7 @@ impl Screen {
                     self.enter_alternate_grid();
                 }
                 [2004] => self.set_mode(MODE_BRACKETED_PASTE),
+                [9001] => self.win32_input_requested = true,
                 _ => unhandled(self),
             }
         }

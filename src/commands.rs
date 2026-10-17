@@ -2856,6 +2856,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     if let Ok(mut parser) = p.term.lock() {
                         let mut fresh = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
                         fresh.screen_mut().set_allow_alternate_screen(allow_alt);
+                        // Same console host, so the same answer to "does it
+                        // parse win32 input records" (issue #845).
+                        fresh.screen_mut().set_win32_input_requested(parser.screen().win32_input_requested());
                         *parser = fresh;
                     }
                 }
