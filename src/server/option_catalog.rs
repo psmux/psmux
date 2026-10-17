@@ -73,11 +73,34 @@ pub enum ChoiceKind {
     /// tmux `options_table_copy_mode_line_numbers_list`: a CHOICE option, so
     /// tmux refuses anything else with `unknown value` (#706).
     CopyModeLineNumbers,
+    /// tmux `options_table_extended_keys_list` (options-table.c:102).
+    ExtendedKeys,
+    /// tmux `options_table_extended_keys_format_list` (options-table.c:105).
+    ExtendedKeysFormat,
 }
+
+/// The values tmux's CHOICE option `extended-keys` takes.
+pub const EXTENDED_KEYS_CHOICES: &[&str] = &["off", "on", "always"];
+/// The values tmux's CHOICE option `extended-keys-format` takes.
+pub const EXTENDED_KEYS_FORMAT_CHOICES: &[&str] = &["csi-u", "xterm"];
 
 impl ChoiceKind {
     fn validate_value(self, value: &str) -> Result<(), String> {
         match self {
+            // tmux options_from_string -> options_choice: anything else is
+            // "unknown value: X" (options.c:1229).
+            Self::ExtendedKeys | Self::ExtendedKeysFormat => {
+                let choices = if self == Self::ExtendedKeys {
+                    EXTENDED_KEYS_CHOICES
+                } else {
+                    EXTENDED_KEYS_FORMAT_CHOICES
+                };
+                if choices.contains(&value.trim()) {
+                    Ok(())
+                } else {
+                    Err(format!("unknown value: {}", value))
+                }
+            }
             Self::CopyModeLineNumbers => {
                 if crate::copy_line_numbers::CHOICES.contains(&value.trim()) {
                     Ok(())
@@ -103,14 +126,16 @@ impl ChoiceKind {
 
     const fn allows_append(self) -> bool {
         match self {
-            Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers => true,
+            Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
+            | Self::ExtendedKeys | Self::ExtendedKeysFormat => true,
             Self::PaneBorderIndicators => false,
         }
     }
 
     const fn allows_local_window_override(self) -> bool {
         match self {
-            Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers => true,
+            Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
+            | Self::ExtendedKeys | Self::ExtendedKeysFormat => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -221,6 +246,15 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "terminal-overrides", scope: Server, option_type: OptionType::String, default: "", description: "Array of pattern:cap overrides matched against the client TERM; smcup@/rmcup@ keep the attached client off the host's alternate screen (#700)" },
     OptionDef { name: "exit-empty", scope: Server, option_type: Boolean, default: "on", description: "Exit server when no sessions remain" },
     OptionDef { name: "priority", scope: Server, option_type: Choice(Priority), default: "above-normal", description: "Scheduling class for psmux's own server and client processes (normal/above-normal/high). Pane children are never raised" },
+    // tmux options-table.c:402 and :411, server scope, defaults `off` and
+    // `xterm`. psmux stores and reports them so a program probing
+    // `show -gv extended-keys` reads the value tmux would give (#846), but
+    // psmux's input path does not consult them: CSI u from the terminal is
+    // always decoded (ssh_input.rs csi_key), and a modifier ConPTY cannot
+    // carry in VT goes to the pane in win32 input mode, which conhost needs
+    // no negotiation for (input.rs ctrl_key_win32_seq).
+    OptionDef { name: "extended-keys", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeys), default: "off", description: "tmux compatibility (off/on/always): stored and reported; psmux always decodes extended keys from the terminal and needs no request to deliver modifiers to panes" },
+    OptionDef { name: "extended-keys-format", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeysFormat), default: "xterm", description: "tmux compatibility (csi-u/xterm): stored and reported, not consulted" },
     // ── Session options ──
     OptionDef { name: "prefix", scope: Session, option_type: OptionType::Key, default: "C-b", description: "Primary prefix key" },
     OptionDef { name: "prefix2", scope: Session, option_type: OptionType::Key, default: "None", description: "Secondary prefix key" },
@@ -331,6 +365,125 @@ pub static VALIDATION_ONLY_OPTIONS: &[ValidationOnlyOptionDef] = &[
     ValidationOnlyOptionDef { name: "history-file-limit", option_type: Number(I64) },
 ];
 
+/// Every option name tmux's options table knows, hooks included
+/// (options-table.c in the local tmux tree, `next-3.8`: the `.name` entries,
+/// the OPTIONS_TABLE_*HOOK entries and the `options_other_names` aliases).
+///
+/// tmux refuses any other name that does not start with `@`: `options_match`
+/// finds no table entry and cmd-set-option.c:269 and cmd-show-options.c:117
+/// fail with "invalid option: NAME" (issue #846). psmux implements only part
+/// of this table, but a name tmux accepts must not become an error here, or a
+/// tmux.conf that works under tmux would stop working under psmux. A name
+/// psmux does not implement is kept as text in `user_options`, which is what
+/// it always was.
+pub static TMUX_OPTION_NAMES: &[&str] = &[
+    "activity-action", "after-bind-key", "after-capture-pane", "after-copy-mode",
+    "after-display-message", "after-display-panes", "after-kill-pane",
+    "after-list-buffers", "after-list-clients", "after-list-keys", "after-list-panes",
+    "after-list-sessions", "after-list-windows", "after-load-buffer",
+    "after-lock-server", "after-new-session", "after-new-window", "after-paste-buffer",
+    "after-pipe-pane", "after-refresh-client", "after-rename-session",
+    "after-rename-window", "after-resize-pane", "after-resize-window",
+    "after-save-buffer", "after-select-layout", "after-select-pane",
+    "after-select-window", "after-send-keys", "after-set-buffer",
+    "after-set-environment", "after-set-hook", "after-set-option",
+    "after-show-environment", "after-show-messages", "after-show-options",
+    "after-split-window", "after-unbind-key", "aggressive-resize", "alert-activity",
+    "alert-bell", "alert-silence", "allow-passthrough", "allow-rename",
+    "allow-set-title", "alternate-screen", "assume-paste-time", "automatic-rename",
+    "automatic-rename-format", "backspace", "base-index", "bell-action", "buffer-limit",
+    "client-active", "client-attached", "client-closed", "client-created",
+    "client-dark-theme", "client-detached", "client-focus-in", "client-focus-out",
+    "client-light-theme", "client-resized", "client-session-changed",
+    "clock-mode-color", "clock-mode-colour", "clock-mode-style", "codepoint-widths",
+    "command-alias", "command-error", "copy-command",
+    "copy-mode-current-line-number-style", "copy-mode-current-line-style",
+    "copy-mode-current-match-style", "copy-mode-line-number-style",
+    "copy-mode-line-numbers", "copy-mode-mark-style", "copy-mode-match-style",
+    "copy-mode-position-format", "copy-mode-position-style",
+    "copy-mode-selection-style", "cursor-color", "cursor-colour", "cursor-style",
+    "dark-theme-black", "dark-theme-blue", "dark-theme-cyan", "dark-theme-dark-grey",
+    "dark-theme-green", "dark-theme-light-grey", "dark-theme-magenta", "dark-theme-red",
+    "dark-theme-white", "dark-theme-yellow", "default-client-command",
+    "default-command", "default-shell", "default-size", "default-terminal",
+    "destroy-unattached", "detach-on-destroy", "display-panes-active-color",
+    "display-panes-active-colour", "display-panes-border-style", "display-panes-color",
+    "display-panes-colour", "display-panes-format", "display-panes-time",
+    "display-time", "editor", "escape-time", "exit-empty", "exit-unattached",
+    "extended-keys", "extended-keys-format", "fill-character", "focus-events",
+    "focus-follows-mouse", "get-clipboard", "history-file", "history-limit",
+    "initial-repeat-time", "input-buffer-size", "key-table", "light-theme-black",
+    "light-theme-blue", "light-theme-cyan", "light-theme-dark-grey",
+    "light-theme-green", "light-theme-light-grey", "light-theme-magenta",
+    "light-theme-red", "light-theme-white", "light-theme-yellow", "lock-after-time",
+    "lock-command", "main-pane-height", "main-pane-width", "marked-pane-changed",
+    "menu-border-lines", "menu-border-style", "menu-selected-style", "menu-style",
+    "message-command-style", "message-format", "message-limit", "message-line",
+    "message-style", "mode-keys", "mode-style", "monitor-activity", "monitor-bell",
+    "monitor-silence", "mouse", "other-pane-height", "other-pane-width",
+    "pane-active-border-style", "pane-activity", "pane-base-index", "pane-bell",
+    "pane-border-format", "pane-border-indicators", "pane-border-lines",
+    "pane-border-status", "pane-border-style", "pane-colors", "pane-colours",
+    "pane-command-finished", "pane-command-started", "pane-created", "pane-died",
+    "pane-exited", "pane-focus-in", "pane-focus-out", "pane-mode-changed",
+    "pane-mode-entered", "pane-mode-exited", "pane-moved", "pane-prompt-closed",
+    "pane-prompt-opened", "pane-resized", "pane-scrollbars", "pane-scrollbars-position",
+    "pane-scrollbars-style", "pane-scrollbars-timeout", "pane-set-clipboard",
+    "pane-shell-prompt", "pane-status-current-style", "pane-status-style",
+    "pane-title-changed", "popup-border-lines", "popup-border-style", "popup-style",
+    "prefix", "prefix-timeout", "prefix2", "prompt-command-cursor-color",
+    "prompt-command-cursor-colour", "prompt-command-cursor-style",
+    "prompt-cursor-color", "prompt-cursor-colour", "prompt-cursor-style",
+    "prompt-history-limit", "remain-on-exit", "remain-on-exit-format",
+    "renumber-windows", "repeat-time", "scroll-on-clear", "session-added-to-group",
+    "session-closed", "session-created", "session-removed-from-group",
+    "session-renamed", "session-status-current-style", "session-status-style",
+    "session-window-changed", "set-clipboard", "set-titles", "set-titles-string",
+    "silence-action", "status", "status-bg", "status-fg", "status-format",
+    "status-interval", "status-justify", "status-keys", "status-left",
+    "status-left-length", "status-left-style", "status-position", "status-right",
+    "status-right-length", "status-right-style", "status-style",
+    "switch-mode-match-style", "synchronize-panes", "terminal-features",
+    "terminal-overrides", "theme", "tiled-layout-max-columns", "tree-mode-border-style",
+    "tree-mode-preview-format", "tree-mode-preview-style", "tree-mode-selection-style",
+    "update-environment", "user-keys", "variation-selector-always-wide",
+    "visual-activity", "visual-bell", "visual-silence", "window-active-style",
+    "window-closed", "window-created", "window-layout-changed", "window-linked",
+    "window-pane-changed", "window-pane-current-status-format",
+    "window-pane-status-format", "window-renamed", "window-resized", "window-size",
+    "window-status-activity-style", "window-status-bell-style",
+    "window-status-current-format", "window-status-current-style",
+    "window-status-format", "window-status-last-style", "window-status-separator",
+    "window-status-style", "window-style", "window-unlinked", "window-unzoomed",
+    "window-zoomed", "word-separators", "wrap-search", "xterm-keys",
+];
+
+/// psmux names that are neither in the catalog nor in tmux's table but that a
+/// setter or the config parser handles: `dim-predictions` (an alias of
+/// `prediction-dimming`), `env-shim` (config file) and `session-group`.
+pub static PSMUX_EXTRA_OPTION_NAMES: &[&str] = &["dim-predictions", "env-shim", "session-group"];
+
+/// True for a name `set-option` and `show-options` accept: a `@user` option,
+/// a psmux option, or any option tmux's table knows. An array subscript
+/// (`status-format[1]`, `command-alias[0]`) is judged by its base name.
+/// Everything else is what tmux calls an invalid option (issue #846).
+pub fn is_valid_option_name(name: &str) -> bool {
+    if name.starts_with('@') {
+        return true;
+    }
+    let base = match name.find('[') {
+        Some(at) if name.ends_with(']') => &name[..at],
+        Some(_) => return false,
+        None => name,
+    };
+    if base.is_empty() {
+        return false;
+    }
+    is_known_option(base)
+        || TMUX_OPTION_NAMES.contains(&base)
+        || PSMUX_EXTRA_OPTION_NAMES.contains(&base)
+}
+
 /// Ordered names emitted by `show-options -w`, not every Window-scoped catalog entry.
 pub static WINDOW_OPTION_NAMES: &[&str] = &[
     "automatic-rename",
@@ -432,3 +585,7 @@ pub fn is_server_option(name: &str) -> bool {
 #[cfg(test)]
 #[path = "../../tests-rs/test_option_default_parity.rs"]
 mod tests_option_default_parity;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue846_option_probe.rs"]
+mod tests_issue846_option_probe;

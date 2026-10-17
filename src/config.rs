@@ -1534,6 +1534,15 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
         Some((off, _)) => extract_option_value(&line[*off..]),
         None => String::new(),
     };
+    // tmux refuses a name its table does not know on every scope and with
+    // every flag, -u included: "invalid option: NAME", which -q silences
+    // (cmd-set-option.c:262-270). Nothing is stored (#846).
+    if !crate::server::option_catalog::is_valid_option_name(key) {
+        if !quiet {
+            warn_config(app, format!("unknown option '{}'", key));
+        }
+        return;
+    }
     if let Err(error) =
         crate::server::option_catalog::validate_local_window_override(
             key,
@@ -2176,24 +2185,22 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
             // so they don't leak into child shells (#105).
             if key.starts_with('@') {
                 app.user_options.insert(key.to_string(), value.to_string());
-            } else if key.contains('-') {
-                // Options with hyphens are tmux config options, NOT environment
-                // variables.  Storing them in environment causes PowerShell
-                // ParserErrors when injected via $env:NAME syntax (#137).
-                // A non-@ hyphenated key that reached this arm is not a known
-                // option — surface it as a typo (#370 follow-up) but still
-                // store it so forward-compat / plugin behavior is unchanged.
-                // Skip array-style keys (`name[N]`) such as command-alias[0]
-                // or terminal-overrides[1], which are valid tmux syntax.
-                if !key.contains('[') {
-                    warn_config(app, format!("unknown option '{}'", key));
-                }
-                app.user_options.insert(key.to_string(), value.to_string());
+            } else if !crate::server::option_catalog::is_valid_option_name(key) {
+                // Not an option tmux knows either: tmux's config load reports
+                // "invalid option" and sets nothing (cmd-set-option.c:269).
+                // It used to be stored anyway, a plain name in the
+                // environment map where `show -gv` read it back and `set -gu`
+                // could not clear it (#846).
+                warn_config(app, format!("unknown option '{}'", key));
+                return false;
             } else {
-                if !key.contains('[') {
-                    warn_config(app, format!("unknown option '{}'", key));
-                }
-                app.environment.insert(key.to_string(), value.to_string());
+                // A name tmux's table knows that psmux has no setter for
+                // (visual-silence, lock-command, status-keys). tmux accepts it
+                // and so does psmux: it is kept as text in user_options so
+                // `show` reads it back, and never in the environment, which
+                // would hand it to every pane as a variable (#137, #846). A
+                // genuine typo was refused above with "unknown option".
+                app.user_options.insert(key.to_string(), value.to_string());
             }
 
             // Auto-source plugin conf files when @plugin is declared.

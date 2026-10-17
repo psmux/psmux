@@ -721,6 +721,10 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
         "copy-mode-match-style" => "bg=cyan,fg=black",
         "copy-mode-current-match-style" => "bg=magenta,fg=black",
         "copy-mode-mark-style" => "bg=red,fg=black",
+        // tmux options-table.c:402 and :411 (#846). Stored as text in
+        // user_options; a missing entry is the tmux default.
+        "extended-keys" => "off",
+        "extended-keys-format" => "xterm",
         // tmux server_client_get_key_table: unset or empty is root.
         "key-table" => "root",
         // TERM handed to panes when default-terminal was never set.
@@ -1181,6 +1185,7 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
     if matches!(
         key,
         "window-style" | "window-active-style" | "pane-border-indicators"
+            | "extended-keys" | "extended-keys-format"
     ) {
         return;
     }
@@ -1519,16 +1524,20 @@ pub(crate) fn apply_set_option(
             } else if option == "default-terminal" {
                 // tmux sets the TERM env var from this option (#137)
                 app.environment.insert("TERM".to_string(), value.to_string());
-            } else if option.contains('-') {
-                // Options with hyphens (e.g. terminal-overrides, allow-rename)
-                // are tmux config options, NOT environment variables.  Storing
-                // them in app.environment causes PowerShell ParserErrors when
-                // injected via $env:NAME syntax (#137).  Store in user_options.
+            } else if crate::server::option_catalog::is_valid_option_name(option) {
+                // A name tmux's table knows that psmux has no setter for
+                // (visual-silence, lock-command, backspace): kept as text so
+                // `show` reads it back as tmux would. Never the environment,
+                // whatever the spelling: an option is not a shell variable
+                // (#137 for hyphenated names, #846 for plain ones).
                 app.user_options.insert(option.to_string(), value.to_string());
             } else {
-                // Simple names without hyphens are likely real env vars
-                // (set via `set-environment` or plugin compat)
-                app.environment.insert(option.to_string(), value.to_string());
+                // tmux options_match finds no table entry and refuses the
+                // name: cmd-set-option.c:269 "invalid option: %s" (#846).
+                // The old fallback stored a plain name in the environment
+                // map, where `show -gv NAME` read it back and `set -gu NAME`
+                // could not clear it.
+                return Err(format!("invalid option: {}", option));
             }
         }
     }

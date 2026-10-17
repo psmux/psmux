@@ -5004,6 +5004,25 @@ match cmd {
         let target_window: String = extract_flag_value(&args, "-t")
             .map(|t| t.trim_matches('"').to_string())
             .unwrap_or_default();
+        // A name no option table knows, user options aside, is what tmux
+        // calls an invalid option: cmd-show-options.c:117 fails with
+        // "invalid option: NAME" unless -q (#846). It used to print an empty
+        // value at rc 0, or read back whatever text an earlier `set` stored.
+        if let Some(name) = opt_name.filter(|n| {
+            !crate::server::option_catalog::is_valid_option_name(n)
+        }) {
+            if !has_q {
+                let output = format!("ERROR: invalid option: {}\n", name);
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+                } else {
+                    let _ = write_stream.write_all(output.as_bytes());
+                    let _ = write_stream.flush();
+                }
+            }
+            if !persistent && pending_chain.is_empty() { break; }
+            continue;
+        }
         // A user option is answered from the table the flags pick, and one
         // that table does not hold is "invalid option: @name" at rc 1, which
         // `-q` silences (cmd-show-options.c). It used to print the bare name
@@ -7133,6 +7152,19 @@ fn dispatch_control_command(
             let target_window2: String = extract_flag_value(&args, "-t")
                 .map(|t| t.trim_matches('"').to_string())
                 .unwrap_or_default();
+            // A name no option table knows: "invalid option", silenced by
+            // `-q` (cmd-show-options.c:117, #846). Same as the one-shot route.
+            if let Some(name) = opt_name.as_deref().filter(|n| {
+                !crate::server::option_catalog::is_valid_option_name(n)
+            }) {
+                let reply = if combined_has2('q') {
+                    String::new()
+                } else {
+                    format!("\u{0001}ERR\u{0001}invalid option: {}", name)
+                };
+                let _ = resp_tx.send(reply);
+                return true;
+            }
             // A user option the chosen table does not hold is "invalid
             // option" like tmux; `-q` silences it. Same as the one-shot route.
             if let Some(name) = opt_name.as_deref().filter(|n| n.starts_with('@')) {

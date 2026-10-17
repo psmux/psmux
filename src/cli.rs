@@ -1963,6 +1963,17 @@ impl ParsedSetOptionArgs<'_> {
         let Some(option) = self.positionals.first().copied() else {
             return Err("too few arguments (need at least 1)".to_string());
         };
+        // tmux cmd-set-option.c:262-270: a name options_match cannot find is
+        // "invalid option: NAME", and `-q` turns that into a silent success
+        // that sets nothing (#846). Every route (CLI, TCP, control mode)
+        // validates through here; with -q the server's apply_set_option
+        // refuses the name again, so nothing is stored.
+        if !crate::server::option_catalog::is_valid_option_name(option) {
+            if self.flag_chars.contains('q') {
+                return Ok(());
+            }
+            return Err(format!("invalid option: {}", option));
+        }
         crate::server::option_catalog::validate_local_window_override(option, local_window)?;
         if pane_scope {
             if unset || self.positionals.len() >= 2 {

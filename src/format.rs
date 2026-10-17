@@ -1247,85 +1247,22 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         // (format.c format_find with no pane).
         return crate::server::options::pane_user_option(app, None, None, name);
     }
-    match name {
-        "status-left" => Some(app.status_left.clone()),
-        "status-right" => Some(app.status_right.clone()),
-        "status" => Some(if app.status_visible { "on".into() } else { "off".into() }),
-        "status-position" => Some(app.status_position.clone()),
-        "status-style" => Some(app.status_style.clone()),
-        "prefix" => Some(crate::config::format_option_key(&app.prefix_key)),
-        "prefix2" => Some(crate::config::format_option_key(&app.prefix2_key)),
-        "base-index" => Some(app.window_base_index.to_string()),
-        "pane-base-index" => Some(app.pane_base_index.to_string()),
-        "escape-time" => Some(app.escape_time_ms.to_string()),
-        "history-limit" => Some(app.history_limit.to_string()),
-        "mouse" => Some(if app.mouse_enabled { "on".into() } else { "off".into() }),
-        "bold-is-bright" => Some(if app.bold_is_bright { "on".into() } else { "off".into() }),
-        "scroll-enter-copy-mode" => Some(if app.scroll_enter_copy_mode { "on".into() } else { "off".into() }),
-        "mouse-drag-enter-copy-mode" => Some(if app.mouse_drag_enter_copy_mode { "on".into() } else { "off".into() }),
-        "ctrl-wheel-zoom" => Some(if app.ctrl_wheel_zoom { "on".into() } else { "off".into() }),
-        "choose-tree-preview" => Some(if app.choose_tree_preview { "on".into() } else { "off".into() }),
-        "mode-keys" => Some(app.mode_keys.clone()),
-        "default-command" | "default-shell" => Some(if app.default_shell.is_empty() {
-            crate::pane::cached_shell().unwrap_or("pwsh.exe").to_string()
-        } else {
-            app.default_shell.clone()
-        }),
-        "word-separators" => Some(app.word_separators.clone()),
-        "renumber-windows" => Some(if app.renumber_windows { "on".into() } else { "off".into() }),
-        "automatic-rename" => Some(if app.automatic_rename { "on".into() } else { "off".into() }),
-        "monitor-activity" => Some(if app.monitor_activity { "on".into() } else { "off".into() }),
-        "remain-on-exit" => Some(if app.remain_on_exit { "on".into() } else { "off".into() }),
-        "destroy-unattached" => Some(if app.destroy_unattached { "on".into() } else { "off".into() }),
-        "exit-empty" => Some(if app.exit_empty { "on".into() } else { "off".into() }),
-        "set-titles" => Some(if app.set_titles { "on".into() } else { "off".into() }),
-        "set-titles-string" => Some(app.set_titles_string.clone()),
-        "pane-border-style" => Some(app.pane_border_style.clone()),
-        "pane-active-border-style" => Some(app.pane_active_border_style.clone()),
-        "pane-border-hover-style" => Some(app.pane_border_hover_style.clone()),
-        "window-status-format" => Some(app.window_status_format.clone()),
-        "window-status-current-format" => Some(app.window_status_current_format.clone()),
-        "window-status-separator" => Some(app.window_status_separator.clone()),
-        "window-status-style" => Some(app.window_status_style.clone()),
-        "window-status-current-style" => Some(app.window_status_current_style.clone()),
-        "window-status-activity-style" => Some(app.window_status_activity_style.clone()),
-        "window-status-bell-style" => Some(app.window_status_bell_style.clone()),
-        "window-status-last-style" => Some(app.window_status_last_style.clone()),
-        "message-style" => Some(app.message_style.clone()),
-        "message-command-style" => Some(app.message_command_style.clone()),
-        "mode-style" => Some(app.mode_style.clone()),
-        "status-left-style" => Some(app.status_left_style.clone()),
-        "status-right-style" => Some(app.status_right_style.clone()),
-        "status-interval" => Some(app.status_interval.to_string()),
-        "status-justify" => Some(app.status_justify.clone()),
-        "display-time" => Some(app.display_time_ms.to_string()),
-        "display-panes-time" => Some(app.display_panes_time_ms.to_string()),
-        "focus-events" => Some(if app.focus_events { "on".into() } else { "off".into() }),
-        "program-status" => Some(if app.program_status { "on".into() } else { "off".into() }),
-        "aggressive-resize" => Some(if app.aggressive_resize { "on".into() } else { "off".into() }),
-        "synchronize-panes" => Some(if app.sync_input { "on".into() } else { "off".into() }),
-        "monitor-silence" => Some(app.monitor_silence.to_string()),
-        "bell-action" => Some(app.bell_action.clone()),
-        "visual-bell" => Some(if app.visual_bell { "on".into() } else { "off".into() }),
-        "terminal-overrides" => Some(app.terminal_overrides.join(",")),
-        "claude-code-fix-tty" => Some(if app.claude_code_fix_tty { "on".into() } else { "off".into() }),
-        "claude-code-force-interactive" => Some(if app.claude_code_force_interactive { "on".into() } else { "off".into() }),
-        _ => {
-            // Try user_options first (plugins store @cpu_percentage etc.),
-            // then environment, then @name fallback for plugin compat
-            // (format strings use #{cpu_percentage} without the @ prefix).
-            app.user_options.get(name).cloned()
-                .or_else(|| app.environment.get(name).cloned())
-                .or_else(|| app.env_scopes.hidden_value(name))
-                .or_else(|| {
-                    if !name.starts_with('@') {
-                        app.user_options.get(&format!("@{}", name)).cloned()
-                    } else {
-                        None
-                    }
-                })
-        }
+    // An option resolves to exactly what `show-options -gv NAME` prints
+    // (#846). This used to be a second hand written table beside
+    // options::get_option_value, and every option it forgot fell through to
+    // the user option and environment lookup below: `#{allow-passthrough}`
+    // expanded empty while `show -gv allow-passthrough` said `off`.
+    // tests-rs/test_issue846_option_probe.rs walks the whole catalog.
+    if crate::server::option_catalog::is_valid_option_name(name) {
+        return Some(crate::server::options::get_option_value(app, name));
     }
+    // Not an option: user_options (plugins store @cpu_percentage etc.), then
+    // the environment, then the @name fallback for plugin compat (format
+    // strings use #{cpu_percentage} without the @ prefix).
+    app.user_options.get(name).cloned()
+        .or_else(|| app.environment.get(name).cloned())
+        .or_else(|| app.env_scopes.hidden_value(name))
+        .or_else(|| app.user_options.get(&format!("@{}", name)).cloned())
 }
 
 // ─────────────────── comparison operators ─────────────────────────

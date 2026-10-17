@@ -1349,11 +1349,12 @@ fn config_flag_a_append_user_option() {
 
 #[test]
 fn config_flag_q_quiet() {
-    // -q should silently accept unknown options
+    // -q silences an unknown option the way tmux's -q does: no warning, and,
+    // as in tmux, nothing is stored (#846).
     let mut app = mock_app();
     parse_config_content(&mut app, "set -gq nonexistent-unknown value\n");
-    // No crash, option stored in user_options because it has hyphens
-    assert!(app.user_options.contains_key("nonexistent-unknown"));
+    assert!(!app.user_options.contains_key("nonexistent-unknown"));
+    assert!(app.config_warnings.is_empty(), "{:?}", app.config_warnings);
 }
 
 #[test]
