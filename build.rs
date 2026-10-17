@@ -138,12 +138,117 @@ fn embed_windows_resources() {
     res.set_version_info(VersionInfo::FILEVERSION, packed);
     res.set_version_info(VersionInfo::PRODUCTVERSION, packed);
 
-    if let Err(e) = res.compile() {
-        // rc.exe ships with the Windows SDK, which the MSVC Rust toolchain
-        // already requires, so this should not happen. Fail loudly rather than
-        // silently shipping another nameless binary.
-        panic!("failed to embed the Windows resource block (icon / version info): {e}");
+    for var in ["CI", "GITHUB_ACTIONS", "PSMUX_REQUIRE_RESOURCES", "RC_PATH", "WindowsSdkVerBinPath"] {
+        println!("cargo:rerun-if-env-changed={var}");
     }
+
+    let mut result = res.compile();
+
+    // winresource finds rc.exe through RC_PATH, a Developer Prompt's
+    // WindowsSdkVerBinPath, or the KitsRoot values in the registry. When none
+    // of those leads to an rc.exe it falls back to the relative path
+    // `bin\x64\rc.exe`, which fails with "path not found" (os error 3, #841).
+    // That happens when the SDK registration is missing or the SDK was
+    // installed without its tools. Look in the other usual places before
+    // giving up.
+    if result.is_err()
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+        && std::env::var_os("RC_PATH").is_none()
+    {
+        if let Some(dir) = find_rc_dir() {
+            println!("Retrying with rc.exe from '{}'", dir.display());
+            res.set_toolkit_path(dir.to_str().expect("rc.exe directory is not UTF-8"));
+            result = res.compile();
+        }
+    }
+
+    if let Err(e) = result {
+        // A release that quietly dropped the resource block would reintroduce
+        // #620 (a nameless process in Task Manager and consent dialogs), so
+        // CI and release builds fail loudly. A contributor building locally
+        // without the Windows SDK tools still gets a working binary, only
+        // without the icon and version info.
+        if resources_required() {
+            panic!(
+                "failed to embed the Windows resource block (icon / version info): {e}\n\
+                 If rc.exe could not be found, install the \"Windows 11 SDK\" component of the \
+                 Visual Studio Build Tools, or point RC_PATH at rc.exe."
+            );
+        }
+        println!(
+            "cargo:warning=building without the Windows icon and version info: \
+             the resource compiler failed ({e}). Install the \"Windows 11 SDK\" \
+             component of the Visual Studio Build Tools, or set RC_PATH to rc.exe, \
+             then run `cargo clean -p psmux` and rebuild to embed them."
+        );
+    }
+}
+
+/// True when a missing resource block must fail the build: on CI, and
+/// whenever PSMUX_REQUIRE_RESOURCES=1 asks for it (release builds).
+#[cfg(windows)]
+fn resources_required() -> bool {
+    let set = |name: &str| {
+        std::env::var(name)
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    };
+    set("CI") || set("GITHUB_ACTIONS") || set("PSMUX_REQUIRE_RESOURCES")
+}
+
+/// Find a directory holding rc.exe outside winresource's own discovery:
+/// first `PATH`, then the default Windows 10/11 SDK location, newest version
+/// folder that actually contains rc.exe for this host.
+#[cfg(windows)]
+fn find_rc_dir() -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join("rc.exe").is_file() {
+                return Some(dir);
+            }
+        }
+    }
+
+    let arches: &[&str] = if cfg!(target_arch = "aarch64") {
+        &["arm64", "x64", "x86"]
+    } else if cfg!(target_arch = "x86_64") {
+        &["x64", "x86"]
+    } else {
+        &["x86"]
+    };
+    let in_arch = |dir: &Path| {
+        arches
+            .iter()
+            .map(|arch| dir.join(arch))
+            .find(|d| d.join("rc.exe").is_file())
+    };
+
+    let root = std::env::var_os("ProgramFiles(x86)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)"));
+    let bin = root.join("Windows Kits").join("10").join("bin");
+    let mut versions: Vec<(Vec<u32>, PathBuf)> = std::fs::read_dir(&bin)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let key = name
+                .split('.')
+                .map(|p| p.parse::<u32>().ok())
+                .collect::<Option<Vec<_>>>()?;
+            Some((key, e.path()))
+        })
+        .collect();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions
+        .iter()
+        .find_map(|(_, dir)| in_arch(dir))
+        .or_else(|| in_arch(&bin))
 }
 
 #[cfg(not(windows))]
