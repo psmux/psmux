@@ -116,6 +116,8 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "pane-active-border-style" => "fg=blue",
         "pane-border-lines" => "double",
         "pane-border-hover-style" => "fg=cyan",
+        "extended-keys" => "always",
+        "extended-keys-format" => "csi-u",
         "message-limit" => "77",
         "history-file-limit" => "88",
         other => panic!(
