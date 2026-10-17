@@ -1090,6 +1090,11 @@ error, as in tmux: a command that fails, a nested file that cannot be read, an u
 bad value. `source-file` prints each on stderr and exits 1, and the rest of the file still runs.
 With `-q`, a file that does not exist is skipped without a word.
 
+`source-file` takes one or more paths, as tmux does, and reads them in the order given:
+`source-file ~/.psmux.conf ~/.psmux.local.conf`. Quote a path that has a space in it. A path that
+cannot be read is reported and the others are still read. An older line that names one file with
+spaces and no quotes, such as `source-file C:\Users\Ann Lee\x.conf`, still reads that file.
+
 A file may source other files, and a path may be a glob. A nested file's commands run where its
 `source-file` line stands, before the rest of the outer file, down to 50 levels as in tmux (deeper
 is `too many nested files`). A file that would source a file already being sourced, itself or one

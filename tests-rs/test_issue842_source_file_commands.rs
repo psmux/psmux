@@ -473,17 +473,17 @@ fn a_file_is_known_by_one_key_however_it_is_spelled() {
 fn the_flags_are_read_and_the_path_kept_as_written() {
     let s = parse_source_spec(r"-q C:\Users\me\.tmux.conf");
     assert!(s.quiet && !s.format && !s.parse_only);
-    assert_eq!(s.path, r"C:\Users\me\.tmux.conf", "backslashes stay");
+    assert_eq!(s.paths, [r"C:\Users\me\.tmux.conf"], "backslashes stay");
     let s = parse_source_spec("-qF '#{@dir}/x.conf'");
     assert!(s.quiet && s.format);
-    assert_eq!(s.path, "#{@dir}/x.conf");
-    assert_eq!(parse_source_spec("-t %1 a.conf").path, "a.conf", "-t's value is not the path");
-    assert_eq!(parse_source_spec("-t%1 a.conf").path, "a.conf");
-    assert_eq!(parse_source_spec("-qt %1 a.conf").path, "a.conf");
+    assert_eq!(s.paths, ["#{@dir}/x.conf"]);
+    assert_eq!(parse_source_spec("-t %1 a.conf").paths, ["a.conf"], "-t's value is not the path");
+    assert_eq!(parse_source_spec("-t%1 a.conf").paths, ["a.conf"]);
+    assert_eq!(parse_source_spec("-qt %1 a.conf").paths, ["a.conf"]);
     assert!(parse_source_spec("-n a.conf").parse_only);
-    assert_eq!(parse_source_spec("\"C:\\My Dir\\a.conf\"").path, "C:\\My Dir\\a.conf");
-    assert_eq!(parse_source_spec("-- -odd.conf").path, "-odd.conf");
-    assert_eq!(parse_source_spec("a.conf"), SourceSpec { path: "a.conf".into(), ..Default::default() });
+    assert_eq!(parse_source_spec("\"C:\\My Dir\\a.conf\"").paths, ["C:\\My Dir\\a.conf"]);
+    assert_eq!(parse_source_spec("-- -odd.conf").paths, ["-odd.conf"]);
+    assert_eq!(parse_source_spec("a.conf"), SourceSpec { paths: vec!["a.conf".into()], ..Default::default() });
 }
 
 #[test]

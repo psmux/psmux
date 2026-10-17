@@ -2586,8 +2586,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // `source-file` made every window in it twice.
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else if let Some(path) = parts.get(1) {
-                crate::config::source_file(app, path);
+            } else if let Some((_, rest)) = cmd.trim().split_once(char::is_whitespace) {
+                // Every argument, so all the paths are read, and a quoted
+                // path with a space stays one path.
+                crate::config::source_file(app, rest.trim());
             }
         }
         "send-keys" | "send" => {
