@@ -117,7 +117,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `show-options` | `show`, `show-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-prompt-history` | `showphist` | none | SRV |
 | `show-window-options` | `showw`, `show-window-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
-| `source-file` | `source` | `qnv` | CLI, SRV, CFG, CTL |
+| `source-file` | `source` | `t:Fnqv` | CLI, SRV, CFG, CTL |
 | `split-window` | `splitw`, `split-pane`, `splitp` | `hvdPZc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
 | `start-server` | `start`, `warmup` | none | CLI, SRV, CFG |
 | `suspend-client` | `suspendc` | none | CLI, SRV, CFG |
@@ -515,8 +515,9 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - Value: `-t` (target session)
 
 **source-file** (`source`)
-- Boolean: `-q` (quiet), `-n` (parse only, do not execute), `-v` (verbose)
-- Not accepted: `-F`, `-t`
+- Boolean: `-F` (each path is a format), `-n` (parse only, nothing runs), `-q` (a path that does not exist is not an error), `-v` (accepted, no effect)
+- Value: `-t` (target pane)
+- One or more paths, each of which may be a glob. They are read in order.
 
 **list-commands** (`lscm`)
 - No flags.

@@ -4573,82 +4573,83 @@ fn run_main() -> io::Result<()> {
                 send_control("zoom-pane\n".to_string())?;
                 return Ok(());
             }
-            // source-file - Load a configuration file
+            // source-file - Load configuration files
             "source-file" | "source" => {
-                let mut quiet = false;
-                // -n: parse only. tmux runs nothing from the file
-                // (cmd-source-file.c:193, cfg.c:182). The flag was
-                // read and then dropped here, so `source-file -n` ran the
-                // whole file, and since the server runs a file's commands
-                // (#842) a syntax check made windows and killed panes.
-                let mut parse_only = false;
-                let mut file_path: Option<String> = None;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    let a = cmd_args[i].as_str();
-                    if a.starts_with('-') && a.len() > 1 && a != "--" {
-                        // tmux's flags `Fnqv` and `-t target`, alone or in a
-                        // cluster such as `-nq`; the value of -t is not a path.
-                        let flags = &a[1..];
-                        for (pos, c) in flags.char_indices() {
-                            match c {
-                                'q' => quiet = true,
-                                'n' => parse_only = true,
-                                't' => {
-                                    if pos + 1 == flags.len() { i += 1; }
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else if a != "--" {
-                        file_path = Some(a.to_string());
-                    }
-                    i += 1;
+                // tmux's flags `Fnqv` and `-t target`, then one or more paths
+                // (cmd-source-file.c:42). Every path is read, in order; the CLI
+                // used to keep only the last one.
+                let mut spec = crate::config::source_spec_from_args(&cmd_args[1..]);
+                if spec.paths.is_empty() {
+                    eprintln!("psmux: source-file: too few arguments (need at least 1)");
+                    std::process::exit(1);
                 }
-                if let Some(path) = file_path {
-                    // Expand ~ to home directory
-                    let expanded = if path.starts_with('~') {
-                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                        path.replacen('~', &home, 1)
+                let cwd = env::current_dir().unwrap_or_default();
+                let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                let mut failed = false;
+                let mut paths = Vec::new();
+                for path in std::mem::take(&mut spec.paths) {
+                    // A format is expanded by the server (-F goes along).
+                    if spec.format {
+                        paths.push(path);
+                        continue;
+                    }
+                    let expanded = if path.starts_with('~') { path.replacen('~', &home, 1) } else { path };
+                    // Relative to this client's directory, as tmux resolves a
+                    // path against the client's cwd (cmd-source-file.c:201, :218).
+                    let expanded = if std::path::Path::new(&expanded).is_relative() {
+                        cwd.join(&expanded).display().to_string()
                     } else {
-                        path
+                        expanded
                     };
-                    if let Err(e) = std::fs::read_to_string(&expanded) {
-                        if !quiet {
-                            eprintln!("psmux: {}: {}", expanded, e);
-                            std::process::exit(1);
-                        }
-                    } else if parse_only {
-                        // Nothing is run or applied. psmux has no parse only
-                        // mode that reports the file's parse errors, so a
-                        // readable file is all -n checks here.
-                    } else {
-                        // The server answers once the file has run (#734 follow
-                        // up), so this returns when its commands are done, as
-                        // tmux's client does (cmd-source-file.c waits for the
-                        // inserted commands before the item continues).
-                        let resp = crate::session::send_control_with_response_wait(
-                            format!("source-file {}\n", crate::util::quote_arg(&expanded)))?;
-                        // The commands' output goes to stdout. A command that
-                        // failed is an `ERROR:` line: its message goes to
-                        // stderr and the exit status is 1, as tmux's client
-                        // reports cmdq_error (issue #842).
-                        let mut failed = false;
-                        let mut out = String::new();
-                        for l in resp.split_inclusive('\n') {
-                            match l.strip_prefix("ERROR: ") {
-                                Some(msg) => {
-                                    eprintln!("psmux: {}", msg.trim_end());
-                                    failed = true;
-                                }
-                                None => out.push_str(l),
+                    // A glob is expanded by the server, which reports a pattern
+                    // that matches nothing.
+                    if expanded.contains('*') || expanded.contains('?') {
+                        paths.push(expanded);
+                        continue;
+                    }
+                    // A path that cannot be read is reported here and left out;
+                    // the others are still read, and the exit status is 1, as
+                    // tmux reports each one (cmd-source-file.c:221 to :236).
+                    // With -q a missing path is skipped without a word.
+                    match std::fs::read_to_string(&expanded) {
+                        Ok(_) => paths.push(expanded),
+                        Err(e) => {
+                            if !spec.quiet {
+                                eprintln!("psmux: {}: {}", expanded, e);
+                                failed = true;
                             }
                         }
-                        if !out.is_empty() { print!("{}", out); }
-                        if failed { std::process::exit(1); }
                     }
                 }
+                // -n: parse only. tmux runs nothing from the files
+                // (cmd-source-file.c:193, cfg.c:182). psmux has no parse only
+                // mode that reports a file's parse errors, so a readable file
+                // is all -n checks here.
+                if !spec.parse_only && !paths.is_empty() {
+                    spec.paths = paths;
+                    // The server answers once the files have run (#734 follow
+                    // up), so this returns when their commands are done, as
+                    // tmux's client does (cmd-source-file.c waits for the
+                    // inserted commands before the item continues).
+                    let resp = crate::session::send_control_with_response_wait(
+                        format!("source-file {}\n", spec.wire()))?;
+                    // The commands' output goes to stdout. A command that
+                    // failed is an `ERROR:` line: its message goes to
+                    // stderr and the exit status is 1, as tmux's client
+                    // reports cmdq_error (issue #842).
+                    let mut out = String::new();
+                    for l in resp.split_inclusive('\n') {
+                        match l.strip_prefix("ERROR: ") {
+                            Some(msg) => {
+                                eprintln!("psmux: {}", msg.trim_end());
+                                failed = true;
+                            }
+                            None => out.push_str(l),
+                        }
+                    }
+                    if !out.is_empty() { print!("{}", out); }
+                }
+                if failed { std::process::exit(1); }
                 return Ok(());
             }
             // list-keys - List all key bindings

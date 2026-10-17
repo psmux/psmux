@@ -373,22 +373,22 @@ pub fn load_config(app: &mut AppState) {
     }
 }
 
-/// Whether a runtime `source-file` argument names the config file the server
-/// started with (`app.startup_config_file`), so the source is a config
-/// reload. `spec` is the argument as the server receives it: optionally
-/// `-F <format>`, quotes, a leading `~`. Paths are compared canonicalised,
-/// and on Windows without regard to case or slash direction.
+/// Whether a runtime `source-file` names the config file the server started
+/// with (`app.startup_config_file`) among its paths, so the source is a
+/// config reload. `spec` is the arguments as the server receives them
+/// (parse_source_spec): flags such as `-q` and `-F`, quotes, a leading `~`.
+/// Paths are compared canonicalised, and on Windows without regard to case or
+/// slash direction.
 pub fn is_startup_config(app: &AppState, spec: &str) -> bool {
     let Some(start) = app.startup_config_file.as_deref() else { return false };
-    let spec = spec.trim();
-    let raw = match spec.strip_prefix("-F ").or_else(|| spec.strip_prefix("-F\t")) {
-        Some(f) => crate::format::expand_format(f.trim().trim_matches('"').trim_matches('\''), app),
-        None => spec.trim_matches('"').trim_matches('\'').to_string(),
-    };
+    let spec = parse_source_spec(spec);
     let expand = |p: &str| -> String {
         if p.starts_with('~') { p.replacen('~', &crate::paths::home_dir(), 1) } else { p.to_string() }
     };
-    same_config_path(&expand(&raw), &expand(start))
+    spec.paths.iter().any(|p| {
+        let raw = if spec.format { crate::format::expand_format(p, app) } else { p.clone() };
+        same_config_path(&expand(&raw), &expand(start))
+    })
 }
 
 /// Two config paths naming the same file.
@@ -1292,9 +1292,9 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     else if l.starts_with("source-file ") || l.starts_with("source ") {
         let parts: Vec<&str> = l.splitn(2, ' ').collect();
         if parts.len() > 1 {
-            // Through source_spec, so a glob in a file is a glob, as it is
-            // in tmux (cmd-source-file.c:221), not a path with a `*` in it.
-            source_spec(app, parts[1].trim());
+            // A glob in a file is a glob, as it is in tmux (cmd-source-file.c:221),
+            // not a path with a `*` in it, and every path on the line is read.
+            source_file(app, parts[1].trim());
         }
     }
     else if l.starts_with("run-shell ") || l.starts_with("run ") {
@@ -3114,14 +3114,15 @@ fn expand_source_path(path: &str) -> String {
     }
 }
 
-/// The arguments of a `source-file` as the server and the config parser hand
-/// them over: tmux's flags (`Fnqv`, `-t target`, cmd-source-file.c:42), alone
-/// or in a cluster such as `-qF`, then the path. The path is the rest of the
-/// text as it stands, so a Windows path keeps its backslashes.
+/// The arguments of a `source-file`: tmux's flags (`Fnqv`, `-t target`,
+/// cmd-source-file.c:42), alone or in a cluster such as `-qF`, then one or
+/// more paths, each of which may be a glob (cmd-source-file.c:203 to :242).
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct SourceSpec {
-    pub path: String,
-    /// `-F`: the path is a format.
+    /// In the order given, which is the order the files are read in
+    /// (cmd-source-file.c:126 to :128).
+    pub paths: Vec<String>,
+    /// `-F`: each path is a format.
     pub format: bool,
     /// `-q`: a file that does not exist is not an error (cmd-source-file.c:221
     /// to :232).
@@ -3130,15 +3131,94 @@ pub(crate) struct SourceSpec {
     pub parse_only: bool,
 }
 
-pub(crate) fn parse_source_spec(spec: &str) -> SourceSpec {
+impl SourceSpec {
+    /// The arguments as the server's `CtrlReq::SourceFile` reads them back
+    /// with parse_source_spec: the flags, `--`, then every path quoted, so a
+    /// path with a space or a leading `-` stays one path.
+    pub(crate) fn wire(&self) -> String {
+        let mut out = String::new();
+        for (on, flag) in [(self.quiet, "-q "), (self.format, "-F "), (self.parse_only, "-n ")] {
+            if on {
+                out.push_str(flag);
+            }
+        }
+        out.push_str("--");
+        for p in &self.paths {
+            out.push(' ');
+            out.push_str(&crate::util::quote_arg(p));
+        }
+        out
+    }
+}
+
+/// A `source-file`'s arguments, already split into words (the dispatcher and
+/// control mode split the line themselves).
+pub(crate) fn source_spec_from_args<S: AsRef<str>>(args: &[S]) -> SourceSpec {
     let mut out = SourceSpec::default();
+    let mut i = 0;
+    while i < args.len() {
+        let word = args[i].as_ref();
+        if word == "--" {
+            i += 1;
+            break;
+        }
+        if !word.starts_with('-') || word.len() == 1 {
+            break;
+        }
+        let flags = &word[1..];
+        for (pos, c) in flags.char_indices() {
+            match c {
+                'F' => out.format = true,
+                'q' => out.quiet = true,
+                'n' => out.parse_only = true,
+                // `-t target`: the value is the rest of this word or the next.
+                't' => {
+                    if pos + 1 == flags.len() {
+                        i += 1;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    out.paths = args.iter().skip(i).map(|a| a.as_ref().to_string()).collect();
+    out
+}
+
+/// A `source-file`'s arguments as text, as a config line, a key binding and
+/// the server's `CtrlReq::SourceFile` carry them. Split as every other
+/// command line is (parse_command_line), so quotes group a path with spaces
+/// and a Windows path keeps its backslashes.
+///
+/// One exception keeps configs that already work working. Before paths were
+/// split, the rest of the line was the one path, so `source-file C:\Users\Ann
+/// Lee\x.conf` read that file. When the paths are unquoted and the rest of the
+/// line, taken whole, names a file that exists, it is still that one path.
+pub(crate) fn parse_source_spec(spec: &str) -> SourceSpec {
+    let words = crate::commands::parse_command_line(spec);
+    let mut out = source_spec_from_args(&words);
+    if out.paths.len() > 1 && !out.format {
+        if let Some(rest) = unquoted_path_rest(spec) {
+            if std::path::Path::new(&expand_source_path(&rest)).is_file() {
+                out.paths = vec![rest];
+            }
+        }
+    }
+    out
+}
+
+/// The text after the flags of a `source-file` spec, as one string, when it
+/// holds no quotes: what the whole line named before paths were split.
+fn unquoted_path_rest(spec: &str) -> Option<String> {
     let mut rest = spec.trim();
     let mut skip_value = false;
     loop {
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let word = &rest[..end];
         if word.is_empty() {
-            break;
+            return None;
         }
         if skip_value {
             skip_value = false;
@@ -3147,26 +3227,19 @@ pub(crate) fn parse_source_spec(spec: &str) -> SourceSpec {
             break;
         } else if word.starts_with('-') && word.len() > 1 {
             let flags = &word[1..];
-            for (pos, c) in flags.char_indices() {
-                match c {
-                    'F' => out.format = true,
-                    'q' => out.quiet = true,
-                    'n' => out.parse_only = true,
-                    // `-t target`: the value is the rest of this word or the next.
-                    't' => {
-                        skip_value = pos + 1 == flags.len();
-                        break;
-                    }
-                    _ => {}
-                }
+            if let Some(pos) = flags.find('t') {
+                skip_value = pos + 1 == flags.len();
             }
         } else {
             break;
         }
         rest = rest[end..].trim_start();
     }
-    out.path = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-    out
+    let rest = rest.trim();
+    if rest.is_empty() || rest.contains('"') || rest.contains('\'') {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 /// The lines of a config file that always run, in order: continuation lines
@@ -3229,13 +3302,20 @@ fn unconditional_lines(content: &str) -> Vec<String> {
 /// (cmd-source-file.c:172 to :186). A file that sources itself is never
 /// wanted, so psmux refuses it before any of its lines take effect.
 fn find_source_cycle(spec: &str) -> Option<String> {
-    let spec = parse_source_spec(spec);
-    if spec.format || spec.parse_only || spec.path.contains('*') || spec.path.contains('?') {
-        return None;
-    }
     let mut keys = SOURCE_STACK.with(|s| s.borrow().clone());
     let mut names: Vec<String> = Vec::new();
-    scan_source_cycle(&expand_source_path(&spec.path), &mut keys, &mut names)
+    scan_spec_cycle(&parse_source_spec(spec), &mut keys, &mut names)
+}
+
+/// The cycle error for any of `spec`'s paths, each followed in turn.
+fn scan_spec_cycle(spec: &SourceSpec, keys: &mut Vec<String>, names: &mut Vec<String>) -> Option<String> {
+    if spec.format || spec.parse_only {
+        return None;
+    }
+    spec.paths
+        .iter()
+        .filter(|p| !p.contains('*') && !p.contains('?'))
+        .find_map(|p| scan_source_cycle(&expand_source_path(p), keys, names))
 }
 
 fn scan_source_cycle(path: &str, keys: &mut Vec<String>, names: &mut Vec<String>) -> Option<String> {
@@ -3263,11 +3343,7 @@ fn scan_source_cycle(path: &str, keys: &mut Vec<String>, names: &mut Vec<String>
         if head != "source-file" && head != "source" {
             continue;
         }
-        let spec = parse_source_spec(rest);
-        if spec.format || spec.parse_only || spec.path.contains('*') || spec.path.contains('?') {
-            continue;
-        }
-        if let Some(msg) = scan_source_cycle(&expand_source_path(&spec.path), keys, names) {
+        if let Some(msg) = scan_spec_cycle(&parse_source_spec(rest), keys, names) {
             return Some(msg);
         }
     }
@@ -3276,26 +3352,77 @@ fn scan_source_cycle(path: &str, keys: &mut Vec<String>, names: &mut Vec<String>
     None
 }
 
-pub fn source_file(app: &mut AppState, path: &str) {
-    let depth = SOURCE_STACK.with(|s| s.borrow().len());
-
-    let spec = parse_source_spec(path);
+/// Run a `source-file`'s arguments (parse_source_spec): every path in the
+/// order given, and a glob's matches in their order, as tmux reads them
+/// (cmd-source-file.c:203 to :242, :126 to :128). A path that cannot be read
+/// is a warning, and the paths after it are still read.
+pub fn source_file(app: &mut AppState, spec: &str) {
+    let spec = parse_source_spec(spec);
     // `-n` parses without running anything; nothing here applies it yet, so
     // it does nothing, as the server's source-file has always done with it.
     if spec.parse_only {
         return;
     }
 
-    let expanded_path = if spec.format {
-        crate::format::expand_format(&spec.path, app)
+    // A runtime `source-file` (not part of a startup batch and not nested) owns
+    // its own warning batch and surfaces the result as a status message, once
+    // for all its paths. Under source_runtime the batch is that function's,
+    // and the source job reports it once the file's commands have run.
+    let outermost_runtime = SOURCE_STACK.with(|s| s.borrow().is_empty())
+        && !in_startup_load()
+        && app.source_defer.is_none();
+    if outermost_runtime {
+        app.config_warnings.clear();
+    }
+
+    for path in &spec.paths {
+        // tmux expands the format first and then globs the result
+        // (cmd-source-file.c:205 to :221).
+        let path = if spec.format { crate::format::expand_format(path, app) } else { path.clone() };
+        if path.contains('*') || path.contains('?') {
+            source_glob(app, &path, spec.quiet);
+        } else {
+            source_path(app, &path, spec.quiet);
+        }
+    }
+
+    if outermost_runtime {
+        summarize_config_warnings(app);
+    }
+}
+
+/// Source every file a glob matches, each with its own name and line numbers
+/// in warnings and in #{current_file}.
+fn source_glob(app: &mut AppState, pattern: &str, quiet: bool) {
+    let expanded = if pattern.starts_with('~') {
+        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+        pattern.replacen('~', &home, 1)
     } else {
-        spec.path.clone()
+        pattern.to_string()
     };
-    let expanded_path = expand_source_path(&expanded_path);
+    let mut matched = false;
+    if let Ok(entries) = glob::glob(&expanded) {
+        for entry in entries.flatten() {
+            matched = true;
+            source_path(app, &entry.display().to_string(), false);
+        }
+    }
+    // A pattern that matches nothing is tmux's "No such file or
+    // directory" unless -q is given (cmd-source-file.c:221 to :232).
+    if !matched && !quiet {
+        warn_config(app, format!("No such file or directory: {}", pattern));
+    }
+}
+
+/// Source one file, named as written: `~` and the `~/.psmux/` fallback are
+/// resolved here.
+fn source_path(app: &mut AppState, path: &str, quiet: bool) {
+    let depth = SOURCE_STACK.with(|s| s.borrow().len());
+    let expanded_path = expand_source_path(path);
 
     // `-q`: a file that does not exist is skipped without a word, as tmux's
     // -q does (cmd-source-file.c:221 to :232).
-    if spec.quiet && !std::path::Path::new(&expanded_path).exists() {
+    if quiet && !std::path::Path::new(&expanded_path).exists() {
         return;
     }
 
@@ -3314,15 +3441,6 @@ pub fn source_file(app: &mut AppState, path: &str) {
     SOURCE_STACK.with(|s| s.borrow_mut().push(key));
     let _stack_guard = SourceStackGuard; // pops on every return path
 
-    // A runtime `source-file` (not part of a startup batch and not nested) owns
-    // its own warning batch and surfaces the result as a status message. Under
-    // source_runtime the batch is that function's, and the source job reports
-    // it once the file's commands have run.
-    let outermost_runtime = depth == 0 && !in_startup_load() && app.source_defer.is_none();
-    if outermost_runtime {
-        app.config_warnings.clear();
-    }
-
     // Save and restore current_config_file around the nested parse
     let prev_file = current_config_file();
     set_current_config_file(&expanded_path);
@@ -3339,8 +3457,8 @@ pub fn source_file(app: &mut AppState, path: &str) {
             // summary.
             //
             // tmux parity note: tmux errors on a missing source-file too, but
-            // only when the path is not a glob. psmux has no glob support here,
-            // so every miss is a real miss.
+            // only when the path is not a glob. Globs are expanded before this
+            // (source_glob), so every miss here is a real miss.
             //
             // Route through warn_config for consistent formatting, but point it
             // at the source-file directive itself — the parent file and line,
@@ -3355,10 +3473,6 @@ pub fn source_file(app: &mut AppState, path: &str) {
     }
 
     set_current_config_file(&prev_file);
-
-    if outermost_runtime {
-        summarize_config_warnings(app);
-    }
 }
 
 /// Show the warning batch of a runtime source in the status line.
@@ -3375,37 +3489,6 @@ pub(crate) fn summarize_config_warnings(app: &mut AppState) {
     // Hold the message for 5s (vs the 750ms default) so a config problem is
     // actually noticed rather than flashing past.
     app.status_message = Some((summary, std::time::Instant::now(), Some(5000)));
-}
-
-/// Source `spec` (a path, `-F <format>`, or a glob) the way the server's
-/// `source-file` does.
-fn source_spec(app: &mut AppState, spec: &str) {
-    let parsed = parse_source_spec(spec);
-    let path_for_glob = parsed.path.as_str();
-    if !parsed.format && !parsed.parse_only && (path_for_glob.contains('*') || path_for_glob.contains('?')) {
-        let expanded = if path_for_glob.starts_with('~') {
-            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-            path_for_glob.replacen('~', &home, 1)
-        } else {
-            path_for_glob.to_string()
-        };
-        let mut matched = false;
-        if let Ok(entries) = glob::glob(&expanded) {
-            // Each match through source_file, so its lines carry its own name
-            // and line numbers in warnings and in #{current_file}.
-            for entry in entries.flatten() {
-                matched = true;
-                source_file(app, &entry.display().to_string());
-            }
-        }
-        // A pattern that matches nothing is tmux's "No such file or
-        // directory" unless -q is given (cmd-source-file.c:221 to :232).
-        if !matched && !parsed.quiet {
-            warn_config(app, format!("No such file or directory: {}", path_for_glob));
-        }
-    } else {
-        source_file(app, spec);
-    }
 }
 
 /// A `source-file` run on a live server (issue #842). Options and bindings
@@ -3433,13 +3516,13 @@ pub fn source_runtime(app: &mut AppState, spec: &str) -> crate::types::SourcePar
     // it, as tmux's client hears of a missing file, an invalid option or a bad
     // value and exits 1 (issue #842); the rest of the file still runs.
     if app.windows.is_empty() || app.is_warm_server() {
-        source_spec(app, spec);
+        source_file(app, spec);
         return crate::types::SourceParse::default();
     }
     app.config_warnings.clear();
     app.config_warn_line = None;
     let outer = app.source_defer.replace(crate::types::SourceDefer::default());
-    source_spec(app, spec);
+    source_file(app, spec);
     let kept = std::mem::replace(&mut app.source_defer, outer).unwrap_or_default();
     if kept.lines.is_empty() {
         summarize_config_warnings(app);
@@ -3871,7 +3954,7 @@ fn parse_tmux_entry_script(app: &mut AppState, path: &std::path::Path) {
                         // Source companion .conf files (but not the .tmux script itself)
                         // Prioritize files like plugin_name_options.conf, plugin_name.conf
                         if fname.ends_with("_tmux.conf") || fname.ends_with("_options_tmux.conf") {
-                            source_file(app, &p.to_string_lossy());
+                            source_path(app, &p.to_string_lossy(), false);
                         }
                     }
                 }
@@ -4007,6 +4090,10 @@ mod test_bind_brace_blocks;
 #[cfg(test)]
 #[path = "../tests-rs/test_source_file_key_tables.rs"]
 mod test_source_file_key_tables;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue847_source_file_paths.rs"]
+mod test_issue847_source_file_paths;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]
