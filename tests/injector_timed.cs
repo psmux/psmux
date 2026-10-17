@@ -2,7 +2,9 @@
 //
 // Usage: injector_timed.exe <pid> <outfile> <token> [<token> ...]
 // token: a single character, ESC, ENTER, S<ms> (sleep), or D:<key> / U:<key>
-// to send only the key down or key up record.  Each key write is logged as
+// to send only the key down or key up record, or VK:<hex>[:<hex>] for a key
+// with no character (VK:26:100 is Up with ENHANCED_KEY, VK:74 is F5, issue
+// #845).  Each key write is logged as
 // "<unix ms with fraction> <token>" using GetSystemTimePreciseAsFileTime, so a
 // reader on the far side can compare arrival times with injection times.
 using System;
@@ -29,9 +31,9 @@ class InjectorTimed
     [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
     struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent; }
 
-    static INPUT_RECORD K(bool down, ushort vk, char ch)
+    static INPUT_RECORD K(bool down, ushort vk, char ch, uint cs = 0)
     {
-        var r = new INPUT_RECORD(); r.EventType = 1;
+        var r = new INPUT_RECORD(); r.EventType = 1; r.KeyEvent.dwControlKeyState = cs;
         r.KeyEvent.bKeyDown = down ? 1 : 0; r.KeyEvent.wRepeatCount = 1;
         r.KeyEvent.wVirtualKeyCode = vk; r.KeyEvent.wVirtualScanCode = (ushort)MapVirtualKeyW(vk, 0);
         r.KeyEvent.UnicodeChar = ch; return r;
@@ -51,11 +53,17 @@ class InjectorTimed
             string t = args[i];
             if (t.StartsWith("S") && t.Length > 1) { Thread.Sleep(int.Parse(t.Substring(1))); continue; }
             int part = 0; if (t.StartsWith("D:")) { part = 1; t = t.Substring(2); } else if (t.StartsWith("U:")) { part = 2; t = t.Substring(2); }
-            ushort vk; char ch;
-            if (t == "ESC") { vk = 0x1B; ch = (char)0x1B; }
+            ushort vk; char ch; uint cs = 0;
+            if (t.StartsWith("VK:"))
+            {
+                var f = t.Substring(3).Split(':');
+                vk = Convert.ToUInt16(f[0], 16); ch = (char)0;
+                if (f.Length > 1) cs = Convert.ToUInt32(f[1], 16);
+            }
+            else if (t == "ESC") { vk = 0x1B; ch = (char)0x1B; }
             else if (t == "ENTER") { vk = 0x0D; ch = '\r'; }
             else { ch = t[0]; vk = (ushort)(VkKeyScanW(ch) & 0xFF); }
-            var recs = part == 1 ? new INPUT_RECORD[] { K(true, vk, ch) } : part == 2 ? new INPUT_RECORD[] { K(false, vk, ch) } : new INPUT_RECORD[] { K(true, vk, ch), K(false, vk, ch) };
+            var recs = part == 1 ? new INPUT_RECORD[] { K(true, vk, ch, cs) } : part == 2 ? new INPUT_RECORD[] { K(false, vk, ch, cs) } : new INPUT_RECORD[] { K(true, vk, ch, cs), K(false, vk, ch, cs) };
             uint w;
             double ts = Now();
             WriteConsoleInputW(h, recs, (uint)recs.Length, out w);
