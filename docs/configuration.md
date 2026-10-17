@@ -134,6 +134,8 @@ Details worth knowing:
 
 ## All Set Options
 
+As in tmux, a name that is neither in this table, nor in tmux's own options table, nor a `@user` option is refused: `set-option` and `show-options` fail with `invalid option: NAME`, and `-q` makes that a silent success that sets nothing. In a config file it is reported as `unknown option 'NAME'` and skipped. A tmux option psmux does not implement (`visual-silence`, `lock-command` and so on) is accepted and read back as text. Use `set-environment`, not `set-option`, for environment variables.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `prefix` | Key | `C-b` | Prefix key |
@@ -192,6 +194,8 @@ Details worth knowing:
 | `bell-action` | Str | `any` | Bell action: controls audible bell forwarding and status bar flag (`any`, `none`, `current`, `other`) |
 | `visual-bell` | Bool | `off` | Visual bell indicator |
 | `allow-passthrough` | Str | `off` | Allow terminal passthrough sequences (`on`/`off`/`all`) |
+| `extended-keys` | Choice | `off` | tmux compatibility (`off`/`on`/`always`): stored and reported so a program probing `show -gv extended-keys` reads what tmux gives. psmux does not need it: extended keys from the terminal are always decoded, and modifiers reach panes through win32 input mode |
+| `extended-keys-format` | Choice | `xterm` | tmux compatibility (`csi-u`/`xterm`): stored and reported, not consulted |
 | `allow-rename` | Bool | `on` | Allow programs to set window title via escape sequences |
 | `allow-set-title` | Bool | `off` | Allow programs to set pane title via OSC 0/2 escape sequences (see [pane-titles.md](pane-titles.md)) |
 | `allow-predictions` | Bool | `off` | Preserve PSReadLine prediction settings (see below) |
