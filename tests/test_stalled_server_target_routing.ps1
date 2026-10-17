@@ -68,11 +68,12 @@ function Wait-Ready([string]$t) {
     }
     return $false
 }
+function Read-Bytes([string]$file) {
+    if (-not (Test-Path $file)) { return '' }
+    try { $fs = [IO.File]::Open($file, 'Open', 'Read', 'ReadWrite'); $ms = New-Object IO.MemoryStream; $fs.CopyTo($ms); $fs.Close(); return [Text.Encoding]::ASCII.GetString($ms.ToArray()) } catch { return '' }
+}
 function Tokens([string]$file) {
-    if (-not (Test-Path $file)) { return @() }
-    $b = $null
-    try { $fs = [IO.File]::Open($file, 'Open', 'Read', 'ReadWrite'); $ms = New-Object IO.MemoryStream; $fs.CopyTo($ms); $fs.Close(); $b = $ms.ToArray() } catch { return @() }
-    return @([regex]::Matches([Text.Encoding]::ASCII.GetString($b), '\{[A-Z]\d+\}') | ForEach-Object { $_.Value })
+    return @([regex]::Matches((Read-Bytes $file), '\{[A-Z]\d+\}') | ForEach-Object { $_.Value })
 }
 function Send-Stall([string]$Sess, [int]$Ms) {
     $base = Join-Path $env:PSMUX_DATA_DIR "${NS}__$Sess"
@@ -123,6 +124,7 @@ try {
             $ids = @(& $PSMUX -L $NS list-panes -t "${S}:0" -F '#{pane_id}' 2>&1)
             if (-not $ok -or $ids.Count -ne 3) { Write-Fail "$S setup: probes ready=$ok panes=$($ids -join ',')"; continue }
             $idA = $ids[0]; $idB = $ids[1]; $idD = $ids[2]
+            $idC = ((& $PSMUX -L $NS display-message -p -t "${S}:1.0" '#{pane_id}') -join '').Trim()
             $before = ((& $PSMUX -L $NS display-message -p -t $S '#{window_index}.#{pane_index}') -join '')
 
             if ($case.ms -gt 0) { Send-Stall $S $case.ms; Start-Sleep -Milliseconds 300 }
@@ -140,6 +142,23 @@ try {
             $totals.timed_out += $to; $totals.commands += $res.Count
             # Let the stall end and every late command run.
             Start-Sleep -Milliseconds ([Math]::Max(500, $case.ms - 3000) + 1500)
+            # Nudge every surviving probe with one more byte, sent by pane id
+            # after the concurrent phase, and wait until each one has read it.
+            # Conhost sometimes keeps the last of several input writes that
+            # arrive within a millisecond or so in the pseudoconsole, undelivered,
+            # until the NEXT input arrives (psmux's pty trace shows the token
+            # written to the right pane's ConPTY; a bare CreatePseudoConsole
+            # harness with no psmux stalls the same way). The nudge flushes
+            # such a token so the checks below see what psmux actually wrote.
+            # It cannot hide a real routing bug: a token psmux never wrote, or
+            # wrote to the wrong pane, is still missing or misplaced.
+            foreach ($nudgeId in @($idA, $idB, $idC)) {
+                & $PSMUX -L $NS send-keys -t $nudgeId -l '.' 2>&1 | Out-Null
+            }
+            foreach ($log in @($logA, $logB, $logC)) {
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                while ($sw.ElapsedMilliseconds -lt 3000 -and -not (Read-Bytes $log).EndsWith('.')) { Start-Sleep -Milliseconds 50 }
+            }
 
             $tA = Tokens $logA; $tB = Tokens $logB; $tC = Tokens $logC; $tD = Tokens $logD
             $panes = @(& $PSMUX -L $NS list-panes -t "${S}:0" -F '#{pane_id}' 2>&1)
