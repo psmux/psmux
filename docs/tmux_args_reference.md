@@ -94,7 +94,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `respawn-window` | `respawnw` | `kc:e:t:` plus a command | CLI, SRV, CFG |
 | `rotate-window` | `rotatew` | `UDt:` | CLI, SRV, CFG, CTL |
 | `run-command` | `runcmd` | none, takes the command line as positional arguments | SRV, CTL |
-| `run-shell` | `run` | `b` | CLI, SRV, CFG |
+| `run-shell` | `run` | `bd:` | CLI, SRV, CFG |
 | `save-buffer` | `saveb` | `ab:` | CLI, SRV, CFG |
 | `select-layout` | `selectl` | `npoEt:` plus a positional layout name | CLI, SRV, CFG, CTL |
 | `select-pane` | `selectp` | `UDLRlZmMedP:T:t:` | CLI, SRV, CFG, CTL |
@@ -565,8 +565,10 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 ### Shell and flow control commands
 
 **run-shell** (`run`)
-- Boolean: `-b` (background)
-- Everything else, including tokens that look like flags, is treated as part of the shell command. `-C`, `-d`, `-s`, `-c` and `-t` are **not** parsed, so passing them sends them straight to the shell.
+- Boolean: `-b` (background: start the command and do not wait for it)
+- Value: `-d` (wait this many seconds, fractions allowed, before starting the command; with no command it only waits; anything but a number is `invalid delay time`)
+- Without `-b` the command is waited for, and so are the commands after it: from the CLI, from a key binding, and in a file read by `source-file` on a running server, where the lines after it run once it has finished. A config file loaded when the server starts does not wait: the command is started and the next line runs.
+- The flags end at the first word that is not one of these, so a word like `-C` starts the shell command. Everything after that is the shell command. `-C`, `-s`, `-c` and `-t` are **not** parsed, so passing them sends them straight to the shell.
 
 **if-shell** (`if`)
 - Boolean: `-b` (background), `-F` (evaluate the condition as a format string instead of running a shell)

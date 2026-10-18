@@ -102,7 +102,7 @@ fn if_shell_parts_reads_the_operands() {
 
 #[test]
 fn run_shell_text_strips_only_its_own_flag_and_balanced_quotes() {
-    assert_eq!(run_shell_command_text(&["-b", "'echo hi'"]), (true, "echo hi".to_string()));
-    assert_eq!(run_shell_command_text(&["psmux", "set", "-g", "@o", "v"]), (false, "psmux set -g @o v".to_string()));
-    assert_eq!(run_shell_command_text(&["echo", "'a'", "b'"]).1, "echo 'a' b'");
+    assert_eq!(run_shell_command_text(&["-b", "'echo hi'"]), Ok((true, None, "echo hi".to_string())));
+    assert_eq!(run_shell_command_text(&["psmux", "set", "-g", "@o", "v"]), Ok((false, None, "psmux set -g @o v".to_string())));
+    assert_eq!(run_shell_command_text(&["echo", "'a'", "b'"]).unwrap().2, "echo 'a' b'");
 }

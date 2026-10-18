@@ -4166,19 +4166,27 @@ fn run_main() -> io::Result<()> {
             }
             // run-shell - Run a shell command
             "run-shell" | "run" => {
-                let mut cmd_to_run: Vec<String> = Vec::new();
-                let mut background = false;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-b" => { background = true; }
-                        s => { cmd_to_run.push(s.to_string()); }
+                // `-b` and `-d delay` (cmd-run-shell.c:47); the rest is the
+                // shell command.
+                let parsed = match crate::commands::parse_run_shell_args(&cmd_args[1..]) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        eprintln!("psmux: {}", e);
+                        std::process::exit(1);
                     }
-                    i += 1;
-                }
-                let shell_cmd_str = cmd_to_run.join(" ");
+                };
+                let background = parsed.background;
+                let delay = parsed.delay;
+                let shell_cmd_str = parsed.command.join(" ");
                 if shell_cmd_str.trim().is_empty() {
-                    eprintln!("usage: run-shell [-b] shell-command");
+                    // `-d` with no command only waits (cmd-run-shell.c:125).
+                    if let Some(delay) = delay {
+                        if !background {
+                            std::thread::sleep(delay);
+                        }
+                        return Ok(());
+                    }
+                    eprintln!("usage: run-shell [-b] [-d delay] shell-command");
                     std::process::exit(1);
                 }
                 // `#{...}` can only be resolved against live server state, which
@@ -4195,10 +4203,15 @@ fn run_main() -> io::Result<()> {
                 // raw, the server split it again and dropped its quotes, so
                 // `run-shell "Write-Output ('x' + '#{pid}')"` reached the shell
                 // as `Write-Output (x + 1234)`.
-                if shell_cmd_str.contains('#') {
+                // `-b -d N` goes to the server too: this client returns at
+                // once, so the server is what waits out the delay.
+                if shell_cmd_str.contains('#') || (background && delay.is_some()) {
                     let mut line = String::from("run-shell");
                     if background {
                         line.push_str(" -b");
+                    }
+                    if let Some(delay) = delay {
+                        line.push_str(&format!(" -d {}", delay.as_secs_f64()));
                     }
                     line.push(' ');
                     line.push_str(&crate::util::quote_arg(&shell_cmd_str));
@@ -4233,6 +4246,11 @@ fn run_main() -> io::Result<()> {
                     }
                     c
                 };
+                // `-d`: wait before starting it. With `-b` this is only the
+                // fallback for a server that could not be reached above.
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
                 // Run the command using the resolved shell
                 if background {
                     let mut c = build(&shell_cmd);

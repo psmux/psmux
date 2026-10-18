@@ -182,6 +182,99 @@ fn prepend_if_absent(old: &str, dir: &str) -> Option<String> {
     })
 }
 
+/// The flags of a run-shell line that psmux acts on, and the words of its
+/// shell command.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct RunShellArgs {
+    /// `-b`: start the command and do not wait for it.
+    pub background: bool,
+    /// `-d delay`: wait this long before starting the command.
+    pub delay: Option<std::time::Duration>,
+    /// The shell command, one word per element.
+    pub command: Vec<String>,
+}
+
+/// Read run-shell's `-b` and `-d delay` from the front of `args` (the words
+/// after the command name), the way tmux's getopt reads its flags
+/// (cmd-run-shell.c:47, `bd:Ct:Es:c:`): one word may carry several flags
+/// (`-bd 2`), `-d` takes the rest of its word or the next one (`-d2`,
+/// `-d 2`), and the flags end at `--` or at the first word that is not one.
+///
+/// The delay is in seconds and may be fractional, as tmux reads it with
+/// strtod (cmd-run-shell.c:125 to :131); anything else is tmux's
+/// `invalid delay time: <value>`. A word holding a flag psmux does not act on
+/// (`-C`, `-c`, `-E`, `-s`, `-t`) ends the flags and goes to the shell with
+/// the rest, as it always has. A `-b` word after the command is still taken
+/// as the flag, as before, unless a `--` ended the flags.
+pub(crate) fn parse_run_shell_args<S: AsRef<str>>(args: &[S]) -> Result<RunShellArgs, String> {
+    let mut out = RunShellArgs::default();
+    let mut i = 0;
+    let mut dash_dash = false;
+    while i < args.len() {
+        let word = args[i].as_ref();
+        if word == "--" {
+            dash_dash = true;
+            i += 1;
+            break;
+        }
+        let Some(flags) = word.strip_prefix('-').filter(|f| !f.is_empty()) else { break };
+        let mut background = false;
+        let mut delay: Option<&str> = None;
+        let mut takes_next = false;
+        let mut ours = true;
+        for (at, c) in flags.char_indices() {
+            match c {
+                'b' => background = true,
+                'd' => {
+                    let rest = &flags[at + 1..];
+                    if rest.is_empty() {
+                        takes_next = true;
+                    } else {
+                        delay = Some(rest);
+                    }
+                    break;
+                }
+                _ => {
+                    ours = false;
+                    break;
+                }
+            }
+        }
+        if !ours {
+            break;
+        }
+        if takes_next {
+            match args.get(i + 1) {
+                Some(v) => {
+                    delay = Some(v.as_ref());
+                    i += 1;
+                }
+                None => return Err("-d expects an argument".to_string()),
+            }
+        }
+        out.background |= background;
+        if let Some(v) = delay {
+            let secs: f64 = v
+                .trim()
+                .parse()
+                .ok()
+                .filter(|s: &f64| s.is_finite())
+                .ok_or_else(|| format!("invalid delay time: {}", v))?;
+            out.delay = Some(std::time::Duration::from_secs_f64(secs.max(0.0)));
+        }
+        i += 1;
+    }
+    for word in &args[i.min(args.len())..] {
+        let word = word.as_ref();
+        if word == "-b" && !dash_dash {
+            out.background = true;
+        } else {
+            out.command.push(word.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// Build a `std::process::Command` for a run-shell invocation.
 ///
 /// Wrapper around `build_run_shell_command_inner` that also makes the psmux
@@ -3709,17 +3802,23 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         "run-shell" | "run" => {
             // Parse with quote-aware parser to handle nested quotes properly
             let args = parse_command_line(cmd);
-            let mut cmd_parts: Vec<&str> = Vec::new();
-            let mut background = false;
-            for arg in &args[1..] {
-                if arg == "-b" { background = true; }
-                else { cmd_parts.push(arg); }
-            }
-            let shell_cmd = cmd_parts.join(" ");
-            if shell_cmd.is_empty() {
+            let parsed = match parse_run_shell_args(&args[1..]) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    app.status_message = Some((e, Instant::now(), None));
+                    return Ok(());
+                }
+            };
+            let background = parsed.background;
+            let delay = parsed.delay;
+            let shell_cmd = parsed.command.join(" ");
+            if shell_cmd.is_empty() && delay.is_some() {
+                // `-d` with no command only waits (cmd-run-shell.c:125); here
+                // nothing waits on it, so there is nothing to do.
+            } else if shell_cmd.is_empty() {
                 // No command given: show usage (tmux parity)
                 app.status_message = Some((
-                    "usage: run-shell [-b] shell-command".to_string(),
+                    "usage: run-shell [-b] [-d delay] shell-command".to_string(),
                     Instant::now(),
                     None,
                 ));
@@ -3751,11 +3850,18 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     if !target_session.is_empty() {
                         c.env("PSMUX_TARGET_SESSION", &target_session);
                     }
+                    if let Some(delay) = delay {
+                        // `-b -d N`: started after the delay, nothing waits.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(delay);
+                            let _ = c.spawn();
+                        });
+                    }
                     // Report a spawn failure. `-b` means "don't wait for the
                     // command", not "don't tell me it never started" — the old
                     // `let _ = c.spawn();` made a broken background bind
                     // indistinguishable from an unbound key.
-                    if let Err(e) = c.spawn() {
+                    else if let Err(e) = c.spawn() {
                         app.status_message = Some((
                             format!("run-shell: {}: {}", shell_cmd, e),
                             Instant::now(),
@@ -3777,6 +3883,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     let shell_cmd_display = shell_cmd.clone();
                     let target_session = target_session.clone();
                     std::thread::spawn(move || {
+                        if let Some(delay) = delay {
+                            std::thread::sleep(delay);
+                        }
                         let mut c = build_run_shell_command(&shell_cmd);
                         if !target_session.is_empty() {
                             c.env("PSMUX_TARGET_SESSION", &target_session);

@@ -303,12 +303,14 @@ fn if_shell_condition(
     }
 }
 
-/// run-shell's shell command: everything but its own `-b`, a balanced pair of
-/// outer quotes removed (#402), not yet format expanded.
-fn run_shell_command_text(args: &[&str]) -> (bool, String) {
-    let background = args.iter().any(|a| *a == "-b");
-    let cmd_parts: Vec<&str> = args.iter().filter(|a| **a != "-b").copied().collect();
-    let shell_cmd = cmd_parts.join(" ");
+/// run-shell's flags (`-b`, `-d delay`, commands::parse_run_shell_args) and
+/// its shell command: the rest, a balanced pair of outer quotes removed
+/// (#402), not yet format expanded.
+fn run_shell_command_text(
+    args: &[&str],
+) -> Result<(bool, Option<Duration>, String), String> {
+    let parsed = crate::commands::parse_run_shell_args(args)?;
+    let shell_cmd = parsed.command.join(" ");
     let trimmed = shell_cmd.trim();
     let shell_cmd = if trimmed.len() >= 2
         && ((trimmed.starts_with('\'') && trimmed.ends_with('\''))
@@ -318,7 +320,7 @@ fn run_shell_command_text(args: &[&str]) -> (bool, String) {
     } else {
         trimmed.to_string()
     };
-    (background, shell_cmd)
+    Ok((parsed.background, parsed.delay, shell_cmd))
 }
 
 /// `expand_shell_command`, or with no session, window or pane when the
@@ -5971,7 +5973,21 @@ match cmd {
         // quoted (e.g. `psmux new-window -c 'C:\path'` or `pwsh -Command "..."`),
         // producing an unterminated-string parse error in the spawned shell so the
         // command silently never ran. Only unwrap when both ends match the same quote.
-        let (background, shell_cmd) = run_shell_command_text(&args);
+        let parsed = run_shell_command_text(&args);
+        let parse_failed = parsed.is_err();
+        let (background, delay, shell_cmd) = match parsed {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                // `invalid delay time: x`, as tmux's cmdq_error.
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(e));
+                } else {
+                    let _ = write!(write_stream, "ERROR: {}\n", e);
+                    let _ = write_stream.flush();
+                }
+                (false, None, String::new())
+            }
+        };
         // Expand formats against live server state (tmux parity). Without
         // this, `run-shell "helper '#{pane_id}'"` passed the helper the
         // literal text `#{pane_id}`; with `-b` swallowing the spawn result, the
@@ -5980,19 +5996,49 @@ match cmd {
         let shell_cmd = expand_shell_command_for(tx, shell_cmd, target_failed);
         // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
-        if shell_cmd.is_empty() {
-            if !persistent {
-                let _ = write!(write_stream, "usage: run-shell [-b] shell-command\n");
+        if shell_cmd.is_empty() && delay.is_some() {
+            // `-d` with no command only waits (cmd-run-shell.c:125), and the
+            // commands after it wait with it unless `-b` is given.
+            let delay = delay.unwrap_or_default();
+            if !background && persistent {
+                let (done, done_rx) = mpsc::channel::<()>();
+                if !pending_chain.is_empty() {
+                    deferred_chains.push((done_rx, std::mem::take(&mut pending_chain)));
+                }
+                std::thread::spawn(move || {
+                    let _done = done;
+                    std::thread::sleep(delay);
+                });
+            } else if !background {
+                std::thread::sleep(delay);
+            }
+        } else if shell_cmd.is_empty() {
+            if !persistent && !parse_failed {
+                let _ = write!(write_stream, "usage: run-shell [-b] [-d delay] shell-command\n");
                 let _ = write_stream.flush();
             }
         } else {
             if background {
                 let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                 crate::commands::null_job_output(&mut c);
+                if let Some(delay) = delay {
+                    // `-b -d N`: start it after the delay, without waiting
+                    // for either (cmd-run-shell.c:178).
+                    let inner = tx.inner.clone();
+                    let target = tx.target.clone();
+                    let shown = shell_cmd.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(delay);
+                        if let Err(e) = c.spawn() {
+                            let tx = TargetedSender::new(&inner, target);
+                            let _ = tx.send(CtrlReq::StatusMessage(format!("run-shell: {}: {}", shown, e)));
+                        }
+                    });
+                }
                 // `-b` means "don't wait for it", not "don't tell me it never
                 // started". Swallowing this made a broken background bind
                 // indistinguishable from an unbound key.
-                if let Err(e) = c.spawn() {
+                else if let Err(e) = c.spawn() {
                     // No trailing newline in the message itself: StatusMessage is
                     // stored verbatim in app.status_message and rendered in the
                     // status bar, where a stray newline corrupts the line. The
@@ -6029,6 +6075,9 @@ match cmd {
                 }
                 std::thread::spawn(move || {
                     let _done = done;
+                    if let Some(delay) = delay {
+                        std::thread::sleep(delay);
+                    }
                     let tx = TargetedSender::new(&inner, target);
                     match c.output() {
                         Ok(out) => {
@@ -6043,6 +6092,12 @@ match cmd {
                     }
                 });
             } else {
+                // A one-shot connection (the CLI, a source job) has a thread
+                // of its own, so the wait happens here and the reply, which
+                // ends the command, comes after the delay and the shell.
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
                 let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                 match c.output() {
                     Ok(out) => {
@@ -7921,22 +7976,51 @@ fn dispatch_control_command(
         // command" on this route (issue #793 follow up). Their output and
         // errors use the same %begin/%end/%error block as every command.
         "run-shell" | "run" => {
-            let (background, shell_cmd) = run_shell_command_text(args);
+            let (background, delay, shell_cmd) = match run_shell_command_text(args) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e));
+                    return true;
+                }
+            };
             let shell_cmd = expand_shell_command_for(tx, shell_cmd, target_failed);
             let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
             if shell_cmd.is_empty() {
-                let _ = resp_tx.send("\u{0001}ERR\u{0001}usage: run-shell [-b] shell-command".to_string());
+                // `-d` with no command only waits (cmd-run-shell.c:125).
+                match delay {
+                    Some(delay) => {
+                        if !background {
+                            std::thread::sleep(delay);
+                        }
+                        let _ = resp_tx.send(String::new());
+                    }
+                    None => {
+                        let _ = resp_tx.send("\u{0001}ERR\u{0001}usage: run-shell [-b] [-d delay] shell-command".to_string());
+                    }
+                }
                 return true;
             }
             let mut c = crate::commands::build_run_shell_command(&shell_cmd);
             if background {
                 // -b does not wait; only a spawn failure is reported.
                 crate::commands::null_job_output(&mut c);
+                if let Some(delay) = delay {
+                    // Started after the delay; the block ends now.
+                    std::thread::spawn(move || {
+                        std::thread::sleep(delay);
+                        let _ = c.spawn();
+                    });
+                    let _ = resp_tx.send(String::new());
+                    return true;
+                }
                 match c.spawn() {
                     Ok(_) => { let _ = resp_tx.send(String::new()); }
                     Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}: {}", shell_cmd, e)); }
                 }
             } else {
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
                 match c.output() {
                     Ok(out) => { let _ = resp_tx.send(run_shell_output_text(&out)); }
                     Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}", e)); }

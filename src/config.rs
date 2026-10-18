@@ -1264,7 +1264,7 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     // #842). An unknown command is still reported here and never runs.
     if source_deferring(app) {
         let line = app.config_warn_line;
-        if is_config_directive(l) {
+        if is_config_directive(l) && !run_shell_waits(l) {
             defer_line(app, line, crate::types::DeferredKind::Directive(l.to_string()));
         } else {
             let cmd = l.split_whitespace().next().unwrap_or("");
@@ -1274,6 +1274,17 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
                 warn_config(app, format!("unknown command: {}", cmd));
             }
         }
+        return;
+    }
+
+    // A run-shell that waits is a command in a runtime source: it starts the
+    // queue, and the job waits for the shell before the next line runs.
+    if app.source_defer.is_some() && run_shell_waits(l) {
+        if let Some(d) = app.source_defer.as_mut() {
+            d.triggered = true;
+        }
+        let line = app.config_warn_line;
+        defer_line(app, line, crate::types::DeferredKind::Command(l.to_string()));
         return;
     }
 
@@ -3731,12 +3742,18 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // Use quote-aware parser to properly handle nested quotes and escapes
     let args = crate::commands::parse_command_line(line);
     if args.len() < 2 { return; }
-    let mut cmd_parts: Vec<&str> = Vec::new();
-    for arg in &args[1..] {
-        if arg == "-b" { /* background flag — always spawn anyway */ }
-        else { cmd_parts.push(arg); }
-    }
-    let shell_cmd = cmd_parts.join(" ");
+    // `-b` changes nothing here: this route always starts the command without
+    // waiting (see the spawn below). A runtime source hands a run-shell that
+    // waits to its job instead (run_shell_waits).
+    let parsed = match crate::commands::parse_run_shell_args(&args[1..]) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            warn_config(app, e);
+            return;
+        }
+    };
+    let delay = parsed.delay;
+    let shell_cmd = parsed.command.join(" ");
     if shell_cmd.is_empty() { return; }
 
     // Format expand the command first, like tmux (cmd-run-shell.c:144) and
@@ -3778,7 +3795,41 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     if !target_session.is_empty() {
         cmd.env("PSMUX_TARGET_SESSION", &target_session);
     }
-    let _ = cmd.spawn();
+    match delay {
+        // `-d`: started after the delay, on a thread so nothing here waits.
+        Some(delay) => {
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = cmd.spawn();
+            });
+        }
+        None => {
+            let _ = cmd.spawn();
+        }
+    }
+}
+
+/// Whether a run-shell line in a runtime source is a command its source job
+/// runs and waits for, as tmux's queue waits for a run-shell without `-b`
+/// (cmd-run-shell.c:123 and :186 to :188), the lines after it included.
+///
+/// The job runs it through the connection dispatcher on a one-shot
+/// connection, whose thread waits for the shell while the server loop goes
+/// on, so a script that calls back into psmux is answered. parse_run_shell
+/// cannot wait on the server thread for exactly that reason. A plugin's
+/// `.tmux` entry script stays with parse_run_shell, which reads it natively,
+/// and so does a line whose flags do not parse, which it reports.
+fn run_shell_waits(l: &str) -> bool {
+    if !(l.starts_with("run-shell ") || l.starts_with("run ")) {
+        return false;
+    }
+    let args = crate::commands::parse_command_line(l);
+    let Ok(parsed) = crate::commands::parse_run_shell_args(&args[1..]) else {
+        return false;
+    };
+    let command = parsed.command.join(" ");
+    let command = command.trim().trim_matches('\'').trim_matches('"');
+    !parsed.background && !command.ends_with(".tmux") && (!command.is_empty() || parsed.delay.is_some())
 }
 
 /// Parse a `.tmux` entry script (bash) and extract tmux commands from it.
@@ -4098,6 +4149,10 @@ mod test_source_file_key_tables;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue847_source_file_paths.rs"]
 mod test_issue847_source_file_paths;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue851_run_shell_wait.rs"]
+mod test_issue851_run_shell_wait;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]
