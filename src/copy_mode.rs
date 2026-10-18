@@ -585,14 +585,18 @@ pub fn move_copy_cursor(app: &mut AppState, dx: i16, dy: i16) {
     let rows = p.last_rows;
     let cols = p.last_cols;
     let desired_r = r as i16 + dy;
-    let nc = (c as i16 + dx).max(0).min(cols as i16 - 1) as u16;
+    let nc = if dy == 0 {
+        step_over_wide(parser.screen(), r, c, dx, cols)
+    } else {
+        (c as i16 + dx).max(0).min(cols as i16 - 1) as u16
+    };
     // If cursor would move above the visible area, scroll up into scrollback
-    if desired_r < 0 {
+    let nr = if desired_r < 0 {
         let scroll_lines = (-desired_r) as usize;
         let current = parser.screen().scrollback();
         parser.screen_mut().set_scrollback(current.saturating_add(scroll_lines));
         app.copy_scroll_offset = parser.screen().scrollback();
-        app.copy_pos = Some((0, nc));
+        0
     }
     // If cursor would move below the visible area, scroll down (reduce scrollback)
     else if desired_r >= rows as i16 {
@@ -601,13 +605,60 @@ pub fn move_copy_cursor(app: &mut AppState, dx: i16, dy: i16) {
         if current > 0 {
             parser.screen_mut().set_scrollback(current.saturating_sub(scroll_lines));
             app.copy_scroll_offset = parser.screen().scrollback();
-            app.copy_pos = Some((rows.saturating_sub(1), nc));
-        } else {
-            // Already at bottom, clamp
-            app.copy_pos = Some((rows.saturating_sub(1), nc));
         }
+        // Already at bottom, clamp
+        rows.saturating_sub(1)
     } else {
-        app.copy_pos = Some((desired_r as u16, nc));
+        desired_r as u16
+    };
+    // An up or down step keeps the column, which on the new row can be the
+    // second cell of a wide character.
+    let nc = if dy == 0 { nc } else { off_padding(parser.screen(), nr, nc) };
+    app.copy_pos = Some((nr, nc));
+}
+
+/// Whether (`row`, `col`) is the second cell of a wide character, a CJK
+/// character or an emoji sequence. It is padding: the character is drawn from
+/// its first cell.
+fn is_padding(screen: &vt100::Screen, row: u16, col: u16) -> bool {
+    screen.cell(row, col).is_some_and(|cell| cell.is_wide_continuation())
+}
+
+/// `col`, or the first cell of the wide character whose second cell it is.
+///
+/// psmux shows the copy cursor by reversing the cell under it, so a cursor on
+/// the second cell reversed only the right half of the character. tmux leaves
+/// its cursor there (grid_reader_cursor_left, and cursor-up and cursor-down
+/// keep the column), and shows it with the terminal's own cursor.
+fn off_padding(screen: &vt100::Screen, row: u16, col: u16) -> u16 {
+    let mut x = col;
+    while x > 0 && is_padding(screen, row, x) {
+        x -= 1;
+    }
+    x
+}
+
+/// The column one character left (`dx < 0`) or right of `col` on `row`.
+///
+/// Right steps over the second cell of a wide character, as tmux's
+/// grid_reader_cursor_right does (grid-reader.c), and stays put when that
+/// second cell is the last column. Left lands on the first cell of the
+/// character before, where tmux's grid_reader_cursor_left can stop on its
+/// second cell (see `off_padding`). Stepping one cell at a time stopped on the
+/// second cell, so a wide character took two presses to cross.
+fn step_over_wide(screen: &vt100::Screen, row: u16, col: u16, dx: i16, cols: u16) -> u16 {
+    let last = cols.saturating_sub(1);
+    if dx > 0 {
+        let mut x = col.saturating_add(1).min(last);
+        while x < last && is_padding(screen, row, x) {
+            x += 1;
+        }
+        off_padding(screen, row, x)
+    } else if dx < 0 {
+        let x = off_padding(screen, row, col.min(last));
+        off_padding(screen, row, x.saturating_sub(1))
+    } else {
+        col.min(last)
     }
 }
 
@@ -3107,3 +3158,7 @@ mod test_issue789_followup_keys_quotes;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue810_saved_screen.rs"]
 mod tests_issue810_saved_screen;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue855_copy_cursor_wide.rs"]
+mod test_issue855_copy_cursor_wide;
