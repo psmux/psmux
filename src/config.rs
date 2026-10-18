@@ -473,6 +473,9 @@ fn parse_config_content_from(app: &mut AppState, content: &str, first_line: usiz
     // is one statement in tmux's grammar; make it one line here.
     let lines = join_brace_blocks(lines);
 
+    // Each command on a line is a statement of its own (`a ; b`).
+    let lines = split_lines_commands(lines);
+
     // tmux's lexer reads `{` and `}` as tokens wherever they stand
     // (cmd-parse.y yylex), so `if-shell C { A } { B }` on one line and a
     // `} {` line between the two blocks are both valid. The collector below
@@ -485,6 +488,9 @@ fn parse_config_content_from(app: &mut AppState, content: &str, first_line: usiz
             None => vec![(lineno, line)],
         })
         .collect();
+    // A block's commands are lines of their own now, so split them too
+    // (`if-shell C { a ; b }` runs both, cmd-parse.y argument_statements).
+    let lines = split_lines_commands(lines);
 
     // Brace-block collection state for if-shell 'cond' { ... } syntax.
     // When we encounter a line like `if-shell 'false' {`, we collect
@@ -814,6 +820,89 @@ fn join_brace_blocks(lines: Vec<(usize, String)>) -> Vec<(usize, String)> {
         out.push((lineno, acc));
     }
     out
+}
+
+/// The commands on one config line, split at each `;` that ends a command.
+///
+/// tmux reads a file with its string grammar, where an unquoted `;` ends the
+/// token it is in and the command with it, wherever it stands
+/// (cmd-parse.y:1314 and :1675, tag 3.7c): `set -g @a on ; set -g @b on` and
+/// `set -g @a on;set -g @b on` are two commands. psmux handed the whole line
+/// to the parser, so a `set` line took the rest of the line for its value.
+///
+/// A `;` is left in place inside quotes, inside a `{ }` block (the block's
+/// command splits it when it runs), after a backslash (`\;` is how a key
+/// binding holds a list of commands), and after a `#` that starts a token,
+/// which is a comment. A key name such as `M-;` is not cut either, as
+/// split_chained_commands keeps it. A line that starts with `;` or `%` is
+/// returned whole: tmux reports the first as a syntax error, which the line
+/// parser still does, and `%if` lines are directives.
+pub(crate) fn split_line_commands(line: &str) -> Vec<String> {
+    let t = line.trim();
+    if t.starts_with(';') || t.starts_with('%') || !t.contains(';') {
+        return vec![line.to_string()];
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let depths = block_depth_map(&chars);
+    let at_top = |i: usize| depths.as_ref().map_or(true, |d| d[i] == 0);
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut token_start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_single {
+            if c == '\'' { in_single = false; }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if c == '\\' { i += 2; continue; }
+            if c == '"' { in_double = false; }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' => { i += 2; continue; }
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ' ' | '\t' => token_start = i + 1,
+            // The rest is a comment, as strip_inline_comment reads it.
+            '#' if i == token_start => break,
+            ';' if at_top(i) => {
+                let ends_token = chars.get(i + 1).is_none_or(|n| n.is_whitespace());
+                let token: String = chars[token_start..=i].iter().collect();
+                if !(ends_token && is_modified_semicolon_key(&token)) {
+                    let seg: String = chars[start..i].iter().collect();
+                    if !seg.trim().is_empty() {
+                        out.push(seg.trim().to_string());
+                    }
+                    start = i + 1;
+                    token_start = i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let rest: String = chars[start.min(chars.len())..].iter().collect();
+    if !rest.trim().is_empty() {
+        out.push(rest.trim().to_string());
+    }
+    out
+}
+
+/// Every line of `lines` split into its commands (split_line_commands), each
+/// keeping the line number it came from.
+fn split_lines_commands(lines: Vec<(usize, String)>) -> Vec<(usize, String)> {
+    lines
+        .into_iter()
+        .flat_map(|(lineno, line)| {
+            split_line_commands(&line).into_iter().map(move |c| (lineno, c))
+        })
+        .collect()
 }
 
 /// Split a config line at its block braces, for the if-shell collector.
@@ -3247,13 +3336,13 @@ fn whole_path_rest(spec: &str) -> Option<String> {
 }
 
 /// The lines of a config file that always run, in order: continuation lines
-/// joined and a multi-line `bind x {` ... `}` made one statement, as
-/// parse_config_content reads them, and every line inside a `%if` block or an
-/// `if-shell { } { }` block left out, because whether those run is decided
-/// only when the file runs (issue #842).
+/// joined, a multi-line `bind x {` ... `}` made one statement and each command
+/// of a line taken alone, as parse_config_content reads them, and every line
+/// inside a `%if` block or an `if-shell { } { }` block left out, because
+/// whether those run is decided only when the file runs (issue #842).
 fn unconditional_lines(content: &str) -> Vec<String> {
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
-    let lines = join_brace_blocks(join_continuations(content, 1));
+    let lines = split_lines_commands(join_brace_blocks(join_continuations(content, 1)));
     let mut out = Vec::new();
     let mut if_depth = 0usize;
     let mut block_depth = 0usize;
@@ -4051,7 +4140,11 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
     let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
     if let Some(cmd) = cmd_to_run {
         // Execute the branch as a config line (recursive — supports set, bind, source, etc.)
-        parse_config_line(app, cmd);
+        // tmux parses the branch as a command string, so each command on it
+        // runs (`if-shell true "set -g @a on ; set -g @b on"` sets both).
+        for c in split_line_commands(cmd) {
+            parse_config_line(app, &c);
+        }
     }
 }
 
@@ -4098,6 +4191,10 @@ mod test_source_file_key_tables;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue847_source_file_paths.rs"]
 mod test_issue847_source_file_paths;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue849_config_line_semicolon.rs"]
+mod test_issue849_config_line_semicolon;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]

@@ -713,7 +713,7 @@ bind-key M-s split-window -h \; select-pane -L
 bind-key D split-window -v -p 30 \; split-window -h \; select-pane -t 0
 ```
 
-In config files, escape the semicolon with `\;` so it is not treated as a comment delimiter.
+Each command ends at a newline or a `;`, in a config file as at the command prompt, so `set -g @a on ; set -g @b on` sets both. A `;` inside quotes, inside a `{ }` block or after a `#` that starts a comment is not a separator. Write `\;` where the semicolon has to stay inside a command's arguments, which is how a key binding holds a list of commands, as above. A plain `;` ends the `bind-key` itself: `bind-key x split-window ; select-pane -L` binds `split-window` and runs `select-pane -L` at once, as in tmux.
 
 ### Case-Sensitive Key Bindings
 
