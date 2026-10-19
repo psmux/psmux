@@ -155,7 +155,8 @@ fn default_mode_keys() {
 #[test]
 fn default_word_separators() {
     let app = mock_app();
-    assert_eq!(app.word_separators, " -_@");
+    // tmux's default (options-table.c): ASCII punctuation minus the underscore.
+    assert_eq!(app.word_separators, "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~");
 }
 
 #[test]
