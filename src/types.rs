@@ -4295,14 +4295,18 @@ pub enum CtrlReq {
         pause_after_secs: Option<u64>,
     },
     /// `refresh-client -A '%N:pause'` pause a pane's output for this client.
+    /// `reply` is true when a `%pause` line is due.
     ControlPausePane {
         client_id: u64,
         pane_id: usize,
+        reply: mpsc::Sender<bool>,
     },
     /// `refresh-client -A '%N:continue'` resume paused pane output.
+    /// `reply` is true when a `%continue` line is due.
     ControlContinuePane {
         client_id: u64,
         pane_id: usize,
+        reply: mpsc::Sender<bool>,
     },
     SuspendClient,
     CopyModePageUp,

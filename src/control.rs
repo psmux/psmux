@@ -848,14 +848,15 @@ impl ControlOutputGate {
     }
 
     /// `refresh-client -A '%N:pause'` (control_pause_pane). True when the
-    /// pane was not paused, so a `%pause` line is due.
+    /// pane was not paused, so a `%pause` line is due. The command's reply
+    /// carries that line inside its %begin/%end block, as tmux writes it,
+    /// so it is not queued for the writer.
     pub fn pause_pane(&self, pane_id: usize) -> bool {
         let mut st = self.lock();
         if st.panes.get(&pane_id).map_or(false, |p| p.paused) {
             return false;
         }
         Self::pause_locked(&mut st, pane_id);
-        st.pending_pauses.push(pane_id);
         true
     }
 

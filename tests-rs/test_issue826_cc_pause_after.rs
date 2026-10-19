@@ -139,7 +139,8 @@ fn manual_pause_and_continue() {
     let GateEnqueue::Send(s) = g.enqueue(4, t0) else { panic!() };
     assert!(g.pause_pane(4));
     assert!(!g.pause_pane(4));
-    assert_eq!(g.take_pending_pauses(), vec![4]);
+    // The command's reply carries this %pause, not the writer.
+    assert!(g.take_pending_pauses().is_empty());
     assert_eq!(g.dequeue(4, s, t0, t0), GateWrite::Drop);
     assert_eq!(g.enqueue(4, t0), GateEnqueue::Skip);
     assert!(g.continue_pane(4));

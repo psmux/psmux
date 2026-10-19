@@ -7943,6 +7943,9 @@ fn dispatch_control_command(
             true
         }
         "refresh-client" | "refresh" => {
+            // %pause / %continue lines from -A, written inside this
+            // command's %begin/%end block as tmux does.
+            let mut body = String::new();
             // Parse -B name:what:format (subscription management)
             let mut i = 0;
             while i < args.len() {
@@ -8011,16 +8014,24 @@ fn dispatch_control_command(
                                 .strip_prefix('%')
                                 .and_then(|p| p.parse::<usize>().ok());
                             if let Some(pid) = pane {
-                                if action == "continue" {
-                                    let _ = tx.send(CtrlReq::ControlContinuePane {
+                                let (reply, due) = mpsc::channel::<bool>();
+                                let sent = if action == "continue" {
+                                    tx.send(CtrlReq::ControlContinuePane {
                                         client_id,
                                         pane_id: pid,
-                                    });
+                                        reply,
+                                    }).is_ok()
                                 } else if action == "pause" {
-                                    let _ = tx.send(CtrlReq::ControlPausePane {
+                                    tx.send(CtrlReq::ControlPausePane {
                                         client_id,
                                         pane_id: pid,
-                                    });
+                                        reply,
+                                    }).is_ok()
+                                } else {
+                                    false
+                                };
+                                if sent && due.recv_timeout(Duration::from_secs(5)).unwrap_or(false) {
+                                    body.push_str(&format!("%{} %{}\n", action, pid));
                                 }
                             }
                         }
@@ -8055,7 +8066,7 @@ fn dispatch_control_command(
                 }
                 i += 1;
             }
-            let _ = resp_tx.send(String::new());
+            let _ = resp_tx.send(body);
             true
         }
         // run-shell, if-shell, swap-window and join-pane were "unknown

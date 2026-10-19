@@ -8302,24 +8302,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         );
                     }
                 }
-                CtrlReq::ControlContinuePane { client_id, pane_id } => {
-                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
-                        if cc.output_gate.continue_pane(pane_id) {
-                            let _ = cc.notification_tx.send(
-                                crate::types::ControlNotification::Continue { pane_id }
-                            );
-                        }
-                    }
+                // The %continue / %pause line goes in the command's reply,
+                // inside its %begin/%end block, as tmux writes it
+                // (control.c control_continue_pane / control_pause_pane).
+                // Sent through the writer instead, it came after the %end,
+                // so a client that paused and resumed at once read the late
+                // %pause as a new pause.
+                CtrlReq::ControlContinuePane { client_id, pane_id, reply } => {
+                    let due = app.control_clients.get_mut(&client_id)
+                        .map_or(false, |cc| cc.output_gate.continue_pane(pane_id));
+                    let _ = reply.send(due);
                 }
-                CtrlReq::ControlPausePane { client_id, pane_id } => {
-                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
-                        if cc.output_gate.pause_pane(pane_id) {
-                            // Wakes the writer, which prints the %pause.
-                            let _ = cc.notification_tx.send(
-                                crate::types::ControlNotification::Pause { pane_id }
-                            );
-                        }
-                    }
+                CtrlReq::ControlPausePane { client_id, pane_id, reply } => {
+                    let due = app.control_clients.get_mut(&client_id)
+                        .map_or(false, |cc| cc.output_gate.pause_pane(pane_id));
+                    let _ = reply.send(due);
                 }
                 CtrlReq::ControlDeregister { client_id } => {
                     app.control_clients.remove(&client_id);
