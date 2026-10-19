@@ -630,7 +630,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("allow-passthrough",          "off"),
     ("priority",                   "above-normal"),
     ("default-command",            "(system shell)"),
-    ("word-separators",            "\" -_@\""),
+    ("word-separators",            "\"!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^`{|}~\""),
     // Display timing
     ("display-time",               "750"),
     ("display-panes-time",         "1000"),

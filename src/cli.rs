@@ -1445,7 +1445,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     set-titles-string   Str  Terminal title format
     default-shell       Str  Shell to launch (default: pwsh)
     default-command     Str  Alias for default-shell
-    word-separators     Str  Copy-mode word delimiters (default: " -_@")
+    word-separators     Str  Copy-mode word delimiters (default: ASCII punctuation but _)
     prediction-dimming  Bool Dim predictive text (default: on)
     cursor-style        Str  Cursor shape asked of the terminal. "block",
                              "underline" and "bar" are steady;

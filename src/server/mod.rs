@@ -2046,16 +2046,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
                 copy_selection_done(app);
             }
         }
-        "select-word" => {
-            // Select the word under cursor
-            crate::copy_mode::move_to_word_start(app);
-            if let Some((r,c)) = crate::copy_mode::get_copy_pos(app) {
-                app.copy_anchor = Some((r,c));
-                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-                app.copy_selection_mode = crate::types::SelectionMode::Char;
-            }
-            crate::copy_mode::move_word_end(app);
-        }
+        "select-word" => { crate::copy_mode::select_word(app); }
         "other-end" => {
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                 app.copy_anchor = Some(p);

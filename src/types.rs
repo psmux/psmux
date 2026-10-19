@@ -3203,7 +3203,7 @@ impl AppState {
             priority: crate::platform::DEFAULT_PRIORITY.to_string(),
             status_style: "bg=green,fg=black".to_string(),
             default_shell: String::new(),
-            word_separators: " -_@".to_string(),
+            word_separators: crate::grid_reader::DEFAULT_WORD_SEPARATORS.to_string(),
             renumber_windows: false,
             automatic_rename: true,
             allow_rename: true,
