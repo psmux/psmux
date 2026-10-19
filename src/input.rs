@@ -245,13 +245,14 @@ fn command_prompt_edit(
     input: &mut String,
     cursor: &mut usize,
     saved: &mut Option<String>,
+    separators: &str,
     key: &str,
     top_buffer: impl FnOnce() -> Option<String>,
 ) -> crate::copy_mode::PromptEdit {
     // Counted without slicing, because an index left inside a character by the
     // old arms would panic on a slice.
     let mut back = input.char_indices().filter(|(i, _)| *i >= *cursor).count();
-    let result = crate::copy_mode::prompt_edit(input, &mut back, saved, key, top_buffer);
+    let result = crate::copy_mode::prompt_edit(input, &mut back, saved, separators, key, top_buffer);
     let total = input.chars().count();
     let idx = total - back.min(total);
     *cursor = input
@@ -733,11 +734,13 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 // Text at the cursor. The byte index moves by the WIDTH of the
                 // character: `*cursor += 1` left it inside a multi byte
                 // character, and the Backspace that followed indexed the line
-                // with it. AltGr is the exception to the Ctrl guard, as it is in
-                // the client's overlays: Windows reports AltGr as Ctrl+Alt, so
-                // `@` on a German layout arrives as Ctrl+Alt+@ and is text.
+                // with it. AltGr is the exception to the Ctrl and Alt guard, as
+                // it is in the client's overlays: Windows reports AltGr as
+                // Ctrl+Alt, so `@` on a German layout arrives as Ctrl+Alt+@ and
+                // is text. Any other Alt key goes to the editor, where M-f and
+                // M-b move by word (status.c:1599, :1621).
                 KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                         || crate::client::is_altgr_char(c, key.modifiers) =>
                 {
                     if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
@@ -755,7 +758,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     let mut recall = None;
                     if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
                         let buffers = &app.paste_buffers;
-                        match command_prompt_edit(input, cursor, &mut app.prompt_saved, &name,
+                        match command_prompt_edit(input, cursor, &mut app.prompt_saved, &app.word_separators, &name,
                             || buffers.first().map(|b| b.data.clone())) {
                             crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
                             crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
@@ -4110,7 +4113,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let mut recall = None;
                 if let Mode::CopySearch { ref mut input, .. } = app.mode {
                     let buffers = &app.paste_buffers;
-                    match crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, k,
+                    match crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, &app.word_separators, k,
                         || buffers.first().map(|b| b.data.clone())) {
                         crate::copy_mode::PromptEdit::HistoryUp => recall = Some(true),
                         crate::copy_mode::PromptEdit::HistoryDown => recall = Some(false),
@@ -4168,7 +4171,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let mut back = app.copy_prompt_back;
                 if let Mode::CopyGoto { ref mut input } = app.mode {
                     let buffers = &app.paste_buffers;
-                    crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, k,
+                    crate::copy_mode::prompt_edit(input, &mut back, &mut app.prompt_saved, &app.word_separators, k,
                         || buffers.first().map(|b| b.data.clone()));
                 }
                 app.copy_prompt_back = back;

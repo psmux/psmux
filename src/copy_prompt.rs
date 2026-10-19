@@ -492,7 +492,7 @@ pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
                 close(app);
             } else {
                 crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back,
-                    &mut app.prompt_saved, "bspace", || None);
+                    &mut app.prompt_saved, &app.word_separators, "bspace", || None);
                 refresh(app);
             }
         }
@@ -507,7 +507,7 @@ pub fn feed(app: &mut AppState, key: PromptKey) -> Fed {
         PromptKey::Named(name) => {
             let buffers = &app.paste_buffers;
             let up = match crate::copy_mode::prompt_edit(&mut p.input, &mut app.copy_prompt_back,
-                &mut app.prompt_saved, name, || buffers.first().map(|b| b.data.clone())) {
+                &mut app.prompt_saved, &app.word_separators, name, || buffers.first().map(|b| b.data.clone())) {
                 crate::copy_mode::PromptEdit::HistoryUp => Some(true),
                 crate::copy_mode::PromptEdit::HistoryDown => Some(false),
                 _ => None,

@@ -42,4 +42,10 @@ pub(crate) struct ClientRenderOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "tov")]
     pub terminal_overrides: Option<Vec<String>>,
+    /// `word-separators`, which the client's prompts split words with for
+    /// C-w, M-f and M-b, as tmux's prompt reads the option (status.c:1559,
+    /// :1600, :1622).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "wsep")]
+    pub word_separators: Option<String>,
 }

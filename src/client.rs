@@ -3283,6 +3283,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // only one of them is open at a time, and each opening clears it. The
     // next prompt of a `-p a,b` keeps it, as tmux's status_prompt_update does.
     let mut prompt_saved: Option<String> = None;
+    // The server's `word-separators`, which C-w, M-f and M-b split words with
+    // at the command prompt and the rename overlay. It arrives with every
+    // frame; before the first one no prompt can be open.
+    let mut word_separators = String::new();
     let mut command_input = false;
     let mut command_buf = String::new();
     // Characters from the END of `command_buf`, the way the shared prompt
@@ -6275,7 +6279,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char(c) if renaming
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                     && !is_altgr_char(c, key.modifiers) => {
-                                    if rename_overlay_ctrl_key(&mut rename_buf, &mut rename_back, &mut prompt_saved, c,
+                                    if rename_overlay_ctrl_key(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, c,
                                         || top_paste_buffer(port, &session_key)) {
                                         renaming = false;
                                         session_renaming = false;
@@ -6285,6 +6289,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         // branch does the same.
                                         selection_changed = true;
                                     }
+                                }
+                                // Alt with a character is a key, not text: M-f
+                                // and M-b move by word, and the editor has no
+                                // use for the rest, which tmux's prompt drops
+                                // rather than types (status.c:1710 to :1718).
+                                KeyCode::Char(c) if renaming
+                                    && key.modifiers.contains(KeyModifiers::ALT)
+                                    && !is_altgr_char(c, key.modifiers) => {
+                                    let name = crate::config::format_key_binding(&(key.code, key.modifiers));
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, &name, || None);
                                 }
                                 KeyCode::Char(c) if renaming && !paste_burst_active => {
                                     let mut buf = [0u8; 4];
@@ -6359,8 +6373,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         selection_changed = true;
                                     }
                                 }
+                                // Alt with a character is not text either: it
+                                // goes on to the editor below, where M-f and M-b
+                                // move by word and the rest are dropped, as
+                                // tmux's prompt drops them (status.c:1710 to
+                                // :1718).
                                 KeyCode::Char(c) if command_input
-                                    && (!key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && (!key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                                         || is_altgr_char(c, key.modifiers))
                                     && !paste_burst_active => {
                                     let mut buf = [0u8; 4];
@@ -6384,22 +6403,26 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // same ones. `prompt_edit` is not changed by
                                 // this, only called.
                                 KeyCode::Backspace if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "backspace", || None);
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, "backspace", || None);
                                 }
                                 KeyCode::Delete if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "delete", || None);
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, "delete", || None);
                                 }
+                                // With Ctrl, Left and Right move by word, as
+                                // M-b and M-f do (status.c:1598, :1620).
                                 KeyCode::Left if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "left", || None);
+                                    let name = if key.modifiers.contains(KeyModifiers::CONTROL) { "c-left" } else { "left" };
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, name, || None);
                                 }
                                 KeyCode::Right if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "right", || None);
+                                    let name = if key.modifiers.contains(KeyModifiers::CONTROL) { "c-right" } else { "right" };
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, name, || None);
                                 }
                                 KeyCode::Home if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "home", || None);
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, "home", || None);
                                 }
                                 KeyCode::End if renaming => {
-                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, "end", || None);
+                                    let _ = crate::copy_mode::prompt_edit(&mut rename_buf, &mut rename_back, &mut prompt_saved, &word_separators, "end", || None);
                                 }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
@@ -6529,6 +6552,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         &mut command_buf,
                                         &mut command_back,
                                         &mut prompt_saved,
+                                        &word_separators,
                                         effective_code,
                                         key.modifiers,
                                         || top_paste_buffer(port, &session_key),
@@ -8536,6 +8560,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             terminal.backend_mut(),
             state.client_render_options.terminal_overrides.as_deref().unwrap_or(&[]),
         );
+        if let Some(seps) = state.client_render_options.word_separators.as_ref() {
+            word_separators.clone_from(seps);
+        }
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
             // Pass full string — visual truncation is handled by ratatui
@@ -10965,6 +10992,7 @@ pub(crate) fn command_prompt_key(
     buf: &mut String,
     back: &mut usize,
     saved: &mut Option<String>,
+    separators: &str,
     code: KeyCode,
     mods: KeyModifiers,
     top_buffer: impl FnOnce() -> Option<String>,
@@ -10977,7 +11005,7 @@ pub(crate) fn command_prompt_key(
         }
     }
     let name = crate::config::format_key_binding(&(code, mods));
-    match crate::copy_mode::prompt_edit(buf, back, saved, &name, top_buffer) {
+    match crate::copy_mode::prompt_edit(buf, back, saved, separators, &name, top_buffer) {
         crate::copy_mode::PromptEdit::HistoryUp => PromptKeyAction::HistoryUp,
         crate::copy_mode::PromptEdit::HistoryDown => PromptKeyAction::HistoryDown,
         _ => PromptKeyAction::Edited,
@@ -10993,13 +11021,14 @@ pub(crate) fn rename_overlay_ctrl_key(
     buf: &mut String,
     back: &mut usize,
     saved: &mut Option<String>,
+    separators: &str,
     c: char,
     top_buffer: impl FnOnce() -> Option<String>,
 ) -> bool {
     match c.to_ascii_lowercase() {
         'c' | 'g' | '[' => true,
         lc => {
-            let _ = crate::copy_mode::prompt_edit(buf, back, saved, &format!("c-{}", lc), top_buffer);
+            let _ = crate::copy_mode::prompt_edit(buf, back, saved, separators, &format!("c-{}", lc), top_buffer);
             false
         }
     }

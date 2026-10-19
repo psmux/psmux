@@ -34,7 +34,7 @@ use crate::client::{command_prompt_key, PromptKeyAction};
 /// Press one key at the client's prompt. `back` counts characters from the end
 /// of the line, as the shared editor does.
 fn ckey(buf: &mut String, back: &mut usize, code: KeyCode, mods: KeyModifiers) -> PromptKeyAction {
-    command_prompt_key(buf, back, &mut None, code, mods, || None)
+    command_prompt_key(buf, back, &mut None, "", code, mods, || None)
 }
 
 fn ctrl(buf: &mut String, back: &mut usize, c: char) -> PromptKeyAction {

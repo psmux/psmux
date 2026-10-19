@@ -1149,7 +1149,7 @@ fn rename_overlay_ctrl_c_g_and_bracket_cancel() {
     for c in ['c', 'g', '[', 'C', 'G'] {
         let mut buf = String::from("alpha");
         let mut back = 2usize;
-        assert!(rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, c, || None), "C-{} must cancel", c);
+        assert!(rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", c, || None), "C-{} must cancel", c);
         assert_eq!(buf, "alpha", "cancelling leaves the text alone");
         assert_eq!(back, 2);
     }
@@ -1160,20 +1160,20 @@ fn rename_overlay_ctrl_c_g_and_bracket_cancel() {
 fn rename_overlay_ctrl_keys_edit_like_tmux_emacs_prompt() {
     let mut buf = String::from("alpha");
     let mut back = 0usize;
-    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 'a', || None));
+    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", 'a', || None));
     assert_eq!(back, 5, "C-a goes to the start");
-    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 'f', || None));
+    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", 'f', || None));
     assert_eq!(back, 4, "C-f moves one right");
-    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 'd', || None));
+    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", 'd', || None));
     assert_eq!(buf, "apha", "C-d deletes under the cursor");
-    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 'k', || None));
+    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", 'k', || None));
     assert_eq!(buf, "a", "C-k kills to the end");
-    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 'u', || None));
+    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", 'u', || None));
     assert_eq!(buf, "", "C-u clears the line");
     // A Ctrl key the editor has no meaning for is swallowed, not an error.
     let mut buf = String::from("x");
     let mut back = 0usize;
-    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, 'z', || None));
+    assert!(!rename_overlay_ctrl_key(&mut buf, &mut back, &mut None, "", 'z', || None));
     assert_eq!(buf, "x");
 }
 

@@ -371,6 +371,7 @@ pub(crate) fn expand_status_formats(
             } else {
                 Some(app.terminal_overrides.clone())
             },
+            word_separators: Some(app.word_separators.clone()),
         },
         status_format_json: {
             let mut sf = String::from("[");

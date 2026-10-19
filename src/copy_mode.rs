@@ -2266,20 +2266,23 @@ pub enum PromptEdit {
 /// prompt editor (prompt.c `prompt_key`, the `process_key` switch) that has a
 /// meaning here: Left, Right, Home, End and their emacs spellings C-b, C-f,
 /// C-a, C-e, Backspace and Delete at the cursor, C-u clears, C-k cuts to the
-/// end, C-w cuts the word before the cursor, C-t transposes the characters at
-/// the cursor, C-y inserts what C-w last cut or else the top paste buffer, and
-/// Space inserts a space, which arrives as a key of its own and used to be
-/// dropped (discussion #694).
+/// end, C-w cuts the word before the cursor, M-f and C-Right move to the end
+/// of the next word, M-b and C-Left to the start of the word before, C-t
+/// transposes the characters at the cursor, C-y inserts what C-w last cut or
+/// else the top paste buffer, and Space inserts a space, which arrives as a
+/// key of its own and used to be dropped (discussion #694).
 ///
-/// `saved` is what C-w last cut at this prompt, tmux's `prompt_saved`. The
-/// caller keeps it for as long as the prompt is open and clears it when a
-/// prompt opens. `top_buffer` gives the top paste buffer, and is only called
-/// for a C-y with nothing saved, because the client's prompts have to ask the
-/// server for it.
+/// `separators` is the `word-separators` option, which C-w and the word keys
+/// split words with, as tmux's prompt does. `saved` is what C-w last cut at
+/// this prompt, tmux's `prompt_saved`. The caller keeps it for as long as the
+/// prompt is open and clears it when a prompt opens. `top_buffer` gives the
+/// top paste buffer, and is only called for a C-y with nothing saved, because
+/// the client's prompts have to ask the server for it.
 pub fn prompt_edit(
     input: &mut String,
     back: &mut usize,
     saved: &mut Option<String>,
+    separators: &str,
     key: &str,
     top_buffer: impl FnOnce() -> Option<String>,
 ) -> PromptEdit {
@@ -2303,14 +2306,21 @@ pub fn prompt_edit(
         }
         "c-u" => { chars.clear(); b = 0; PromptEdit::Edited }
         "c-k" => { chars.truncate(idx); b = 0; PromptEdit::Edited }
+        // tmux cuts back to where M-b would go (status.c:1558 to :1597).
         "c-w" => {
-            let mut start = idx;
-            while start > 0 && chars[start - 1] == ' ' { start -= 1; }
-            while start > 0 && chars[start - 1] != ' ' { start -= 1; }
+            let start = prompt_backward_word(&chars, idx, separators);
             // tmux keeps the cut for C-y, even an empty one, which then makes
             // C-y insert nothing rather than the paste buffer
             // (status.c:1583 to :1587).
             *saved = Some(chars.drain(start..idx).collect());
+            PromptEdit::Edited
+        }
+        "m-f" | "c-right" => {
+            b = len - prompt_forward_word(&chars, idx, separators);
+            PromptEdit::Edited
+        }
+        "m-b" | "c-left" => {
+            b = len - prompt_backward_word(&chars, idx, separators);
             PromptEdit::Edited
         }
         // tmux inserts what C-w last cut, and only when nothing was cut the
@@ -2345,6 +2355,62 @@ pub fn prompt_edit(
     *input = chars.into_iter().collect();
     *back = b;
     result
+}
+
+/// Whether `c` is a prompt word separator. tmux tests only a one byte, one
+/// cell character against the list (status_prompt_in_list, status.c:974), so
+/// a wide character or a control character is never one.
+fn prompt_in_list(separators: &str, c: char) -> bool {
+    (' '..='~').contains(&c) && separators.contains(c)
+}
+
+/// Whether `c` is a space to tmux's prompt: only ' ' (status_prompt_space,
+/// status.c:983).
+fn prompt_space(c: char) -> bool {
+    c == ' '
+}
+
+/// Where M-f takes the cursor from character index `idx`: over any spaces,
+/// then to the end of the word, a run of separators or of other characters
+/// (status_prompt_forward_word with emacs keys, status.c:1320 to :1358).
+fn prompt_forward_word(chars: &[char], idx: usize, separators: &str) -> usize {
+    let size = chars.len();
+    let mut idx = idx.min(size);
+    while idx != size && prompt_space(chars[idx]) {
+        idx += 1;
+    }
+    if idx == size {
+        return idx;
+    }
+    let word_is_separators = prompt_in_list(separators, chars[idx]) && !prompt_space(chars[idx]);
+    loop {
+        idx += 1;
+        if idx == size || prompt_space(chars[idx]) || word_is_separators != prompt_in_list(separators, chars[idx]) {
+            return idx;
+        }
+    }
+}
+
+/// Where M-b, and the start of what C-w cuts, is from character index `idx`:
+/// back over any spaces, then to the start of the word
+/// (status_prompt_backward_word, status.c:1399 to :1425).
+fn prompt_backward_word(chars: &[char], idx: usize, separators: &str) -> usize {
+    let mut idx = idx.min(chars.len());
+    while idx != 0 {
+        idx -= 1;
+        if !prompt_space(chars[idx]) {
+            break;
+        }
+    }
+    let Some(&first) = chars.get(idx) else { return idx };
+    let word_is_separators = prompt_in_list(separators, first);
+    while idx != 0 {
+        idx -= 1;
+        if prompt_space(chars[idx]) || word_is_separators != prompt_in_list(separators, chars[idx]) {
+            return idx + 1;
+        }
+    }
+    idx
 }
 
 /// The part of a paste buffer that C-y puts into a prompt: everything before
@@ -3437,3 +3503,7 @@ mod test_copy_selection_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_copy_mode_end_of_line.rs"]
 mod test_copy_mode_end_of_line;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue866_prompt_word_keys.rs"]
+mod test_issue866_prompt_word_keys;

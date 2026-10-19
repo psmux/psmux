@@ -35,7 +35,7 @@ fn edit(text: &str, keys: &[&str], top: Option<&str>) -> String {
     let mut back = 0usize;
     let mut saved = None;
     for k in keys {
-        prompt_edit(&mut input, &mut back, &mut saved, k, || top.map(str::to_string));
+        prompt_edit(&mut input, &mut back, &mut saved, "", k, || top.map(str::to_string));
     }
     prompt_insert(&mut input, back, "X");
     input
@@ -90,8 +90,8 @@ fn c_y_is_an_editing_key_even_when_it_inserts_nothing() {
     let mut input = "a".to_string();
     let mut back = 0usize;
     let mut saved = None;
-    assert_eq!(prompt_edit(&mut input, &mut back, &mut saved, "C-y", || None), PromptEdit::Edited);
-    assert_eq!(prompt_edit(&mut input, &mut back, &mut saved, "c-y", || None), PromptEdit::Edited);
+    assert_eq!(prompt_edit(&mut input, &mut back, &mut saved, "", "C-y", || None), PromptEdit::Edited);
+    assert_eq!(prompt_edit(&mut input, &mut back, &mut saved, "", "c-y", || None), PromptEdit::Edited);
 }
 
 #[test]
@@ -100,12 +100,12 @@ fn after_c_w_c_y_puts_the_cut_back_and_can_repeat_it() {
     let mut back = 0usize;
     let mut saved = None;
     let no_buffer = || -> Option<String> { panic!("a cut is there, so the buffer is not asked for") };
-    prompt_edit(&mut input, &mut back, &mut saved, "C-w", || None);
+    prompt_edit(&mut input, &mut back, &mut saved, "", "C-w", || None);
     assert_eq!(input, "one ");
     assert_eq!(saved.as_deref(), Some("two"));
-    prompt_edit(&mut input, &mut back, &mut saved, "C-y", no_buffer);
+    prompt_edit(&mut input, &mut back, &mut saved, "", "C-y", no_buffer);
     assert_eq!(input, "one two");
-    prompt_edit(&mut input, &mut back, &mut saved, "C-y", no_buffer);
+    prompt_edit(&mut input, &mut back, &mut saved, "", "C-y", no_buffer);
     assert_eq!(input, "one twotwo");
 }
 
@@ -144,7 +144,7 @@ fn the_client_command_prompt_pastes_on_ctrl_y() {
     let mut buf = "abc".to_string();
     let mut back = 0usize;
     let mut saved = None;
-    let act = command_prompt_key(&mut buf, &mut back, &mut saved, KeyCode::Char('y'),
+    let act = command_prompt_key(&mut buf, &mut back, &mut saved, "", KeyCode::Char('y'),
         KeyModifiers::CONTROL, || Some("BUF1".to_string()));
     assert_eq!(act, PromptKeyAction::Edited);
     assert_eq!(buf, "abcBUF1");
@@ -158,8 +158,8 @@ fn the_client_command_prompt_keeps_its_c_w_cut_for_c_y() {
     let mut buf = "one two".to_string();
     let mut back = 0usize;
     let mut saved = None;
-    command_prompt_key(&mut buf, &mut back, &mut saved, KeyCode::Char('w'), KeyModifiers::CONTROL, || None);
-    command_prompt_key(&mut buf, &mut back, &mut saved, KeyCode::Char('y'), KeyModifiers::CONTROL,
+    command_prompt_key(&mut buf, &mut back, &mut saved, "", KeyCode::Char('w'), KeyModifiers::CONTROL, || None);
+    command_prompt_key(&mut buf, &mut back, &mut saved, "", KeyCode::Char('y'), KeyModifiers::CONTROL,
         || Some("BUF1".to_string()));
     assert_eq!(buf, "one two");
 }
@@ -169,7 +169,7 @@ fn the_rename_overlay_pastes_on_ctrl_y() {
     let mut buf = "ab".to_string();
     let mut back = 1usize;
     let mut saved = None;
-    let closes = crate::client::rename_overlay_ctrl_key(&mut buf, &mut back, &mut saved, 'y',
+    let closes = crate::client::rename_overlay_ctrl_key(&mut buf, &mut back, &mut saved, "", 'y',
         || Some("NAME".to_string()));
     assert!(!closes, "C-y edits the name, it does not close the overlay");
     assert_eq!(buf, "aNAMEb");
