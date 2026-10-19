@@ -512,6 +512,10 @@ pub fn option_definition(name: &str) -> Option<&'static OptionDef> {
 }
 
 pub fn validate_option_value(name: &str, value: &str) -> Result<(), String> {
+    // #798: a running server cannot change its mode (server/shared).
+    if name == crate::server::shared::OPTION {
+        return crate::server::shared::set_on_running_per_session_server(value);
+    }
     if let Some(definition) = option_definition(name) {
         return definition.validate_value(value);
     }

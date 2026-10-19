@@ -3628,6 +3628,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = std::fs::remove_file(&port_path);
             }
 
+            // #798: the switch says shared (or is bad); claim and start nothing.
+            if let Err(e) = crate::server::shared::check_server_start() {
+                app.status_message = Some((e, Instant::now(), None));
+                return Ok(());
+            }
+
             // Try to claim a warm server first (fast path)
             let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                 || crate::config::is_warm_disabled_by_config();

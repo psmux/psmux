@@ -101,4 +101,9 @@ fn option_is_known_but_not_listed() {
     assert!(!cat::server_option_names().contains(&"server-mode"));
     assert!(cat::option_definition("server-mode").is_none());
     assert!(!cat::is_server_option("server-mode"));
+    // `set server-mode` is judged where every set is judged, so the CLI
+    // reports a refusal at exit 1.
+    assert_eq!(cat::validate_option_value("server-mode", "per-session"), Ok(()));
+    assert!(cat::validate_option_value("server-mode", "shared").is_err());
+    assert!(cat::validate_option_value("server-mode", "bogus").is_err());
 }

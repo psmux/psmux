@@ -204,6 +204,19 @@ fn run_shared_cli() -> ! {
     die(&not_available_message())
 }
 
+/// The same decision for a start a running server makes on a user's behalf
+/// (`new-session` from a binding, the command prompt or a persistent client),
+/// where exiting is not an option: `Err` carries the message to show, and the
+/// caller starts and claims nothing. With the switch at `per-session` the
+/// caller goes on exactly as before.
+pub fn check_server_start() -> Result<(), String> {
+    match resolve_for_this_process() {
+        Ok(ServerMode::PerSession) => Ok(()),
+        Ok(ServerMode::Shared) => Err(not_available_message()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Called at the very top of the internal `psmux server` process, the one
 /// place every server process starts, however it was spawned (a CLI, another
 /// server's `new-session`, the warm standby refill). A process whose switch
@@ -225,7 +238,10 @@ pub const RUNNING_PER_SESSION: &str = "per-session";
 /// chosen when a server starts and a running server cannot change it, but the
 /// startup config (and a later `source-file` of it) naming the mode the server
 /// already runs in must not warn, so that value is accepted and changes
-/// nothing. An unset never reaches here (the option has no catalog default,
+/// nothing. It is the value check `set-option` runs (option_catalog
+/// validate_option_value) on the CLI and in the server; in step 1 every running
+/// server is a per session one, so judging the value there is exact. An unset
+/// never reaches here (the option has no catalog default,
 /// so `set -u` has nothing to apply) and leaves the mode as it is.
 pub fn set_on_running_per_session_server(value: &str) -> Result<(), String> {
     match parse_value(value) {

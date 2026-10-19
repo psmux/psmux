@@ -6285,6 +6285,15 @@ match cmd {
                     let _ = write_stream.flush();
                     break;
                 }
+            } else if let Err(e) = crate::server::shared::check_server_start() {
+                // #798: the switch says shared (or is bad); start nothing here.
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(e));
+                } else {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                    break;
+                }
             } else {
                 // Spawn new server
                 let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
