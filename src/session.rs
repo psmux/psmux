@@ -220,7 +220,7 @@ pub fn session_name_base(ns: Option<&str>, name: &str) -> String {
 /// session name, as tmux refuses a name it cannot store (`invalid session:`).
 /// Under `-L` a name may contain `__`: the base splits at the first `__`.
 pub fn reserved_session_name_error(ns: Option<&str>, name: &str) -> Option<String> {
-    let in_default = ns.map_or(true, |n| n.is_empty());
+    let in_default = ns.is_none_or(|n| n.is_empty());
     if in_default && name.contains("__") {
         Some(format!(
             "invalid session: {} (psmux stores the sessions of -L NAME as NAME__session, \
