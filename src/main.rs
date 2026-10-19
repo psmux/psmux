@@ -1496,7 +1496,10 @@ fn run_main() -> io::Result<()> {
         // done nothing. tmux refuses all four (CMD_FIND_PANE/WINDOW, no
         // CANFAIL).
         | "rotate-window" | "rotatew" | "resize-window" | "resizew"
-        | "copy-mode" | "send-prefix")
+        | "copy-mode" | "send-prefix"
+        | "list-windows" | "lsw" | "list-clients" | "lsc"
+        | "choose-buffer" | "chooseb" | "choose-client"
+        | "find-window" | "findw")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref());
     }
