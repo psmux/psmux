@@ -205,11 +205,15 @@ Write-Host "`n--- Test 6: -C echo mode ---" -ForegroundColor Cyan
 $output = Invoke-ControlMode -Mode "-C" -Commands @("list-sessions")
 $joined = ($output | Out-String)
 
-# In -C echo mode, the command should be echoed back
-$hasEcho = $joined -match "list-sessions"
+# stdin here is a file, not a terminal: tmux never echoes a command line, so
+# nothing but protocol lines comes back (issue #857). This used to assert the
+# echo, which was psmux writing the line back where tmux does not; a console
+# stdin still gets it, standing in for the console echo the client turns off.
+$hasEcho = @($output | Where-Object { $_ -eq "list-sessions" }).Count -gt 0
 $hasBegin = $joined -match "%begin"
-Add-Result "-C mode echoes commands" $hasEcho
+Add-Result "-C mode with stdin a file does not echo commands" (-not $hasEcho)
 Add-Result "-C mode has %begin framing" $hasBegin
+Add-Result "-C mode opens with the flag 0 reply to its command line" ([string]$output[0] -match '^%begin \d+ \d+ 0$') "first='$($output[0])'"
 
 # ============================================================
 # TEST 7: -CC mode (no echo)
