@@ -776,21 +776,36 @@ pub fn split_sizes_at<'a>(node: &'a Node, path: Vec<usize>, idx: usize) -> Optio
     } else { None }
 }
 
+/// Move one separator in relative-weight space. `pixels` includes the node's
+/// separators, just as compute_split_borders and the client border snapshot do.
+pub fn drag_split_sizes(sizes: &mut [u16], index: usize, left_initial: u16, delta: i32, pixels: u16, horizontal: bool) {
+    let Some((&left, &right)) = sizes.get(index).zip(index.checked_add(1).and_then(|i| sizes.get(i))) else { return };
+    // Zero weights can be a zoom mask; dragging must not reveal hidden panes.
+    if left == 0 || right == 0 { return; }
+    let available = i64::from(pixels) - (sizes.len() - 1) as i64;
+    if available <= 0 { return; }
+    let total: i64 = sizes.iter().map(|&s| i64::from(s)).sum();
+    let pair = i64::from(left) + i64::from(right);
+    let change = i64::from(delta) * total / available;
+    // Preserve the five-percent drag floor and the layout's cell minimum.
+    // A pane already below that floor must still return to its press position.
+    let cell_floor = (i64::from(min_cell(horizontal)) * total + available - 1) / available;
+    let floor = (total / 20).max(cell_floor).max(1);
+    let initial = i64::from(left_initial).clamp(1, pair - 1);
+    let minimum = floor.min(initial).max(pair - i64::from(u16::MAX));
+    let maximum = (pair - floor.min(pair - initial)).min(i64::from(u16::MAX));
+    let left = (i64::from(left_initial) + change).clamp(minimum, maximum);
+    sizes[index] = left as u16;
+    sizes[index + 1] = (pair - left) as u16;
+}
+
 pub fn adjust_split_sizes(root: &mut Node, d: &DragState, x: u16, y: u16) {
     if let Some(Node::Split { sizes, .. }) = get_split_mut(root, &d.split_path) {
-        let total_pct = sizes[d.index] + sizes[d.index+1];
-        let min_pct = 5u16;
-        // Convert pixel delta to percentage delta
         let pixel_delta: i32 = match d.kind {
             LayoutKind::Horizontal => x as i32 - d.start_x as i32,
             LayoutKind::Vertical => y as i32 - d.start_y as i32,
         };
-        let total_px = d.total_pixels.max(1) as i32;
-        let pct_delta = (pixel_delta * total_pct as i32) / total_px;
-        let left = (d.left_initial as i32 + pct_delta).clamp(min_pct as i32, (total_pct - min_pct) as i32) as u16;
-        let right = total_pct - left;
-        sizes[d.index] = left;
-        sizes[d.index+1] = right;
+        drag_split_sizes(sizes, d.index, d.left_initial, pixel_delta, d.total_pixels, matches!(d.kind, LayoutKind::Horizontal));
     }
 }
 
@@ -1533,3 +1548,7 @@ mod test_issue171_layout_bugs;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue644_one_row_pane.rs"]
 mod test_issue644_one_row_pane;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_split_weight_drag.rs"]
+mod test_split_weight_drag;
