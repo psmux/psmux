@@ -5231,9 +5231,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::HasSession(resp) => {
                     let _ = resp.send(true);
                 }
+                CtrlReq::RenameSession(name) if crate::session::reserved_session_name_error(
+                    app.socket_name.as_deref(), &name,
+                ).is_some() => {
+                    // Discussion #844: the new name would read back as a
+                    // session of another namespace. Nothing is renamed.
+                    let msg = crate::session::reserved_session_name_error(app.socket_name.as_deref(), &name).unwrap_or_default();
+                    app.status_message = Some((msg, std::time::Instant::now(), None));
+                    state_dirty = true;
+                }
+                // The base the session gets is always the prefixed name: a new
+                // name `ns__x` under -L ns lands at `ns__ns__x` (discussion
+                // #844), so that is what must be free.
                 CtrlReq::RenameSession(name) if crate::session::rename_blocker(
                     &app.port_file_base(),
-                    &crate::session::namespaced_session_base(app.socket_name.as_deref(), &name),
+                    &crate::session::session_name_base(app.socket_name.as_deref(), &name),
                 ).is_some() => {
                     // tmux: `duplicate session: NAME`, and nothing is renamed.
                     // Writing our files over a live session's orphaned it

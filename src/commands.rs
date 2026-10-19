@@ -3600,13 +3600,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Generate session name if not provided
             let ns_prefix = app.socket_name.as_deref();
             let name = session_name.unwrap_or_else(|| crate::session::next_session_name(ns_prefix));
+            if let Some(msg) = crate::session::reserved_session_name_error(ns_prefix, &name) {
+                app.status_message = Some((msg, Instant::now(), None));
+                return Ok(());
+            }
 
             // Build port file base (with namespace prefix if applicable)
-            let port_file_base = if let Some(ref sn) = app.socket_name {
-                format!("{}__{}", sn, name)
-            } else {
-                name.clone()
-            };
+            let port_file_base = crate::session::session_name_base(ns_prefix, &name);
 
             // Check if session already exists
             let port_path = crate::paths::port_file(&port_file_base);

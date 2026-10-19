@@ -164,12 +164,71 @@ pub fn session_namespace(full: &str) -> Option<&str> {
 /// such as `PSMUX_TARGET_SESSION` and a resolved `$N` id already carry the
 /// on disk name (`ns__sess`). Adding the prefix only when it is missing maps
 /// both spellings onto the same identity, so the prefix is never doubled.
+///
+/// A session may itself be named `ns__x` (discussion #844): its base is
+/// `ns__ns__x`, so when that registry entry exists the name is read as a
+/// session name and prefixed like any other. Otherwise `ns__x` is taken to be
+/// a base already, as before.
 pub fn namespaced_session_base(ns: Option<&str>, name: &str) -> String {
+    namespaced_session_base_with(ns, name, |base| {
+        std::path::Path::new(&crate::paths::port_file(base)).exists()
+    })
+}
+
+/// [`namespaced_session_base`] with the registry lookup passed in, so the rule
+/// can be tested without a data dir. `registered(base)` says whether a session
+/// with that base exists.
+pub fn namespaced_session_base_with(
+    ns: Option<&str>,
+    name: &str,
+    registered: impl Fn(&str) -> bool,
+) -> String {
     match ns {
-        Some(n) if !n.is_empty() && !name.starts_with(&format!("{}__", n)) => {
-            format!("{}__{}", n, name)
+        Some(n) if !n.is_empty() => {
+            let prefixed = session_name_base(ns, name);
+            if !name.starts_with(&format!("{}__", n)) || registered(&prefixed) {
+                prefixed
+            } else {
+                name.to_string()
+            }
         }
         _ => name.to_string(),
+    }
+}
+
+/// The registry base a session NAMED `name` gets under namespace `ns`: the
+/// name with the `<ns>__` prefix under `-L`, the name alone otherwise. This is
+/// what `AppState::port_file_base` writes, so a new or renamed session must be
+/// checked against this and never against [`namespaced_session_base`], which
+/// reads a `-t` that may already be a base.
+pub fn session_name_base(ns: Option<&str>, name: &str) -> String {
+    match ns {
+        Some(n) => format!("{}__{}", n, name),
+        None => name.to_string(),
+    }
+}
+
+/// Why `name` cannot be the name of a new or renamed session in namespace
+/// `ns`, as the error line to print, or None when it can.
+///
+/// The registry stores session `B` of `-L A` as `A__B` and a default namespace
+/// session under its name alone, so a default namespace session named `A__B`
+/// would share every registry file with `-L A`'s `B` and be read back as
+/// belonging to namespace `A` (discussion #844): listed and killed there,
+/// missing from its own `ls`. The file names cannot change without breaking
+/// the tools that read them, so the default namespace refuses `__` in a
+/// session name, as tmux refuses a name it cannot store (`invalid session:`).
+/// Under `-L` a name may contain `__`: the base splits at the first `__`.
+pub fn reserved_session_name_error(ns: Option<&str>, name: &str) -> Option<String> {
+    let in_default = ns.map_or(true, |n| n.is_empty());
+    if in_default && name.contains("__") {
+        Some(format!(
+            "invalid session: {} (psmux stores the sessions of -L NAME as NAME__session, \
+             so a session outside -L cannot have __ in its name)",
+            name
+        ))
+    } else {
+        None
     }
 }
 
@@ -3520,3 +3579,7 @@ mod tests_issue809_registry_reply;
 #[cfg(test)]
 #[path = "../tests-rs/test_switch_client_last_namespace.rs"]
 mod tests_switch_client_last_namespace;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_discussion844_namespace_names.rs"]
+mod tests_discussion844_namespace_names;

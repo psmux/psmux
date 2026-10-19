@@ -2159,12 +2159,14 @@ fn run_main() -> io::Result<()> {
                     // tmux-compatible: auto-generate numeric name (0, 1, 2, ...)
                     crate::session::next_session_name(l_socket_name.as_deref())
                 });
+                // Discussion #844: a default namespace name with `__` would
+                // share its registry files with a session of an -L namespace.
+                if let Some(msg) = crate::session::reserved_session_name_error(l_socket_name.as_deref(), &name) {
+                    eprintln!("{}", msg);
+                    std::process::exit(1);
+                }
                 // Compute port file base name: with -L namespace prefix if specified
-                let port_file_base = if let Some(ref l) = l_socket_name {
-                    format!("{}__{}", l, name)
-                } else {
-                    name.clone()
-                };
+                let port_file_base = crate::session::session_name_base(l_socket_name.as_deref(), &name);
                 // Check for -- separator: everything after it is a raw command (direct execution)
                 let raw_cmd_args: Option<Vec<String>> = raw_cmd_after_dd.filter(|v| !v.is_empty());
                 // Parse initial command from positional args (legacy mode, no --)
@@ -3824,8 +3826,13 @@ fn run_main() -> io::Result<()> {
                     // `duplicate session: NAME` at exit 1. psmux wrote over the
                     // other session's registry and orphaned it, also for a name
                     // that differs only in case (issue #774).
+                    if let Some(msg) = crate::session::reserved_session_name_error(l_socket_name.as_deref(), &name) {
+                        eprintln!("{}", msg);
+                        std::process::exit(1);
+                    }
                     if let Ok(current) = env::var("PSMUX_TARGET_SESSION") {
-                        let new_base = crate::session::namespaced_session_base(l_socket_name.as_deref(), &name);
+                        // The base the renamed session gets (discussion #844).
+                        let new_base = crate::session::session_name_base(l_socket_name.as_deref(), &name);
                         if crate::session::rename_blocker(&current, &new_base).is_some() {
                             eprintln!("duplicate session: {}", name);
                             std::process::exit(1);

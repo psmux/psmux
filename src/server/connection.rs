@@ -6261,9 +6261,13 @@ match cmd {
 
             // The session belongs to this server's namespace (#734 follow
             // up): the bare name used to put it in the default namespace.
-            let port_file_base = crate::session::namespaced_session_base(ns.as_deref(), &name);
+            // It is the base the new server writes, so a name `ns__x` under
+            // -L ns is `ns__ns__x` (discussion #844).
+            let port_file_base = crate::session::session_name_base(ns.as_deref(), &name);
 
             let port_path = crate::paths::port_file(&port_file_base);
+
+            let reserved = crate::session::reserved_session_name_error(ns.as_deref(), &name);
 
             // Check if session already exists
             let already_exists = if std::path::Path::new(&port_path).exists() {
@@ -6275,7 +6279,16 @@ match cmd {
                 } else { false }
             } else { false };
 
-            if already_exists {
+            if let Some(msg) = reserved {
+                // Discussion #844: refused like a duplicate, nothing is made.
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(msg));
+                } else {
+                    let _ = write!(write_stream, "{}\n", msg);
+                    let _ = write_stream.flush();
+                    break;
+                }
+            } else if already_exists {
                 // tmux's wording (cmd-new-session.c:138), the same string the CLI
                 // path has printed since discussion #210; gastown greps for it.
                 if persistent {

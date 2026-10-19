@@ -3311,11 +3311,7 @@ impl AppState {
     /// When socket_name is set (via -L flag), files are stored as `{socket_name}__{session_name}`.
     /// Otherwise, just the session_name is used.
     pub fn port_file_base(&self) -> String {
-        if let Some(ref sn) = self.socket_name {
-            format!("{}__{}", sn, self.session_name)
-        } else {
-            self.session_name.clone()
-        }
+        crate::session::session_name_base(self.socket_name.as_deref(), &self.session_name)
     }
 }
 
