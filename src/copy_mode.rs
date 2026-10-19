@@ -686,31 +686,137 @@ pub fn get_copy_pos(app: &mut AppState) -> Option<(u16, u16)> {
     current_prompt_pos(app)
 }
 
-/// Move cursor to start of line (0 key in vi copy mode).
-pub fn move_to_line_start(app: &mut AppState) {
-    if let Some((r, _)) = get_copy_pos(app) {
-        app.copy_pos = Some((r, 0));
+/// Whether the cell at (`row`, `col`) is blank the way tmux's grid_line_length
+/// sees it: a space, or a cell nothing was ever written to. The second cell of
+/// a wide character is not blank.
+fn is_blank_cell(screen: &vt100::Screen, row: u16, col: u16) -> bool {
+    match screen.cell(row, col) {
+        Some(cell) => !cell.is_wide_continuation() && matches!(cell.contents(), "" | " "),
+        None => true,
     }
 }
 
-/// Move cursor to end of line ($ key in vi copy mode).
-pub fn move_to_line_end(app: &mut AppState) {
-    if let Some((r, _)) = get_copy_pos(app) {
-        let win = &app.windows[app.active_idx];
-        if let Some(p) = active_pane(&win.root, &win.active_path) {
-            let cols = p.last_cols;
-            app.copy_pos = Some((r, cols.saturating_sub(1)));
+/// The length of visible row `row` with its trailing blanks left out, tmux's
+/// grid_line_length: one past the last cell that holds something.
+fn row_text_length(screen: &vt100::Screen, row: u16, cols: u16) -> u16 {
+    let mut x = cols;
+    while x > 0 && is_blank_cell(screen, row, x - 1) {
+        x -= 1;
+    }
+    x
+}
+
+/// The first visible row of the line `row` is part of: up while the row above
+/// wrapped into the one below it.
+fn logical_line_first_row(screen: &vt100::Screen, row: u16) -> u16 {
+    let mut r = row;
+    while r > 0 && screen.row_wrapped(r - 1) {
+        r -= 1;
+    }
+    r
+}
+
+/// The text of a selection from column `c0` to `c1` (both included) on one
+/// row. It stops at the end of the row's text, as tmux's window_copy_copy_line
+/// does: blanks after the text are not copied, blanks between words are.
+fn one_row_selection_text(screen: &vt100::Screen, row: u16, c0: u16, c1: u16, cols: u16) -> String {
+    let end = c1.saturating_add(1).min(row_text_length(screen, row, cols));
+    capture_row_text(screen, row, c0..end.max(c0))
+}
+
+/// Where end-of-line puts the cursor, tmux's window_copy_cursor_end_of_line.
+///
+/// It follows a wrapped line to its last row (grid_reader_cursor_end_of_line
+/// with wrap), scrolling down out of the scrollback when that row is below
+/// the screen, and stops at the end of the text there, trailing blanks left
+/// out. With vi keys the cursor stays on the last character, as tmux 3.7 and
+/// later do (window_copy_cursor_limit); with emacs keys it goes one past it.
+/// In a rectangle selection it goes to the last column, as tmux's does.
+fn line_end_pos(parser: &mut vt100::Parser, row: u16, rows: u16, cols: u16, vi: bool, rect: bool) -> (u16, u16) {
+    let last_row = rows.saturating_sub(1);
+    let mut r = row.min(last_row);
+    while parser.screen().row_wrapped(r) {
+        if r < last_row {
+            r += 1;
+        } else {
+            let sb = parser.screen().scrollback();
+            if sb == 0 {
+                break;
+            }
+            parser.screen_mut().set_scrollback(sb - 1);
         }
     }
+    let last_col = cols.saturating_sub(1);
+    if rect {
+        return (r, last_col);
+    }
+    let screen = parser.screen();
+    let len = row_text_length(screen, r, cols);
+    let x = if vi { len.saturating_sub(1) } else { len };
+    // The last character may be wide: keep vi keys on its first cell.
+    (r, off_padding(screen, r, x.min(last_col)))
+}
+
+/// Where back-to-indentation puts the cursor, tmux's
+/// grid_reader_cursor_back_to_indentation: the first cell that holds
+/// something, from the first row of a wrapped line on, or `None` (stay put)
+/// on a line that is all blank.
+fn indentation_pos(screen: &vt100::Screen, row: u16, rows: u16, cols: u16) -> Option<(u16, u16)> {
+    let mut r = logical_line_first_row(screen, row);
+    loop {
+        let len = row_text_length(screen, r, cols);
+        if let Some(x) = (0..len).find(|&x| !is_blank_cell(screen, r, x)) {
+            return Some((r, x));
+        }
+        if !screen.row_wrapped(r) || r + 1 >= rows {
+            return None;
+        }
+        r += 1;
+    }
+}
+
+/// Move cursor to start of line (0 key in vi copy mode).
+///
+/// On a wrapped line it goes to the first row of the line, as tmux's
+/// grid_reader_cursor_start_of_line with wrap does.
+pub fn move_to_line_start(app: &mut AppState) {
+    if let Some((r, _)) = get_copy_pos(app) {
+        let win = &mut app.windows[app.active_idx];
+        let first = active_pane_mut(&mut win.root, &win.active_path)
+            .and_then(|p| p.term.lock().ok().map(|parser| logical_line_first_row(parser.screen(), r)))
+            .unwrap_or(r);
+        app.copy_pos = Some((first, 0));
+    }
+}
+
+/// Move cursor to end of line ($ in vi copy mode, C-e in emacs).
+pub fn move_to_line_end(app: &mut AppState) {
+    let Some((r, _)) = get_copy_pos(app) else { return };
+    let vi = app.mode_keys != "emacs";
+    let rect = app.copy_anchor.is_some() && app.copy_selection_mode == crate::types::SelectionMode::Rect;
+    let win = &mut app.windows[app.active_idx];
+    let Some(p) = active_pane_mut(&mut win.root, &win.active_path) else { return };
+    let (rows, cols) = (p.last_rows, p.last_cols);
+    let Ok(mut parser) = p.term.lock() else { return };
+    let pos = line_end_pos(&mut parser, r, rows, cols, vi, rect);
+    let sb = parser.screen().scrollback();
+    drop(parser);
+    app.copy_scroll_offset = sb;
+    app.copy_pos = Some(pos);
 }
 
 /// Move cursor to first non-blank character (^ key in vi copy mode).
 pub fn move_to_first_nonblank(app: &mut AppState) {
     app.copy_search_marks = false;
     if let Some((r, _)) = get_copy_pos(app) {
-        if let Some((text, _)) = read_row_text(app, r) {
-            let col = text.find(|c: char| !c.is_whitespace()).unwrap_or(0) as u16;
-            app.copy_pos = Some((r, col));
+        let win = &mut app.windows[app.active_idx];
+        let Some(p) = active_pane_mut(&mut win.root, &win.active_path) else { return };
+        let (rows, cols) = (p.last_rows, p.last_cols);
+        let Ok(parser) = p.term.lock() else { return };
+        let found = indentation_pos(parser.screen(), r, rows, cols);
+        drop(parser);
+        if let Some(pos) = found {
+            app.copy_pos = Some(pos);
         }
     }
 }
@@ -1227,7 +1333,7 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
                 crate::types::SelectionMode::Char => {
                     if total_lines == 1 {
                         let c0 = anchor.1.min(pos.1); let c1 = anchor.1.max(pos.1);
-                        text.push_str(&capture_row_text(parser.screen(), r, c0..c1.saturating_add(1)));
+                        text.push_str(&one_row_selection_text(parser.screen(), r, c0, c1, cols));
                     } else {
                         let line_start = if is_first { top_col } else { 0 };
                         let line_end   = if is_last  { bot_col } else { cols.saturating_sub(1) };
@@ -3161,3 +3267,7 @@ mod tests_issue810_saved_screen;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue855_copy_cursor_wide.rs"]
 mod test_issue855_copy_cursor_wide;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_copy_mode_end_of_line.rs"]
+mod test_copy_mode_end_of_line;
