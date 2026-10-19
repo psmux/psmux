@@ -858,8 +858,21 @@ fn pid_owns_live_server(pid: u32) -> bool {
     // handle and would otherwise prune a live server's satellites.
     match crate::platform::process_info::get_process_name_or_snapshot(pid) {
         None => false,
-        Some(name) => PSMUX_SERVER_IMAGE_NAMES.contains(&name.to_ascii_lowercase().as_str()),
+        Some(name) => {
+            let name = name.to_ascii_lowercase();
+            // A renamed binary's servers carry its own image name. Answering
+            // "live" only keeps files, the safe direction for this sweep.
+            PSMUX_SERVER_IMAGE_NAMES.contains(&name.as_str())
+                || own_image_stem().as_deref() == Some(name.as_str())
+        }
     }
+}
+
+/// Lower-case file stem of the running executable, e.g. `psmux-dev` for a
+/// renamed copy, so registry readers recognise servers it started itself.
+fn own_image_stem() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.file_stem()?.to_string_lossy().to_ascii_lowercase())
 }
 
 /// Instance-token file names (`instances/<prefix>-<hash>`) that a namespace with
@@ -1867,7 +1880,24 @@ where
     let pid_path = port_path.with_extension("pid");
     // Tolerate both `pid` and `pid:creation_filetime` bodies (the latter written
     // so kill-server can verify identity); the anchor only needs the pid.
-    let (pid, _creation) = parse_pid_file_contents(&std::fs::read_to_string(&pid_path).ok()?)?;
+    let (pid, creation) = parse_pid_file_contents(&std::fs::read_to_string(&pid_path).ok()?)?;
+    pid_anchor_verdict_for(&pid_path, pid, creation, name_of, crate::platform::process_kill::process_creation_time)
+}
+
+/// The verdict half of [`pid_anchor_verdict_with`] once the `.pid` body is
+/// parsed, with the creation time lookup injected as well so a test can drive
+/// a renamed server image without spawning one.
+fn pid_anchor_verdict_for<F, C>(
+    pid_path: &Path,
+    pid: u32,
+    recorded_creation: Option<u64>,
+    name_of: F,
+    creation_of: C,
+) -> Option<bool>
+where
+    F: Fn(u32) -> Option<String>,
+    C: Fn(u32) -> Option<u64>,
+{
     let name = match name_of(pid) {
         // No such process anywhere on the machine — not openable AND not in the
         // process table. That is a genuinely dead PID, so the #448 fast reap
@@ -1886,14 +1916,27 @@ where
         Some(n) => n.to_ascii_lowercase(),
     };
     if !PSMUX_SERVER_IMAGE_NAMES.contains(&name.as_str()) {
+        // An image psmux does not know by name is still our server when it is
+        // the very process that wrote the `.pid`: the recorded creation time
+        // pins identity exactly, so a recycled PID can never match it. This is
+        // what keeps a copied or renamed binary (`psmux-dev.exe`, a pinned
+        // `pr123.exe`) usable; judging by name alone made its own CLI call its
+        // freshly started server dead, so `new-session -d` exited 0 and every
+        // later command said "no server running", and a psmux.exe CLI sharing
+        // the data dir deleted the live server's registry files.
+        if let (Some(recorded), Some(created)) = (recorded_creation, creation_of(pid)) {
+            if recorded == created {
+                return Some(true);
+            }
+        }
         // PID recycled by an unrelated application; our server is gone.
         return Some(false);
     }
     // PID-reuse guard (same idea as the #447 reaper guard): a psmux process
     // created well AFTER the .pid file was last written cannot be the server
     // that wrote it. When either timestamp is unavailable, err towards alive.
-    if let Some(created_ft) = crate::platform::process_kill::process_creation_time(pid) {
-        if let Some(mtime_ft) = std::fs::metadata(&pid_path)
+    if let Some(created_ft) = creation_of(pid) {
+        if let Some(mtime_ft) = std::fs::metadata(pid_path)
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(system_time_to_filetime_ticks)
@@ -3559,6 +3602,10 @@ mod tests_picker_namespace_filter;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue650_cross_session_process_name.rs"]
 mod tests_issue650_cross_session_process_name;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_renamed_server_image_anchor.rs"]
+mod tests_renamed_server_image_anchor;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue698_counter_lock_missing_dir.rs"]
