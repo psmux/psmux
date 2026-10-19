@@ -18,7 +18,7 @@ serde_support = ["serde", "serde_derive"]
 anyhow = "1.0.104"
 downcast-rs = "2.0.2"
 filedescriptor = "0.8.3"
-libc = "0.2.190"
+libc = "0.2.191"
 log = "0.4.34"
 nix = { version = "0.31.3", features = ["term", "fs"] }
 serde = { version = "1.0.229", optional = true }
