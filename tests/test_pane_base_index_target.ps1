@@ -3,7 +3,8 @@
 # With `set -g pane-base-index 5` the panes of a window are numbered 5, 6, ...
 # (#{pane_index}), and `-t X:.6` names the second pane. The server turned that
 # number into a position without taking the base off, in the target check
-# every -t command goes through, in display-message and in select-pane. So
+# every -t command goes through, in display-message, select-pane,
+# paste-buffer, switch-client and the pane part of select-window. So
 # `-t X:.6` was "can't find pane: 6" (send-keys did nothing at exit 0), and
 # `-t X:.1`, below the base, was read as position 1: its keys went into pane 6
 # and select-pane moved there.
@@ -17,6 +18,14 @@
 #   moves.
 # - select-pane on window 1, which is not the current window: its active pane
 #   becomes 6 and window 0 stays current; 1 is refused.
+# - paste-buffer -t X:.6 pastes into pane 6 only, -t X:.1 nowhere.
+#   switch-client -t X:1.6 makes window 1 current with pane 6 active;
+#   switch-client -t X:1.1 does not move window 1's pane. select-window
+#   -t X:0.6 on the current window makes pane 6 active, X:0.1 moves nothing.
+#   (select-window to another window focuses the pane part before it switches
+#   windows, whatever the base, so that case is not checked here.)
+# - A floating pane after the two tiled ones is index 7 (X:.7, X:0.7); 8 and
+#   2 name no pane.
 # - With pane-base-index set back to 0, the same targets one lower work.
 #
 # Isolation: a unique -L namespace, a PSMUX_DATA_DIR, USERPROFILE and HOME of
@@ -218,6 +227,59 @@ try {
     $Select = Invoke-Psmux @("select-pane", "-t", "$W1.1")
     $After = Get-Focus
     Check ($Select.Code -eq 1 -and $Select.Err -match "can't find pane" -and $After -eq $Before) "select-pane -t $W1.1 is refused and moves nothing" "exit $($Select.Code), '$($Select.Err)', focus '$After' (was '$Before')"
+
+    Write-Host "`n--- pane-base-index 5: paste-buffer, switch-client and select-window ---" -ForegroundColor Yellow
+    $script:Number++
+    $Paste = "pbipaste" + $script:Number.ToString("000") + "x"
+    Expect-Step @("set-buffer", $Paste) | Out-Null
+    $Result = Invoke-Psmux @("paste-buffer", "-t", "X:.6")
+    Start-Sleep -Milliseconds 400
+    $Landed = Get-MarkerPanes $Paste
+    Check ($Result.Code -eq 0 -and $Landed -eq "$W0.6") "paste-buffer -t X:.6 pastes into pane 6 only" "exit $($Result.Code), landed in '$Landed', '$($Result.Err)'"
+    $script:Number++
+    $Paste = "pbipaste" + $script:Number.ToString("000") + "x"
+    Expect-Step @("set-buffer", $Paste) | Out-Null
+    $Result = Invoke-Psmux @("paste-buffer", "-t", "X:.1")
+    Start-Sleep -Milliseconds 400
+    $Landed = Get-MarkerPanes $Paste
+    Check ($Landed -eq "") "paste-buffer -t X:.1 pastes nowhere" "exit $($Result.Code), landed in '$Landed', '$($Result.Err)'"
+
+    Reset-Focus
+    $Result = Invoke-Psmux @("switch-client", "-t", "X:1.6")
+    $Focus = Get-Focus
+    Check ($Result.Code -eq 0 -and $Focus -match [regex]::Escape("$W1|6|1|1")) "switch-client -t X:1.6 makes window 1 current with pane 6 active" "exit $($Result.Code), focus '$Focus', '$($Result.Err)'"
+    Reset-Focus
+    $Result = Invoke-Psmux @("switch-client", "-t", "X:1.1")
+    $Focus = Get-Focus
+    Check ($Focus -match [regex]::Escape("$W1|5|1|")) "switch-client -t X:1.1 leaves window 1's active pane at 5" "exit $($Result.Code), focus '$Focus', '$($Result.Err)'"
+
+    Reset-Focus
+    $Result = Invoke-Psmux @("select-window", "-t", "X:0.6")
+    $Focus = Get-Focus
+    Check ($Result.Code -eq 0 -and $Focus -match [regex]::Escape("$W0|6|1|1")) "select-window -t X:0.6 keeps window 0 current with pane 6 active" "exit $($Result.Code), focus '$Focus', '$($Result.Err)'"
+
+    Reset-Focus
+    $Before = Get-Focus
+    $Result = Invoke-Psmux @("select-window", "-t", "X:0.1")
+    $After = Get-Focus
+    Check ($After -eq $Before) "select-window -t X:0.1 moves no pane" "exit $($Result.Code), focus '$After' (was '$Before'), '$($Result.Err)'"
+    Reset-Focus
+
+    Write-Host "`n--- pane-base-index 5: a floating pane follows the tiled ones ---" -ForegroundColor Yellow
+    Expect-Step @("new-pane", "-t", "X:0") | Out-Null
+    Start-Sleep -Milliseconds 1500
+    $Float = ((Expect-Step @("list-panes", "-t", "X:0", "-F", "#{pane_index}|#{pane_id}")).Out -split "`r?`n" | Where-Object { $_ -like "7|*" }) -replace '^7\|', ''
+    if ($Float -notmatch '^%\d+$') { throw "floating pane 7 not found" }
+    foreach ($Target in @("X:.7", "X:0.7")) {
+        $Display = Invoke-Psmux @("display-message", "-t", $Target, "-p", "#{pane_index}|#{pane_id}")
+        Check ($Display.Code -eq 0 -and $Display.Out -eq "7|$Float") "display-message -t $Target is the floating pane 7" "exit $($Display.Code), '$($Display.Out)', '$($Display.Err)'"
+    }
+    foreach ($Target in @("X:.8", "X:.2")) {
+        $Display = Invoke-Psmux @("display-message", "-t", $Target, "-p", "#{pane_index}|#{pane_id}")
+        Check ($Display.Code -eq 1 -and $Display.Out -eq "" -and $Display.Err -match "can't find pane") "display-message -t $Target is refused" "exit $($Display.Code), '$($Display.Out)', '$($Display.Err)'"
+    }
+    Expect-Step @("kill-pane", "-t", $Float) | Out-Null
+    Start-Sleep -Milliseconds 500
 
     Write-Host "`n--- pane-base-index 0: the same panes one number lower ---" -ForegroundColor Yellow
     Expect-Step @("set-option", "-g", "pane-base-index", "0") | Out-Null

@@ -1817,11 +1817,13 @@ fn with_paste_target<T>(
             }
             crate::tree::focus_pane_by_id_no_mru(app, p);
         } else {
-            if p >= crate::tree::count_panes(&app.windows[win_idx].root) {
+            let pos = p.checked_sub(app.pane_base_index)
+                .filter(|pos| *pos < crate::tree::count_panes(&app.windows[win_idx].root));
+            let Some(pos) = pos else {
                 app.active_idx = saved_idx;
                 return Ok(Err(format!("can't find pane: {}", p)));
-            }
-            crate::tree::focus_pane_by_index(app, p);
+            };
+            crate::tree::focus_pane_by_index(app, pos);
         }
     }
     let out = f(app);

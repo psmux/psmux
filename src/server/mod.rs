@@ -3700,7 +3700,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::FocusPaneByIndex(idx) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
-                    switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, idx); });
+                    if let Some(pos) = idx.checked_sub(app.pane_base_index) {
+                        switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
+                    }
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
                     // Update MRU so directional navigation remembers this focus change
                     let win = &mut app.windows[app.active_idx];
@@ -7538,7 +7540,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                         app.last_window_idx = app.active_idx;
                                                         app.active_idx = i;
                                                     }
-                                                    crate::tree::focus_pane_by_index(app, pid);
+                                                    if let Some(pos) = pid.checked_sub(app.pane_base_index) {
+                                                        crate::tree::focus_pane_by_index(app, pos);
+                                                    }
                                                 });
                                                 if let Some(win) = app.windows.get_mut(i) {
                                                     win.activity_flag = false; win.bell_flag = false; win.silence_flag = false;
