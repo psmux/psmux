@@ -175,7 +175,11 @@ Save-Status @{ BeforeInput = `$beforeIn; BeforeOutput = `$beforeOut; AfterInput 
             $pane = $null
             $status = Join-Path $tempDir "bytes-$stream-$terminal.json"
             $method = if ($stream -eq 'stdout') { 'OpenStandardOutput' } else { 'OpenStandardError' }
-            $emit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("[Console]::$method().WriteByte(255); [Console]::$method().WriteByte(10); exit 17"))
+            $payload = 'CHILD:' + $unicode + ':END'
+            $raw = [byte[]](@(255, 10) + [Text.Encoding]::UTF8.GetBytes($payload + "`n"))
+            $expectedBytes = [Convert]::ToBase64String($raw)
+            $emitCode = "`$data=[Convert]::FromBase64String('$expectedBytes'); `$stream=[Console]::$method(); `$stream.Write(`$data,0,`$data.Length); exit 17"
+            $emit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($emitCode))
             $arguments = (@('-L', $outerNS, '-f', $config, 'run-shell', "pwsh.exe -NoProfile -EncodedCommand $emit") | ForEach-Object { Literal $_ }) -join ','
             $body = @"
 `$si = [Diagnostics.ProcessStartInfo]::new(`$PsmuxExe)
@@ -196,16 +200,17 @@ try {
                 $s = Read-Status $status
                 $data = if ($stream -eq 'stdout') { $s.Out } else { $s.Err }
                 $other = if ($stream -eq 'stdout') { $s.Err } else { $s.Out }
-                if ($s.Exit -ne 17 -or (-not $terminal -and ($data -cne '/wo=' -or $other))) {
+                if ($s.Exit -ne 17 -or (-not $terminal -and ($data -cne $expectedBytes -or $other))) {
                     throw "Child output/status regression: $($s | ConvertTo-Json -Compress)"
                 }
+                if ($terminal) { Wait-For { (Outer capture-pane -p -t $pane).Contains($payload) } "$label Unicode child output" }
                 Write-Host "PASS $label"
             } catch { $failures.Add("${label}: $_") }
             finally { Close-Subject $pane $label }
         }
     }
 
-    foreach ($cp in @(437, 1252)) {
+    foreach ($cp in @(437, 1252, 65001)) {
         foreach ($mode in @('-C', '-CC')) {
             foreach ($terminal in @($false, $true)) {
                 $label = "control cp=$cp $mode terminal=$terminal"
