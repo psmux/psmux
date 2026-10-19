@@ -7477,24 +7477,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                         match crate::cross_session::validate_switch_target(port, &key, &pt) {
                                             Err(e) => Err(e),
                                             Ok(()) => {
-                                                if pt.pane.is_some() || pt.window.is_some() || pt.window_name.is_some() {
-                                                    // tmux's cmd-switch-client sets BOTH the
-                                                    // session's current window and the
-                                                    // window's active pane. Since #693 a
-                                                    // `select-pane -t s:w.p` leaves the current
-                                                    // window alone (cmd-select-pane.c:274), so a
-                                                    // pane target sent as select-pane alone
-                                                    // landed the pane and not the window
-                                                    // (test_issue483: dstWin=0 dstPane=1).
-                                                    // select-window first (the resolver drops
-                                                    // the .pane suffix), then the pane.
-                                                    let win_msg = format!("TARGET {}\nselect-window\n", raw);
-                                                    let _ = crate::session::send_control_to_port(port, &win_msg, &key);
-                                                    if pt.pane.is_some() {
-                                                        let pane_msg = format!("TARGET {}\nselect-pane\n", raw);
-                                                        let _ = crate::session::send_control_to_port(port, &pane_msg, &key);
-                                                    }
-                                                }
+                                                // tmux's cmd-switch-client sets BOTH the
+                                                // session's current window and the
+                                                // window's active pane (test_issue483:
+                                                // dstWin=0 dstPane=1 when only the pane
+                                                // was selected).
+                                                crate::cross_session::preselect_window_pane(port, &key, &raw, &pt);
                                                 if let Some(cid) = app.latest_client_id {
                                                     crate::types::send_directive_to_client(cid, &format!("SWITCH {}", dest));
                                                 } else {

@@ -161,6 +161,24 @@ pub fn validate_switch_target(
     Ok(())
 }
 
+/// Make the window and pane a target names current on the session server at
+/// `port`, the way tmux's cmd-switch-client and cmd-attach-session do
+/// (window_set_active_pane on the target window, then session_set_current).
+/// select-window goes first because a `select-pane -t s:w.p` leaves the
+/// current window alone (cmd-select-pane.c). A target with no window or pane
+/// part changes nothing. The caller validates with validate_switch_target.
+pub fn preselect_window_pane(port: u16, key: &str, raw: &str, pt: &crate::types::ParsedTarget) {
+    if pt.pane.is_none() && pt.window.is_none() && pt.window_name.is_none() {
+        return;
+    }
+    let win_msg = format!("TARGET {}\nselect-window\n", raw);
+    let _ = crate::session::send_control_to_port(port, &win_msg, key);
+    if pt.pane.is_some() {
+        let pane_msg = format!("TARGET {}\nselect-pane\n", raw);
+        let _ = crate::session::send_control_to_port(port, &pane_msg, key);
+    }
+}
+
 /// The window and pane half of a join-pane `-s` / `-t` spec (everything after
 /// the session's colon, or the whole spec when it has no session half) in the
 /// form the pane-forward commands read: `%<id>` and `@<id>` as they are, and

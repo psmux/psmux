@@ -1984,6 +1984,24 @@ fn run_main() -> io::Result<()> {
                             control_mode, "psmux: ", &format!("can't find session: {}", shown));
                     }
                 }
+                // tmux cmd-attach-session.c: a -t naming a window or pane
+                // (`s:1`, `s:@3`, `s:0.1`) is looked up as a pane, and that
+                // window becomes the session's current one and that pane its
+                // active pane before the client attaches. Only the session
+                // half was read here, so `attach -t s:0` showed whatever window
+                // was current. A window or pane that is not there is an error,
+                // as in tmux (`can't find window: 9`).
+                if let Some(raw) = args.iter().position(|a| a == "-t").and_then(|i| args.get(i + 1)) {
+                    let pt = crate::cli::parse_target(raw);
+                    if pt.window.is_some() || pt.window_name.is_some() || pt.pane.is_some() {
+                        if let Ok((port, key)) = crate::cross_session::resolve_session(&name) {
+                            if let Err(e) = crate::cross_session::validate_switch_target(port, &key, &pt) {
+                                command_line_error_exit(control_mode, "psmux: ", &e);
+                            }
+                            crate::cross_session::preselect_window_pane(port, &key, raw, &pt);
+                        }
+                    }
+                }
                 env::set_var("PSMUX_SESSION_NAME", name);
                 env::set_var("PSMUX_SESSION_DISPLAY_NAME", shown);
                 env::set_var("PSMUX_REMOTE_ATTACH", "1");
