@@ -81,6 +81,12 @@ jobs:
           $env:PSMUX_EXE = $exe
           .\tests\run_smoke_integration.ps1
 
+      - name: Verify console Unicode and caller encoding
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "target\x86_64-pc-windows-msvc\release\psmux.exe").Path
+          .\tests\test_console_unicode.ps1 -PsmuxExe $exe
+
       - name: Run raw SSH pipe mouse integration
         shell: pwsh
         run: |
