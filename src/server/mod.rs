@@ -3640,7 +3640,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(i) = other_window {
                         let moved = match (pane, pane_is_id) {
                             (Some(p), true) => crate::tree::set_window_active_pane_by_id(&mut app, i, p),
-                            (Some(p), false) => crate::tree::set_window_active_pane_by_index(&mut app, i, p),
+                            (Some(p), false) => p.checked_sub(app.pane_base_index)
+                                .is_some_and(|pos| crate::tree::set_window_active_pane_by_index(&mut app, i, pos)),
                             // `select-pane -t <window>` with no pane part names
                             // that window's already active pane, so nothing
                             // moves anywhere (tmux: `wp == w->active`, :269).
@@ -3661,8 +3662,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let old_path = app.windows[app.active_idx].active_path.clone();
                         if pane_is_id {
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
-                        } else {
-                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, p); });
+                        } else if let Some(pos) = p.checked_sub(app.pane_base_index) {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
                         }
                         if app.windows[app.active_idx].active_path != old_path {
                             // tmux pushes the pane we came from onto
@@ -5802,7 +5803,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // -t targeting: evaluate format for the specific pane
                             // using PANE_POS_OVERRIDE so #{pane_active} reflects
                             // the REAL active pane, not the target (#113)
-                            crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pane_idx)
+                            match pane_idx.checked_sub(app.pane_base_index) {
+                                Some(pos) => crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pos),
+                                None => String::new(),
+                            }
                         } else {
                             expand_format(&fmt, &app)
                         })

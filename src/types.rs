@@ -3421,8 +3421,9 @@ pub enum WindowDumpFormat {
 /// The window and/or pane a command's -t names, as `CtrlReq::ValidateTarget`
 /// and `CtrlReq::Targeted` carry it.  `win` is a window index or, when
 /// `win_is_id` is set, an @id; `win_name` is a window name target.  `pane` is
-/// a %id when `pane_is_id` is set, otherwise a positional pane index within
-/// the target window (the active window when there is no window part).
+/// a %id when `pane_is_id` is set, otherwise the pane index as the user wrote
+/// it, pane-base-index included, within the target window (the active window
+/// when there is no window part); the resolver turns it into a position.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TempTarget {
     pub win: Option<usize>,
