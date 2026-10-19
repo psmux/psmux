@@ -1071,6 +1071,12 @@ This is useful for running completely separate psmux environments, for example o
 development and one for monitoring. On disk the state files become `<namespace>__<session>.*`
 under `~\.psmux\`.
 
+Because `__` joins the namespace and the session name on disk, a session in the default
+namespace (no `-L`) cannot have `__` in its name: `new-session` and `rename-session` refuse it
+with `invalid session: NAME`. A session named `a__b` would otherwise share its files with
+session `b` of `-L a`. Under `-L` any name works, including one that starts with the namespace
+itself (`psmux -L work new-session -s work__x`, then `-t work__x`).
+
 ## Key Binding Management
 
 ```powershell
