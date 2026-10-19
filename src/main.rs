@@ -1973,14 +1973,16 @@ fn run_main() -> io::Result<()> {
                     // never typed by the user (it came from last_session or the
                     // `0` default), so echoing it back would blame a session
                     // they never asked for.
+                    // A control client gets it as the %error reply to its
+                    // command line command (issue #857).
                     if !explicit_target
                         && crate::session::list_session_names_ns(l_socket_name.as_deref()).is_empty()
                     {
-                        eprintln!("psmux: no sessions");
+                        command_line_error_exit(control_mode, "psmux: ", "no sessions");
                     } else {
-                        eprintln!("psmux: can't find session: {}", shown);
+                        command_line_error_exit(
+                            control_mode, "psmux: ", &format!("can't find session: {}", shown));
                     }
-                    std::process::exit(1);
                 }
                 env::set_var("PSMUX_SESSION_NAME", name);
                 env::set_var("PSMUX_SESSION_DISPLAY_NAME", shown);
@@ -2208,12 +2210,11 @@ fn run_main() -> io::Result<()> {
                         None
                     };
                     if let Some(stored) = case_variant {
-                        eprintln!(
+                        command_line_error_exit(control_mode, "", &format!(
                             "duplicate session: {} (differs only in case from session {}, which psmux cannot keep apart on Windows)",
                             name,
                             crate::session::display_session_name(l_socket_name.as_deref(), &stored)
-                        );
-                        std::process::exit(1);
+                        ));
                     }
                     if server_alive {
                         if attach_if_exists {
@@ -2225,8 +2226,8 @@ fn run_main() -> io::Result<()> {
                             // Skip server creation, jump straight to attach
                             // (handled at the bottom of this match block)
                         } else {
-                            eprintln!("duplicate session: {}", name);
-                            std::process::exit(1);
+                            command_line_error_exit(
+                                control_mode, "", &format!("duplicate session: {}", name));
                         }
                     } else {
                         // Stale port file - remove it and continue
@@ -6494,6 +6495,9 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     // `ssh -t`. Some clients (e.g. iTerm2's tmux integration) close stdin
     // on the SSH session shortly after seeing the DCS opener when no PTY
     // is allocated, so supporting `ssh -t` is required for them.
+    // Whether stdin is a console whose own echo is switched off below.
+    #[allow(unused_mut)]
+    let mut stdin_console = false;
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]
@@ -6516,6 +6520,7 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
             let mut mode_in: u32 = 0;
             let mut mode_out: u32 = 0;
             if GetConsoleMode(h_in, &mut mode_in) != 0 {
+                stdin_console = true;
                 let new_in = (mode_in & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
                     | ENABLE_VIRTUAL_TERMINAL_INPUT;
                 let r = SetConsoleMode(h_in, new_in);
@@ -6574,8 +6579,18 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth failed: {}", ok_line.trim())));
     }
 
-    // Send CONTROL or CONTROL_NOECHO
-    let mode_str = if mode == 1 { "CONTROL" } else { "CONTROL_NOECHO" };
+    // Send CONTROL, CONTROL_QUIET or CONTROL_NOECHO.
+    //
+    // tmux itself never echoes a command line. What a `tmux -C` user at a
+    // terminal sees is the tty's own echo, and a pipe has none (issue #857).
+    // The console's echo was switched off above to read it raw, so the
+    // server stands in for it (CONTROL); a pipe, or a Cygwin pty that still
+    // echoes for itself, gets no echo at all (CONTROL_QUIET).
+    let mode_str = match (mode, stdin_console) {
+        (1, true) => "CONTROL",
+        (1, false) => "CONTROL_QUIET",
+        _ => "CONTROL_NOECHO",
+    };
     let mut write_stream = reader.get_ref().try_clone()?;
     write!(write_stream, "{}\n", mode_str)?;
     write_stream.flush()?;
@@ -6891,6 +6906,44 @@ fn control_mode_finish(mode: u8, exit_line: Option<&str>) -> bool {
     }
     let _ = out.flush();
     true
+}
+
+/// The command on a control client's command line failed before any server
+/// took it: report it the way tmux does and exit 1.
+///
+/// tmux runs that command inside the server, so its failure is the reply to
+/// it, a `%begin` / `%error` block flagged 0 (not from the client's stdin),
+/// followed by `%exit`, all on stdout and nothing on stderr (issue #857).
+/// psmux decides these failures in the client, which used to write
+/// `psmux: can't find session: X` to stderr and leave stdout empty, so a
+/// control client never saw the reply it was waiting for.
+///
+/// Outside control mode the message goes to stderr as before, with
+/// `stderr_prefix` in front of it.
+fn command_line_error_exit(control_mode: u8, stderr_prefix: &str, msg: &str) -> ! {
+    if control_mode == 0 {
+        eprintln!("{}{}", stderr_prefix, msg);
+        std::process::exit(1);
+    }
+    let ts = chrono::Utc::now().timestamp();
+    let mut block = String::new();
+    if control_mode == 2 {
+        block.push_str("\x1bP1000p");
+    }
+    block.push_str(&crate::control::format_initial_begin(ts, 1));
+    block.push('\n');
+    block.push_str(msg);
+    block.push('\n');
+    block.push_str(&crate::control::format_initial_error(ts, 1));
+    block.push('\n');
+    {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(block.as_bytes());
+        let _ = out.flush();
+    }
+    control_mode_finish(control_mode, Some("%exit"));
+    std::process::exit(1);
 }
 
 /// show-buffer and save-buffer with a `-b` name no buffer has: the server

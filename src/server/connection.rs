@@ -2005,10 +2005,18 @@ if line.trim() == "PERSISTENT" {
     }
 }
 
-// Check for CONTROL or CONTROL_NOECHO (control mode)
+// Check for CONTROL, CONTROL_QUIET or CONTROL_NOECHO (control mode).
+//
+// CONTROL is `-C` on a console: the client switched the console's own echo
+// off to read it raw, so the server writes each command line back in its
+// place, which is what a tty shows a `tmux -C` user. CONTROL_QUIET is `-C`
+// on a pipe or a pty that echoes for itself: tmux never echoes anything, and
+// a client reading the stream sees only protocol lines (issue #857).
+// CONTROL_NOECHO is `-CC`.
 let control_echo = line.trim() == "CONTROL";
+let control_quiet = line.trim() == "CONTROL_QUIET";
 let control_noecho = line.trim() == "CONTROL_NOECHO";
-if control_echo || control_noecho {
+if control_echo || control_quiet || control_noecho {
     let _ = r.get_ref().set_nodelay(true);
     let _ = write_stream.set_nodelay(true);
     let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(5000)));
@@ -2138,17 +2146,17 @@ if control_echo || control_noecho {
     //   - flag=0 (server-originated) creates a synthetic currentCommand_
     //     and the matching %end fires tmuxInitialCommandDidCompleteSuccessfully
     //     which kicks off iTerm's tmux integration (phony-command, ping, etc.).
+    //
+    // `-C` gets the same block without the DCS: tmux answers the command
+    // line command first in every control mode, and a client that pairs
+    // replies with commands in order counts on it. psmux used to send a
+    // blank line here instead, so every later reply landed on the command
+    // before it (issue #857).
     {
         let mut ws = write_lock.lock().unwrap();
-        if control_noecho {
-            let init_ts = chrono::Utc::now().timestamp();
-            // DCS opener (no newline) immediately followed by %begin, sent
-            // as one write: the bytes are the same, only the send count drops.
-            let _ = write!(ws, "\x1bP1000p%begin {0} 1 0\n%end {0} 1 0\n", init_ts);
-        } else {
-            // -C (echo) mode: no DCS, just a blank ready line
-            let _ = writeln!(ws);
-        }
+        let init_ts = chrono::Utc::now().timestamp();
+        // One write: DCS opener (no newline) and the block together.
+        let _ = ws.write_all(control::initial_reply_block(init_ts, control_noecho).as_bytes());
         let _ = ws.flush();
     }
 
@@ -2167,7 +2175,9 @@ if control_echo || control_noecho {
     });
 
     // Control mode command loop: read lines, dispatch, wrap in %begin/%end/%error
-    let mut cmd_counter: u64 = 0;
+    // Number 1 is the initial block above; tmux numbers every command
+    // uniquely, so the first stdin command is 2, never a second 1.
+    let mut cmd_counter: u64 = 1;
     let tx_ctrl = tx.clone();
     let aliases_ctrl = aliases.clone();
     // Queue of pending sub-command strings produced by splitting a single input

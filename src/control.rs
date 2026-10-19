@@ -212,6 +212,40 @@ pub fn format_error(timestamp: i64, cmd_number: u64) -> String {
     format!("%error {} {} 1", timestamp, cmd_number)
 }
 
+// The reply to the command on the control client's own command line
+// (`-C attach`, `-C new-session -A`) is flagged 0, because the item did not
+// come from the client's stdin: tmux sets the flag from CMDQ_STATE_CONTROL,
+// which only control.c's stdin reader puts on an item (cmd-queue.c
+// cmdq_fire_command, issue #857).
+
+/// `%begin` of the reply to the command line command (flag 0).
+pub fn format_initial_begin(timestamp: i64, cmd_number: u64) -> String {
+    format!("%begin {} {} 0", timestamp, cmd_number)
+}
+
+/// `%end` of the reply to the command line command (flag 0).
+pub fn format_initial_end(timestamp: i64, cmd_number: u64) -> String {
+    format!("%end {} {} 0", timestamp, cmd_number)
+}
+
+/// `%error` of the reply to a failed command line command (flag 0).
+pub fn format_initial_error(timestamp: i64, cmd_number: u64) -> String {
+    format!("%error {} {} 0", timestamp, cmd_number)
+}
+
+/// The whole reply block a control connection opens with, before any
+/// notification: tmux answers the command line command first. `-CC` puts the
+/// DCS opener directly in front of it with no newline (control.c
+/// control_start), which iTerm2 needs to see before `%begin`.
+pub fn initial_reply_block(timestamp: i64, dcs: bool) -> String {
+    format!(
+        "{}{}\n{}\n",
+        if dcs { "\x1bP1000p" } else { "" },
+        format_initial_begin(timestamp, 1),
+        format_initial_end(timestamp, 1),
+    )
+}
+
 /// Emit a control notification to all connected control mode clients.
 /// Non-blocking: if a client's channel is full, the notification is dropped for that client.
 pub fn emit_notification(app: &AppState, notif: ControlNotification) {
@@ -737,6 +771,23 @@ mod tests {
         assert_eq!(format_begin(1700000000, 1), "%begin 1700000000 1 1");
         assert_eq!(format_end(1700000000, 1), "%end 1700000000 1 1");
         assert_eq!(format_error(1700000000, 1), "%error 1700000000 1 1");
+    }
+
+    // Issue #857: the reply to the command line command is flagged 0, and
+    // only -CC puts the DCS opener in front of it, with no newline between.
+    #[test]
+    fn issue857_initial_reply_block_is_flagged_zero() {
+        assert_eq!(format_initial_begin(1700000000, 1), "%begin 1700000000 1 0");
+        assert_eq!(format_initial_end(1700000000, 1), "%end 1700000000 1 0");
+        assert_eq!(format_initial_error(1700000000, 1), "%error 1700000000 1 0");
+        assert_eq!(
+            initial_reply_block(1700000000, false),
+            "%begin 1700000000 1 0\n%end 1700000000 1 0\n"
+        );
+        assert_eq!(
+            initial_reply_block(1700000000, true),
+            "\x1bP1000p%begin 1700000000 1 0\n%end 1700000000 1 0\n"
+        );
     }
 
     #[test]
