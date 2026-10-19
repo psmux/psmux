@@ -299,7 +299,9 @@ fn yank_line_selection_keeps_cuf_gaps() {
 fn yank_char_selection_keeps_cuf_gaps() {
     let _clip = ClipboardGuard::new();
     let mut app = app_showing(CUF_PAYLOAD);
-    // Single-line char selection covering exactly "CUFA    CUFB".
+    // vi keys copy the cell under the end too (emacs keys leave it out, as
+    // tmux does), so this char selection covers exactly "CUFA    CUFB".
+    app.mode_keys = "vi".to_string();
     select_all_of_row0(&mut app, SelectionMode::Char, 11);
     yank_selection(&mut app).expect("yank");
     assert_eq!(

@@ -78,7 +78,7 @@ impl portable_pty::MasterPty for DummyMaster {
     fn tty_name(&self) -> Option<std::path::PathBuf> { None }
 }
 
-fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
+pub(super) fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
     let term = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {
@@ -116,7 +116,7 @@ fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
     }
 }
 
-fn make_window(id: usize) -> crate::types::Window {
+pub(super) fn make_window(id: usize) -> crate::types::Window {
     crate::types::Window {
         root: Node::Split { kind: crate::types::LayoutKind::Horizontal, sizes: vec![], children: vec![] },
         active_path: vec![],
@@ -142,7 +142,7 @@ fn make_window(id: usize) -> crate::types::Window {
 
 /// One window, one pane (root is the leaf so `active_path` stays empty), with
 /// `bytes` already fed through the pane's vt100 parser.
-fn app_showing(bytes: &[u8]) -> AppState {
+pub(super) fn app_showing(bytes: &[u8]) -> AppState {
     let mut app = AppState::new("fidelity".to_string());
     app.window_base_index = 0;
     app.pane_base_index = 0;

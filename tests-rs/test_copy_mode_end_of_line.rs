@@ -254,13 +254,18 @@ fn end_of_line_scrolls_down_to_the_rest_of_a_wrapped_line() {
     assert_eq!(app.copy_scroll_offset, sb - 1, "the view moved down one row");
 }
 
-// The copy itself is checked through one_row_selection_text: yank_selection
-// also writes the system clipboard, which a unit test must not touch.
+// The copy itself is checked through selection_text: yank_selection also
+// writes the system clipboard, which a unit test must not touch.
+fn one_row_selection_text(p: &mut vt100::Parser, row: u16, c0: u16, c1: u16, cols: u16) -> String {
+    let (r, mode) = (row as i64, crate::types::SelectionMode::Char);
+    selection_text(p, ROWS, cols, (r, c0), (r, c1), mode, false, 0)
+}
+
 #[test]
 fn a_one_row_selection_past_the_text_copies_only_the_text() {
     let mut p = vt100::Parser::new(ROWS, COLS, 0);
     p.process(format!("trail   \r\na   b\r\n{CJK}x\r\n").as_bytes());
-    let s = p.screen();
+    let s = &mut p;
     assert_eq!(one_row_selection_text(s, 0, 0, 7, COLS), "trail");
     assert_eq!(one_row_selection_text(s, 0, 0, COLS - 1, COLS), "trail");
     assert_eq!(one_row_selection_text(s, 0, 2, 3, COLS), "ai");

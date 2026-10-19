@@ -95,6 +95,9 @@ fn make_pane(id: usize) -> crate::types::Pane {
 fn app_with(mode: &str) -> AppState {
     let mut app = AppState::new("issue732".to_string());
     app.mouse_enabled = true;
+    // vi keys copy the cell under the pointer too; emacs keys (the default)
+    // leave it out, as tmux does, which is not what these tests are about.
+    app.mode_keys = "vi".to_string();
     app.last_window_area = AREA;
     if mode != "off" {
         app.user_options.insert("copy-mode-line-numbers".into(), mode.into());

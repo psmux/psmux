@@ -65,6 +65,9 @@ function Stop-Ns {
 function Start-Ns {
     Stop-Ns
     & $PSMUX -L $NS new-session -d -s s -x 80 -y 24 $child 2>&1 | Out-Null
+    # The vi keys and the copies below are vi's: emacs keys leave the end
+    # cell of a selection out, as tmux does.
+    & $PSMUX -L $NS set -g mode-keys vi 2>&1 | Out-Null
     Start-Sleep -Milliseconds 2200
     & $PSMUX -L $NS copy-mode -t s 2>&1 | Out-Null
     # Park the cursor on LINE196 (row 18 of 24), clear of both edges so no

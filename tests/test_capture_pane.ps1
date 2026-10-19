@@ -163,23 +163,18 @@ $lines8 = $out8 -split "`n"
 Check "-e -S -E returns reasonable lines" ($lines8.Count -le 15)
 
 # =============================================================================
-# TEST 9: capture-pane -J (join lines / trim whitespace)
+# TEST 9: capture-pane -J (join wrapped lines)
 # =============================================================================
 Write-Host "`n--- TEST 9: Join lines -J ---" -ForegroundColor Yellow
 
 $out9 = & $exe capture-pane -t $SESSION -p -J 2>&1 | Out-String
 Check "-J flag returns content" ($out9.Length -gt 0)
-# -J should produce output with no trailing whitespace on any line
-$lines9 = $out9 -split "`n"
-$j_trailing = $false
-foreach ($line in $lines9) {
-    # Check for trailing spaces/tabs (not newlines) on lines that have visible content
-    if ($line.TrimEnd("`r") -match "[ `t]+$" -and $line.Trim().Length -gt 0) {
-        $j_trailing = $true
-        break
-    }
-}
-Check "-J has no trailing whitespace" (-not $j_trailing)
+# -J joins wrapped rows and, like tmux, keeps the spaces the program printed
+# (cmd-capture-pane.c leaves GRID_STRING_TRIM_SPACES off for -J), so it never
+# has more lines than the plain capture. tests/test_capture_pane_join.ps1
+# checks the joined text itself.
+$plain9 = & $exe capture-pane -t $SESSION -p 2>&1 | Out-String
+Check "-J has no more lines than the plain capture" (($out9 -split "`n").Count -le ($plain9 -split "`n").Count)
 
 # =============================================================================
 # TEST 10: capture-pane -S - (all history)
