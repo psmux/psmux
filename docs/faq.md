@@ -148,7 +148,7 @@ A: They are all the same binary. psmux installs as `psmux.exe` with `pmux.exe` a
 A: Yes. Add `set -g scroll-enter-copy-mode off` to your config. Scroll events will be passed directly to the running application instead of entering copy mode.
 
 **Q: Ctrl+V is intercepted by psmux even after unbinding. How do I let Ctrl+V reach neovim/vim?**
-A: psmux has a Windows paste detection system that intercepts Ctrl+V at the client input layer, outside of the key binding system. `unbind-key -n C-v` alone will not stop it. Add `set -g paste-detection off` to your `~/.psmux.conf`. This forwards Ctrl+V to the child application so neovim can use it for visual block mode. You can still paste using Ctrl+Shift+V, right click, or Prefix + ]. See [configuration.md](configuration.md#paste-detection-ctrlv-passthrough) for details.
+A: First check the terminal: Windows Terminal pastes on Ctrl+V by default and then the key never reaches psmux or neovim at all. Remove its `ctrl+v` paste action (or bind paste to Ctrl+Shift+V only). Once the terminal does not paste on Ctrl+V, psmux treats the key like tmux does: a `bind -n C-v` binding runs, and with no binding the pane gets C-v, so neovim enters visual block mode. Older psmux versions needed `set -g paste-detection off` for this; it is no longer required. You can still paste using Ctrl+Shift+V, right click, or Prefix + ]. See [configuration.md](configuration.md#paste-detection-ctrlv-passthrough) for details.
 
 **Q: How do I chain multiple commands in a key binding?**
 A: Use `\;` to separate commands: `bind-key M-s split-window -h \; select-pane -L`. The semicolon must be escaped in config files.

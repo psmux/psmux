@@ -156,7 +156,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `ctrl-wheel-zoom` | Bool | `off` | Windows Terminal only: Ctrl+Wheel zooms the terminal font one step per notch instead of scrolling the pane. psmux has mouse reporting on, so Windows Terminal forwards Ctrl+Wheel to it; with this on, psmux sends Windows Terminal its default zoom keys (Ctrl+Numpad Plus / Minus) back. Does nothing over SSH, in other terminals, or when `experimental.scrollToZoom` is `false` in that terminal's settings |
 | `mouse-drag-enter-copy-mode` | Bool | `off` | Enter copy mode and select there on a left-button drag in a pane that does not track the mouse (tmux's `MouseDragStart` → `copy-mode -M`) instead of the psmux client-side selection overlay |
 | `pwsh-mouse-selection` | Bool | `off` | tmux-like release-copy selection with word/line multi-click and pane-clipped extraction |
-| `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host and send as bracketed paste (set `off` to let Ctrl+V reach child apps like neovim) |
+| `paste-detection` | Bool | `on` | Reassemble a terminal's Ctrl+V paste into one bracketed paste. A Ctrl+V the terminal does not paste on reaches bindings and the pane as C-v either way (set `off` to forward every key as typed) |
 | `choose-tree-preview` | Bool | `off` | Open `choose-session` / `choose-tree` pickers with the live preview pane already visible (saves pressing `p`). See [preview.md](preview.md) |
 | `bold-is-bright` | Bool | `on` | Restore standard SGR codes for the 16 basic colors so the outer terminal renders `bold` as bright (matches a bare shell). Set `off` to keep explicit 256-indexed low colors byte-accurate. See [Bold Is Bright](#bold-is-bright-color-rendering) |
 | `status` | Bool/Int | `on` | Show status bar (number = line count) |
@@ -595,23 +595,23 @@ This option is independent of `mouse` (which controls whether mouse events are r
 
 ### Paste Detection (Ctrl+V Passthrough)
 
-On Windows, the console host intercepts Ctrl+V, reads the clipboard, and injects the content as character events. psmux detects this pattern and reassembles it into a single bracketed paste for child applications. This is the `paste-detection` option and it is enabled by default.
+On Windows, a terminal that pastes on Ctrl+V (Windows Terminal does by default) takes the key itself and hands psmux the clipboard as a burst of character events. psmux detects this pattern and reassembles it into a single bracketed paste for child applications. This is the `paste-detection` option and it is enabled by default.
 
-If you use TUI applications like **neovim** or **vim** where Ctrl+V has a different meaning (visual block mode), the paste detection will intercept the keypress before it reaches the application. To let Ctrl+V pass through to the child app:
+If the terminal does **not** paste on Ctrl+V (for example Windows Terminal with its `ctrl+v` paste action removed), the key reaches psmux as an ordinary key and is treated like one, as in tmux: a binding such as `bind -n C-v split-window -h` runs and pastes nothing, and with no binding the pane receives C-v, so **neovim** and **vim** get visual block mode. psmux waits a moment after the press to tell this apart from a terminal that delivers the press and then the pasted characters.
+
+If the terminal itself pastes on Ctrl+V, the key never reaches psmux or the application, and only the terminal's own setting can change that. To stop psmux from reassembling character bursts into bracketed pastes:
 
 ```tmux
-# Disable paste detection so Ctrl+V reaches child apps
+# Forward every key as typed, with no paste reassembly
 set -g paste-detection off
 ```
 
-With paste detection off, you can still paste using:
+You can paste using:
 
 * **Ctrl+Shift+V** (Windows Terminal default paste shortcut)
 * **Right click** (paste in most terminals)
 * **Prefix + ]** (psmux paste from buffer)
 * **`psmux send-keys C-v`** from another terminal
-
-> **Note:** `unbind-key -n C-v` alone is not sufficient to stop Ctrl+V interception because the paste detection operates outside the key binding system. You must use `set -g paste-detection off`.
 
 ### Live Preview in Choosers
 
