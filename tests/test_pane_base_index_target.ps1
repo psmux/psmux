@@ -26,7 +26,16 @@
 #   windows, whatever the base, so that case is not checked here.)
 # - A floating pane after the two tiled ones is index 7 (X:.7, X:0.7); 8 and
 #   2 name no pane.
-# - With pane-base-index set back to 0, the same targets one lower work.
+# - With pane-base-index set back to 0, the corresponding targets work (0 and
+#   1 for the first and second pane).
+# - join-pane and move-pane read both ends the same way, in one session and
+#   across two: -s <window>.6 moves pane 6 and -t <window>.6 puts the pane
+#   after pane 6, where both used to be "can't find pane: 6"; 1 is refused
+#   where it used to name pane 6. Across sessions, -t <window>.6 passed the
+#   CLI's check and failed only after the source pane was taken out of its
+#   session, so the pane was in neither. Each case gets fresh sessions; the
+#   corresponding cases run with pane-base-index 0 (0 and 1 for the first and
+#   second pane).
 #
 # Isolation: a unique -L namespace, a PSMUX_DATA_DIR, USERPROFILE and HOME of
 # its own, a config of one line, and cleanup only with `-L <ns> kill-server`.
@@ -141,6 +150,45 @@ function Expect-Pane([string]$Target, $Pane) {
     $Want = "$($Pane.WinId)|$($Pane.Index)|1|1"
     Check ($Select.Code -eq 0 -and $Focus -match [regex]::Escape($Want)) "select-pane -t $Target makes pane $($Pane.Index) active" "exit $($Select.Code), focus '$Focus'"
     Reset-Focus
+}
+
+# A fresh session for one join-pane case: window 0 and, with -Windows 2,
+# window 1, each with two panes. Its pane-base-index is the config's 5 unless
+# -Base says otherwise. Returns its panes as "<window index>|<pane index>|<pane id>".
+function New-JoinSession([string]$Name, [int]$Windows, [int]$Base = 5) {
+    & $Psmux -L $Ns new-session -d -s $Name *> $null
+    $Deadline = (Get-Date).AddSeconds(15)
+    do {
+        $Probe = Invoke-Psmux @("has-session", "-t", $Name) 5000
+        if ($Probe.Code -eq 0) { break }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $Deadline)
+    foreach ($PidFile in Get-ChildItem $DataDir -Filter "*.pid" -ErrorAction SilentlyContinue) {
+        $script:ServerPids += [int](([System.IO.File]::ReadAllText($PidFile.FullName)).Trim().Split(":")[0])
+    }
+    if ($Probe.Code -ne 0) { throw "session $Name did not come up" }
+    if ($Base -ne 5) { Expect-Step @("set-option", "-t", $Name, "-g", "pane-base-index", "$Base") | Out-Null }
+    Expect-Step @("split-window", "-t", "${Name}:0") | Out-Null
+    if ($Windows -ge 2) {
+        Expect-Step @("new-window", "-t", $Name) | Out-Null
+        Expect-Step @("split-window", "-t", "${Name}:1") | Out-Null
+    }
+    Start-Sleep -Milliseconds 1500
+    $Panes = Get-JoinPanes $Name
+    $Want = @("0|$Base", "0|$($Base + 1)")
+    if ($Windows -ge 2) { $Want += @("1|$Base", "1|$($Base + 1)") }
+    $Layout = @($Panes | ForEach-Object { ($_.Split("|"))[0..1] -join "|" })
+    if (($Layout -join ",") -ne ($Want -join ",")) { throw "unexpected layout in ${Name}: $($Panes -join ',')" }
+    Expect-Step @("select-pane", "-t", (Get-JoinPaneId $Panes 0 $Base)) | Out-Null
+    return $Panes
+}
+
+function Get-JoinPanes([string]$Name) {
+    return @((Expect-Step @("list-panes", "-s", "-t", $Name, "-F", "#{window_index}|#{pane_index}|#{pane_id}")).Out -split "`r?`n" | Where-Object { $_ })
+}
+
+function Get-JoinPaneId($Panes, [int]$Window, [int]$Index) {
+    return (($Panes | Where-Object { $_ -like "$Window|$Index|*" }) -split "\|")[2]
 }
 
 function Expect-NoPane([string]$Target) {
@@ -281,7 +329,7 @@ try {
     Expect-Step @("kill-pane", "-t", $Float) | Out-Null
     Start-Sleep -Milliseconds 500
 
-    Write-Host "`n--- pane-base-index 0: the same panes one number lower ---" -ForegroundColor Yellow
+    Write-Host "`n--- pane-base-index 0: the same panes as 0 and 1 ---" -ForegroundColor Yellow
     Expect-Step @("set-option", "-g", "pane-base-index", "0") | Out-Null
     foreach ($Pane in $script:Panes) { $Pane.Index = [string]([int]$Pane.Index - 5) }
     foreach ($Target in @("$W0.1", "X:.1", "X:0.1", "X.1")) { Expect-Pane $Target $W0Second }
@@ -290,6 +338,49 @@ try {
     $Select = Invoke-Psmux @("select-pane", "-t", "$W1.1")
     $Focus = Get-Focus
     Check ($Select.Code -eq 0 -and $Focus -match [regex]::Escape("$W1|1|1|0") -and $Focus -match [regex]::Escape("$W0|0|1|1")) "select-pane -t $W1.1 moves window 1 to pane 1, window 0 stays current" "exit $($Select.Code), focus '$Focus'"
+
+    # join-pane and move-pane, in a fresh session per case. Each end is a
+    # pane index the way #{pane_index} shows it, in one session and across
+    # two (the CLI extracts the pane from one server and grafts it into the
+    # other). The joined pane goes after the -t pane, or after the active
+    # pane 5 when -t names only a window.
+    Write-Host "`n--- pane-base-index 5: join-pane and move-pane ---" -ForegroundColor Yellow
+    $script:JoinNumber = 0
+    function Test-Join([string]$Label, [scriptblock]$CliArgs, [int]$Base, [bool]$Cross, [string]$WantJ, [string]$WantK, [bool]$Refused) {
+        $script:JoinNumber++
+        $J = "J$script:JoinNumber"; $K = "K$script:JoinNumber"
+        $JPanes = New-JoinSession $J 2 $Base
+        $KPanes = if ($Cross) { New-JoinSession $K 1 $Base } else { @() }
+        $JoinArgs = & $CliArgs $J $K $JPanes $KPanes
+        $Result = Invoke-Psmux $JoinArgs 20000
+        Start-Sleep -Milliseconds 700
+        # Pane ids are per server, so a pane grafted across sessions gets a
+        # new one; the layout is compared by window and index, with the ids
+        # of panes that stayed or moved within the session.
+        $Name = { param($Panes, $Rows) ($Rows | ForEach-Object {
+            $Field = $_.Split("|"); $Old = ($Panes | Where-Object { $_ -like "*|$($Field[2])" })
+            if ($Old) { "$($Field[0]).$($Field[1])=" + ($Old.Split("|")[0..1] -join ".") } else { "$($Field[0]).$($Field[1])=new" } }) -join " " }
+        $GotJ = & $Name $JPanes (Get-JoinPanes $J)
+        $GotK = if ($Cross) { & $Name $KPanes (Get-JoinPanes $K) } else { "" }
+        $CodeOk = if ($Refused) { $Result.Code -eq 1 -and $Result.Err -match "can't find pane" } else { $Result.Code -eq 0 }
+        Check ($CodeOk -and $GotJ -eq $WantJ -and $GotK -eq $WantK) "$Label ($($JoinArgs -join ' '))" "exit $($Result.Code), '$($Result.Err)', J '$GotJ' (want '$WantJ'), K '$GotK' (want '$WantK')"
+        Expect-Step @("kill-session", "-t", $J) | Out-Null
+        if ($Cross) { Expect-Step @("kill-session", "-t", $K) | Out-Null }
+        Start-Sleep -Milliseconds 300
+    }
+    $Unmoved = "0.5=0.5 0.6=0.6 1.5=1.5 1.6=1.6"
+    Test-Join "join-pane -s <window 1>.6 moves pane 6 of window 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:1.6", "-t", "${J}:0") } 5 $false "0.5=0.5 0.6=1.6 0.7=0.6 1.5=1.5" "" $false
+    Test-Join "move-pane -s <window 1>.6 moves pane 6 of window 1" { param($J, $K, $JP, $KP) @("move-pane", "-s", "${J}:1.6", "-t", "${J}:0") } 5 $false "0.5=0.5 0.6=1.6 0.7=0.6 1.5=1.5" "" $false
+    Test-Join "join-pane -s <window 1>.1 is refused" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:1.1", "-t", "${J}:0") } 5 $false $Unmoved "" $true
+    Test-Join "join-pane -t <window 0>.6 puts the pane after pane 6" { param($J, $K, $JP, $KP) @("join-pane", "-s", (Get-JoinPaneId $JP 1 6), "-t", "${J}:0.6") } 5 $false "0.5=0.5 0.6=0.6 0.7=1.6 1.5=1.5" "" $false
+    Test-Join "join-pane -t <window 0>.1 is refused" { param($J, $K, $JP, $KP) @("join-pane", "-s", (Get-JoinPaneId $JP 1 6), "-t", "${J}:0.1") } 5 $false $Unmoved "" $true
+    Test-Join "across sessions, -s <other>:0.6 moves that pane" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${K}:0.6", "-t", "${J}:0") } 5 $true "0.5=0.5 0.6=new 0.7=0.6 1.5=1.5 1.6=1.6" "0.5=0.5" $false
+    Test-Join "across sessions, -t <window 0>.6 puts the pane after pane 6" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${K}:$(Get-JoinPaneId $KP 0 6)", "-t", "${J}:0.6") } 5 $true "0.5=0.5 0.6=0.6 0.7=new 1.5=1.5 1.6=1.6" "0.5=0.5" $false
+
+    Write-Host "`n--- pane-base-index 0: join-pane with the same panes as 0 and 1 ---" -ForegroundColor Yellow
+    Test-Join "join-pane -s <window 1>.1 moves pane 1 of window 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:1.1", "-t", "${J}:0") } 0 $false "0.0=0.0 0.1=1.1 0.2=0.1 1.0=1.0" "" $false
+    Test-Join "join-pane -t <window 0>.1 puts the pane after pane 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", (Get-JoinPaneId $JP 1 1), "-t", "${J}:0.1") } 0 $false "0.0=0.0 0.1=0.1 0.2=1.1 1.0=1.0" "" $false
+    Test-Join "across sessions, -t <window 0>.1 puts the pane after pane 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${K}:$(Get-JoinPaneId $KP 0 1)", "-t", "${J}:0.1") } 0 $true "0.0=0.0 0.1=0.1 0.2=new 1.0=1.0 1.1=1.1" "0.0=0.0" $false
 }
 catch {
     Fail "setup or unexpected error: $_"

@@ -733,12 +733,13 @@ pub(crate) fn resolve_join_end(app: &AppState, t: &crate::types::TempTarget) -> 
     } else {
         return Err("no current window".to_string());
     };
-    if let Some(p) = t.pane {
-        if crate::tree::pane_paths(&app.windows[pos].root).get(p).is_none() {
-            return Err(format!("can't find pane: {}", p));
-        }
-    }
-    Ok((pos, t.pane))
+    let Some(p) = t.pane else { return Ok((pos, None)) };
+    // The pane index as #{pane_index} shows it: pane-base-index comes off
+    // before it is a position in the window's pane order.
+    let pane_pos = p.checked_sub(app.pane_base_index)
+        .filter(|pane_pos| *pane_pos < crate::tree::pane_paths(&app.windows[pos].root).len())
+        .ok_or_else(|| format!("can't find pane: {}", p))?;
+    Ok((pos, Some(pane_pos)))
 }
 
 /// The server's join-pane / move-pane: resolve both ends strictly (pane ids
