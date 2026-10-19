@@ -1131,6 +1131,15 @@ fn ensure_standby_server(ns: Option<&str>, warm_base: &str, wait: bool) -> io::R
     std::process::exit(1);
 }
 
+fn write_shell_output(mut stream: impl Write + IsTerminal, bytes: &[u8]) -> io::Result<()> {
+    // Windows console stdio requires UTF-8. Redirected output retains the child's bytes.
+    #[cfg(windows)]
+    if stream.is_terminal() {
+        return stream.write_all(String::from_utf8_lossy(bytes).as_bytes());
+    }
+    stream.write_all(bytes)
+}
+
 fn run_main() -> io::Result<()> {
     // `-L=foo` first (flag_equals), then `-Lfoo` (attached globals), then
     // command-level `-tname` (attached target): running attached passes
@@ -4263,8 +4272,8 @@ fn run_main() -> io::Result<()> {
                 } else {
                     let mut c = build(&shell_cmd);
                     let output = c.output()?;
-                    io::stdout().write_all(&output.stdout)?;
-                    io::stderr().write_all(&output.stderr)?;
+                    write_shell_output(io::stdout(), &output.stdout)?;
+                    write_shell_output(io::stderr(), &output.stderr)?;
                     std::process::exit(output.status.code().unwrap_or(0));
                 }
                 return Ok(());
@@ -6638,7 +6647,7 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         let _ = f.flush();
     }
 
-    // Use raw Win32 ReadFile for stdin to handle SSH pipe edge cases.
+    // Retain raw Win32 ReadFile for non-console input to handle SSH pipe edge cases.
     // Windows sshd may close the stdin pipe before the SSH channel is
     // fully established (race condition). We use PeekNamedPipe to
     // distinguish a genuinely broken pipe from a temporary condition.
@@ -6657,10 +6666,15 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     let mut eof_retries: u32 = 0;
     const MAX_EOF_RETRIES: u32 = 20; // 20 * 50ms = 1 second of retries
 
+    #[cfg(windows)]
+    let mut console_reader = crate::platform::ControlConsoleReader::default();
     loop {
-        // On Windows, use ReadFile directly for better diagnostics
+        // Console reads preserve raw control characters and split UTF-16 pairs.
+        // Non-console handles retain raw reads and the SSH startup retries below.
         #[cfg(windows)]
-        let read_result = {
+        let read_result = if io::stdin().is_terminal() {
+            console_reader.read(&mut stdin_buf)
+        } else {
             #[link(name = "kernel32")]
             extern "system" {
                 fn ReadFile(
