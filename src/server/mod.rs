@@ -3482,7 +3482,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if closed_float {
                         state_dirty = true;
                     } else {
+                        let win_id = app.windows[app.active_idx].id;
                         unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                        control::emit_layout_change_for(&app, win_id);
                     }
                 }
                 CtrlReq::KillPaneById(pid) => {
@@ -3503,7 +3505,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         };
                         state_dirty = true;
                     } else {
+                        let win_id = app.windows.iter()
+                            .find(|w| crate::tree::find_path_by_id(&w.root, pid).is_some())
+                            .map(|w| w.id);
                         unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                        if let Some(win_id) = win_id { control::emit_layout_change_for(&app, win_id); }
                     }
                 }
                 CtrlReq::CapturePane(resp, pane_id, preserve_trailing) => {

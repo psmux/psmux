@@ -99,6 +99,21 @@ pub fn layout_change(app: &AppState, win_idx: usize, area: Rect) -> Option<Contr
     })
 }
 
+/// `%layout-change` for the window with this id, if it still exists. tmux
+/// sends it when a pane closes and its window stays (layout_close_pane,
+/// notify_window "window-layout-changed"); a window that closed gets
+/// `%window-close` from the window list diff instead.
+pub fn emit_layout_change_for(app: &AppState, window_id: usize) {
+    if app.control_clients.is_empty() {
+        return;
+    }
+    if let Some(idx) = app.windows.iter().position(|w| w.id == window_id) {
+        if let Some(n) = layout_change(app, idx, app.windows[idx].area) {
+            emit_notification(app, n);
+        }
+    }
+}
+
 /// Format a control mode notification as a tmux wire-compatible line.
 pub fn format_notification(notif: &ControlNotification) -> String {
     match notif {

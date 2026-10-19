@@ -155,6 +155,10 @@ try {
     Start-Sleep -Milliseconds 800
     $close = @((Get-Notes $from) | Where-Object { $_ -match 'window-close ' })
     if ($close.Count -eq 0) { Write-Pass "kill-pane $p2 -> no %window-close" } else { Write-Fail "kill-pane $p2 -> '$($close -join ' / ')'" }
+    # tmux sends %layout-change for the window that keeps its other pane
+    # (layout_close_pane, notify_window "window-layout-changed").
+    $lc = @((Get-Notes $from) | Where-Object { $_ -match "^%layout-change $w1 " })
+    if ($lc.Count -ge 1 -and $lc[-1] -notmatch '[\[{]') { Write-Pass "kill-pane $p2 -> '$($lc[-1])'" } else { Write-Fail "kill-pane $p2 -> no one-pane %layout-change $w1 in: $((Get-Notes $from) -join ' / ')" }
 } catch {
     if ("$_" -ne 'no session') { Write-Fail "exception: $_" }
 } finally {
