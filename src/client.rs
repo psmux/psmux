@@ -4573,7 +4573,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // can distinguish paste from typed input.
                     // Skipped when paste-detection is off.
                     //
-                    // That is only true when the press did NOT reach the
+                    // Measured for #858 on Windows Terminal (26200, default
+                    // ctrl+v binding): no press arrives, the clipboard DOES
+                    // arrive as key records, then this release with Ctrl
+                    // held.  So in practice the release confirms a burst the
+                    // client already holds, and the clipboard read is the
+                    // fallback for a host whose characters never show up.
+                    //
+                    // All of that is only true when the press did NOT reach the
                     // client.  When it did (issue #858: a terminal with no
                     // Ctrl+V paste binding, or one that delivers the press and
                     // then the clipboard as key records) the press is what
