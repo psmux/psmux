@@ -1,6 +1,7 @@
 # Design: a shared multi session server (issue #798)
 
-Status: proposal. Nothing in this document is implemented.
+Status: proposal. Only the switch is implemented (stage 1, step 1: `PSMUX_SERVER_MODE`
+and `server-mode`, with `shared` refusing cleanly); the shared server itself is not.
 
 > **Owner ruling, 2026-10-17. This overrides anything below that disagrees with it.**
 >
@@ -365,6 +366,71 @@ server start. The default stays `per-session`. A namespace is in shared mode onl
 its server was started in shared mode; the mode is written to a namespace marker
 (`<ns>.server`) so CLIs without the variable still route correctly.
 
+#### Step 1 (implemented): the switch itself
+
+The switch exists and nothing behind it is built yet. The contract:
+
+* **Where it is read.** Only where a server is about to be started or the warm
+  standby is about to be claimed: CLI `new-session` / `new` (which also covers the
+  `attach` bootstrap from a config `new-session`, and the one shot `new-session -d`
+  a server forwards to the CLI for `if-shell` and TCP), CLI `start-server` /
+  `start` / `warmup`, the bare `psmux` and `-C` / `-CC` start (only when no live
+  session is being attached to), `new-session` run inside a server (hook, key
+  binding, command prompt: `execute_command_string` in `commands.rs`), the TCP
+  `new-session` spawn route in `connection.rs`, and the top of the internal
+  `psmux server` process, which every server process passes through however it was
+  spawned (including the warm standby refill). Nothing else reads it: `ls`,
+  `attach`, `kill-session`, `kill-server` and every other command behave as before
+  whatever its value.
+* **Values.** `PSMUX_SERVER_MODE` is `per-session` (the default) or `shared`.
+  Unset, empty or only whitespace is unset. Case and surrounding spaces are
+  ignored. If the variable is unset, the user's config file is scanned the way
+  the CLI already peeks at `warm` and `priority` before a server exists: a top
+  level `set` / `set-option` line (any flags) naming `server-mode`, last one wins,
+  `set -u server-mode` means the default. Lines inside `if-shell` or a sourced
+  file are not seen. Otherwise `per-session`. The environment outranks the config,
+  as `PSMUX_PRIORITY` outranks `priority`.
+* **Unknown values.** Any other value is an error, never a fallback, at exit 1
+  with no server started or claimed:
+  `psmux: PSMUX_SERVER_MODE: unknown value 'bogus' (expected per-session or shared)`
+  and, from the config,
+  `psmux: server-mode: unknown value 'x' in <file> (expected per-session or shared)`.
+  This is stricter than `PSMUX_PRIORITY` (which warns and ignores) on purpose: a
+  typo must never quietly run the other process model.
+* **`shared` in step 1.** It is handed to `src/server/shared/mod.rs`, the only
+  entry for the mode, which prints
+  `psmux: shared server mode is not available in this build yet (step 1 of #798); ...`
+  and exits 1. A start a running server makes on the user's behalf (hook, binding,
+  prompt, TCP) shows the same text as a status message or an `ERROR:` reply and
+  creates nothing. It never falls back to per session.
+* **The warm pool.** The gate runs before the warm claim on every route, so a
+  `shared` request is never served by the per session `__warm__` standby, and the
+  standby is left parked and untouched (the E2E checks the process list before and
+  after). If the switch says `shared` when a per session server tries to refill its
+  standby, the new standby process refuses at its own entry, so no per session
+  standby is created while the switch says shared. The shared server will not use
+  the `__warm__` standby at all; it will keep spare panes in its own process.
+* **`server-mode` as an option.** Known to `set` and `show` (a validation only name,
+  so `show -s`, `show -g` and the customize list are byte for byte unchanged), and
+  `#{server-mode}` expands. `show -s server-mode` answers the mode the server
+  actually runs in, so on every server today `server-mode per-session`, whatever
+  the asking shell's variable says. The mode is fixed when a server starts: `set -s
+  server-mode per-session` on a per session server is a silent no op (so a config
+  that names it, and a later `source-file` of that config, do not warn), and
+  `shared` or an unknown value is refused at exit 1 (`server-mode cannot change on
+  a running server`). tmux has no such option; it is psmux only.
+* **Proof the default path is untouched.**
+  `tests/test_issue798_server_mode_switch.ps1` runs one scenario (two
+  `new-session`, `new-window`, `ls`, `list-windows`, `display-message`,
+  `kill-session`, the registry file names, the server processes per session, the
+  warm standby) with the variable unset, `per-session` and empty, and requires
+  one identical signature, equal to a master build's when `PSMUX_BASELINE_EXE` is
+  given. `tests-rs/test_issue798_server_mode_switch.rs` covers the parser.
+
+Step 2, the first working slice, replaces the refusal in `shared/mod.rs` with a
+server that hosts one session and accepts a second `new-session` in the same
+namespace, writing the per session registry files described below.
+
 What changes in shared mode:
 
 * `new-session` in a namespace with a live shared server sends `new-session` to it.
@@ -537,6 +603,29 @@ switch itself: read `PSMUX_SERVER_MODE` / `server-mode` where a server is about 
 started, with `per-session` (the default) taking exactly today's path, unchanged, and
 `shared` entering new code of its own. A test must prove that with the switch unset
 the default path is untouched (same ids, same files, same processes as master).
+
+That switch PR is now done (stage 1, step 1 above). The hunks it adds to code a
+default build runs, and nothing else:
+
+1. `src/main.rs`: one gate call each at the top of `new-session`, `start-server`
+   and the internal `server` entry, and one before the bare / `-CC` warm claim
+   (only when no live session is being attached).
+2. `src/commands.rs` and `src/server/connection.rs`: one gate each before the in
+   server `new-session` claims the warm standby or spawns a server; on refusal it
+   reports like the existing `duplicate session` branch beside it.
+3. `src/server/option_catalog.rs`: `server-mode` as a validation only name, and a
+   one line hand off in `validate_option_value` for that name.
+4. `src/server/options.rs`: the `server-mode` arm in `get_option_value` (answers
+   `per-session`) and in `apply_set_option` (no op for the running mode).
+5. `src/server/mod.rs`: `mod shared;`.
+
+With the switch unset each gate reads one environment variable and the config file
+and returns; every other line of the default path is the old code.
+
+The next contributor sized PR is step 2: a minimal shared server inside
+`src/server/shared/` that holds one session, answers the existing protocol on its
+port, and takes a second `new-session` in its namespace, with its own id allocator
+(stage 0a rebuilt inside the shared code, not in `AppState`).
 
 The original stage 0a text, for the record:
 
