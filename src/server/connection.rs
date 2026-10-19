@@ -2679,6 +2679,14 @@ if control_echo || control_quiet || control_noecho {
                 out.push_str(&footer);
                 out.push('\n');
                 failed = is_error;
+                // tmux tells the control client the session list changed once
+                // the command that created a session is done (notify.c
+                // session-created fires %sessions-changed after the %end).
+                // The new session lives on its own server, so this server's
+                // notification thread never sees it; the reply carries it.
+                if !is_error && matches!(cmd_name, "new-session" | "new") {
+                    out.push_str("%sessions-changed\n");
+                }
             }
             Some(Err(_)) => {
                 out.push_str("command timed out\n");
@@ -6777,6 +6785,35 @@ fn dispatch_control_command(
                 let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None, extra: p.extra });
                 false
             }
+        }
+        // tmux runs new-session from a control client like from any client
+        // (cmd-new-session.c): the session is created, `-P` prints its report,
+        // a clash is `duplicate session: K`, and the control client hears
+        // %sessions-changed. It fell to the catch all here, so a control
+        // client could not create a session at all. The real CLI new-session
+        // runs in this server's namespace, the same route a forwarded one-shot
+        // `new-session -d` takes. It always runs detached: a psmux control
+        // client is bound to the one session server it attached to, so the
+        // switch tmux makes without -d is not available to it.
+        "new-session" | "new" => {
+            let mut ns_args: Vec<&str> = args.to_vec();
+            if !ns_args.iter().any(|a| *a == "-d") {
+                ns_args.insert(0, "-d");
+            }
+            if let Some(t) = raw_target {
+                if !ns_args.iter().any(|a| *a == "-t") {
+                    ns_args.push("-t");
+                    ns_args.push(t);
+                }
+            }
+            let out = run_cli_new_session(&ns_args);
+            let reply = match out.lines().find_map(|l| l.strip_prefix("ERROR: ")) {
+                Some(err) => format!("\u{0001}ERR\u{0001}{}", err),
+                None if out == "OK\n" => String::new(),
+                None => out.trim_end_matches('\n').to_string(),
+            };
+            let _ = resp_tx.send(reply);
+            true
         }
         "new-window" | "neww" => {
             let name = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());
