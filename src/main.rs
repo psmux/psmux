@@ -6370,6 +6370,35 @@ fn run_main() -> io::Result<()> {
     result
 }
 
+/// Whether the control client diagnostics log is on (PSMUX_CC_DEBUG set to
+/// anything but empty or "0").
+fn cc_debug_enabled() -> bool {
+    matches!(env::var_os("PSMUX_CC_DEBUG"), Some(v) if !v.is_empty() && v != "0")
+}
+
+/// Write one diagnostics log line with a single write, so the stdin and
+/// relay threads, which hold separate handles, never split each other's lines.
+fn cc_log_write(f: &mut std::fs::File, args: std::fmt::Arguments) {
+    let mut line = args.to_string();
+    line.push('\n');
+    let _ = f.write_all(line.as_bytes());
+}
+
+/// The kind of a server line for the diagnostics log: the notification or
+/// guard word (`%begin`, `%output`, ...) for a `%` line, else `data`. Only
+/// the leading word is kept, so no line contents reach the log.
+fn cc_debug_line_kind(line: &[u8]) -> &str {
+    if line.first() != Some(&b'%') {
+        return "data";
+    }
+    let end = line.iter().position(|b| !(b.is_ascii_alphanumeric() || *b == b'-' || *b == b'%'))
+        .unwrap_or(line.len());
+    match std::str::from_utf8(&line[..end.min(32)]) {
+        Ok(w) if w.len() > 1 => w,
+        _ => "data",
+    }
+}
+
 /// Run as a control mode client (psmux -C or psmux -CC).
 /// Connects to the server via TCP, sends CONTROL/CONTROL_NOECHO,
 /// reads commands from stdin and prints responses/notifications to stdout.
@@ -6383,15 +6412,25 @@ fn run_main() -> io::Result<()> {
 fn run_control_mode(mode: u8) -> io::Result<()> {
     use std::net::TcpStream;
 
-    // Create diagnostic log FIRST, before anything else, so we can see failures.
+    // The diagnostics log is opt in (PSMUX_CC_DEBUG=1). It records event
+    // kinds, byte counts, timings and errors only: never what was read from
+    // stdin, never what the server sent, never environment values.
     let psmux_dir = crate::paths::psmux_dir();
     let _ = std::fs::create_dir_all(&psmux_dir);
-    let cc_log_path = crate::paths::psmux_dir_file("cc_debug.log");
-    let mut log_file = std::fs::File::create(&cc_log_path).ok();
+    let cc_log_file_path = crate::paths::psmux_dir_file("cc_debug.log");
+    let cc_log_path: Option<String> = if cc_debug_enabled() {
+        Some(cc_log_file_path)
+    } else {
+        // Older builds always wrote this file with full stream contents;
+        // remove one left behind (best effort).
+        let _ = std::fs::remove_file(&cc_log_file_path);
+        None
+    };
+    let mut log_file = cc_log_path.as_ref().and_then(|p| std::fs::File::create(p).ok());
     macro_rules! cclog {
         ($($arg:tt)*) => {
             if let Some(ref mut f) = log_file {
-                let _ = writeln!(f, $($arg)*);
+                cc_log_write(f, format_args!($($arg)*));
                 let _ = f.flush();
             }
         }
@@ -6399,13 +6438,9 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     cclog!("=== psmux control mode log ===");
     cclog!("time: {:?}", std::time::SystemTime::now());
     cclog!("mode: {}", if mode == 1 { "CONTROL" } else { "CONTROL_NOECHO" });
-    cclog!("USERPROFILE: {:?}", env::var("USERPROFILE"));
-    cclog!("HOME: {:?}", env::var("HOME"));
-    cclog!("log_path: {}", cc_log_path);
-    cclog!("SSH_CLIENT: {:?}", env::var("SSH_CLIENT"));
-    cclog!("SSH_CONNECTION: {:?}", env::var("SSH_CONNECTION"));
-    cclog!("PSMUX_SESSION_NAME: {:?}", env::var("PSMUX_SESSION_NAME"));
-    cclog!("PSMUX_REMOTE_ATTACH: {:?}", env::var("PSMUX_REMOTE_ATTACH"));
+    for var in ["USERPROFILE", "HOME", "SSH_CLIENT", "SSH_CONNECTION", "PSMUX_SESSION_NAME", "PSMUX_REMOTE_ATTACH"] {
+        cclog!("{} set: {}", var, env::var_os(var).is_some());
+    }
 
     // Win32 handle diagnostics
     #[cfg(windows)]
@@ -6496,18 +6531,15 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
 
     let session_name = env::var("PSMUX_SESSION_NAME")
         .unwrap_or_else(|_| "default".to_string());
-    cclog!("session: {}", session_name);
 
     // Read port and key
     let port_path = crate::paths::port_file(&session_name);
     let key_path = crate::paths::key_file(&session_name);
-    cclog!("port_path: {}", port_path);
-    cclog!("key_path: {}", key_path);
     cclog!("port_path exists: {}", std::path::Path::new(&port_path).exists());
     cclog!("key_path exists: {}", std::path::Path::new(&key_path).exists());
 
     let port_str = match std::fs::read_to_string(&port_path) {
-        Ok(s) => { cclog!("port_str: {:?}", s.trim()); s }
+        Ok(s) => s,
         Err(e) => { cclog!("FATAL: cannot read port file: {}", e); return Err(io::Error::new(io::ErrorKind::NotFound, format!("session '{}' not found (no port file)", session_name))); }
     };
     let port: u16 = match port_str.trim().parse() {
@@ -6536,7 +6568,7 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     let mut reader = io::BufReader::new(stream.try_clone()?);
     let mut ok_line = String::new();
     reader.read_line(&mut ok_line)?;
-    cclog!("auth response: {:?}", ok_line.trim());
+    cclog!("auth response ok: {}", ok_line.trim().starts_with("OK"));
     if !ok_line.trim().starts_with("OK") {
         cclog!("FATAL: auth failed");
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth failed: {}", ok_line.trim())));
@@ -6551,7 +6583,6 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
 
     // Spawn a thread to read server responses/notifications and print to stdout
     let reader_stream = reader.get_ref().try_clone()?;
-    let cc_log_path = Some(cc_log_path);
     let cc_log_out = cc_log_path.clone();
     // Set once stdin has ended: from then on the main thread owns the exit
     // (it drains the reader and prints %exit itself).
@@ -6579,10 +6610,9 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
                         if let Some(ref mut f) = log_file {
-                            let text = String::from_utf8_lossy(&line);
-                            let _ = writeln!(f, "[{:>8.3}s] OUT ({} bytes): {:?}",
-                                start.elapsed().as_secs_f64(), line.len(),
-                                crate::util::str_prefix_within(&text, 200));
+                            cc_log_write(f, format_args!("[{:>8.3}s] OUT {} ({} bytes)",
+                                start.elapsed().as_secs_f64(), cc_debug_line_kind(&line),
+                                line.len()));
                         }
                         let is_exit = line.starts_with(b"%exit")
                             && matches!(line.get(5), None | Some(b' ') | Some(b'\n') | Some(b'\r'));
@@ -6633,8 +6663,8 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         std::fs::OpenOptions::new().append(true).open(p).ok()
     });
     if let Some(ref mut f) = stdin_log_file {
-        let _ = writeln!(f, "[{:>8.3}s] stdin reader started",
-            stdin_start.elapsed().as_secs_f64());
+        cc_log_write(f, format_args!("[{:>8.3}s] stdin reader started",
+            stdin_start.elapsed().as_secs_f64()));
         let _ = f.flush();
     }
 
@@ -6696,8 +6726,8 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
                         eof_retries += 1;
                         if let Some(ref mut f) = stdin_log_file {
                             if eof_retries <= 5 || eof_retries % 20 == 0 {
-                                let _ = writeln!(f, "[{:>8.3}s] stdin pipe broken (err={}), retry {}/{}",
-                                    stdin_start.elapsed().as_secs_f64(), err, eof_retries, MAX_EOF_RETRIES);
+                                cc_log_write(f, format_args!("[{:>8.3}s] stdin pipe broken (err={}), retry {}/{}",
+                                    stdin_start.elapsed().as_secs_f64(), err, eof_retries, MAX_EOF_RETRIES));
                                 let _ = f.flush();
                             }
                         }
@@ -6711,27 +6741,27 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
                         if peek_ok != 0 {
                             // Pipe is alive again!
                             if let Some(ref mut f) = stdin_log_file {
-                                let _ = writeln!(f, "[{:>8.3}s] stdin pipe recovered! avail={}",
-                                    stdin_start.elapsed().as_secs_f64(), avail);
+                                cc_log_write(f, format_args!("[{:>8.3}s] stdin pipe recovered! avail={}",
+                                    stdin_start.elapsed().as_secs_f64(), avail));
                                 let _ = f.flush();
                             }
                         }
                         continue;
                     }
                     if let Some(ref mut f) = stdin_log_file {
-                        let _ = writeln!(f, "[{:>8.3}s] stdin pipe broken (err={}), giving up after {} retries",
-                            stdin_start.elapsed().as_secs_f64(), err, eof_retries);
-                        let _ = writeln!(f, "HINT: check DefaultShell and SSH client settings");
+                        cc_log_write(f, format_args!("[{:>8.3}s] stdin pipe broken (err={}), giving up after {} retries",
+                            stdin_start.elapsed().as_secs_f64(), err, eof_retries));
+                        cc_log_write(f, format_args!("HINT: check DefaultShell and SSH client settings"));
                         let _ = f.flush();
                     }
                     // Do NOT print to stderr: it travels through the SSH
                     // session and corrupts iTerm2's tmux control protocol.
-                    // Diagnostics are in ~/.psmux/cc_debug.log.
+                    // Diagnostics go to cc_debug.log when PSMUX_CC_DEBUG=1.
                     Err(io::Error::from_raw_os_error(err as i32))
                 } else {
                     if let Some(ref mut f) = stdin_log_file {
-                        let _ = writeln!(f, "[{:>8.3}s] stdin ReadFile error: {}",
-                            stdin_start.elapsed().as_secs_f64(), err);
+                        cc_log_write(f, format_args!("[{:>8.3}s] stdin ReadFile error: {}",
+                            stdin_start.elapsed().as_secs_f64(), err));
                         let _ = f.flush();
                     }
                     Err(io::Error::from_raw_os_error(err as i32))
@@ -6742,8 +6772,8 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
                     eof_retries += 1;
                     if let Some(ref mut f) = stdin_log_file {
                         if eof_retries <= 5 || eof_retries % 20 == 0 {
-                            let _ = writeln!(f, "[{:>8.3}s] stdin EOF (0 bytes), retry {}/{}",
-                                stdin_start.elapsed().as_secs_f64(), eof_retries, MAX_EOF_RETRIES);
+                            cc_log_write(f, format_args!("[{:>8.3}s] stdin EOF (0 bytes), retry {}/{}",
+                                stdin_start.elapsed().as_secs_f64(), eof_retries, MAX_EOF_RETRIES));
                             let _ = f.flush();
                         }
                     }
@@ -6751,8 +6781,8 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
                     continue;
                 }
                 if let Some(ref mut f) = stdin_log_file {
-                    let _ = writeln!(f, "[{:>8.3}s] stdin EOF, giving up after {} retries",
-                        stdin_start.elapsed().as_secs_f64(), eof_retries);
+                    cc_log_write(f, format_args!("[{:>8.3}s] stdin EOF, giving up after {} retries",
+                        stdin_start.elapsed().as_secs_f64(), eof_retries));
                     let _ = f.flush();
                 }
                 Ok(0usize)
@@ -6775,18 +6805,8 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
             Ok(n) => {
                 total_bytes_read += n as u64;
                 if let Some(ref mut f) = stdin_log_file {
-                    // Log a printable ASCII dump of all bytes (replace control bytes with .)
-                    // plus the byte count. Avoids 80-byte truncation in the hex dump.
-                    let asc: String = stdin_buf[..n].iter()
-                        .map(|&b| {
-                            if b == b'\r' { "\\r".to_string() }
-                            else if b == b'\n' { "\\n".to_string() }
-                            else if b == b'\t' { "\\t".to_string() }
-                            else if (0x20..0x7f).contains(&b) { (b as char).to_string() }
-                            else { format!("\\x{:02x}", b) }
-                        }).collect::<String>();
-                    let _ = writeln!(f, "[{:>8.3}s] IN  ({} bytes): {}",
-                        stdin_start.elapsed().as_secs_f64(), n, asc);
+                    cc_log_write(f, format_args!("[{:>8.3}s] IN  ({} bytes)",
+                        stdin_start.elapsed().as_secs_f64(), n));
                     let _ = f.flush();
                 }
                 n
@@ -6818,8 +6838,8 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     stdin_closed.store(true, std::sync::atomic::Ordering::Release);
     let _ = write_stream.shutdown(std::net::Shutdown::Write);
     if let Some(ref mut f) = stdin_log_file {
-        let _ = writeln!(f, "[{:>8.3}s] stdin closed (total_bytes_read={}), TCP write shut down",
-            stdin_start.elapsed().as_secs_f64(), total_bytes_read);
+        cc_log_write(f, format_args!("[{:>8.3}s] stdin closed (total_bytes_read={}), TCP write shut down",
+            stdin_start.elapsed().as_secs_f64(), total_bytes_read));
         let _ = f.flush();
     }
 
@@ -7035,3 +7055,7 @@ mod tests_ready_poll_backoff;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue830_show_buffer_newline.rs"]
 mod tests_issue830_show_buffer_newline;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_cc_debug_log_optin.rs"]
+mod tests_cc_debug_log_optin;

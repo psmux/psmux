@@ -2733,10 +2733,15 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
             ));
         }
     }
-    // Log SSH env vars
+    // Log which SSH env vars are set; their values only with PSMUX_SSH_DEBUG=1.
+    let verbose_env = ssh_verbose();
     for var in &["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
         if let Ok(val) = std::env::var(var) {
-            ssh_debug_log(&format!("  {}={}", var, val));
+            if verbose_env {
+                ssh_debug_log(&format!("  {}={}", var, val));
+            } else {
+                ssh_debug_log(&format!("  {} is set", var));
+            }
         }
     }
 
