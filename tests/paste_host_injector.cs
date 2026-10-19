@@ -17,8 +17,17 @@
 //                                    the client's paste detection has to cope
 //                                    with.
 //   paste_host_injector.exe <pid> plain <delay_ms> <text>  Ctrl+V press, then
-//                                    the release after delay_ms, no chars (a
-//                                    host that does not inject)
+//                                    the release after delay_ms, no chars: a
+//                                    terminal that does not paste on Ctrl+V.
+//                                    Since issue #858 that is NOT a paste: the
+//                                    key belongs to a binding or to the pane.
+//   paste_host_injector.exe <pid> release <delay_ms> <text>  the Ctrl+V
+//                                    release only, no press and no chars: the
+//                                    host's binding took the press and pasted
+//                                    where the client cannot see it, so the
+//                                    client reads the clipboard itself.
+//   paste_host_injector.exe <pid> hostv <delay_ms> <text>  host, with the
+//                                    Ctrl+V PRESS delivered before the chars.
 //   paste_host_injector.exe <pid> drip  <delay_ms> <text>  the same as host,
 //                                    except every character is its OWN
 //                                    WriteConsoleInputW call with a gap
@@ -188,7 +197,15 @@ class PasteHostInjector
         // The user holds Ctrl: the host forwards the modifier itself.
         ok &= Write(h, new List<INPUT_RECORD> { Key(true, VK_CONTROL, '\0', LEFT_CTRL_PRESSED) }, log, "ctrl down");
 
-        if (mode == "plain")
+        if (mode == "release")
+        {
+            // The route the client's clipboard read back is for: the host's
+            // Ctrl+V binding swallows the press and pastes where the console
+            // input buffer never sees it, so the V release is all that arrives.
+            Thread.Sleep(delay);
+            ok &= Write(h, new List<INPUT_RECORD> { Key(false, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v release only, no chars");
+        }
+        else if (mode == "plain")
         {
             // A host that does not paste on Ctrl+V: the client sees the press
             // and the release and reads the clipboard itself.
@@ -241,7 +258,13 @@ class PasteHostInjector
             // Windows Terminal: the press is consumed by its paste binding,
             // the clipboard text is injected as one burst of character
             // events (Ctrl is not held for those, the host synthesises them),
-            // then the V key release is forwarded.
+            // then the V key release is forwarded.  `hostv` is the same with
+            // the press delivered first (a host that passes the press through
+            // and then pastes as key records, issue #858).
+            if (mode == "hostv")
+            {
+                ok &= Write(h, new List<INPUT_RECORD> { Key(true, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v press");
+            }
             var chars = new List<INPUT_RECORD>();
             foreach (char c in text)
             {

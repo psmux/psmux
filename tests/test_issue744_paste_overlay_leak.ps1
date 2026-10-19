@@ -11,8 +11,11 @@
 #   tests\injector.cs            prefix and prompt keys (C-b, :, ',', Esc, Enter)
 #   tests\paste_host_injector.cs the paste itself, in two shapes:
 #     host   characters, then the Ctrl+V release only (Windows Terminal)
-#     plain  Ctrl+V press and release, no characters (a host that does not
-#            inject; the client reads the clipboard itself)
+#     release  the Ctrl+V release only, no press and no characters (the
+#            host's binding pasted where the client cannot see it; the client
+#            reads the clipboard itself).  A press AND a release with nothing
+#            between them is not a paste since issue #858: that terminal does
+#            not paste on Ctrl+V.
 #
 # The clipboard is real, so a desktop that refuses clipboard access to this
 # process is detected up front and reported as SKIP, never as a pass.
@@ -119,7 +122,7 @@ try {
     }
 
     # ---- 1. command prompt, Windows Terminal shape, then Esc ---------------
-    foreach ($mode in 'host', 'plain') {
+    foreach ($mode in 'host', 'release') {
         Write-Host "`n[command prompt, $mode paste, Esc] the issue's exact steps" -ForegroundColor Yellow
         Reset-Pane
         $m = "LEAK744${mode}ESC"
@@ -134,7 +137,7 @@ try {
     }
 
     # ---- 2. command prompt, paste then Enter: the prompt got it exactly once
-    foreach ($mode in 'host', 'plain') {
+    foreach ($mode in 'host', 'release') {
         Write-Host "`n[command prompt, $mode paste, Enter] the prompt holds the text once" -ForegroundColor Yellow
         Reset-Pane
         P set -u -g '@p744' | Out-Null
@@ -241,7 +244,7 @@ try {
     } else { Write-Skip "AttachConsole refused (large)" }
 
     # ---- 4. no overlay: the common case still lands once in the pane -----
-    foreach ($mode in 'host', 'plain') {
+    foreach ($mode in 'host', 'release') {
         Write-Host "`n[no prompt open, $mode paste] the pane gets it exactly once" -ForegroundColor Yellow
         Reset-Pane
         $t = "PANE744$mode"
