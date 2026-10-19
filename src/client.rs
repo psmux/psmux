@@ -3568,6 +3568,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Windows paths ever populate it.
     #[allow(unused_variables)]
     let mut paste_gesture = PasteGesture::default();
+    // The Ctrl+V press that reached the client, if any (issue #858): with it,
+    // a release that nothing paste shaped preceded reads no clipboard, and an
+    // unbound press goes to the pane as C-v.
+    #[cfg(windows)]
+    let mut ctrlv_press = CtrlVPress::default();
     // The clipboard's first characters, re-read only when the system's
     // clipboard sequence number moves.  Consulted before a 1 to 2 character
     // burst is committed as typing: if it is the start of what is on the
@@ -4344,6 +4349,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Flush or promote chars based on how long they've been buffered.
         #[cfg(windows)]
         {
+            // An unbound Ctrl+V press that no paste followed within the
+            // gesture window is the pane's C-v (issue #858), even with the key
+            // still held down.
+            if ctrlv_press.take_due(PASTE_GESTURE_WINDOW) {
+                if input_log_enabled() {
+                    input_log("paste", "Ctrl+V press: nothing followed it, sending C-v to the pane");
+                }
+                cmd_batch.push("send-key C-v\n".to_string());
+            }
             if paste_pend.len() != paste_seen_len {
                 paste_seen_len = paste_pend.len();
                 paste_last_growth = if paste_pend.is_empty() { None } else { Some(Instant::now()) };
@@ -4558,6 +4572,44 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // as a bracketed-paste so child apps (Claude CLI, etc.)
                     // can distinguish paste from typed input.
                     // Skipped when paste-detection is off.
+                    //
+                    // That is only true when the press did NOT reach the
+                    // client.  When it did (issue #858: a terminal with no
+                    // Ctrl+V paste binding, or one that delivers the press and
+                    // then the clipboard as key records) the press is what
+                    // decides: nothing paste shaped after it means nothing was
+                    // pasted, and the release must not read the clipboard.
+                    #[cfg(windows)]
+                    Event::Key(key) if key.kind == KeyEventKind::Release
+                        && matches!(key.code, KeyCode::Char('v'))
+                        && paste_detection_enabled
+                        && ctrlv_press.pending() =>
+                    {
+                        match ctrlv_press.release() {
+                            Some(CtrlVRelease::NoPaste { send_cv }) => {
+                                if input_log_enabled() {
+                                    input_log("paste", &format!(
+                                        "Ctrl+V Release after a press with nothing pasted between: no clipboard read{}",
+                                        if send_cv { ", sending C-v to the pane" } else { "" }));
+                                }
+                                if send_cv {
+                                    cmd_batch.push("send-key C-v\n".to_string());
+                                }
+                                paste_gesture.finish();
+                            }
+                            _ => {
+                                if input_log_enabled() {
+                                    input_log("paste", &format!("Ctrl+V Release after a pasting press, paste_pend len={}", paste_pend.len()));
+                                }
+                                // Same as before #858: a release with Ctrl
+                                // still held confirms the paste; one with Ctrl
+                                // already up leaves it to the stage 2 timer.
+                                if key.modifiers == KeyModifiers::CONTROL {
+                                    paste_confirmed = true;
+                                }
+                            }
+                        }
+                    }
                     #[cfg(windows)]
                     Event::Key(key) if key.kind == KeyEventKind::Release
                         && matches!(key.code, KeyCode::Char('v'))
@@ -4604,6 +4656,37 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             let folded = crate::config::fold_nul_to_ctrl_space((key.code, key.modifiers));
                             key.code = folded.0;
                             key.modifiers = folded.1;
+                        }
+                        // Issue #858: note a Ctrl+V press that reached the
+                        // client, and whether what follows it is a paste (the
+                        // host's characters) or an ordinary key, before which
+                        // a held back C-v has to go out.
+                        #[cfg(windows)]
+                        if paste_detection_enabled {
+                            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                            let alt = key.modifiers.contains(KeyModifiers::ALT);
+                            let owed = if matches!(key.code, KeyCode::Char('v')) && key.modifiers == KeyModifiers::CONTROL {
+                                ctrlv_press.press()
+                            } else {
+                                let paste_shaped = match key.code {
+                                    // AltGr arrives as Ctrl+Alt on a non letter.
+                                    KeyCode::Char(c) => (!ctrl && !alt) || (ctrl && alt && !c.is_ascii_lowercase()),
+                                    KeyCode::Enter | KeyCode::Tab => !ctrl && !alt,
+                                    _ => false,
+                                };
+                                if paste_shaped {
+                                    ctrlv_press.note_paste_input();
+                                    false
+                                } else {
+                                    ctrlv_press.take_before_key()
+                                }
+                            };
+                            if owed {
+                                if input_log_enabled() {
+                                    input_log("paste", "Ctrl+V press: nothing followed it, sending C-v to the pane before the next key");
+                                }
+                                cmd_batch.push("send-key C-v\n".to_string());
+                            }
                         }
                         // On Windows, VS Code's xterm.js sends ESC+CR for
                         // Shift+Enter.  ConPTY interprets the ESC as Alt, so
@@ -6640,6 +6723,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     // paste belongs to one gesture; a new Press
                                     // starts a fresh one.
                                     paste_gesture.start();
+                                    // Nothing is bound to it, so unless a paste
+                                    // follows, this is the pane's C-v (issue
+                                    // #858: nvim's visual block key never
+                                    // arrived).  It is held, not sent, until
+                                    // the release, the gesture window or the
+                                    // next key shows that no paste is coming.
+                                    ctrlv_press.defer();
                                 }
                                 #[cfg(windows)]
                                 KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL && !paste_detection_enabled => {
@@ -6768,6 +6858,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         }
                     }
                     Event::Paste(data) => {
+                        // A paste event behind a Ctrl+V press is the host
+                        // pasting, so the press was the gesture (issue #858).
+                        #[cfg(windows)]
+                        ctrlv_press.note_paste_input();
                         // Route paste into the active client-side text overlay
                         // (issue #290) so it does not leak past the command
                         // prompt / rename prompts into the underlying pane.
@@ -10688,6 +10782,120 @@ impl PasteGesture {
     }
 }
 
+/// A Ctrl+V PRESS that reached the client, and what came after it (issue #858).
+///
+/// Windows Terminal's own Ctrl+V paste binding swallows the press, so a press
+/// that does reach the client means one of two things: the host pastes by
+/// delivering the clipboard as key records right behind it (the shape
+/// [`PASTE_GESTURE_WINDOW`] exists for), or the host does not paste on Ctrl+V
+/// at all, in which case the key is the user's and belongs to a binding or to
+/// the pane as C-v (0x16), exactly as tmux has it.  Before #858 the release of
+/// that press read the clipboard and pasted it, so `bind -n C-v split-window`
+/// split AND pasted, and nvim never got its visual block key.
+///
+/// The rule: when the press reached the client and nothing paste shaped
+/// followed it before the release, the terminal did not paste, so the release
+/// reads nothing.  An unbound press is held back (`deferred`) instead of being
+/// sent at once, because a pasting host's characters are still on their way;
+/// it goes to the pane as C-v when the release comes with nothing in between,
+/// when the window runs out, or right before an unrelated key.  A release with
+/// no press before it (the route Windows Terminal's binding leaves) is not
+/// this struct's business and keeps reading the clipboard.
+#[derive(Default)]
+struct CtrlVPress {
+    /// When the press arrived; `None` once it was released.
+    at: Option<Instant>,
+    /// Paste shaped input (characters, a paste event) came after the press.
+    followed: bool,
+    /// An unbound C-v still owed to the pane.
+    deferred: bool,
+}
+
+/// What the release of a Ctrl+V press means.
+#[derive(Debug, PartialEq, Eq)]
+enum CtrlVRelease {
+    /// The host pasted after the press: confirm the paste as before.
+    Pasted,
+    /// Nothing followed the press, so the terminal did not paste.  `send_cv`
+    /// is true when the press was held back and is now owed to the pane.
+    NoPaste { send_cv: bool },
+}
+
+/// A press older than this is forgotten: a host that forwards presses but not
+/// releases must not leave one behind that blocks a later release-only paste.
+const CTRLV_PRESS_STALE: Duration = Duration::from_secs(5);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl CtrlVPress {
+    /// A Ctrl+V press arrived.  Returns true when an earlier held back C-v
+    /// (key repeat, or a second tap) must go out first.
+    fn press(&mut self) -> bool {
+        let owed = self.deferred && !self.followed;
+        self.at = Some(Instant::now());
+        self.followed = false;
+        self.deferred = false;
+        owed
+    }
+
+    /// Nothing is bound to the press just seen, so it is the pane's C-v once
+    /// it is clear that no paste follows it.
+    fn defer(&mut self) {
+        if self.pending() {
+            self.deferred = true;
+        }
+    }
+
+    /// True while a press is waiting for its release.
+    fn pending(&self) -> bool {
+        self.at.map_or(false, |t| t.elapsed() < CTRLV_PRESS_STALE)
+    }
+
+    /// Paste shaped input arrived: if a press is pending, the host is pasting,
+    /// and the held back C-v was the paste gesture, not a key for the pane.
+    fn note_paste_input(&mut self) {
+        if self.pending() {
+            self.followed = true;
+            self.deferred = false;
+        }
+    }
+
+    /// A key that is not part of a paste arrived: the held back C-v goes out
+    /// before it, in the order the two were typed.
+    fn take_before_key(&mut self) -> bool {
+        let owed = self.deferred && !self.followed;
+        self.deferred = false;
+        owed
+    }
+
+    /// The held back C-v has waited `window` with nothing behind it: no paste
+    /// is coming, so it is the pane's now, whether or not the key is still down.
+    fn take_due(&mut self, window: Duration) -> bool {
+        let due = self.deferred
+            && !self.followed
+            && self.at.map_or(false, |t| t.elapsed() >= window);
+        if due {
+            self.deferred = false;
+        }
+        due
+    }
+
+    /// The V key came up.  `None` when no press is pending (release only, the
+    /// Windows Terminal binding's route), which keeps the clipboard read.
+    fn release(&mut self) -> Option<CtrlVRelease> {
+        if !self.pending() {
+            *self = CtrlVPress::default();
+            return None;
+        }
+        let verdict = if self.followed {
+            CtrlVRelease::Pasted
+        } else {
+            CtrlVRelease::NoPaste { send_cv: self.deferred }
+        };
+        *self = CtrlVPress::default();
+        Some(verdict)
+    }
+}
+
 /// How long after a burst was forwarded a clipboard read-back of the same text
 /// is treated as a duplicate of it.  The read-back fires from the Ctrl+V Release
 /// of the same gesture, so a few hundred milliseconds is generous, and keeping
@@ -10922,6 +11130,10 @@ mod test_issue684_clipboard_head_cache;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue766_paste_then_key.rs"]
 mod test_issue766_paste_then_key;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue858_ctrlv_press.rs"]
+mod test_issue858_ctrlv_press;
 
 /// How long the client keeps polling console input at 1ms after sending a key,
 /// waiting for that key's echo to come back and be drawn.
