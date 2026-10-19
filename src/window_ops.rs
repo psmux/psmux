@@ -3489,6 +3489,66 @@ mod window_ops_tests {
         assert_eq!(app.copy_scroll_offset, 6, "copy mode must keep the direct-scrolled view");
     }
 
+    /// The offset of the parser the focused pane is drawn from.
+    fn live_view_offset(app: &AppState) -> usize {
+        let win = &app.windows[app.active_idx];
+        crate::tree::active_pane(&win.root, &win.active_path)
+            .map(|p| p.term.lock().expect("term lock").screen().scrollback())
+            .expect("active pane")
+    }
+
+    /// Output reaching the focused pane, as the shell's reply to a key would.
+    fn pane_output(app: &AppState, bytes: &[u8]) {
+        let win = &app.windows[app.active_idx];
+        crate::tree::active_pane(&win.root, &win.active_path)
+            .expect("active pane")
+            .term
+            .lock()
+            .expect("term lock")
+            .process(bytes);
+    }
+
+    #[test]
+    fn typed_key_returns_direct_scrolled_view_to_live() {
+        let mut app = make_scrollback_app(true);
+        app.scroll_enter_copy_mode = false;
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        assert!(matches!(app.mode, Mode::Passthrough), "direct scroll must not enter copy mode");
+        assert_eq!(live_view_offset(&app), 6);
+
+        // Left alone, the scrolled view stays anchored on the old rows: the
+        // prompt a typed Enter produces only pushes the offset further up.
+        pane_output(&app, b"PS> \r\n");
+        assert_eq!(live_view_offset(&app), 7, "a scrolled view stays anchored on new output");
+
+        // A key from the attached client snaps it back, and from there the
+        // view follows the output again.
+        assert!(crate::input::snap_interactive_to_live(&mut app), "a scrolled view must report the snap");
+        assert_eq!(live_view_offset(&app), 0, "typing must return the view to the live screen");
+        pane_output(&app, b"PS> \r\n");
+        assert_eq!(live_view_offset(&app), 0, "the live view must follow new output");
+
+        // At the live screen already there is nothing to snap or redraw.
+        assert!(!crate::input::snap_interactive_to_live(&mut app));
+    }
+
+    #[test]
+    fn typed_key_leaves_copy_mode_view_alone() {
+        // scroll-enter-copy-mode on: the wheel entered copy mode, and the key
+        // is a copy mode key, not input for the shell.
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        assert!(matches!(app.mode, Mode::CopyMode));
+        let offset = app.copy_scroll_offset;
+        assert!(offset > 0);
+
+        assert!(!crate::input::snap_interactive_to_live(&mut app), "copy mode keys must not snap the view");
+        assert!(matches!(app.mode, Mode::CopyMode));
+        assert_eq!(app.copy_scroll_offset, offset);
+        assert_eq!(live_view_offset(&app), offset, "the copy mode view must stay where the reader left it");
+    }
+
     #[test]
     fn copy_drag_release_after_edge_scroll_yanks_and_exits() {
         let mut app = make_scrollback_app(true);

@@ -4217,6 +4217,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_text(&mut app);
+                    // Typing into a direct-scrolled pane shows its live screen
+                    // again, before the key can be taken by a mode it opens.
+                    if crate::input::snap_interactive_to_live(&mut app) {
+                        state_dirty = true;
+                    }
                     send_text_to_active(&mut app, &s)?;
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
@@ -4247,13 +4252,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::pty_trace::mark("g", 0, k.as_bytes());
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_key(&mut app, &k);
+                    if crate::input::snap_interactive_to_live(&mut app) {
+                        state_dirty = true;
+                    }
                     send_key_to_active(&mut app, &k)?;
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
                     echo_pending_until = Some(Instant::now());
                 }
-                CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::SendPaste(s) => {
+                    if crate::input::snap_interactive_to_live(&mut app) {
+                        state_dirty = true;
+                    }
+                    send_paste_to_active(&mut app, &s)?;
+                    echo_pending_until = Some(Instant::now());
+                }
                 CtrlReq::PasteBuffer(pb, resp) => {
                     // No `?` here on purpose: a write that fails because the
                     // target pane died a moment ago is a routine failure of one
