@@ -4,6 +4,8 @@ pub(crate) mod option_catalog;
 pub(crate) mod connection;
 pub(crate) mod temp_target;
 pub(crate) mod source_job;
+// #798: the shared server's only entry, behind PSMUX_SERVER_MODE.
+pub(crate) mod shared;
 
 use std::io::{self, Write};
 use std::sync::mpsc;

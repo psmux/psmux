@@ -1995,6 +1995,8 @@ fn run_main() -> io::Result<()> {
                 }
             }
             "server" => {
+                // #798: every server process starts here; only per-session goes on.
+                crate::server::shared::gate_server_process();
                 // Internal command - run headless server (used when spawning background server)
                 let name = args.iter().position(|a| a == "-s").and_then(|i| args.get(i+1)).map(|s| s.clone()).unwrap_or_else(|| "default".to_string());
                 // Parse -L socket name for namespace isolation
@@ -2033,6 +2035,8 @@ fn run_main() -> io::Result<()> {
             }
             "new-session" | "new" => {
                 crate::startup_trace::mark("cli.dispatch");
+                // #798: shared mode never reaches the per session code below.
+                crate::server::shared::gate_server_start(l_socket_name.as_deref());
                 // Nesting guard is applied AFTER flag parsing below, once we know
                 // whether -d (detached) was requested. A detached session never
                 // grabs the current terminal, so nesting it is harmless and must
@@ -5679,6 +5683,8 @@ fn run_main() -> io::Result<()> {
             }
             // start-server / warmup - start the namespace's server
             "start-server" | "start" | "warmup" => {
+                // #798: shared mode never reaches the per session standby below.
+                crate::server::shared::gate_server_start(l_socket_name.as_deref());
                 // psmux's form of a running server with no session is the
                 // namespace's __warm__ standby, so start-server makes sure one
                 // is up. That also pre-warms the next new-session and Windows
@@ -5977,6 +5983,11 @@ fn run_main() -> io::Result<()> {
                 Duration::from_millis(100),
             ).is_ok())
             .unwrap_or(false);
+
+        // #798: about to claim or spawn a server; shared mode never does that here.
+        if !server_already_alive {
+            crate::server::shared::gate_server_start(l_socket_name.as_deref());
+        }
 
         // Try warm server claim first (fast path)
         // Skipped when PSMUX_NO_WARM=1 is set or config has 'set -g warm off',

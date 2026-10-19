@@ -795,6 +795,8 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "remain-on-exit" => if app.remain_on_exit { "on".into() } else { "off".into() },
         "destroy-unattached" => if app.destroy_unattached { "on".into() } else { "off".into() },
         "exit-empty" => if app.exit_empty { "on".into() } else { "off".into() },
+        // #798: the mode this server runs in; a per session server is one.
+        "server-mode" => crate::server::shared::RUNNING_PER_SESSION.into(),
         "set-titles" => if app.set_titles { "on".into() } else { "off".into() },
         // Report the format that actually drives the host title. An empty stored
         // value means "use the built-in", so report the built-in, not a blank.
@@ -1211,6 +1213,8 @@ pub(crate) fn apply_set_option(
 ) -> Result<(), String> {
     crate::server::option_catalog::validate_option_value(option, value)?;
     match option {
+        // #798: fixed when the server starts, see server/shared.
+        "server-mode" => return crate::server::shared::set_on_running_per_session_server(value),
         "status-left" => { app.status_left = value.to_string(); }
         "status-right" => { app.status_right = value.to_string(); }
         "status-left-length" => {

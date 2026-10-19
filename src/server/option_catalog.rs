@@ -363,6 +363,9 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
 pub static VALIDATION_ONLY_OPTIONS: &[ValidationOnlyOptionDef] = &[
     ValidationOnlyOptionDef { name: "message-limit", option_type: Number(I64) },
     ValidationOnlyOptionDef { name: "history-file-limit", option_type: Number(I64) },
+    // #798: chosen when a server starts (server/shared). Known so `set` and
+    // `show` accept it, kept out of the catalog so no listing changes.
+    ValidationOnlyOptionDef { name: "server-mode", option_type: OptionType::String },
 ];
 
 /// Every option name tmux's options table knows, hooks included
