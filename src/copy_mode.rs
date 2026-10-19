@@ -611,9 +611,10 @@ pub fn move_copy_cursor(app: &mut AppState, dx: i16, dy: i16) {
     } else {
         desired_r as u16
     };
-    // An up or down step keeps the column, which on the new row can be the
-    // second cell of a wide character.
-    let nc = if dy == 0 { nc } else { off_padding(parser.screen(), nr, nc) };
+    // An up or down step keeps the column, as tmux's does, even when it is the
+    // second cell of a wide character on the new row. Moving it to the first
+    // cell would lose the column: up and back down over a CJK line would end
+    // one column to the left of where it began.
     app.copy_pos = Some((nr, nc));
 }
 
@@ -625,11 +626,6 @@ fn is_padding(screen: &vt100::Screen, row: u16, col: u16) -> bool {
 }
 
 /// `col`, or the first cell of the wide character whose second cell it is.
-///
-/// psmux shows the copy cursor by reversing the cell under it, so a cursor on
-/// the second cell reversed only the right half of the character. tmux leaves
-/// its cursor there (grid_reader_cursor_left, and cursor-up and cursor-down
-/// keep the column), and shows it with the terminal's own cursor.
 fn off_padding(screen: &vt100::Screen, row: u16, col: u16) -> u16 {
     let mut x = col;
     while x > 0 && is_padding(screen, row, x) {
@@ -642,10 +638,14 @@ fn off_padding(screen: &vt100::Screen, row: u16, col: u16) -> u16 {
 ///
 /// Right steps over the second cell of a wide character, as tmux's
 /// grid_reader_cursor_right does (grid-reader.c), and stays put when that
-/// second cell is the last column. Left lands on the first cell of the
-/// character before, where tmux's grid_reader_cursor_left can stop on its
-/// second cell (see `off_padding`). Stepping one cell at a time stopped on the
+/// second cell is the last column. Stepping one cell at a time stopped on the
 /// second cell, so a wide character took two presses to cross.
+///
+/// Left is tmux's grid_reader_cursor_left: from the second cell of a wide
+/// character it first backs off to the first cell, then steps one cell, so it
+/// can stop on the second cell of the character before. A left walk therefore
+/// visits the same columns as tmux's, and a selection made leftwards copies
+/// what tmux's copies.
 fn step_over_wide(screen: &vt100::Screen, row: u16, col: u16, dx: i16, cols: u16) -> u16 {
     let last = cols.saturating_sub(1);
     if dx > 0 {
@@ -655,8 +655,7 @@ fn step_over_wide(screen: &vt100::Screen, row: u16, col: u16, dx: i16, cols: u16
         }
         off_padding(screen, row, x)
     } else if dx < 0 {
-        let x = off_padding(screen, row, col.min(last));
-        off_padding(screen, row, x.saturating_sub(1))
+        off_padding(screen, row, col.min(last)).saturating_sub(1)
     } else {
         col.min(last)
     }

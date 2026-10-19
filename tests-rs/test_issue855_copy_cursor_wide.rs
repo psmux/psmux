@@ -4,12 +4,10 @@
 // where the cursor still looks as if it is on the character.
 //
 // Right steps over the padding as tmux does (grid-reader.c,
-// grid_reader_cursor_right); those columns are what tmux 3.7c reported in
-// `#{copy_cursor_x}` for the same lines. tmux's left step and its cursor-up and
-// cursor-down can stop on padding, and tmux shows that with the terminal's own
-// cursor. psmux reverses the cell under the cursor, so on padding only the
-// right half of the character was highlighted: here left, up and down move to
-// the character's first cell instead, which is where tmux's columns differ.
+// grid_reader_cursor_right). Left backs off a second cell and then steps one
+// cell, as grid_reader_cursor_left does, so it can stop on the second cell of
+// the character before, and up and down keep the column. Every column here is
+// what tmux 3.7c and 3.8 report in `#{copy_cursor_x}` for the same lines.
 //
 // These tests drive the real copy mode over a pane tree with a stub PTY (no
 // psmux server). Registered from src/copy_mode.rs.
@@ -159,10 +157,10 @@ fn right_crosses_each_cjk_character_in_one_step() {
 }
 
 #[test]
-fn left_lands_on_the_first_cell_of_each_cjk_character() {
+fn left_crosses_each_cjk_character_in_one_step_as_tmux_does() {
     let mut app = lines_app();
-    // tmux 3.7c: 8 -> 7 -> 6 -> 5 -> 3 -> 1, the second cell of each.
-    assert_eq!(walk(&mut app, 0, 8, -1, 5), vec![7, 6, 4, 2, 0]);
+    // tmux 3.7c and 3.8: 8 -> 7 -> 6 -> 5 -> 3 -> 1, the second cell of each.
+    assert_eq!(walk(&mut app, 0, 8, -1, 5), vec![7, 6, 5, 3, 1]);
     // Column 0 stays put. tmux goes on to the end of the line above there;
     // psmux has never wrapped a left step.
     assert_eq!(walk(&mut app, 0, 0, -1, 1), vec![0]);
@@ -171,9 +169,9 @@ fn left_lands_on_the_first_cell_of_each_cjk_character() {
 #[test]
 fn left_from_a_second_cell_goes_to_the_character_before() {
     let mut app = lines_app();
-    // A cursor left on padding by an older route steps from the character's
-    // first cell, as tmux does.
-    assert_eq!(walk(&mut app, 0, 3, -1, 1), vec![0]);
+    // From a second cell the step starts at the character's first cell, as
+    // tmux's does, and lands on the second cell of the character before.
+    assert_eq!(walk(&mut app, 0, 3, -1, 1), vec![1]);
     assert_eq!(walk(&mut app, 0, 1, -1, 1), vec![0]);
 }
 
@@ -205,10 +203,10 @@ fn right_crosses_each_emoji_sequence_in_one_step() {
 }
 
 #[test]
-fn left_lands_on_the_first_cell_of_each_emoji_sequence() {
+fn left_crosses_each_emoji_sequence_in_one_step_as_tmux_does() {
     let mut app = lines_app();
-    // tmux 3.7c: 11 -> 10 -> 9 -> 7 -> 5 -> 3 -> 1, the second cell of each.
-    assert_eq!(walk(&mut app, 1, 11, -1, 6), vec![10, 8, 6, 4, 2, 0]);
+    // tmux 3.7c and 3.8: 11 -> 10 -> 9 -> 7 -> 5 -> 3 -> 1.
+    assert_eq!(walk(&mut app, 1, 11, -1, 6), vec![10, 9, 7, 5, 3, 1]);
 }
 
 #[test]
@@ -246,25 +244,42 @@ fn a_wide_character_in_the_scrollback_is_crossed_in_one_step() {
     })
     .expect("the CJK line is on screen once scrolled back");
     assert_eq!(walk(&mut app, row, 0, 1, 4), vec![2, 4, 6, 7]);
-    assert_eq!(walk(&mut app, row, 6, -1, 3), vec![4, 2, 0]);
+    assert_eq!(walk(&mut app, row, 6, -1, 3), vec![5, 3, 1]);
 }
 
 #[test]
-fn up_and_down_onto_a_second_cell_land_on_the_first() {
+fn up_and_down_onto_a_second_cell_keep_the_column() {
     let mut app = lines_app();
     // Column 3 of the `abc def` line is the space; above it, column 3 is the
     // second cell of the flag, and above that the second cell of 本. tmux
     // keeps column 3 on both rows.
     app.copy_pos = Some((2, 3));
     move_copy_cursor(&mut app, 0, -1);
-    assert_eq!(app.copy_pos, Some((1, 2)));
-    app.copy_pos = Some((2, 5));
+    assert_eq!(app.copy_pos, Some((1, 3)));
     move_copy_cursor(&mut app, 0, -1);
-    move_copy_cursor(&mut app, 0, -1);
-    assert_eq!(app.copy_pos, Some((0, 4)));
+    assert_eq!(app.copy_pos, Some((0, 3)));
     app.copy_pos = Some((0, 5));
     move_copy_cursor(&mut app, 0, 1);
-    assert_eq!(app.copy_pos, Some((1, 4)));
+    assert_eq!(app.copy_pos, Some((1, 5)));
+}
+
+#[test]
+fn up_and_back_down_over_wide_characters_returns_to_the_same_column() {
+    let mut app = lines_app();
+    // tmux 3.8: 2:3 up then down is 2:3 again, and 2:5 up twice then down
+    // twice is 2:5. Landing on first cells on the way drifted it left.
+    app.copy_pos = Some((2, 3));
+    move_copy_cursor(&mut app, 0, -1);
+    move_copy_cursor(&mut app, 0, 1);
+    assert_eq!(app.copy_pos, Some((2, 3)));
+    app.copy_pos = Some((2, 5));
+    for _ in 0..2 {
+        move_copy_cursor(&mut app, 0, -1);
+    }
+    for _ in 0..2 {
+        move_copy_cursor(&mut app, 0, 1);
+    }
+    assert_eq!(app.copy_pos, Some((2, 5)));
 }
 
 #[test]
@@ -279,7 +294,7 @@ fn up_and_down_onto_a_first_cell_or_a_narrow_one_keep_the_column() {
 }
 
 #[test]
-fn up_into_the_scrollback_onto_a_second_cell_lands_on_the_first() {
+fn up_into_the_scrollback_onto_a_second_cell_keeps_the_column() {
     // Nine fillers and the empty line the cursor is on fill the ten rows, so
     // the CJK line is the one row just above the top of the screen.
     let mut out = format!("{CJK}\r\n");
@@ -297,5 +312,5 @@ fn up_into_the_scrollback_onto_a_second_cell_lands_on_the_first() {
     move_copy_cursor(&mut app, 0, -1);
     let pos = app.copy_pos.expect("copy_pos");
     with_screen(&app, |screen| assert_eq!(screen.cell(pos.0, 0).expect("cell").contents(), "\u{65e5}"));
-    assert_eq!(pos, (0, 4));
+    assert_eq!(pos, (0, 5));
 }

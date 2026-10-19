@@ -3,12 +3,10 @@
 # They moved one cell at a time, and the second cell of a CJK character or an
 # emoji sequence is padding, where the cursor still shows on the character, so
 # each wide character took two presses. Right now steps over the padding as
-# tmux does (grid-reader.c, grid_reader_cursor_right, tag 3.7c). tmux's left
-# step and its cursor-up and cursor-down can stop on padding, shown with the
-# terminal's own cursor; psmux reverses the cell under the cursor, which
-# highlighted only the right half of the character there, so in psmux they
-# land on the character's first cell. Each check names tmux 3.7c's value for
-# the same lines, and says where psmux differs on purpose.
+# tmux does (grid-reader.c, grid_reader_cursor_right, tag 3.7c). Left backs off
+# a second cell and steps one cell, as grid_reader_cursor_left does, and up and
+# down keep the column. Every value checked is what tmux 3.7c and 3.8 report
+# for the same lines.
 #
 # The suite runs under -L in a PSMUX_DATA_DIR of its own and kills only its own
 # namespace. Set PSMUX_TEST_BIN to test a binary that is not on PATH.
@@ -101,14 +99,14 @@ try {
     $r = Walk cursor-right 5
     Check (Same $r @(2, 4, 6, 7, 8)) "cursor-right visits 2 4 6 7 8 (tmux)" "visited $($r -join ' ')"
     $l = Walk cursor-left 5
-    Check (Same $l @(7, 6, 4, 2, 0)) "cursor-left visits 7 6 4 2 0, each character's first cell (tmux: 7 6 5 3 1)" "visited $($l -join ' ')"
+    Check (Same $l @(7, 6, 5, 3, 1)) "cursor-left visits 7 6 5 3 1 (tmux)" "visited $($l -join ' ')"
 
     Write-Head "C. the emoji line"
     Enter-At 1 0
     $r = Walk cursor-right 6
     Check (Same $r @(2, 4, 6, 8, 10, 11)) "cursor-right visits 2 4 6 8 10 11 (tmux)" "visited $($r -join ' ')"
     $l = Walk cursor-left 6
-    Check (Same $l @(10, 8, 6, 4, 2, 0)) "cursor-left visits 10 8 6 4 2 0, each sequence's first cell (tmux: 10 9 7 5 3 1)" "visited $($l -join ' ')"
+    Check (Same $l @(10, 9, 7, 5, 3, 1)) "cursor-left visits 10 9 7 5 3 1 (tmux)" "visited $($l -join ' ')"
 
     Write-Head "D. one-cell characters, and up and down"
     Enter-At 2 0
@@ -119,7 +117,11 @@ try {
     $up1 = (P display -p -t $S '#{copy_cursor_y}:#{copy_cursor_x}') -join ''
     P send-keys -t $S -X cursor-up | Out-Null
     $up2 = (P display -p -t $S '#{copy_cursor_y}:#{copy_cursor_x}') -join ''
-    Check (($up1 -eq '1:2') -and ($up2 -eq '0:2')) "cursor-up from column 3 lands on the flag, then on U+672C, at their first cells (tmux: 1:3, 0:3)" "got $up1 then $up2"
+    Check (($up1 -eq '1:3') -and ($up2 -eq '0:3')) "cursor-up from column 3 keeps column 3 on both rows (tmux)" "got $up1 then $up2"
+    P send-keys -t $S -X cursor-down | Out-Null
+    P send-keys -t $S -X cursor-down | Out-Null
+    $back = (P display -p -t $S '#{copy_cursor_y}:#{copy_cursor_x}') -join ''
+    Check ($back -eq '2:3') "cursor-down twice comes back to 2:3, the column it left (tmux)" "got $back"
 
     Write-Head "E. a repeat count and a selection"
     Enter-At 0 0
@@ -145,7 +147,7 @@ try {
     P send-keys -t $S -X cursor-left | Out-Null
     P send-keys -t $S -X copy-selection-and-cancel | Out-Null
     $buf = ((P show-buffer) -join "`n")
-    Check ($buf -eq ((U 0x8A9E) + 'a')) "one cursor-left from 'a' selects the CJK character before it too (tmux copies only 'a', vi keys)" "buffer [$buf]"
+    Check ($buf -eq 'a') "one cursor-left from 'a' stops on the second cell of the CJK character before and copies 'a' (tmux, vi keys)" "buffer [$buf]"
 } finally {
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
