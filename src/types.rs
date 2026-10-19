@@ -3593,12 +3593,12 @@ pub enum CtrlReq {
     KillPane,
     KillPaneById(usize),
     /// Capture a pane's plain text. Fields: resp, target pane id
-    /// (`-t %N`, None = active pane), preserve trailing spaces (`-N`).
-    CapturePane(mpsc::Sender<String>, Option<usize>, bool),
+    /// (`-t %N`, None = active pane), the `-N` / `-J` line flags.
+    CapturePane(mpsc::Sender<String>, Option<usize>, crate::copy_mode::CaptureOpts),
     /// Capture a pane's text with ANSI SGR sequences. Fields: resp,
     /// start (-S), end (-E), target pane id (`-t %N`, None = active pane),
-    /// preserve trailing spaces (`-N`).
-    CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>, Option<usize>, bool),
+    /// the `-N` / `-J` line flags.
+    CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>, Option<usize>, crate::copy_mode::CaptureOpts),
     FocusWindow(usize),
     /// Focus window by @N id lookup
     FocusWindowById(usize),
@@ -3670,9 +3670,9 @@ pub enum CtrlReq {
     /// pass `-F` to get structured output.
     SessionInfoFormat(mpsc::Sender<String>, String),
     /// Capture a plain-text row range. Fields: resp, start (-S), end (-E),
-    /// target pane id (`-t %N`, None = active pane), preserve trailing
-    /// spaces (`-N`).
-    CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>, Option<usize>, bool),
+    /// target pane id (`-t %N`, None = active pane), the `-N` / `-J` line
+    /// flags.
+    CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>, Option<usize>, crate::copy_mode::CaptureOpts),
     /// `capture-pane -a`: the main screen the alternate screen covers, with
     /// the same -S/-E/-e/-N handling as the captures above. `None` when the
     /// pane is not on the alternate screen (issue #810).
@@ -3682,7 +3682,7 @@ pub enum CtrlReq {
         end: Option<i32>,
         pane_id: Option<usize>,
         styled: bool,
-        preserve_trailing: bool,
+        opts: crate::copy_mode::CaptureOpts,
     },
     /// (client id, process id of the attaching client when the server could
     /// read it from the connection, issue #724).

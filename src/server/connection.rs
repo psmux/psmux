@@ -858,6 +858,25 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
     Some((target.unwrap_or_else(|| String::new()), bytes))
 }
 
+/// The capture-pane line flags: `-N` keeps trailing spaces, `-J` joins
+/// wrapped rows (and keeps their spaces, as tmux does).
+fn capture_opts(args: &[&str]) -> crate::copy_mode::CaptureOpts {
+    crate::copy_mode::CaptureOpts {
+        preserve_trailing: crate::cli::has_short_flag(args, 'N'),
+        join: crate::cli::has_short_flag(args, 'J'),
+    }
+}
+
+/// tmux's `capture-pane -p` prints the capture and then exactly one newline
+/// (cmd_capture_pane_exec drops a final '\n' and file_print adds one), so a
+/// `-J` capture that ends inside a wrapped line still ends its output.
+fn capture_print_text(mut text: String) -> String {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
 /// The capture-pane forms that do not read the visible grid
 /// (cmd-capture-pane.c cmd_capture_pane_exec): `-P` is the pending incomplete
 /// escape sequence, which psmux's parser does not keep, so it is always empty;
@@ -885,7 +904,7 @@ fn capture_pane_special(
         end,
         pane_id,
         styled: has('e'),
-        preserve_trailing: has('N'),
+        opts: capture_opts(args),
     });
     // A wait that runs out is the timeout error, not "no alternate screen"
     // (the same rule as the user option read, issue #832).
@@ -3348,10 +3367,10 @@ match cmd {
     }
     "capture-pane" | "capturep" => {
         let print_stdout = crate::cli::has_short_flag(&args, 'p');
-        let join_lines = crate::cli::has_short_flag(&args, 'J');
         let escape_seqs = crate::cli::has_short_flag(&args, 'e');
-        // -N: preserve trailing spaces at the end of each line (tmux parity).
-        let preserve_trailing = crate::cli::has_short_flag(&args, 'N');
+        // -N keeps trailing spaces, -J joins wrapped rows; both act on the
+        // grid, where the wrap flag of each row is known.
+        let opts = capture_opts(&args);
         // -t %N target: resolved server-side by pane id across all windows.
         let capture_pane_id = if pane_is_id { target_pane } else { None };
         // Parse -S start and -E end (negative = scrollback offset, - = entire scrollback)
@@ -3382,22 +3401,19 @@ match cmd {
             None => {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 if escape_seqs {
-                    let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end, capture_pane_id, preserve_trailing));
+                    let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end, capture_pane_id, opts));
                 } else if s_arg.is_some() || e_arg.is_some() {
-                    let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end, capture_pane_id, preserve_trailing));
+                    let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end, capture_pane_id, opts));
                 } else {
-                    let _ = tx.send(CtrlReq::CapturePane(rtx, capture_pane_id, preserve_trailing));
+                    let _ = tx.send(CtrlReq::CapturePane(rtx, capture_pane_id, opts));
                 }
                 rrx.recv().ok()
             }
         };
         if captured.is_none() && !persistent && pending_chain.is_empty() { break; }
-        if let Some(mut text) = captured {
-            if join_lines {
-                // Remove trailing whitespace from each line (join wrapped lines)
-                text = text.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
-            }
+        if let Some(text) = captured {
             if print_stdout {
+                let text = capture_print_text(text);
                 // Write text directly — it already ends with \n from capture
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("capture-pane".to_string(), text));
@@ -6931,8 +6947,8 @@ fn dispatch_control_command(
             let start = args.windows(2).find(|w| w[0] == "-S").and_then(|w| if w[1] == "-" { Some(i32::MIN) } else { w[1].parse::<i32>().ok() });
             let end = args.windows(2).find(|w| w[0] == "-E").and_then(|w| w[1].parse::<i32>().ok());
             let styled = crate::cli::has_short_flag(&args, 'e');
-            // -N: preserve trailing spaces at the end of each line (tmux parity).
-            let preserve_trailing = crate::cli::has_short_flag(&args, 'N');
+            // -N keeps trailing spaces, -J joins wrapped rows (tmux parity).
+            let opts = capture_opts(args);
             // -t %N target: resolved server-side by pane id across all windows.
             let capture_pane_id = if pane_is_id { target_pane } else { None };
             // -P and -a answer before the visible grid is read (#810).
@@ -6950,14 +6966,14 @@ fn dispatch_control_command(
             }
             let (rtx, rrx) = mpsc::channel::<String>();
             if styled {
-                let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end, capture_pane_id, preserve_trailing));
+                let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end, capture_pane_id, opts));
             } else if start.is_some() || end.is_some() {
-                let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end, capture_pane_id, preserve_trailing));
+                let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end, capture_pane_id, opts));
             } else {
-                let _ = tx.send(CtrlReq::CapturePane(rtx, capture_pane_id, preserve_trailing));
+                let _ = tx.send(CtrlReq::CapturePane(rtx, capture_pane_id, opts));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
-                let _ = resp_tx.send(text);
+                let _ = resp_tx.send(capture_print_text(text));
             }
             true
         }

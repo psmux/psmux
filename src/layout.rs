@@ -659,6 +659,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         },
         None => app.active_idx,
     };
+    let emacs = app.mode_keys == "emacs";
     let win = &mut app.windows[win_idx];
     let mut path = Vec::new();
     let mut root = build(&mut win.root, &mut path, &win.active_path, in_copy_mode);
@@ -673,12 +674,14 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         copy_pos: Option<(u16, u16)>,
         anchor_scroll: usize,
         pos_scroll: Option<usize>,
+        emacs: bool,
     ) {
         match node {
             LayoutJson::Leaf {
                 active,
                 copy_mode,
                 rows: pane_rows,
+                cols: pane_cols,
                 scroll_offset: so,
                 sel_start_row,
                 sel_start_col,
@@ -713,17 +716,20 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             // breaks after an edge auto-scroll moved the view.
                             let a_abs = ar as i64 - anchor_scroll as i64;
                             let p_abs = pr as i64 - pos_scroll.unwrap_or(scroll_offset) as i64;
-                            let (top_abs, top_col, bot_abs, bot_col) = if a_abs <= p_abs {
+                            let (top_abs, top_col, bot_abs, bot_col) = if (a_abs, ac) <= (p_abs, pc) {
                                 (a_abs, ac, p_abs, pc)
                             } else {
                                 (p_abs, pc, a_abs, ac)
                             };
                             let last = pane_rows.saturating_sub(1) as i64;
                             let cur = scroll_offset as i64;
-                            *sel_start_row = Some((top_abs + cur).clamp(0, last) as u16);
-                            *sel_start_col = Some(top_col);
-                            *sel_end_row = Some((bot_abs + cur).clamp(0, last) as u16);
-                            *sel_end_col = Some(bot_col);
+                            let start = ((top_abs + cur).clamp(0, last) as u16, top_col);
+                            let end = ((bot_abs + cur).clamp(0, last) as u16, bot_col);
+                            let painted = crate::copy_mode::char_selection_highlight(start, end, emacs, *pane_cols);
+                            *sel_start_row = painted.map(|(s, _)| s.0);
+                            *sel_start_col = painted.map(|(s, _)| s.1);
+                            *sel_end_row = painted.map(|(_, e)| e.0);
+                            *sel_end_col = painted.map(|(_, e)| e.1);
                         } else {
                             *sel_start_row = None;
                             *sel_start_col = None;
@@ -743,7 +749,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
             LayoutJson::Split { children, .. } => {
                 if idx < path.len() {
                     if let Some(child) = children.get_mut(path[idx]) {
-                        mark_active(child, path, idx + 1, in_copy_mode, scroll_offset, copy_anchor, copy_pos, anchor_scroll, pos_scroll);
+                        mark_active(child, path, idx + 1, in_copy_mode, scroll_offset, copy_anchor, copy_pos, anchor_scroll, pos_scroll, emacs);
                     }
                 }
             }
@@ -759,6 +765,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         if win_id_override.is_none() { app.copy_pos } else { None },
         if win_id_override.is_none() { app.copy_anchor_scroll_offset } else { 0 },
         if win_id_override.is_none() { app.copy_pos_scroll_offset } else { None },
+        emacs,
     );
     if in_copy_mode && win_id_override.is_none() {
         let hl = crate::copy_mode::copy_highlights(app);
@@ -793,6 +800,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     let cpos = app.copy_pos;
     let pos_scroll = app.copy_pos_scroll_offset;
     let sel_mode = app.copy_selection_mode;
+    // mode-keys decides whether the selection's end cell is selected.
+    let emacs = app.mode_keys == "emacs";
     // Search match and mark highlights of the focused copy-mode pane (#694).
     let hl = if in_copy { crate::copy_mode::copy_highlights(app) } else { Vec::new() };
 
@@ -873,6 +882,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         cpos: Option<(u16, u16)>,
         pos_scroll: Option<usize>,
         sel_mode: crate::types::SelectionMode,
+        emacs: bool,
         hl: &[[u16; 4]],
         out: &mut String,
     ) {
@@ -892,7 +902,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 for (i, c) in children.iter_mut().enumerate() {
                     if i > 0 { out.push(','); }
                     cur_path.push(i);
-                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, hl, out);
+                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, out);
                     cur_path.pop();
                 }
                 out.push_str("]}");
@@ -1164,22 +1174,27 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         // start_col to EOL, middle full, last line to end_col).
                         // For rect mode: send min/max columns.
                         // For line mode: columns are irrelevant.
-                        let (sr, sc, er, ec) = match sel_mode {
+                        let bounds = match sel_mode {
                             crate::types::SelectionMode::Char => {
-                                let top = display_ar.min(pr);
-                                let bot = display_ar.max(pr);
-                                let (tc, bc) = if display_ar <= pr {
-                                    (ac, pc) // anchor is top, cursor is bottom
+                                // The two ends in reading order; with emacs
+                                // keys the last one is not selected, so the
+                                // painted range is the range the yank copies.
+                                let (start, end) = if (display_ar, ac) <= (pr, pc) {
+                                    ((display_ar, ac), (pr, pc))
                                 } else {
-                                    (pc, ac) // cursor is top, anchor is bottom
+                                    ((pr, pc), (display_ar, ac))
                                 };
-                                (top, tc, bot, bc)
+                                crate::copy_mode::char_selection_highlight(start, end, emacs, p.last_cols)
+                                    .map(|((sr, sc), (er, ec))| (sr, sc, er, ec))
                             }
                             crate::types::SelectionMode::Rect => {
-                                (display_ar.min(pr), ac.min(pc), display_ar.max(pr), ac.max(pc))
+                                // emacs keys leave the cursor column out when
+                                // it is right of the anchor, as the yank does.
+                                let (lc, rc) = if emacs && ac < pc { (ac, pc - 1) } else { (ac.min(pc), ac.max(pc)) };
+                                Some((display_ar.min(pr), lc, display_ar.max(pr), rc))
                             }
                             crate::types::SelectionMode::Line => {
-                                (display_ar.min(pr), 0u16, display_ar.max(pr), p.last_cols.saturating_sub(1))
+                                Some((display_ar.min(pr), 0u16, display_ar.max(pr), p.last_cols.saturating_sub(1)))
                             }
                         };
                         let mode_str = match sel_mode {
@@ -1187,10 +1202,14 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             crate::types::SelectionMode::Line => "line",
                             crate::types::SelectionMode::Rect => "rect",
                         };
-                        let _ = std::fmt::Write::write_fmt(out, format_args!(
-                            "\"sel_start_row\":{},\"sel_start_col\":{},\"sel_end_row\":{},\"sel_end_col\":{},\"sel_mode\":\"{}\",",
-                            sr, sc, er, ec, mode_str,
-                        ));
+                        if let Some((sr, sc, er, ec)) = bounds {
+                            let _ = std::fmt::Write::write_fmt(out, format_args!(
+                                "\"sel_start_row\":{},\"sel_start_col\":{},\"sel_end_row\":{},\"sel_end_col\":{},\"sel_mode\":\"{}\",",
+                                sr, sc, er, ec, mode_str,
+                            ));
+                        } else {
+                            out.push_str("\"sel_start_row\":null,\"sel_start_col\":null,\"sel_end_row\":null,\"sel_end_col\":null,\"sel_mode\":null,");
+                        }
                     } else {
                         out.push_str("\"sel_start_row\":null,\"sel_start_col\":null,\"sel_end_row\":null,\"sel_end_col\":null,\"sel_mode\":null,");
                     }
@@ -1290,7 +1309,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     let mut out = String::with_capacity(32768);
     write_node(
         &mut win.root, &mut path, &active_path,
-        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, &hl, &mut out,
+        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, &mut out,
     );
     Ok(out)
 }

@@ -2994,6 +2994,11 @@ mod window_ops_tests {
 
         let mut app = AppState::new("mouse-scrollback".to_string());
         app.mouse_enabled = mouse_enabled;
+        // vi keys copy the cell under the end of a drag too, so the yanks
+        // below are the cells the pointer covered. emacs keys (the default)
+        // leave that cell out, as tmux does; see
+        // an_emacs_drag_leaves_the_cell_under_the_pointer_out.
+        app.mode_keys = "vi".to_string();
         app.scroll_enter_copy_mode = true;
         app.last_window_area = Rect {
             x: 0,
@@ -3270,6 +3275,28 @@ mod window_ops_tests {
         );
     }
 
+    /// tmux with emacs mode-keys (its default) copies a drag up to the cell
+    /// BEFORE the pointer, and paints the same: window_copy_get_selection and
+    /// screen_check_selection drop the bottom right end. Measured on tmux 3.4
+    /// and 3.8 by dragging over "abcdefghij" from c to g: emacs copies "cdef",
+    /// vi "cdefg".
+    #[test]
+    fn an_emacs_drag_leaves_the_cell_under_the_pointer_out() {
+        let mut app = make_scrollback_app(true);
+        app.mode_keys = "emacs".to_string();
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, true); // press at (col 5, row 2)
+        super::handle_pane_mouse(&mut app, 41, 32, 9, 2, true); // drag to col 9
+        let frame = crate::layout::dump_layout_json_fast(&mut app).expect("a frame");
+        assert!(
+            frame.contains("\"sel_start_col\":5,\"sel_end_row\":"),
+            "the highlight starts at the press: {frame}"
+        );
+        assert!(frame.contains("\"sel_end_col\":8,"), "the highlight stops before the pointer: {frame}");
+        super::handle_pane_mouse(&mut app, 41, 0, 9, 2, false);
+        assert_eq!(app.paste_top(), Some("ry-7"), "the copy is cols 5..=8");
+    }
+
     #[test]
     fn a_legacy_mouse_up_past_the_last_drag_must_not_extend_the_selection() {
         // Same bug on the screen-coordinate protocol (mouse-down/drag/up x y),
@@ -3346,6 +3373,11 @@ mod window_ops_tests {
     fn a_legacy_mouse_up_slip_no_frame_carried_must_not_widen_the_yank() {
         fn yank_after(slip_frame: bool) -> String {
             let mut app = make_scrollback_app(true);
+            // The slip lands on column 10, one past the text of
+            // "history-75". vi keys hold the end on the last character
+            // (tmux 3.7 and later), which would hide the slip; emacs keys
+            // copy up to the end cell, so the slip shows as one more cell.
+            app.mode_keys = "emacs".to_string();
             crate::copy_mode::enter_copy_mode(&mut app);
             super::remote_mouse_down(&mut app, 5, 2);
             super::remote_mouse_drag(&mut app, 9, 2);

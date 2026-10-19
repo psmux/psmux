@@ -716,12 +716,77 @@ fn logical_line_first_row(screen: &vt100::Screen, row: u16) -> u16 {
     r
 }
 
-/// The text of a selection from column `c0` to `c1` (both included) on one
-/// row. It stops at the end of the row's text, as tmux's window_copy_copy_line
-/// does: blanks after the text are not copied, blanks between words are.
-fn one_row_selection_text(screen: &vt100::Screen, row: u16, c0: u16, c1: u16, cols: u16) -> String {
-    let end = c1.saturating_add(1).min(row_text_length(screen, row, cols));
-    capture_row_text(screen, row, c0..end.max(c0))
+/// Append columns `sx..ex` of `row` to a copy, tmux's window_copy_copy_line.
+///
+/// Both ends are clamped to the row's text, so blanks after the text are not
+/// copied and blanks between words are. A row that wrapped keeps its full
+/// width instead (its spaces run on into the next row), and gets no newline
+/// when the range reaches its end, so a wrapped line copies as one line.
+fn copy_selection_row(out: &mut String, screen: &vt100::Screen, row: u16, sx: u16, ex: u16, cols: u16) {
+    if sx > ex {
+        return;
+    }
+    let wrapped = screen.row_wrapped(row);
+    let xx = if wrapped { cols } else { row_text_length(screen, row, cols) };
+    let (sx, ex) = (sx.min(xx), ex.min(xx));
+    if sx < ex {
+        out.push_str(&capture_row_text(screen, row, sx..ex));
+    }
+    if !wrapped || ex != xx {
+        out.push('\n');
+    }
+}
+
+/// Where the last row of a selection stops, tmux's window_copy_get_selection:
+/// the end column is clamped to the row's text, and with emacs keys the cell
+/// under the end is left out ("keep the top-left-most character, drop the
+/// bottom-right-most, regardless of copy direction") while vi keeps it.
+/// Returns (lastex, ey_last): the exclusive end, and the row's text length.
+///
+/// With vi keys tmux 3.7 and later never leave the cursor past the last
+/// character (window_copy_cursor_limit, which a mouse drag goes through too),
+/// so the vi end is held on the last character here. A drag past the text
+/// then copies the text without a newline, as tmux 3.8 does; tmux 3.4, which
+/// had no limit, added one.
+fn selection_last_end(screen: &vt100::Screen, row: u16, end_col: u16, cols: u16, emacs: bool) -> (u16, u16) {
+    let ey_last = row_text_length(screen, row, cols);
+    if emacs {
+        (end_col.min(ey_last), ey_last)
+    } else {
+        (end_col.min(ey_last.saturating_sub(1)) + 1, ey_last)
+    }
+}
+
+/// tmux drops the newline a copy ends with ("unless at end in vi mode": a vi
+/// selection whose end is past the text of its last row keeps it), and a
+/// last row that wrapped exactly at the end added none to drop.
+fn trim_selection_newline(text: &mut String, last_wrapped: bool, lastex: u16, ey_last: u16, emacs: bool) {
+    if (emacs || lastex <= ey_last) && (!last_wrapped || lastex != ey_last) && text.ends_with('\n') {
+        text.pop();
+    }
+}
+
+/// The cells a character selection highlights, as inclusive (row, col)
+/// bounds in display rows: `start` and `end` are its two ends in reading
+/// order. With emacs keys the end cell is not selected (tmux
+/// screen_check_selection), so the highlight stops one cell before it, and
+/// `None` means nothing is selected yet (both ends on one cell). tmux still
+/// paints column 0 when the end is at column 0; psmux paints what the copy
+/// takes instead, so the highlight never shows a cell the buffer will not get.
+pub fn char_selection_highlight(start: (u16, u16), end: (u16, u16), emacs: bool, cols: u16) -> Option<((u16, u16), (u16, u16))> {
+    if !emacs {
+        return Some((start, end));
+    }
+    if end.1 > 0 {
+        if start.0 == end.0 && end.1 <= start.1 {
+            return None;
+        }
+        return Some((start, (end.0, end.1 - 1)));
+    }
+    if end.0 <= start.0 {
+        return None;
+    }
+    Some((start, (end.0 - 1, cols.saturating_sub(1))))
 }
 
 /// Where end-of-line puts the cursor, tmux's window_copy_cursor_end_of_line.
@@ -1264,38 +1329,43 @@ pub fn goto_line(app: &mut AppState, lineno: i64) {
     app.copy_scroll_offset = parser.screen().scrollback();
 }
 
-pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
-    let (anchor, pos) = match (app.copy_anchor, app.copy_pos) { (Some(a), Some(p)) => (a,p), _ => return Ok(()) };
-    let sel_mode = app.copy_selection_mode;
-    let anchor_scroll = app.copy_anchor_scroll_offset;
-    let current_scroll = app.copy_scroll_offset;
-    let win = &mut app.windows[app.active_idx];
-    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(()) };
-    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(()) };
-    let rows = p.last_rows;
-    let cols = p.last_cols;
-
-    // Compute absolute line positions (relative to an arbitrary reference).
-    // abs = screen_row - scrollback_at_that_time
-    // Higher abs = further down in the terminal buffer (more recent).
-    //
-    // Each end carries its OWN scrollback, not the current one: an edge
-    // auto-scroll (`scroll_copy_up`/`scroll_copy_down`) moves the view between
-    // the anchor and the endpoint, so reading the endpoint against the current
-    // offset puts it on the wrong content line and the yank no longer covers
-    // what the client painted.
-    let anchor_abs = anchor.0 as i64 - anchor_scroll as i64;
-    let cursor_abs = pos.0 as i64 - app.copy_pos_scroll_offset.unwrap_or(current_scroll) as i64;
+/// The text a selection copies, tmux window_copy_get_selection, without
+/// storing it anywhere. `anchor` and `cursor` are (absolute line, column),
+/// absolute meaning screen row minus the scrollback it was measured at;
+/// rows in the scrollback are read by moving the view, which is put back
+/// to `restore_sb` afterwards. `emacs` is mode-keys emacs, which leaves
+/// the end cell out.
+pub(crate) fn selection_text(
+    parser: &mut vt100::Parser,
+    rows: u16,
+    cols: u16,
+    anchor: (i64, u16),
+    cursor: (i64, u16),
+    sel_mode: crate::types::SelectionMode,
+    emacs: bool,
+    restore_sb: usize,
+) -> String {
+    let ((anchor_abs, anchor_col), (cursor_abs, cursor_col)) = (anchor, cursor);
     let sel_top_abs = anchor_abs.min(cursor_abs);
     let sel_bot_abs = anchor_abs.max(cursor_abs);
     let total_lines = (sel_bot_abs - sel_top_abs + 1) as usize;
 
-    // For character mode: determine which endpoint is the "top" (first) line
-    let (top_col, bot_col) = if anchor_abs <= cursor_abs {
-        (anchor.1, pos.1)
+    // For character mode: the column of the end that comes first in reading
+    // order, and of the one that comes last.
+    let (top_col, bot_col) = if anchor <= cursor {
+        (anchor_col, cursor_col)
     } else {
-        (pos.1, anchor.1)
+        (cursor_col, anchor_col)
     };
+    // A rectangle leaves the cursor column out with emacs keys only when the
+    // cursor is right of the anchor; it always keeps the anchor column.
+    let (rect_sx, rect_ex) = if anchor_col < cursor_col {
+        (anchor_col, if emacs { cursor_col } else { cursor_col + 1 })
+    } else {
+        (cursor_col, anchor_col + 1)
+    };
+    // The last row's end, for the final newline rule.
+    let mut last_end = (false, 0u16, 0u16);
 
     // Read all selected rows by adjusting scrollback as needed.
     // At scrollback S, row R shows absolute line (R - S).
@@ -1320,10 +1390,13 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
             let is_last  = abs_idx + 1 == total_lines;
             match sel_mode {
                 crate::types::SelectionMode::Rect => {
-                    let c0 = anchor.1.min(pos.1); let c1 = anchor.1.max(pos.1);
-                    let line = capture_row_text(parser.screen(), r, c0..c1.saturating_add(1));
-                    text.push_str(line.trim_end());
-                    if !is_last { text.push('\n'); }
+                    // Every row is copied from rect_sx to rect_ex and ends its
+                    // line; only the copy's final newline is dropped below.
+                    copy_selection_row(&mut text, parser.screen(), r, rect_sx, rect_ex, cols);
+                    if is_last {
+                        let ey_last = row_text_length(parser.screen(), r, cols);
+                        last_end = (parser.screen().row_wrapped(r), rect_ex, ey_last);
+                    }
                 }
                 crate::types::SelectionMode::Line => {
                     let line = capture_row_text(parser.screen(), r, 0..cols);
@@ -1331,16 +1404,19 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
                     text.push('\n');
                 }
                 crate::types::SelectionMode::Char => {
-                    if total_lines == 1 {
-                        let c0 = anchor.1.min(pos.1); let c1 = anchor.1.max(pos.1);
-                        text.push_str(&one_row_selection_text(parser.screen(), r, c0, c1, cols));
+                    // tmux window_copy_get_selection: the first row from the
+                    // first end, middle rows whole, the last row to its end
+                    // clamped to the row's text, so blanks between words at
+                    // the end of the selection stay in the copy.
+                    let sx = if is_first { top_col } else { 0 };
+                    let ex = if is_last {
+                        let (lastex, ey_last) = selection_last_end(parser.screen(), r, bot_col, cols, emacs);
+                        last_end = (parser.screen().row_wrapped(r), lastex, ey_last);
+                        lastex
                     } else {
-                        let line_start = if is_first { top_col } else { 0 };
-                        let line_end   = if is_last  { bot_col } else { cols.saturating_sub(1) };
-                        let line = capture_row_text(parser.screen(), r, line_start..line_end.saturating_add(1));
-                        text.push_str(line.trim_end());
-                        if !is_last { text.push('\n'); }
-                    }
+                        cols
+                    };
+                    copy_selection_row(&mut text, parser.screen(), r, sx, ex, cols);
                 }
             }
             abs_idx += 1;
@@ -1348,8 +1424,44 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
         next_abs = read_end + 1;
     }
     // Restore original scrollback
-    parser.screen_mut().set_scrollback(current_scroll);
+    parser.screen_mut().set_scrollback(restore_sb);
+    if !matches!(sel_mode, crate::types::SelectionMode::Line) {
+        let (last_wrapped, lastex, ey_last) = last_end;
+        trim_selection_newline(&mut text, last_wrapped, lastex, ey_last, emacs);
+    }
+    text
+}
+
+pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
+    let (anchor, pos) = match (app.copy_anchor, app.copy_pos) { (Some(a), Some(p)) => (a,p), _ => return Ok(()) };
+    let sel_mode = app.copy_selection_mode;
+    let anchor_scroll = app.copy_anchor_scroll_offset;
+    let current_scroll = app.copy_scroll_offset;
+    let win = &mut app.windows[app.active_idx];
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(()) };
+    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(()) };
+    let rows = p.last_rows;
+    let cols = p.last_cols;
+
+    // Compute absolute line positions (relative to an arbitrary reference).
+    // abs = screen_row - scrollback_at_that_time
+    // Higher abs = further down in the terminal buffer (more recent).
+    //
+    // Each end carries its OWN scrollback, not the current one: an edge
+    // auto-scroll (`scroll_copy_up`/`scroll_copy_down`) moves the view between
+    // the anchor and the endpoint, so reading the endpoint against the current
+    // offset puts it on the wrong content line and the yank no longer covers
+    // what the client painted.
+    let anchor_abs = anchor.0 as i64 - anchor_scroll as i64;
+    let cursor_abs = pos.0 as i64 - app.copy_pos_scroll_offset.unwrap_or(current_scroll) as i64;
+    let emacs = app.mode_keys == "emacs";
+    let text = selection_text(&mut parser, rows, cols, (anchor_abs, anchor.1), (cursor_abs, pos.1), sel_mode, emacs, current_scroll);
     drop(parser);
+    // tmux copies nothing when the selection holds nothing ("Don't bother if
+    // no data"): an emacs selection whose two ends are one cell is empty.
+    if text.is_empty() {
+        return Ok(());
+    }
     // Store in named register if one was selected
     if let Some(reg) = app.copy_register.take() {
         app.named_registers.insert(reg, text.clone());
@@ -1465,6 +1577,54 @@ fn capture_row_text(screen: &vt100::Screen, row: u16, cols: std::ops::Range<u16>
     out
 }
 
+/// The capture-pane flags that shape each line: `-N` keeps trailing spaces,
+/// `-J` joins wrapped rows into one line. A bare `bool` converts to `-N`
+/// alone, the shape every capture had before `-J` reached the grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CaptureOpts {
+    pub preserve_trailing: bool,
+    pub join: bool,
+}
+
+impl From<bool> for CaptureOpts {
+    fn from(preserve_trailing: bool) -> Self {
+        CaptureOpts { preserve_trailing, join: false }
+    }
+}
+
+/// The columns of `row` the pane actually wrote, tmux's `cellused`: up to
+/// and including the last cell with contents. A space the program printed
+/// counts, a cell nothing wrote or an erase cleared does not.
+fn row_used_cols(screen: &vt100::Screen, row: u16, cols: u16) -> u16 {
+    (0..cols)
+        .rev()
+        .find(|&c| screen.cell(row, c).is_some_and(|cell| cell.has_contents() || cell.is_wide_continuation()))
+        .map_or(0, |c| c + 1)
+}
+
+/// Append one grid row of a plain capture (tmux cmd-capture-pane.c
+/// `cmd_capture_pane_history`). Without `-J` a row is the full width, trimmed
+/// unless `-N`. With `-J` tmux drops GRID_STRING_TRIM_SPACES and
+/// GRID_STRING_EMPTY_CELLS, so a row is exactly the cells it used, spaces
+/// kept, and a wrapped row gets no newline so the next row continues it.
+fn push_capture_line(text: &mut String, screen: &vt100::Screen, row: u16, cols: u16, opts: CaptureOpts) {
+    if opts.join {
+        let used = row_used_cols(screen, row, cols);
+        text.push_str(&capture_row_text(screen, row, 0..used));
+        if screen.row_wrapped(row) {
+            return;
+        }
+    } else {
+        let line = capture_row_text(screen, row, 0..cols);
+        if opts.preserve_trailing {
+            text.push_str(&line);
+        } else {
+            text.push_str(line.trim_end());
+        }
+    }
+    text.push('\n');
+}
+
 /// Resolve the (window index, tree path) a capture should read.
 ///
 /// An explicit `-t %N` pane id wins and is searched across every window
@@ -1482,13 +1642,14 @@ fn capture_target(app: &AppState, pane_id: Option<usize>) -> (usize, Vec<usize>)
     (app.active_idx, app.windows[app.active_idx].active_path.clone())
 }
 
-pub fn capture_active_pane_text(app: &mut AppState, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
-    capture_pane_text_from(app, pane_id, preserve_trailing, false)
+pub fn capture_active_pane_text(app: &mut AppState, pane_id: Option<usize>, opts: impl Into<CaptureOpts>) -> io::Result<Option<String>> {
+    capture_pane_text_from(app, pane_id, opts, false)
 }
 
 /// `saved` reads the main screen the alternate screen covers (`capture-pane
 /// -a`), `Ok(None)` when the alternate screen is not in use.
-pub fn capture_pane_text_from(app: &mut AppState, pane_id: Option<usize>, preserve_trailing: bool, saved: bool) -> io::Result<Option<String>> {
+pub fn capture_pane_text_from(app: &mut AppState, pane_id: Option<usize>, opts: impl Into<CaptureOpts>, saved: bool) -> io::Result<Option<String>> {
+    let opts = opts.into();
     // A floating pane: named by %id, or the focused one when the request has
     // no id (a -t naming it by index runs with it focused). capture_target
     // knows the tiled tree only, so a floating %id captured the ACTIVE pane
@@ -1520,15 +1681,7 @@ pub fn capture_pane_text_from(app: &mut AppState, pane_id: Option<usize>, preser
     let screen = parser.screen();
     let mut text = String::new();
     for r in 0..p.last_rows {
-        let row = capture_row_text(screen, r, 0..p.last_cols);
-        // -N (preserve_trailing) keeps the full row width, trailing spaces
-        // included; without it, trim like tmux does by default.
-        if preserve_trailing {
-            text.push_str(&row);
-        } else {
-            text.push_str(row.trim_end());
-        }
-        text.push('\n');
+        push_capture_line(&mut text, screen, r, p.last_cols, opts);
     }
     // Trim trailing all-empty lines so iTerm2 doesn't advance its cursor
     // past the actual content on initial attach.
@@ -2450,12 +2603,13 @@ pub fn compute_capture_range(s: Option<i32>, e: Option<i32>, last_row: u16) -> (
     (start, end)
 }
 
-pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
-    capture_pane_range_from(app, s, e, pane_id, preserve_trailing, false)
+pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, opts: impl Into<CaptureOpts>) -> io::Result<Option<String>> {
+    capture_pane_range_from(app, s, e, pane_id, opts, false)
 }
 
 /// `saved`: see [`capture_pane_text_from`].
-pub fn capture_pane_range_from(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool, saved: bool) -> io::Result<Option<String>> {
+pub fn capture_pane_range_from(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, opts: impl Into<CaptureOpts>, saved: bool) -> io::Result<Option<String>> {
+    let opts = opts.into();
     let (win_idx, path) = capture_target(app, pane_id);
     let win = &mut app.windows[win_idx];
     let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
@@ -2477,14 +2631,7 @@ pub fn capture_pane_range_from(app: &mut AppState, s: Option<i32>, e: Option<i32
         let screen = parser.screen();
         let mut text = String::new();
         for r in start..=end {
-            let row = capture_row_text(screen, r, 0..cols);
-            // -N keeps trailing spaces per row; default trims them.
-            if preserve_trailing {
-                text.push_str(&row);
-            } else {
-                text.push_str(row.trim_end());
-            }
-            text.push('\n');
+            push_capture_line(&mut text, screen, r, cols, opts);
         }
         // An explicit range (-S/-E) is honored line for line, matching tmux:
         // every requested row is emitted, including trailing blank rows inside
@@ -2538,14 +2685,7 @@ pub fn capture_pane_range_from(app: &mut AppState, s: Option<i32>, e: Option<i32
 
         for aline in read_start..=read_end {
             let r = (aline + actual_sb) as u16;
-            let row = capture_row_text(parser.screen(), r, 0..cols);
-            // -N keeps trailing spaces per row; default trims them.
-            if preserve_trailing {
-                text.push_str(&row);
-            } else {
-                text.push_str(row.trim_end());
-            }
-            text.push('\n');
+            push_capture_line(&mut text, parser.screen(), r, cols, opts);
         }
         next_abs = read_end + 1;
     }
@@ -2576,12 +2716,13 @@ pub fn capture_pane_range_from(app: &mut AppState, s: Option<i32>, e: Option<i32
 /// (`tty_check_fg` and friends) substitutes the palette.  So a capture reports
 /// the indexed colour the pane actually wrote, and a caller that wants the
 /// resolved RGB reads the rendered frame instead.
-pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
-    capture_pane_styled_from(app, s, e, pane_id, preserve_trailing, false)
+pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, opts: impl Into<CaptureOpts>) -> io::Result<Option<String>> {
+    capture_pane_styled_from(app, s, e, pane_id, opts, false)
 }
 
 /// `saved`: see [`capture_pane_text_from`].
-pub fn capture_pane_styled_from(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool, saved: bool) -> io::Result<Option<String>> {
+pub fn capture_pane_styled_from(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, opts: impl Into<CaptureOpts>, saved: bool) -> io::Result<Option<String>> {
+    let CaptureOpts { preserve_trailing, join } = opts.into();
     let (win_idx, path) = capture_target(app, pane_id);
     let win = &mut app.windows[win_idx];
     let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
@@ -2610,13 +2751,19 @@ pub fn capture_pane_styled_from(app: &mut AppState, s: Option<i32>, e: Option<i3
     let mut prev_hidden = false;
     let mut prev_strikethrough = false;
 
+    // A -J row that ran on into the next one with a style still set.
+    let mut style_carried = false;
+
     // Helper closure: render one screen row with SGR tracking
     let mut render_styled_row = |screen: &vt100::Screen, r: u16, text: &mut String| {
         let mut row_chars: Vec<String> = Vec::new();
         let mut row_sgr: Vec<Option<String>> = Vec::new();
         let mut any_style_active = false;
+        // -J: the row ends after the last cell the pane wrote (tmux cellused).
+        let mut used_chars = 0usize;
         for c in 0..cols {
             if let Some(cell) = screen.cell(r, c) {
+                if cell.has_contents() { used_chars = row_chars.len() + 1; }
                 // Second half of a wide glyph: the leading half already emitted
                 // the full multi-column character, so skip it entirely (issue
                 // #443 fix must not add a phantom column after wide/CJK glyphs).
@@ -2719,7 +2866,13 @@ pub fn capture_pane_styled_from(app: &mut AppState, s: Option<i32>, e: Option<i3
         // spaces (e.g. a TUI's background fill painted to end-of-line) keep
         // their SGR when the capture is replayed. Without -N, trim after the
         // last non-whitespace cell like tmux does by default.
-        let trim_end = if preserve_trailing {
+        //
+        // -J: the cells the row used, spaces kept, and a wrapped row runs on
+        // into the next one with no reset or newline between them, so the
+        // style carries across the join as it does in tmux.
+        let trim_end = if join {
+            used_chars
+        } else if preserve_trailing {
             row_chars.len()
         } else {
             match row_chars.iter().rposition(|s| !s.is_empty() && s.trim() != "") { Some(pos) => pos + 1, None => 0 }
@@ -2728,7 +2881,12 @@ pub fn capture_pane_styled_from(app: &mut AppState, s: Option<i32>, e: Option<i3
             if let Some(ref sgr) = row_sgr[c] { text.push_str(sgr); }
             text.push_str(&row_chars[c]);
         }
-        if any_style_active {
+        if join && screen.row_wrapped(r) {
+            style_carried |= any_style_active;
+            return;
+        }
+        let carried = std::mem::take(&mut style_carried);
+        if any_style_active || carried {
             text.push_str("\x1b[0m");
             prev_fg = None;
             prev_bg = None;
@@ -3267,6 +3425,14 @@ mod tests_issue810_saved_screen;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue855_copy_cursor_wide.rs"]
 mod test_issue855_copy_cursor_wide;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_capture_pane_join.rs"]
+mod test_capture_pane_join;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_copy_selection_parity.rs"]
+mod test_copy_selection_parity;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_copy_mode_end_of_line.rs"]
