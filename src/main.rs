@@ -455,6 +455,12 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
                 eprintln!("psmux: can't find pane: {}", p);
                 std::process::exit(1);
             }
+            if p.chars().all(|c| c.is_ascii_digit())
+                && cli_pane_index_exists_in_window(win_part, p) == Some(false)
+            {
+                eprintln!("psmux: can't find pane: {}", p);
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -495,6 +501,11 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
                 // live layout, which only the server can resolve.
             } else if p.starts_with('%') {
                 if cli_pane_id_exists(p) == Some(false) {
+                    eprintln!("psmux: can't find pane: {}", p);
+                    std::process::exit(1);
+                }
+            } else if win_part.is_empty() {
+                if cli_pane_index_exists(p) == Some(false) {
                     eprintln!("psmux: can't find pane: {}", p);
                     std::process::exit(1);
                 }
