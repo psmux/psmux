@@ -3981,6 +3981,8 @@ pub enum CtrlReq {
         /// move-pane: the source may already be in the target window
         /// ("like join-pane but allows the same window", tmux CHANGES 1.7).
         same_window: bool,
+        /// -l size (cells, or a share of the target pane with the flag set).
+        size: Option<(u16, bool)>,
     },
     /// respawn-pane. Fields: optional workdir (-c), kill flag (-k), command
     /// (`--`/positional shell-command), empty (-E), and the per-request reply.

@@ -355,13 +355,20 @@ pub struct Grafted {
 /// `if (!args_has(args, 'd'))`), so `focus_new` selects it, and otherwise the
 /// pane that was active before keeps the focus.
 pub fn graft_pane(win: &mut crate::types::Window, path: &Vec<usize>, kind: LayoutKind, new_leaf: Node, before: bool, focus_new: bool) -> Option<Grafted> {
+    graft_pane_sized(win, path, kind, new_leaf, None, before, focus_new)
+}
+
+/// graft_pane with join-pane / move-pane `-l` (`size`: cells, or a share of
+/// the target pane when the flag is set), as layout_get_tiled_cell sizes it.
+pub fn graft_pane_sized(win: &mut crate::types::Window, path: &Vec<usize>, kind: LayoutKind, new_leaf: Node,
+                        size: Option<(u16, bool)>, before: bool, focus_new: bool) -> Option<Grafted> {
     let new_id = match &new_leaf { Node::Leaf(p) => Some(p.id), Node::Split { .. } => collect_pane_ids(&new_leaf).first().copied() };
     let prev_id = get_active_pane_id(&win.root, &win.active_path);
     // cmd-join-pane.c splits the target with the same layout_split_pane as
     // split-window, so the joined pane gets the same cells (60 | 59 on 120).
     if win.area.width > 0 && win.area.height > 0 {
         let area = win.area;
-        split_leaf_tmux(&mut win.root, path, area, kind, new_leaf, None, before)?;
+        split_leaf_tmux(&mut win.root, path, area, kind, new_leaf, size, before)?;
     } else {
         replace_leaf_with_split_ordered(&mut win.root, path, kind, new_leaf, before);
     }

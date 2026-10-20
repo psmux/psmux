@@ -4327,6 +4327,7 @@ match cmd {
             before: args.contains(&"-b"),
             resp: resp_s,
             same_window: matches!(cmd, "move-pane" | "movep"),
+            size: crate::commands::join_size_arg(&args),
         });
         if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
             if !persistent {
@@ -8229,6 +8230,7 @@ fn dispatch_control_command(
                 before: args.contains(&"-b"),
                 resp: jp_s,
                 same_window: matches!(cmd, "move-pane" | "movep"),
+                size: crate::commands::join_size_arg(&args),
             });
             match jp_r.recv_timeout(Duration::from_secs(5)) {
                 Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }

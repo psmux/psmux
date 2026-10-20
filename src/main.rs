@@ -4519,6 +4519,7 @@ fn run_main() -> io::Result<()> {
                 let mut horizontal = false;
                 let mut detach = false;
                 let mut before = false;
+                let mut size_arg: Option<String> = None;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
@@ -4531,6 +4532,14 @@ fn run_main() -> io::Result<()> {
                         "-d" => detach = true,
                         // -b is forwarded for the same reason (#725).
                         "-b" => before = true,
+                        // -l size / -p percentage: forwarded, the server sizes
+                        // the joined pane (layout_get_tiled_cell).
+                        "-l" | "-p" => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                size_arg = Some(format!(" {} {}", cmd_args[i], v));
+                                i += 1;
+                            }
+                        }
                         "-s" => {
                             if let Some(t) = cmd_args.get(i + 1) {
                                 source_spec = t.to_string();
@@ -4627,6 +4636,7 @@ fn run_main() -> io::Result<()> {
                     if horizontal { cmd.push_str(" -h"); }
                     if detach { cmd.push_str(" -d"); }
                     if before { cmd.push_str(" -b"); }
+                    if let Some(ref s) = size_arg { cmd.push_str(s); }
                     if !source_spec.is_empty() { cmd.push_str(&format!(" -s {}", source_spec)); }
                     if !target_spec.is_empty() { cmd.push_str(&format!(" -t {}", target_spec)); }
                     cmd.push('\n');
