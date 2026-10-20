@@ -1131,10 +1131,24 @@ fn ensure_standby_server(ns: Option<&str>, warm_base: &str, wait: bool) -> io::R
     std::process::exit(1);
 }
 
-fn write_shell_output(mut stream: impl Write + IsTerminal, bytes: &[u8]) -> io::Result<()> {
-    // Windows console stdio requires UTF-8. Redirected output retains the child's bytes.
+/// Whether a std handle (-10 stdin, -11 stdout, -12 stderr) is a real Windows
+/// console. Unlike `is_terminal()`, an MSYS2 or Cygwin pty pipe is not one.
+#[cfg(windows)]
+fn std_handle_is_console(id: i32) -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
+    }
+    let mut mode = 0u32;
+    unsafe { GetConsoleMode(GetStdHandle(id as u32), &mut mode) != 0 }
+}
+
+fn write_shell_output(mut stream: impl Write, _std_handle: i32, bytes: &[u8]) -> io::Result<()> {
+    // Windows console stdio requires UTF-8. Redirected output, an MSYS2 pty
+    // pipe included, retains the child's bytes.
     #[cfg(windows)]
-    if stream.is_terminal() {
+    if std_handle_is_console(_std_handle) {
         return stream.write_all(String::from_utf8_lossy(bytes).as_bytes());
     }
     stream.write_all(bytes)
@@ -4302,8 +4316,8 @@ fn run_main() -> io::Result<()> {
                 } else {
                     let mut c = build(&shell_cmd);
                     let output = c.output()?;
-                    write_shell_output(io::stdout(), &output.stdout)?;
-                    write_shell_output(io::stderr(), &output.stderr)?;
+                    write_shell_output(io::stdout(), -11, &output.stdout)?;
+                    write_shell_output(io::stderr(), -12, &output.stderr)?;
                     std::process::exit(output.status.code().unwrap_or(0));
                 }
                 return Ok(());
@@ -6753,7 +6767,10 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         // Console reads preserve raw control characters and split UTF-16 pairs.
         // Non-console handles retain raw reads and the SSH startup retries below.
         #[cfg(windows)]
-        let read_result = if io::stdin().is_terminal() {
+        // `stdin_console` is GetConsoleMode, not is_terminal(): Rust's
+        // is_terminal() is also true for an MSYS2 or Cygwin pty pipe (mintty,
+        // Git Bash, Cygwin sshd), and ReadConsoleW fails on a pipe.
+        let read_result = if stdin_console {
             console_reader.read(&mut stdin_buf)
         } else {
             #[link(name = "kernel32")]

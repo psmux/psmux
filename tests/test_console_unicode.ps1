@@ -313,6 +313,45 @@ try { `$run.Process.WaitForExit() } finally { `$run.Process.Dispose() }
             }
         }
     }
+
+    # mintty, Git Bash and Cygwin sshd hand a native program a pipe named like an
+    # MSYS2 pty. Rust's is_terminal() is true for it, yet it is no console, so
+    # ReadConsoleW must not be used: control mode has to read it as a pipe.
+    foreach ($mode in @('-C', '-CC')) {
+        $label = "MSYS pty pipe $mode"
+        $server = $null; $writer = $null; $proc = $null
+        try {
+            Control set-option -g @unicode-probe unset | Out-Null
+            if ((Control list-clients)) { throw 'precondition: previous control client remains' }
+            $pipeName = 'msys-1888ae32e00d56aa-pty0-from-master-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $server = [IO.Pipes.NamedPipeServerStream]::new($pipeName, [IO.Pipes.PipeDirection]::Out)
+            $si = [Diagnostics.ProcessStartInfo]::new('cmd.exe')
+            $si.Arguments = "/s /c `"`"$PsmuxExe`" -L $controlNS -f `"$config`" $mode attach-session -t inner < \\.\pipe\$pipeName > nul 2>&1`""
+            $si.UseShellExecute = $false; $si.CreateNoWindow = $true
+            $proc = [Diagnostics.Process]::Start($si)
+            if (-not $server.WaitForConnectionAsync().Wait(15000)) { throw 'control client never opened the pipe' }
+            $writer = [IO.StreamWriter]::new($server, [Text.UTF8Encoding]::new($false))
+            Wait-For { [bool](Control list-clients) } "$label registration"
+            $writer.Write("set-option -g @unicode-probe '$unicode'`n"); $writer.Flush()
+            Wait-For { (Control display-message -p -t inner '#{@unicode-probe}') -ceq $unicode -or $proc.HasExited } "$label Unicode"
+            if ((Control display-message -p -t inner '#{@unicode-probe}') -cne $unicode) {
+                throw "MSYS pty pipe input was not read (client exited=$($proc.HasExited))"
+            }
+            $writer.Dispose(); $writer = $null
+            $server.Dispose(); $server = $null
+            if (-not $proc.WaitForExit(15000)) { throw 'control client did not exit at pipe EOF' }
+            Wait-For { -not (Control list-clients) } "$label disconnect"
+            Write-Host "PASS $label"
+        } catch { $failures.Add("${label}: $_") }
+        finally {
+            if ($writer) { try { $writer.Dispose() } catch {} }
+            if ($server) { $server.Dispose() }
+            if ($proc) {
+                if (-not $proc.HasExited) { try { $proc.Kill($true) } catch {} }
+                $proc.Dispose()
+            }
+        }
+    }
 } catch { $failures.Add(($_ | Out-String)) }
 finally {
     if ($privateRoot) {
