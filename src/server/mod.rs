@@ -6354,7 +6354,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         };
                         output.push_str(&format!("default-shell {}\n", shell_val));
                     }
-                    output.push_str(&format!("word-separators \"{}\"\n", app.word_separators));
+                    // Quoted the way tmux shows it: the default holds `"` and
+                    // `\`, which go escaped inside the quotes (#862).
+                    output.push_str(&format!("word-separators {}\n",
+                        crate::util::quote_arg_if_needed(&app.word_separators)));
                     // tmux lists key-table with its root default; the value
                     // itself lives in user_options, skipped in the loop below.
                     output.push_str(&format!("key-table {}\n",

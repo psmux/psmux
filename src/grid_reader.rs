@@ -61,7 +61,10 @@ pub struct ScreenGrid<'a> {
 impl<'a> ScreenGrid<'a> {
     pub fn new(screen: &'a mut vt100::Screen) -> Self {
         let (rows, cols) = screen.size();
-        let history = screen.scrollback_filled();
+        // The history of the grid in use: `scrollback_filled` counts the
+        // main grid's even while the alternate grid is up, and the lines
+        // above the alternate screen would then all read as its top row.
+        let history = screen.active_scrollback_filled();
         let scrollback = screen.scrollback();
         ScreenGrid {
             screen,

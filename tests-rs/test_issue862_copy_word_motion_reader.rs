@@ -288,3 +288,25 @@ fn a_word_motion_reads_the_scrollback_and_puts_the_view_back() {
     }
     assert_eq!(p.screen().scrollback(), 3, "the view is where it was");
 }
+
+#[test]
+fn the_alternate_screen_has_no_lines_above_it() {
+    // 30 lines go into the main grid's scrollback, then an app takes the
+    // alternate screen. The alternate grid keeps no scrollback, so there is
+    // nothing above its top row: previous-word from 0:0 stays there, and the
+    // top row is not read again as if it were the line above.
+    let fillers: Vec<String> = (0..30).map(|i| format!("word{i:02} aa")).collect();
+    let lines: Vec<&str> = fillers.iter().map(String::as_str).collect();
+    let mut p = parser(&lines, 8, 40, 100);
+    p.process(b"\x1b[?1049h\x1b[HALT top line");
+    assert!(p.screen().scrollback_filled() > 0, "the main grid has history");
+    let mut grid = ScreenGrid::new(p.screen_mut());
+    assert_eq!(grid.history(), 0);
+    let top = grid.abs_of_row(0);
+    assert_eq!(top, 0);
+    let got = walk(&mut grid, Verb::PreviousWord, true, 0, top, 2);
+    assert_eq!(got, vec!["0:0", "0:0"]);
+    let got = walk(&mut grid, Verb::PreviousWord, false, 0, top, 1);
+    assert_eq!(got, vec!["0:0"]);
+    assert_eq!(format_grid_word(&mut grid, 0, top, DEFAULT_WORD_SEPARATORS), "ALT");
+}

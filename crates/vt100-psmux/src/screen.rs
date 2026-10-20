@@ -316,6 +316,16 @@ impl Screen {
         self.grid.scrollback_filled()
     }
 
+    /// Returns the number of rows held in the scrollback of the grid that
+    /// is in use, the one `cell` and `set_scrollback` work on: none while
+    /// the alternate grid is up, since it keeps no scrollback.  A reader
+    /// that walks lines by moving the scrollback offset needs this count,
+    /// not `scrollback_filled`, or it reads rows the offset cannot reach.
+    #[must_use]
+    pub fn active_scrollback_filled(&self) -> usize {
+        self.grid().scrollback_filled()
+    }
+
     /// Returns roughly how many bytes the main grid's scrollback holds: the
     /// cells the history rows actually store, plus per-row bookkeeping.  Since
     /// a row is compacted to its used width when it becomes history (issue
