@@ -20,10 +20,10 @@
 # (tests\conread.cs), read while nothing else is sent to the server, and
 # #{window_flags} from list-windows afterwards.
 #
-# Set PSMUX_TEST_BIN to test a binary that is not on PATH.
+# Set PSMUX_TEST_EXE (or PSMUX_TEST_BIN) to test a binary that is not on PATH.
 
 $ErrorActionPreference = "Continue"
-$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
+$PSMUX = if ($env:PSMUX_TEST_EXE) { $env:PSMUX_TEST_EXE } elseif ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
 $psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $script:TestsPassed = 0; $script:TestsFailed = 0
 $script:Opened = @()
