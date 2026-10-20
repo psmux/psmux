@@ -4400,17 +4400,10 @@ pub fn spawn_reader_thread(
                     }
                     // Append raw output to ring buffer for control mode %output.
                     // This is independent of parser state and must stay live.
-                    if let Ok(mut ring) = output_ring_r.lock() {
-                        const MAX_RING: usize = 65536;
-                        let space = MAX_RING.saturating_sub(ring.len());
-                        if n <= space {
-                            ring.extend(&local[..n]);
-                        } else {
-                            let drop_count = (n - space).min(ring.len());
-                            ring.drain(..drop_count);
-                            ring.extend(&local[..n]);
-                        }
-                    }
+                    // While control clients consume it, a full ring holds
+                    // this reader until the server loop takes the bytes
+                    // instead of dropping the oldest (#875).
+                    crate::control_ring::push(&output_ring_r, &local[..n]);
                     // Issue #440: tee raw pane output to any registered pipe-pane
                     // writer for this pane. The atomic gate keeps this a single
                     // relaxed load (no mutex) whenever nothing is being piped,

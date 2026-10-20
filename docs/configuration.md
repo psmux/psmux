@@ -188,7 +188,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `set-titles-string` | Str | | Terminal title format |
 | `default-shell` | Str | `$SHELL` if usable, else `pwsh` | Shell to launch (then `powershell`, then `cmd`) |
 | `default-command` | Str | | Alias for default-shell |
-| `word-separators` | Str | `" -_@"` | Copy-mode word delimiters |
+| `word-separators` | Str | ASCII punctuation except `_` | Characters that split words in copy mode, besides whitespace. The default is every printable ASCII character that is neither a letter nor a digit, minus the underscore, as in tmux |
 | `activity-action` | Str | `other` | Action on window activity: `any`, `none`, `current`, `other` |
 | `silence-action` | Str | `other` | Action on window silence: `any`, `none`, `current`, `other` |
 | `bell-action` | Str | `any` | Bell action: controls audible bell forwarding and status bar flag (`any`, `none`, `current`, `other`) |

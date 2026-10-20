@@ -2046,16 +2046,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
                 copy_selection_done(app);
             }
         }
-        "select-word" => {
-            // Select the word under cursor
-            crate::copy_mode::move_to_word_start(app);
-            if let Some((r,c)) = crate::copy_mode::get_copy_pos(app) {
-                app.copy_anchor = Some((r,c));
-                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-                app.copy_selection_mode = crate::types::SelectionMode::Char;
-            }
-            crate::copy_mode::move_word_end(app);
-        }
+        "select-word" => { crate::copy_mode::select_word(app); }
         "other-end" => {
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                 app.copy_anchor = Some(p);
@@ -2902,60 +2893,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::window_ops::update_mouse_proto_owner(&mut fp.pane);
                 }
             }
-            // Drain output ring buffers and send %output notifications to control clients
-            if !app.control_clients.is_empty() {
-                // Collect output from all panes first, then dispatch to clients
-                let mut pane_outputs: Vec<(usize, String)> = Vec::new();
-                for win in &app.windows {
-                    crate::tree::for_each_pane(&win.root, &mut |pane: &crate::types::Pane| {
-                        if let Ok(mut ring) = pane.output_ring.lock() {
-                            if !ring.is_empty() {
-                                let bytes: Vec<u8> = ring.drain(..).collect();
-                                let data = String::from_utf8_lossy(&bytes).to_string();
-                                pane_outputs.push((pane.id, data));
-                            }
-                        }
-                    });
-                }
-                // Dispatch to each control client. The client's output gate
-                // tracks how old the oldest unwritten output of each pane is
-                // (tmux control_check_age): past pause-after the pane is
-                // paused for that client and its backlog dropped, and a
-                // client without pause-after that falls CONTROL_MAXIMUM_AGE
-                // behind is disconnected (#826). The writer thread decides
-                // between %output and %extended-output and measures the age.
-                let now = std::time::Instant::now();
-                for (pane_id, data) in &pane_outputs {
-                    for client in app.control_clients.values_mut() {
-                        if client.paused_panes.contains(pane_id) {
-                            continue;
-                        }
-                        match client.output_gate.enqueue(*pane_id, now) {
-                            crate::control::GateEnqueue::Send(seq) => {
-                                let sent = client.notification_tx.try_send(
-                                    crate::types::ControlNotification::PaneOutput {
-                                        pane_id: *pane_id,
-                                        data: data.clone(),
-                                        seq,
-                                        queued_at: now,
-                                    }
-                                );
-                                if sent.is_err() {
-                                    client.output_gate.unqueue(*pane_id, seq);
-                                }
-                            }
-                            crate::control::GateEnqueue::Paused => {
-                                // Wakes the writer, which prints the %pause.
-                                let _ = client.notification_tx.try_send(
-                                    crate::types::ControlNotification::Pause { pane_id: *pane_id }
-                                );
-                            }
-                            crate::control::GateEnqueue::Skip
-                            | crate::control::GateEnqueue::TooFarBehind => {}
-                        }
-                    }
-                }
-            }
             // Answer any ESC[6n queries — pwsh re-issues this after lock/unlock.
             if crate::types::CPR_DATA_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 for win in &mut app.windows {
@@ -3037,6 +2974,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
             }
         }
+        // Pane output for the control clients as %output. Every pass, not
+        // only on a pass that saw new data: a pane reader waiting on a full
+        // ring, or output held back while the clients were behind, must
+        // not wait for the pane to print again (#875).
+        crate::control::flush_pane_output(&mut app);
         // Issue #597: write the DA1/DA2/DSR/DECRQM answers the parser threads
         // composed.  Deliberately outside the `data_ready` arm above: a warm
         // spare that is still starting up is exactly the pane whose console
@@ -3117,8 +3059,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         if last_alert_check.elapsed() >= Duration::from_secs(1) {
             last_alert_check = Instant::now();
-            let alert_hooks = helpers::check_window_activity(&mut app);
-            for event in &alert_hooks {
+            let alerts = helpers::check_window_activity(&mut app);
+            // A changed flag changes the tabs, which come from the cached
+            // window list, so rebuild it and push the frame.
+            if alerts.flags_changed {
+                meta_dirty = true;
+            }
+            for event in &alerts.hooks {
                 crate::commands::fire_hooks(&mut app, event);
             }
         }
@@ -3531,7 +3478,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if closed_float {
                         state_dirty = true;
                     } else {
+                        let win = &app.windows[app.active_idx];
+                        let win_id = win.id;
+                        let killed_active = crate::tree::get_active_pane_id(&win.root, &win.active_path)
+                            .map_or(false, |pid| temp_target::is_real_active_pane(&app, &temp_focus_restore, app.active_idx, pid));
                         unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                        control::emit_pane_closed(&app, win_id, killed_active);
                     }
                 }
                 CtrlReq::KillPaneById(pid) => {
@@ -3552,7 +3504,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         };
                         state_dirty = true;
                     } else {
+                        let win = app.windows.iter()
+                            .position(|w| crate::tree::find_path_by_id(&w.root, pid).is_some())
+                            .map(|wi| (app.windows[wi].id, temp_target::is_real_active_pane(&app, &temp_focus_restore, wi, pid)));
                         unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                        if let Some((win_id, killed_active)) = win { control::emit_pane_closed(&app, win_id, killed_active); }
                     }
                 }
                 CtrlReq::CapturePane(resp, pane_id, preserve_trailing) => {
@@ -3640,7 +3596,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(i) = other_window {
                         let moved = match (pane, pane_is_id) {
                             (Some(p), true) => crate::tree::set_window_active_pane_by_id(&mut app, i, p),
-                            (Some(p), false) => crate::tree::set_window_active_pane_by_index(&mut app, i, p),
+                            (Some(p), false) => p.checked_sub(app.pane_base_index)
+                                .is_some_and(|pos| crate::tree::set_window_active_pane_by_index(&mut app, i, pos)),
                             // `select-pane -t <window>` with no pane part names
                             // that window's already active pane, so nothing
                             // moves anywhere (tmux: `wp == w->active`, :269).
@@ -3661,8 +3618,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let old_path = app.windows[app.active_idx].active_path.clone();
                         if pane_is_id {
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
-                        } else {
-                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, p); });
+                        } else if let Some(pos) = p.checked_sub(app.pane_base_index) {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
                         }
                         if app.windows[app.active_idx].active_path != old_path {
                             // tmux pushes the pane we came from onto
@@ -3699,7 +3656,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::FocusPaneByIndex(idx) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
-                    switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, idx); });
+                    if let Some(pos) = idx.checked_sub(app.pane_base_index) {
+                        switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
+                    }
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
                     // Update MRU so directional navigation remembers this focus change
                     let win = &mut app.windows[app.active_idx];
@@ -3845,8 +3804,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DumpState(resp, allow_nc, dump_client_id) => {
                     state_dirty |= helpers::refresh_program_status_tabs(&app, &mut cached_program_status_version, &mut cached_windows_json)?;
                     // ── Activity / bell / silence detection ──
-                    let alert_hooks = helpers::check_window_activity(&mut app);
-                    for event in &alert_hooks {
+                    let alerts = helpers::check_window_activity(&mut app);
+                    if alerts.flags_changed {
+                        meta_dirty = true;
+                    }
+                    for event in &alerts.hooks {
                         if let Some(cmds) = app.hooks.get(*event) { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     }
 
@@ -4209,6 +4171,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_text(&mut app);
+                    // Typing into a direct-scrolled pane shows its live screen
+                    // again, before the key can be taken by a mode it opens.
+                    if crate::input::snap_interactive_to_live(&mut app) {
+                        state_dirty = true;
+                    }
                     send_text_to_active(&mut app, &s)?;
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
@@ -4239,13 +4206,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::pty_trace::mark("g", 0, k.as_bytes());
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_key(&mut app, &k);
+                    if crate::input::snap_interactive_to_live(&mut app) {
+                        state_dirty = true;
+                    }
                     send_key_to_active(&mut app, &k)?;
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
                     echo_pending_until = Some(Instant::now());
                 }
-                CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::SendPaste(s) => {
+                    if crate::input::snap_interactive_to_live(&mut app) {
+                        state_dirty = true;
+                    }
+                    send_paste_to_active(&mut app, &s)?;
+                    echo_pending_until = Some(Instant::now());
+                }
                 CtrlReq::PasteBuffer(pb, resp) => {
                     // No `?` here on purpose: a write that fails because the
                     // target pane died a moment ago is a routine failure of one
@@ -4694,7 +4670,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 // third character of "C-x" on a whitespace split
                                 // command line, and the generic C- arm below would read
                                 // the 'S' of "C-Space" and send Ctrl+S.  tmux byte: NUL.
-                                "C-Space" | "c-space" | "C-space" => {
+                                // This match is on `key_upper`, so the only spelling
+                                // that can ever arrive is "C-SPACE"; the mixed case
+                                // forms alone never matched and `send-keys C-Space`
+                                // wrote 0x13, an XOFF (issue #860).
+                                "C-SPACE" => {
                                     #[cfg(windows)]
                                     let handled = match ctrl_key_record_seq_for_active(&mut app, ' ', false) {
                                         Some(seq) => {
@@ -5802,7 +5782,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // -t targeting: evaluate format for the specific pane
                             // using PANE_POS_OVERRIDE so #{pane_active} reflects
                             // the REAL active pane, not the target (#113)
-                            crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pane_idx)
+                            match pane_idx.checked_sub(app.pane_base_index) {
+                                Some(pos) => crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pos),
+                                None => String::new(),
+                            }
                         } else {
                             expand_format(&fmt, &app)
                         })
@@ -5945,12 +5928,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::JoinPane { src_raw, src, dst, horizontal, detach, before, resp } => {
+                CtrlReq::JoinPane { src_raw, src, dst, horizontal, detach, before, resp, same_window, size } => {
                     unzoom_if_zoomed(&mut app);
                     // One implementation with the embedded fallback (#725);
                     // join_pane_request resolves %id ends and answers the
                     // refusals the CLI prints at exit 1.
-                    let r = crate::commands::join_pane_request(&mut app, src_raw.as_deref(), &src, &dst, horizontal, detach, before);
+                    let r = crate::commands::join_pane_request(&mut app, src_raw.as_deref(), &src, &dst, horizontal, detach, before, same_window, size);
                     match r {
                         Ok(()) => {
                             resize_all_panes(&mut app);
@@ -6363,7 +6346,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         };
                         output.push_str(&format!("default-shell {}\n", shell_val));
                     }
-                    output.push_str(&format!("word-separators \"{}\"\n", app.word_separators));
+                    // Quoted the way tmux shows it: the default holds `"` and
+                    // `\`, which go escaped inside the quotes (#862).
+                    output.push_str(&format!("word-separators {}\n",
+                        crate::util::quote_arg_if_needed(&app.word_separators)));
                     // tmux lists key-table with its root default; the value
                     // itself lives in user_options, skipped in the loop below.
                     output.push_str(&format!("key-table {}\n",
@@ -7534,7 +7520,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                         app.last_window_idx = app.active_idx;
                                                         app.active_idx = i;
                                                     }
-                                                    crate::tree::focus_pane_by_index(app, pid);
+                                                    if let Some(pos) = pid.checked_sub(app.pane_base_index) {
+                                                        crate::tree::focus_pane_by_index(app, pos);
+                                                    }
                                                 });
                                                 if let Some(win) = app.windows.get_mut(i) {
                                                     win.activity_flag = false; win.bell_flag = false; win.silence_flag = false;
@@ -8310,6 +8298,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Register control clients with the same idempotent
                     // counter/registry invariant as normal TUI clients.
                     app.register_client_with_pid(client_id, true, pid);
+                    // Its %output starts with what the panes write from now.
+                    crate::control::start_consuming_output(&app);
                     // Real tmux fires server hooks (session-changed, window-add,
                     // etc.) as side effects of the initial attach-session command.
                     // iTerm2 depends on %session-changed to enable writes
@@ -8349,24 +8339,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         );
                     }
                 }
-                CtrlReq::ControlContinuePane { client_id, pane_id } => {
-                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
-                        if cc.output_gate.continue_pane(pane_id) {
-                            let _ = cc.notification_tx.try_send(
-                                crate::types::ControlNotification::Continue { pane_id }
-                            );
-                        }
-                    }
+                // The %continue / %pause line goes in the command's reply,
+                // inside its %begin/%end block, as tmux writes it
+                // (control.c control_continue_pane / control_pause_pane).
+                // Sent through the writer instead, it came after the %end,
+                // so a client that paused and resumed at once read the late
+                // %pause as a new pause.
+                CtrlReq::ControlContinuePane { client_id, pane_id, reply } => {
+                    let due = app.control_clients.get_mut(&client_id)
+                        .map_or(false, |cc| cc.output_gate.continue_pane(pane_id));
+                    let _ = reply.send(due);
                 }
-                CtrlReq::ControlPausePane { client_id, pane_id } => {
-                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
-                        if cc.output_gate.pause_pane(pane_id) {
-                            // Wakes the writer, which prints the %pause.
-                            let _ = cc.notification_tx.try_send(
-                                crate::types::ControlNotification::Pause { pane_id }
-                            );
-                        }
-                    }
+                CtrlReq::ControlPausePane { client_id, pane_id, reply } => {
+                    let due = app.control_clients.get_mut(&client_id)
+                        .map_or(false, |cc| cc.output_gate.pause_pane(pane_id));
+                    let _ = reply.send(due);
                 }
                 CtrlReq::ControlDeregister { client_id } => {
                     app.control_clients.remove(&client_id);
@@ -8704,8 +8691,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         push_deferred = owe_push && pty_batch_pending;
         if owe_push && !pty_batch_pending {
             // Check bell/activity state for the pushed frame
-            let push_alert_hooks = helpers::check_window_activity(&mut app);
-            for event in &push_alert_hooks {
+            let push_alerts = helpers::check_window_activity(&mut app);
+            if push_alerts.flags_changed {
+                meta_dirty = true;
+            }
+            for event in &push_alerts.hooks {
                 crate::commands::fire_hooks(&mut app, event);
             }
             // Rebuild metadata cache if structural changes happened.
@@ -8976,7 +8966,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             for (cid, notif) in sub_notifs {
                 if let Some(cc) = app.control_clients.get(&cid) {
-                    let _ = cc.notification_tx.try_send(notif);
+                    let _ = cc.notification_tx.send(notif);
                 }
             }
         }

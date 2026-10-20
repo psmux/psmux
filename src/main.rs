@@ -23,6 +23,7 @@ mod popup;
 mod pane_border;
 mod clipboard;
 mod copy_mode;
+mod grid_reader;
 mod mouse_keys;
 mod copy_prompt;
 mod input;
@@ -38,6 +39,7 @@ mod ssh_input;
 mod console_tap;
 mod debug_log;
 mod control;
+mod control_ring;
 mod resize_window;
 mod proxy_pane;
 mod cross_session;
@@ -455,6 +457,12 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
                 eprintln!("psmux: can't find pane: {}", p);
                 std::process::exit(1);
             }
+            if p.chars().all(|c| c.is_ascii_digit())
+                && cli_pane_index_exists_in_window(win_part, p) == Some(false)
+            {
+                eprintln!("psmux: can't find pane: {}", p);
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -495,6 +503,11 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
                 // live layout, which only the server can resolve.
             } else if p.starts_with('%') {
                 if cli_pane_id_exists(p) == Some(false) {
+                    eprintln!("psmux: can't find pane: {}", p);
+                    std::process::exit(1);
+                }
+            } else if win_part.is_empty() {
+                if cli_pane_index_exists(p) == Some(false) {
                     eprintln!("psmux: can't find pane: {}", p);
                     std::process::exit(1);
                 }
@@ -1131,6 +1144,29 @@ fn ensure_standby_server(ns: Option<&str>, warm_base: &str, wait: bool) -> io::R
     std::process::exit(1);
 }
 
+/// Whether a std handle (-10 stdin, -11 stdout, -12 stderr) is a real Windows
+/// console. Unlike `is_terminal()`, an MSYS2 or Cygwin pty pipe is not one.
+#[cfg(windows)]
+fn std_handle_is_console(id: i32) -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
+    }
+    let mut mode = 0u32;
+    unsafe { GetConsoleMode(GetStdHandle(id as u32), &mut mode) != 0 }
+}
+
+fn write_shell_output(mut stream: impl Write, _std_handle: i32, bytes: &[u8]) -> io::Result<()> {
+    // Windows console stdio requires UTF-8. Redirected output, an MSYS2 pty
+    // pipe included, retains the child's bytes.
+    #[cfg(windows)]
+    if std_handle_is_console(_std_handle) {
+        return stream.write_all(String::from_utf8_lossy(bytes).as_bytes());
+    }
+    stream.write_all(bytes)
+}
+
 fn run_main() -> io::Result<()> {
     // `-L=foo` first (flag_equals), then `-Lfoo` (attached globals), then
     // command-level `-tname` (attached target): running attached passes
@@ -1496,7 +1532,10 @@ fn run_main() -> io::Result<()> {
         // done nothing. tmux refuses all four (CMD_FIND_PANE/WINDOW, no
         // CANFAIL).
         | "rotate-window" | "rotatew" | "resize-window" | "resizew"
-        | "copy-mode" | "send-prefix")
+        | "copy-mode" | "send-prefix"
+        | "list-windows" | "lsw" | "list-clients" | "lsc"
+        | "choose-buffer" | "chooseb" | "choose-client"
+        | "find-window" | "findw")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref());
     }
@@ -4181,11 +4220,11 @@ fn run_main() -> io::Result<()> {
                     // real value, and left the shell believing the command had
                     // succeeded. Route it to stderr with the same "psmux: "
                     // prefix the client's own target errors use, and exit 1.
-                    if resp.trim_start().starts_with("ERROR:") {
-                        eprintln!(
-                            "psmux: {}",
-                            resp.trim().trim_start_matches("ERROR:").trim()
-                        );
+                    // Only the server's own target error counts (#865): a
+                    // message that merely starts with "ERROR" is output, as
+                    // in tmux.
+                    if let Some(e) = crate::cli::display_reply_error(&resp, &msg, parsed.literal) {
+                        eprintln!("psmux: {}", e);
                         std::process::exit(1);
                     }
                     print!("{}", resp);
@@ -4293,8 +4332,8 @@ fn run_main() -> io::Result<()> {
                 } else {
                     let mut c = build(&shell_cmd);
                     let output = c.output()?;
-                    io::stdout().write_all(&output.stdout)?;
-                    io::stderr().write_all(&output.stderr)?;
+                    write_shell_output(io::stdout(), -11, &output.stdout)?;
+                    write_shell_output(io::stderr(), -12, &output.stderr)?;
                     std::process::exit(output.status.code().unwrap_or(0));
                 }
                 return Ok(());
@@ -4480,6 +4519,7 @@ fn run_main() -> io::Result<()> {
                 let mut horizontal = false;
                 let mut detach = false;
                 let mut before = false;
+                let mut size_arg: Option<String> = None;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
@@ -4492,6 +4532,14 @@ fn run_main() -> io::Result<()> {
                         "-d" => detach = true,
                         // -b is forwarded for the same reason (#725).
                         "-b" => before = true,
+                        // -l size / -p percentage: forwarded, the server sizes
+                        // the joined pane (layout_get_tiled_cell).
+                        "-l" | "-p" => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                size_arg = Some(format!(" {} {}", cmd_args[i], v));
+                                i += 1;
+                            }
+                        }
                         "-s" => {
                             if let Some(t) = cmd_args.get(i + 1) {
                                 source_spec = t.to_string();
@@ -4546,7 +4594,10 @@ fn run_main() -> io::Result<()> {
                 } else { target_spec.as_str() };
                 let same_session = !effective_src.is_empty()
                     && crate::session::same_session_identity(l_socket_name.as_deref(), &effective_src, &effective_tgt);
-                if same_session && !src_after_colon_check.is_empty() && !tgt_after_colon_check.is_empty() {
+                // move-pane may stay in its window ("like join-pane but allows
+                // the same window"); the server refuses the same pane.
+                let move_pane = matches!(cmd, "move-pane" | "movep");
+                if same_session && !move_pane && !src_after_colon_check.is_empty() && !tgt_after_colon_check.is_empty() {
                     // Prefix with ':' so parse_target reads "0.2" as window=0,pane=2
                     // (a bare "0.2" is otherwise read as session="0", pane=2).
                     let sp_chk = crate::cli::parse_target(&format!(":{}", src_after_colon_check));
@@ -4579,11 +4630,13 @@ fn run_main() -> io::Result<()> {
                         }
                     }
                 } else {
-                    // Same-session join-pane: forward to server as before
-                    let mut cmd = "join-pane".to_string();
+                    // Same-session join-pane: forward to server as before,
+                    // under its own name: move-pane may stay in its window.
+                    let mut cmd = if move_pane { "move-pane" } else { "join-pane" }.to_string();
                     if horizontal { cmd.push_str(" -h"); }
                     if detach { cmd.push_str(" -d"); }
                     if before { cmd.push_str(" -b"); }
+                    if let Some(ref s) = size_arg { cmd.push_str(s); }
                     if !source_spec.is_empty() { cmd.push_str(&format!(" -s {}", source_spec)); }
                     if !target_spec.is_empty() { cmd.push_str(&format!(" -t {}", target_spec)); }
                     cmd.push('\n');
@@ -6719,7 +6772,7 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         let _ = f.flush();
     }
 
-    // Use raw Win32 ReadFile for stdin to handle SSH pipe edge cases.
+    // Retain raw Win32 ReadFile for non-console input to handle SSH pipe edge cases.
     // Windows sshd may close the stdin pipe before the SSH channel is
     // fully established (race condition). We use PeekNamedPipe to
     // distinguish a genuinely broken pipe from a temporary condition.
@@ -6738,10 +6791,18 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     let mut eof_retries: u32 = 0;
     const MAX_EOF_RETRIES: u32 = 20; // 20 * 50ms = 1 second of retries
 
+    #[cfg(windows)]
+    let mut console_reader = crate::platform::ControlConsoleReader::default();
     loop {
-        // On Windows, use ReadFile directly for better diagnostics
+        // Console reads preserve raw control characters and split UTF-16 pairs.
+        // Non-console handles retain raw reads and the SSH startup retries below.
         #[cfg(windows)]
-        let read_result = {
+        // `stdin_console` is GetConsoleMode, not is_terminal(): Rust's
+        // is_terminal() is also true for an MSYS2 or Cygwin pty pipe (mintty,
+        // Git Bash, Cygwin sshd), and ReadConsoleW fails on a pipe.
+        let read_result = if stdin_console {
+            console_reader.read(&mut stdin_buf)
+        } else {
             #[link(name = "kernel32")]
             extern "system" {
                 fn ReadFile(

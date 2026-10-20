@@ -124,6 +124,15 @@ pub fn client_flags_string_with(ci: &crate::types::ClientInfo, ignore_size: bool
     flags.join(",")
 }
 
+/// The word at screen row `row`, column `col` of a pane, as tmux's
+/// `format_grid_word` finds it for `#{copy_cursor_word}` and `#{mouse_word}`.
+/// The row is counted at the pane's current scroll offset.
+fn grid_word(parser: &mut vt100::Parser, row: u16, col: u16, separators: &str) -> String {
+    let mut grid = crate::grid_reader::ScreenGrid::new(parser.screen_mut());
+    let y = grid.abs_of_row(row);
+    crate::grid_reader::format_grid_word(&mut grid, col as usize, y, separators)
+}
+
 /// Seconds since the Unix epoch of a moment `ago` in the past.
 fn epoch_secs_ago(ago: std::time::Duration) -> i64 {
     let now = std::time::SystemTime::now()
@@ -2204,9 +2213,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "mouse_word" => {
             if let Some(w) = app.windows.get(win_idx) {
                 if let Some(p) = active_pane(&w.root, &w.active_path) {
-                    if let Ok(parser) = p.term.lock() {
-                        let screen = parser.screen();
-                        let cols = p.last_cols;
+                    if let Ok(mut parser) = p.term.lock() {
                         let mut rects = Vec::new();
                         crate::tree::format_rects(w, &mut rects);
                         let (pane_x_offset, pane_y_offset) = rects.iter()
@@ -2215,29 +2222,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                             .unwrap_or((0, 0));
                         let row = app.last_mouse_y.saturating_sub(pane_y_offset);
                         let col = app.last_mouse_x.saturating_sub(pane_x_offset);
-                        let mut row_text = String::with_capacity(cols as usize);
-                        for c in 0..cols {
-                            if let Some(cell) = screen.cell(row, c) {
-                                let t = cell.contents();
-                                if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
-                            } else { row_text.push(' '); }
-                        }
-                        let chars: Vec<char> = row_text.chars().collect();
-                        let ci = col as usize;
-                        if ci < chars.len() && !chars[ci].is_whitespace() {
-                            let seps = &app.word_separators;
-                            let cls = |ch: &char| -> u8 {
-                                if ch.is_whitespace() { 0 }
-                                else if seps.contains(*ch) { 1 }
-                                else { 2 }
-                            };
-                            let target = cls(&chars[ci]);
-                            let mut start = ci;
-                            while start > 0 && cls(&chars[start - 1]) == target { start -= 1; }
-                            let mut end = ci;
-                            while end + 1 < chars.len() && cls(&chars[end + 1]) == target { end += 1; }
-                            return chars[start..=end].iter().collect();
-                        }
+                        return grid_word(&mut parser, row, col, &app.word_separators);
                     }
                 }
             }
@@ -2245,38 +2230,31 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
 
         // ── Copy mode ──
-        "copy_cursor_x" => app.copy_pos.map(|(_, c)| c.to_string()).unwrap_or("0".into()),
-        "copy_cursor_y" => app.copy_pos.map(|(r, _)| r.to_string()).unwrap_or("0".into()),
+        "copy_cursor_x" | "copy_cursor_y" | "scroll_position" => {
+            let (pos, scroll) = match target_pane() {
+                Some(p) if Some(p.id) == crate::copy_mode::active_pane_id(app) => {
+                    if app.mode.in_copy() {
+                        (app.copy_pos, app.copy_scroll_offset)
+                    } else {
+                        (None, 0)
+                    }
+                }
+                Some(p) => p.copy_state.as_ref()
+                    .map(|s| (s.pos, s.scroll_offset))
+                    .unwrap_or((None, 0)),
+                None => (None, 0),
+            };
+            match var {
+                "copy_cursor_x" => pos.map(|(_, c)| c).unwrap_or(0).to_string(),
+                "copy_cursor_y" => pos.map(|(r, _)| r).unwrap_or(0).to_string(),
+                _ => scroll.to_string(),
+            }
+        }
         "copy_cursor_word" => {
-            // Return the word under the copy cursor
             if let (Some((r, c)), Some(w)) = (app.copy_pos, app.windows.get(win_idx)) {
                 if let Some(p) = active_pane(&w.root, &w.active_path) {
-                    if let Ok(parser) = p.term.lock() {
-                        let screen = parser.screen();
-                        let cols = p.last_cols;
-                        let mut row_text = String::with_capacity(cols as usize);
-                        for col in 0..cols {
-                            if let Some(cell) = screen.cell(r, col) {
-                                let t = cell.contents();
-                                if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
-                            } else { row_text.push(' '); }
-                        }
-                        let chars: Vec<char> = row_text.chars().collect();
-                        let ci = c as usize;
-                        if ci < chars.len() && !chars[ci].is_whitespace() {
-                            let seps = &app.word_separators;
-                            let cls = |ch: &char| -> u8 {
-                                if ch.is_whitespace() { 0 }
-                                else if seps.contains(*ch) { 1 }
-                                else { 2 }
-                            };
-                            let target = cls(&chars[ci]);
-                            let mut start = ci;
-                            while start > 0 && cls(&chars[start - 1]) == target { start -= 1; }
-                            let mut end = ci;
-                            while end + 1 < chars.len() && cls(&chars[end + 1]) == target { end += 1; }
-                            return chars[start..=end].iter().collect();
-                        }
+                    if let Ok(mut parser) = p.term.lock() {
+                        return grid_word(&mut parser, r, c, &app.word_separators);
                     }
                 }
             }
@@ -2315,7 +2293,6 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                     .unwrap_or_default()
             } else { String::new() }
         }
-        "scroll_position" => app.copy_scroll_offset.to_string(),
         "scroll_region_upper" => "0".into(),
         "scroll_region_lower" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
@@ -2393,14 +2370,14 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "history_limit" => app.history_limit.to_string(),
         "alternate_screen" => if app.allow_alternate_screen { "on".into() } else { "off".into() },
         // history_size reports the number of rows currently held in the
-        // active pane's scrollback (the *retained* count), not the
-        // configured maximum (#271).  Falls back to 0 when no active pane
+        // target pane's scrollback (the *retained* count), not the
+        // configured maximum (#271).  Falls back to 0 when no target pane
         // is reachable, matching tmux's behaviour for empty buffers.
         // It reads the LIVE grid even while copy mode shows a snapshot
         // (PR #671), because tmux's format_cb_history_size answers from
         // wp->base.grid->hsize whatever mode the pane is in.
         "history_size" => {
-            if let Some(p) = active_pane(&win.root, &win.active_path) {
+            if let Some(p) = target_pane() {
                 if let Ok(parser) = p.live_parser().lock() {
                     return parser.screen().scrollback_filled().to_string();
                 }
@@ -2691,6 +2668,10 @@ fn collect_pane_ids(node: &Node, ids: &mut Vec<usize>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_copy_formats.rs"]
+mod tests_pane_copy_formats;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_format.rs"]

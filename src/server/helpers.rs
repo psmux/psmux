@@ -629,13 +629,30 @@ pub(crate) fn window_data_version(win: &Window) -> u64 {
     v
 }
 
+/// What one `check_window_activity` pass did.
+pub(crate) struct WindowAlerts {
+    /// The alert hooks to run, one for each flag the pass newly set.
+    pub hooks: Vec<&'static str>,
+    /// Whether any window's bell, activity or silence flag changed. The
+    /// window list a frame carries is cached with each tab's expanded
+    /// window-status-format and its flags, so the caller must rebuild it,
+    /// as tmux redraws the status line when it sets a flag
+    /// (alerts.c:202-204, server_status_session).
+    pub flags_changed: bool,
+}
+
+fn alert_flags(win: &Window) -> (bool, bool, bool) {
+    (win.bell_flag, win.activity_flag, win.silence_flag)
+}
+
 /// Check non-active windows for output activity and set their activity_flag.
 /// Also checks bell_pending on all panes and sets window bell_flag,
 /// and checks monitor-silence timeout to set silence_flag.
-pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
+pub(crate) fn check_window_activity(app: &mut AppState) -> WindowAlerts {
     let active = app.active_idx;
     let bell_action = app.bell_action.clone();
     let mut triggered_hooks: Vec<&'static str> = Vec::new();
+    let mut flags_changed = false;
     let mut forward_bell = false;
 
     // #648: monitor-activity and monitor-silence are WINDOW options, so each
@@ -652,6 +669,7 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
             crate::server::options::win_flag(win, "monitor-activity", global_monitor_activity);
         let monitor_silence_secs =
             crate::server::options::win_number(win, "monitor-silence", global_monitor_silence);
+        let flags_before = alert_flags(win);
         // ── Bell detection: check all panes for pending bells ──
         let has_bell = check_pane_bells(&win.root);
         if has_bell && i != active {
@@ -701,6 +719,7 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
                 win.last_output_time = std::time::Instant::now();
             }
             win.last_seen_version = cur;
+            flags_changed |= alert_flags(win) != flags_before;
             continue;
         }
         let cur = window_data_version(win);
@@ -722,11 +741,12 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
                 triggered_hooks.push("alert-silence");
             }
         }
+        flags_changed |= alert_flags(win) != flags_before;
     }
     if forward_bell {
         app.bell_forward = true;
     }
-    triggered_hooks
+    WindowAlerts { hooks: triggered_hooks, flags_changed }
 }
 
 /// Propagate OSC 0/2 titles from the vt100 parser to pane.title for all windows.
@@ -1250,6 +1270,10 @@ mod tests_issue556_color_reply_order;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue559_monitor_silence.rs"]
 mod tests_issue559_monitor_silence;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue876_bell_status_refresh.rs"]
+mod tests_issue876_bell_status_refresh;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue759_session_name_frame.rs"]

@@ -394,6 +394,42 @@ impl DisplayMessageArgs {
     }
 }
 
+/// The server's error in a `display-message -p` reply, if the reply is one
+/// (#865). The one shot reply carries output and errors as the same text, so
+/// a printed message that starts with "ERROR" used to exit 1 with the text on
+/// stderr, where tmux prints it and exits 0. The CLI parses the flags and
+/// checks the target before it sends, so the only errors the server can still
+/// answer here are a target that went away in between (one line,
+/// `ERROR: can't find ...`) and the few refusals listed below. Anything else
+/// is output. A template the server
+/// prints as written (no `#`, or `-l`) is output even when it reads like that
+/// error, since the reply is exactly that text.
+pub fn display_reply_error(reply: &str, template: &str, literal: bool) -> Option<String> {
+    let line = reply.trim_end_matches(['\r', '\n']);
+    if line.contains('\n') {
+        return None;
+    }
+    let message = line.trim_start().strip_prefix("ERROR:")?.trim();
+    // What the server's target check (connection.rs validate_target) and
+    // its AUTH step can answer before the command runs.
+    const SERVER_ERRORS: &[&str] = &[
+        "can't find ",
+        "server is shutting down",
+        "no response from server",
+        "Authentication required",
+        "Invalid session key",
+    ];
+    if !SERVER_ERRORS.iter().any(|p| message.starts_with(p)) {
+        return None;
+    }
+    if (literal || !template.contains('#'))
+        && line == crate::util::visual_escape_message(template)
+    {
+        return None;
+    }
+    Some(message.to_string())
+}
+
 /// Parse `display-message` arguments (everything after the command name).
 /// Errors are tmux's: "unknown flag -X", "-X expects an argument", and "only
 /// one of -F or argument must be given".
@@ -1445,7 +1481,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     set-titles-string   Str  Terminal title format
     default-shell       Str  Shell to launch (default: pwsh)
     default-command     Str  Alias for default-shell
-    word-separators     Str  Copy-mode word delimiters (default: " -_@")
+    word-separators     Str  Copy-mode word delimiters (default: ASCII punctuation but _)
     prediction-dimming  Bool Dim predictive text (default: on)
     cursor-style        Str  Cursor shape asked of the terminal. "block",
                              "underline" and "bar" are steady;
@@ -2337,3 +2373,7 @@ mod tests_cli_command_list;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue829_client_path.rs"]
 mod tests_issue829_client_path;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue865_display_reply_error.rs"]
+mod tests_issue865_display_reply_error;

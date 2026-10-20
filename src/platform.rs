@@ -392,23 +392,15 @@ pub fn acquire_session_mutex(_name: &str) -> Option<SessionMutex> { Some(Session
 pub fn enable_virtual_terminal_processing() {
     const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-    const CP_UTF8: u32 = 65001;
 
     #[link(name = "kernel32")]
     extern "system" {
         fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
         fn GetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, lpMode: *mut u32) -> i32;
         fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
-        fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
-        fn SetConsoleCP(wCodePageID: u32) -> i32;
     }
 
     unsafe {
-        // Set console code page to UTF-8 so multi-byte Unicode characters
-        // (e.g. ▶ U+25B6, ◀ U+25C0) render correctly instead of as mojibake.
-        SetConsoleOutputCP(CP_UTF8);
-        SetConsoleCP(CP_UTF8);
-
         let handle = GetStdHandle(STD_OUTPUT_HANDLE);
         if !handle.is_null() {
             let mut mode: u32 = 0;
@@ -423,6 +415,80 @@ pub fn enable_virtual_terminal_processing() {
 pub fn enable_virtual_terminal_processing() {
     // No-op on non-Windows platforms
 }
+
+#[cfg(windows)]
+#[derive(Default)]
+pub(crate) struct ControlConsoleReader {
+    high_surrogate: Option<u16>,
+}
+
+#[cfg(windows)]
+impl ControlConsoleReader {
+    pub(crate) fn read(&mut self, buf: &mut [u8; 4096]) -> std::io::Result<usize> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(id: u32) -> *mut std::ffi::c_void;
+            fn ReadConsoleW(
+                handle: *mut std::ffi::c_void,
+                buf: *mut u16,
+                len: u32,
+                read: *mut u32,
+                reserved: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+        self.read_with(buf, |wide| {
+            let mut read = 0;
+            let ok = unsafe {
+                ReadConsoleW(
+                    GetStdHandle(-10i32 as u32),
+                    wide.as_mut_ptr(),
+                    wide.len() as u32,
+                    &mut read,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(read as usize)
+        })
+    }
+
+    fn read_with(
+        &mut self,
+        buf: &mut [u8; 4096],
+        mut read: impl FnMut(&mut [u16]) -> std::io::Result<usize>,
+    ) -> std::io::Result<usize> {
+        loop {
+            // Each UTF-16 unit needs at most three UTF-8 bytes, including replacement characters.
+            let mut wide = [0u16; 4096 / 3];
+            let offset = if let Some(high) = self.high_surrogate {
+                wide[0] = high;
+                1
+            } else {
+                0
+            };
+            let read = read(&mut wide[offset..])?;
+            let mut len = offset + read;
+            self.high_surrogate = None;
+            if read != 0 && (0xD800..=0xDBFF).contains(&wide[len - 1]) {
+                len -= 1;
+                self.high_surrogate = Some(wide[len]);
+            }
+            let text = String::from_utf16_lossy(&wide[..len]);
+            if read == 0 || !text.is_empty() {
+                let bytes = text.as_bytes();
+                buf[..bytes.len()].copy_from_slice(bytes);
+                return Ok(bytes.len());
+            }
+            // A high surrogate alone is incomplete input, not EOF. Read its next batch.
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_control_console_reader.rs"]
+mod tests_control_console_reader;
 
 /// Issue #473: query the HOST terminal for its colors (OSC 10/11 fg/bg, the
 /// OSC 4 16-color palette, and the CSI ?996n light/dark scheme) at client

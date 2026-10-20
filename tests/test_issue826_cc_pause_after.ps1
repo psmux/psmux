@@ -226,14 +226,21 @@ try {
     $mark = $cc.Bytes()
     $cc.Send("refresh-client -A '${pane}:pause'")
     $cc.ReadFor(500)
+    $reply = [Text.Encoding]::UTF8.GetString($cc.All.ToArray(), [int]$mark, [int]($cc.Bytes() - $mark))
+    # tmux writes the %pause inside the command's block (control_pause_pane);
+    # after the %end, a client that resumes at once reads it as a new pause.
+    Check ($reply -match "(?m)^%begin [^\r\n]*\r?\n%pause $paneRe\r?\n%end ") "%pause $pane is inside the command's %begin/%end"
     $cc.Send("send-keys -t s1 -l 'echo %M%_HIDDEN'")
     $cc.Send("send-keys -t s1 Enter")
     $cc.ReadFor(1200)
     $tail = [Text.Encoding]::UTF8.GetString($cc.All.ToArray(), [int]$mark, [int]($cc.Bytes() - $mark))
     Check ($tail -match "(?m)^%pause $paneRe\s*$") "%pause $pane on request"
     Check ($tail -notmatch 'OK826_HIDDEN') "paused pane output is not sent"
+    $mark2 = $cc.Bytes()
     $cc.Send("refresh-client -A '${pane}:continue'")
     $cc.ReadFor(500)
+    $reply = [Text.Encoding]::UTF8.GetString($cc.All.ToArray(), [int]$mark2, [int]($cc.Bytes() - $mark2))
+    Check ($reply -match "(?m)^%begin [^\r\n]*\r?\n%continue $paneRe\r?\n%end ") "%continue $pane is inside the command's %begin/%end"
     $cc.Send("send-keys -t s1 -l 'echo %M%_BACK'")
     $cc.Send("send-keys -t s1 Enter")
     $cc.ReadFor(1500)

@@ -7432,17 +7432,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     if let Some(ref d) = client_drag {
                                         let current_pos = if d.kind == "Horizontal" { me.column } else { me.row };
                                         let pixel_delta = current_pos as i32 - d.start_pos as i32;
-                                        let total_pct: i32 = d.initial_sizes.iter().map(|&s| s as i32).sum();
-                                        let total_px = d.total_pixels.max(1) as i32;
-                                        let pct_delta = (pixel_delta * total_pct) / total_px;
-                                        let min_pct = 5i32;
-
                                         let mut new_sizes = d.initial_sizes.clone();
-                                        let left = (d.initial_sizes[d.index] as i32 + pct_delta)
-                                            .clamp(min_pct, d.initial_sizes[d.index] as i32 + d.initial_sizes[d.index + 1] as i32 - min_pct) as u16;
-                                        let right = d.initial_sizes[d.index] + d.initial_sizes[d.index + 1] - left;
-                                        new_sizes[d.index] = left;
-                                        new_sizes[d.index + 1] = right;
+                                        crate::tree::drag_split_sizes(
+                                            &mut new_sizes, d.index, d.initial_sizes[d.index], pixel_delta, d.total_pixels, d.kind == "Horizontal",
+                                        );
 
                                         let path_str = if d.path.is_empty() { "_".to_string() } else { d.path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".") };
                                         let sizes_str = new_sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");

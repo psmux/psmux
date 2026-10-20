@@ -2043,7 +2043,7 @@ if control_echo || control_quiet || control_noecho {
     let ctrl_client_id = crate::types::next_client_id();
     crate::types::register_persistent_stream(ctrl_client_id, &write_stream);
 
-    let (notif_tx, notif_rx) = std::sync::mpsc::sync_channel::<ControlNotification>(4096);
+    let (notif_tx, notif_rx) = std::sync::mpsc::channel::<ControlNotification>();
 
     // Wrap the write stream in a mutex so that the notification writer
     // thread and the command-response loop never interleave bytes on
@@ -2085,6 +2085,7 @@ if control_echo || control_quiet || control_noecho {
             let mut is_exit = is_detach || matches!(notif, ControlNotification::Exit { .. });
             match notif {
                 ControlNotification::PaneOutput { pane_id, data, seq, queued_at } => {
+                    gate_notif.written(data.len());
                     match gate_notif.dequeue(pane_id, seq, queued_at, std::time::Instant::now()) {
                         control::GateWrite::Write { age_ms, extended: true } => {
                             lines.push(control::format_notification(
@@ -4325,6 +4326,8 @@ match cmd {
             // -b: the moved pane goes left of / above the target (#725).
             before: args.contains(&"-b"),
             resp: resp_s,
+            same_window: matches!(cmd, "move-pane" | "movep"),
+            size: crate::commands::join_size_arg(&args),
         });
         if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
             if !persistent {
@@ -7942,6 +7945,9 @@ fn dispatch_control_command(
             true
         }
         "refresh-client" | "refresh" => {
+            // %pause / %continue lines from -A, written inside this
+            // command's %begin/%end block as tmux does.
+            let mut body = String::new();
             // Parse -B name:what:format (subscription management)
             let mut i = 0;
             while i < args.len() {
@@ -8010,16 +8016,24 @@ fn dispatch_control_command(
                                 .strip_prefix('%')
                                 .and_then(|p| p.parse::<usize>().ok());
                             if let Some(pid) = pane {
-                                if action == "continue" {
-                                    let _ = tx.send(CtrlReq::ControlContinuePane {
+                                let (reply, due) = mpsc::channel::<bool>();
+                                let sent = if action == "continue" {
+                                    tx.send(CtrlReq::ControlContinuePane {
                                         client_id,
                                         pane_id: pid,
-                                    });
+                                        reply,
+                                    }).is_ok()
                                 } else if action == "pause" {
-                                    let _ = tx.send(CtrlReq::ControlPausePane {
+                                    tx.send(CtrlReq::ControlPausePane {
                                         client_id,
                                         pane_id: pid,
-                                    });
+                                        reply,
+                                    }).is_ok()
+                                } else {
+                                    false
+                                };
+                                if sent && due.recv_timeout(Duration::from_secs(5)).unwrap_or(false) {
+                                    body.push_str(&format!("%{} %{}\n", action, pid));
                                 }
                             }
                         }
@@ -8054,7 +8068,7 @@ fn dispatch_control_command(
                 }
                 i += 1;
             }
-            let _ = resp_tx.send(String::new());
+            let _ = resp_tx.send(body);
             true
         }
         // run-shell, if-shell, swap-window and join-pane were "unknown
@@ -8215,6 +8229,8 @@ fn dispatch_control_command(
                 detach: args.contains(&"-d"),
                 before: args.contains(&"-b"),
                 resp: jp_s,
+                same_window: matches!(cmd, "move-pane" | "movep"),
+                size: crate::commands::join_size_arg(&args),
             });
             match jp_r.recv_timeout(Duration::from_secs(5)) {
                 Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }

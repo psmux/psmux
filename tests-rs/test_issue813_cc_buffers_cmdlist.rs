@@ -115,7 +115,7 @@ fn delete_buffer_errors_like_tmux() {
 #[test]
 fn paste_api_announces_buffer_changes() {
     let mut app = crate::types::AppState::new("t".to_string());
-    let (ntx, nrx) = std::sync::mpsc::sync_channel(256);
+    let (ntx, nrx) = std::sync::mpsc::channel();
     app.control_clients.insert(1, crate::types::ControlClient {
         client_id: 1,
         cmd_counter: 0,

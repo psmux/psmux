@@ -52,7 +52,7 @@ fn control_client(
     size: Option<(u16, u16)>,
     window_sizes: &[(usize, (u16, u16))],
 ) -> ControlClient {
-    let (notification_tx, _notification_rx) = std::sync::mpsc::sync_channel(1);
+    let (notification_tx, _notification_rx) = std::sync::mpsc::channel();
     ControlClient {
         client_id,
         cmd_counter: 0,

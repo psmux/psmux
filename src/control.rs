@@ -99,6 +99,29 @@ pub fn layout_change(app: &AppState, win_idx: usize, area: Rect) -> Option<Contr
     })
 }
 
+/// A pane of the window with this id was killed. If the window stays, tmux
+/// sends `%layout-change` (layout_close_pane, notify_window
+/// "window-layout-changed"), then `%window-pane-changed` when the killed pane
+/// was the window's active one (window_remove_pane picks the new active pane
+/// after the layout closed). A window that closed gets `%window-close` from
+/// the window list diff instead.
+pub fn emit_pane_closed(app: &AppState, window_id: usize, killed_active: bool) {
+    if app.control_clients.is_empty() {
+        return;
+    }
+    if let Some(idx) = app.windows.iter().position(|w| w.id == window_id) {
+        if let Some(n) = layout_change(app, idx, app.windows[idx].area) {
+            emit_notification(app, n);
+        }
+        let w = &app.windows[idx];
+        if killed_active {
+            if let Some(pane_id) = crate::tree::get_active_pane_id(&w.root, &w.active_path) {
+                emit_notification(app, ControlNotification::WindowPaneChanged { window_id, pane_id });
+            }
+        }
+    }
+}
+
 /// Format a control mode notification as a tmux wire-compatible line.
 pub fn format_notification(notif: &ControlNotification) -> String {
     match notif {
@@ -247,7 +270,8 @@ pub fn initial_reply_block(timestamp: i64, dcs: bool) -> String {
 }
 
 /// Emit a control notification to all connected control mode clients.
-/// Non-blocking: if a client's channel is full, the notification is dropped for that client.
+/// Never drops: the channel is unbounded, and a client that falls behind is
+/// handled by its output gate (pause-after, too far behind) instead (#875).
 pub fn emit_notification(app: &AppState, notif: ControlNotification) {
     for client in app.control_clients.values() {
         if let ControlNotification::Output { pane_id, .. } = &notif {
@@ -255,14 +279,118 @@ pub fn emit_notification(app: &AppState, notif: ControlNotification) {
                 continue;
             }
         }
-        let _ = client.notification_tx.try_send(notif.clone());
+        let _ = client.notification_tx.send(notif.clone());
     }
 }
 
 /// Send a notification to a single control client by id (no-op if unknown).
 pub fn emit_to_client(app: &AppState, client_id: u64, notif: ControlNotification) {
     if let Some(client) = app.control_clients.get(&client_id) {
-        let _ = client.notification_tx.try_send(notif);
+        let _ = client.notification_tx.send(notif);
+    }
+}
+
+/// The output rings of the panes in the window trees, the panes a control
+/// client is sent `%output` for.
+pub fn tree_rings(app: &AppState) -> Vec<(usize, crate::control_ring::Ring)> {
+    let mut rings = Vec::new();
+    for win in &app.windows {
+        crate::tree::for_each_pane(&win.root, &mut |pane: &crate::types::Pane| {
+            rings.push((pane.id, pane.output_ring.clone()));
+        });
+    }
+    rings
+}
+
+/// A control client registered: its rings start being consumed, and if it
+/// is the first one, what they held from before is thrown away (#875).
+pub fn start_consuming_output(app: &AppState) {
+    crate::control_ring::CONTROL_CLIENTS_PRESENT.store(true, std::sync::atomic::Ordering::Release);
+    let rings = tree_rings(app);
+    let refs: Vec<&crate::control_ring::Ring> = rings.iter().map(|r| &r.1).collect();
+    crate::control_ring::set_consumed(&refs, true);
+}
+
+/// Take the panes' new output and queue it as `%output` for every control
+/// client, once per server loop pass.
+///
+/// Nothing is dropped here: the client's channel is unbounded and its output
+/// gate tracks how far behind it is, so a client that falls behind is paused
+/// (pause-after) or cut off with `%exit too far behind`, as tmux does (#826).
+/// When every attached client is a control client that already has
+/// `CONTROL_QUEUE_HIGH` unwritten, the rings are left alone; they fill, and
+/// the pane readers wait, which holds the programs on their writes, as tmux
+/// stops reading a pane (server_client_check_pane_buffer, #875).
+pub fn flush_pane_output(app: &mut AppState) {
+    use std::sync::atomic::Ordering;
+    let present = !app.control_clients.is_empty();
+    let was = crate::control_ring::CONTROL_CLIENTS_PRESENT.swap(present, Ordering::AcqRel);
+    if !present {
+        if was {
+            // The last control client left: stop consuming, so no reader
+            // waits for a drain that will not come.
+            crate::control_ring::set_consumed(&[], false);
+        }
+        return;
+    }
+    let rings = tree_rings(app);
+    {
+        let refs: Vec<&crate::control_ring::Ring> = rings.iter().map(|r| &r.1).collect();
+        crate::control_ring::set_consumed(&refs, false);
+    }
+    let tui_attached = app.client_registry.values().any(|c| !c.is_control);
+    let all_behind = !tui_attached
+        && app.control_clients.values()
+            .all(|c| c.output_gate.queued_bytes() >= CONTROL_QUEUE_HIGH);
+    if all_behind {
+        return;
+    }
+    let mut pane_outputs: Vec<(usize, String)> = Vec::new();
+    for (pane_id, ring) in &rings {
+        let bytes = crate::control_ring::drain(ring);
+        if bytes.is_empty() {
+            continue;
+        }
+        let data = String::from_utf8_lossy(&bytes).into_owned();
+        for chunk in crate::control_ring::chunks(data) {
+            pane_outputs.push((*pane_id, chunk));
+        }
+    }
+    crate::control_ring::notify_drained();
+    if pane_outputs.is_empty() {
+        return;
+    }
+    // The client's output gate tracks how old the oldest unwritten output of
+    // each pane is (tmux control_check_age): past pause-after the pane is
+    // paused for that client and its backlog dropped, and a client without
+    // pause-after that falls CONTROL_MAXIMUM_AGE behind is disconnected
+    // (#826). The writer thread decides between %output and
+    // %extended-output and measures the age.
+    let now = std::time::Instant::now();
+    for (pane_id, data) in &pane_outputs {
+        for client in app.control_clients.values_mut() {
+            if client.paused_panes.contains(pane_id) {
+                continue;
+            }
+            match client.output_gate.enqueue_sized(*pane_id, now, data.len()) {
+                GateEnqueue::Send(seq) => {
+                    let sent = client.notification_tx.send(ControlNotification::PaneOutput {
+                        pane_id: *pane_id,
+                        data: data.clone(),
+                        seq,
+                        queued_at: now,
+                    });
+                    if sent.is_err() {
+                        client.output_gate.unqueue_sized(*pane_id, seq, data.len());
+                    }
+                }
+                GateEnqueue::Paused => {
+                    // Wakes the writer, which prints the %pause.
+                    let _ = client.notification_tx.send(ControlNotification::Pause { pane_id: *pane_id });
+                }
+                GateEnqueue::Skip | GateEnqueue::TooFarBehind => {}
+            }
+        }
     }
 }
 
@@ -328,7 +456,7 @@ pub fn detach_control_client(app: &mut AppState, client_id: u64) -> bool {
         Some(client) => {
             // Dropping the client's sender after this ends its writer, so
             // the connection closes even when the channel is full.
-            let _ = client.notification_tx.try_send(ControlNotification::Detached);
+            let _ = client.notification_tx.send(ControlNotification::Detached);
             true
         }
         None => false,
@@ -479,6 +607,20 @@ pub fn parse_pause_after_flag(flag: &str) -> Option<Option<u64>> {
 /// `%exit too far behind` (control.c CONTROL_MAXIMUM_AGE, in milliseconds).
 pub const CONTROL_MAXIMUM_AGE_MS: u64 = 300_000;
 
+/// Unwritten output for one control client past which the server stops
+/// taking pane output from the PTYs, when every attached client is a control
+/// client this far behind: the panes' programs then wait on their writes, as
+/// tmux stops reading a pane (server_client_check_pane_buffer, #875).
+pub const CONTROL_QUEUE_HIGH: usize = 1 << 20;
+
+/// psmux's ceiling on one control client's unwritten output. tmux has none
+/// and relies on the age rules alone, but a TUI client keeps the panes
+/// flowing, so a control client that stops reading would otherwise hold
+/// up to five minutes of output in memory. Past this the client is treated
+/// as too old: its pane is paused (pause-after) or it is dropped with
+/// `%exit too far behind`. Either way it is told; nothing is lost silently.
+pub const CONTROL_QUEUE_MAX: usize = 256 << 20;
+
 #[derive(Default)]
 struct GatePane {
     /// Output handed to the writer and not written yet: (sequence, queued at).
@@ -501,6 +643,8 @@ struct GateState {
     pending_pauses: Vec<usize>,
     /// The client fell more than CONTROL_MAXIMUM_AGE behind.
     too_far_behind: bool,
+    /// Bytes of pane output handed to the writer and not written yet (#875).
+    queued_bytes: usize,
 }
 
 /// What the server loop does with a new chunk of pane output for one client.
@@ -598,6 +742,12 @@ impl ControlOutputGate {
 
     /// The server loop has new output for `pane_id` (control_write_output).
     pub fn enqueue(&self, pane_id: usize, now: std::time::Instant) -> GateEnqueue {
+        self.enqueue_sized(pane_id, now, 0)
+    }
+
+    /// `enqueue` for a chunk of `bytes` bytes, counted until the writer
+    /// reports it with `written`.
+    pub fn enqueue_sized(&self, pane_id: usize, now: std::time::Instant, bytes: usize) -> GateEnqueue {
         let mut st = self.lock();
         if st.too_far_behind {
             return GateEnqueue::Skip;
@@ -606,8 +756,9 @@ impl ControlOutputGate {
             return GateEnqueue::Skip;
         }
         let oldest = st.panes.get(&pane_id).and_then(|p| p.pending.front().map(|e| e.1));
-        if let Some(t) = oldest {
-            if Self::too_old(&st, gate_age_ms(t, now)) {
+        let over = st.queued_bytes.saturating_add(bytes) > CONTROL_QUEUE_MAX;
+        if oldest.is_some() || over {
+            if over || oldest.map_or(false, |t| Self::too_old(&st, gate_age_ms(t, now))) {
                 if st.pause_after_ms.is_some() {
                     Self::pause_locked(&mut st, pane_id);
                     st.pending_pauses.push(pane_id);
@@ -623,13 +774,32 @@ impl ControlOutputGate {
         }
         st.next_seq += 1;
         let seq = st.next_seq;
+        st.queued_bytes += bytes;
         st.panes.entry(pane_id).or_default().pending.push_back((seq, now));
         GateEnqueue::Send(seq)
     }
 
-    /// The chunk `seq` could not be queued after all (channel full or gone).
-    pub fn unqueue(&self, pane_id: usize, seq: u64) {
+    /// The writer is done with a chunk of `bytes` bytes queued with
+    /// `enqueue_sized`, written or dropped.
+    pub fn written(&self, bytes: usize) {
         let mut st = self.lock();
+        st.queued_bytes = st.queued_bytes.saturating_sub(bytes);
+    }
+
+    /// Bytes of pane output queued for this client and not written yet.
+    pub fn queued_bytes(&self) -> usize {
+        self.lock().queued_bytes
+    }
+
+    /// The chunk `seq` could not be queued after all (channel gone).
+    pub fn unqueue(&self, pane_id: usize, seq: u64) {
+        self.unqueue_sized(pane_id, seq, 0)
+    }
+
+    /// `unqueue` for a chunk queued with `enqueue_sized`.
+    pub fn unqueue_sized(&self, pane_id: usize, seq: u64, bytes: usize) {
+        let mut st = self.lock();
+        st.queued_bytes = st.queued_bytes.saturating_sub(bytes);
         if let Some(p) = st.panes.get_mut(&pane_id) {
             if p.pending.back().map(|e| e.0) == Some(seq) {
                 p.pending.pop_back();
@@ -701,14 +871,15 @@ impl ControlOutputGate {
     }
 
     /// `refresh-client -A '%N:pause'` (control_pause_pane). True when the
-    /// pane was not paused, so a `%pause` line is due.
+    /// pane was not paused, so a `%pause` line is due. The command's reply
+    /// carries that line inside its %begin/%end block, as tmux writes it,
+    /// so it is not queued for the writer.
     pub fn pause_pane(&self, pane_id: usize) -> bool {
         let mut st = self.lock();
         if st.panes.get(&pane_id).map_or(false, |p| p.paused) {
             return false;
         }
         Self::pause_locked(&mut st, pane_id);
-        st.pending_pauses.push(pane_id);
         true
     }
 
@@ -898,7 +1069,7 @@ mod tests {
     #[test]
     fn test_has_control_clients_with_client() {
         let mut app = AppState::new("test".to_string());
-        let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+        let (tx, _rx) = std::sync::mpsc::channel();
         app.control_clients.insert(1, crate::types::ControlClient {
             client_id: 1,
             cmd_counter: 0,
@@ -918,7 +1089,7 @@ mod tests {
     #[test]
     fn test_emit_notification_to_clients() {
         let mut app = AppState::new("test".to_string());
-        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        let (tx, rx) = std::sync::mpsc::channel();
         app.control_clients.insert(1, crate::types::ControlClient {
             client_id: 1,
             cmd_counter: 0,
@@ -940,7 +1111,7 @@ mod tests {
     #[test]
     fn test_emit_notification_skips_paused_pane() {
         let mut app = AppState::new("test".to_string());
-        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut paused = std::collections::HashSet::new();
         paused.insert(3usize);
         app.control_clients.insert(1, crate::types::ControlClient {

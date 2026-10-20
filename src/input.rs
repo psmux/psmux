@@ -2925,6 +2925,47 @@ pub fn stamp_interactive_key(app: &mut AppState, name: &str) {
     for_each_receiving_pane(app, |p| p.last_special_key = Some((now, canonical.clone())));
 }
 
+/// Bring a direct-scrolled pane back to its live screen when the attached
+/// client types into it, the way Windows Terminal's `snapOnInput` does.
+///
+/// With `scroll-enter-copy-mode off` (#193) the wheel scrolls the pane's
+/// parser without entering copy mode, and nothing else ever unscrolled it.
+/// While the offset is above zero every new line bumps it (the vt100 grid
+/// keeps a scrolled view anchored), so the prompt that an Enter produced
+/// stayed out of sight and only wheeling all the way down came back.
+///
+/// Call it before the key is dispatched: only input headed for the program
+/// counts.  A key that copy mode, a menu or a prompt consumes leaves the view
+/// alone, a pane parked in copy mode keeps its snapshot's position, and a
+/// focused floating pane (which the wheel never direct-scrolls) takes the key
+/// without moving the pane underneath.  `send-keys` arrives as
+/// CtrlReq::SendKeys and does not come here, so a script never moves the view.
+///
+/// Returns whether a view moved.  The caller owes the client a frame then: a
+/// key the program does not echo changes no cell by itself, and the snapped
+/// view would otherwise wait for the next dump-state poll.
+pub fn snap_interactive_to_live(app: &mut AppState) -> bool {
+    if !matches!(app.mode, Mode::Passthrough) {
+        return false;
+    }
+    if app.windows.get(app.active_idx).is_some_and(|w| w.floating_focus.is_some()) {
+        return false;
+    }
+    let mut snapped = false;
+    for_each_receiving_pane(app, |p| {
+        if p.copy_state.is_some() {
+            return;
+        }
+        if let Ok(mut parser) = p.term.lock() {
+            if parser.screen().scrollback() > 0 {
+                parser.screen_mut().set_scrollback(0);
+                snapped = true;
+            }
+        }
+    });
+    snapped
+}
+
 pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
     // Record use of the INTERACTIVE input route as read-only route signals:
     // `#{pane_last_text_input}` (printable text) and, for every other key,
@@ -4403,7 +4444,6 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     return;
                 }
                 if let Some(byte) = ctrl_char_send_keys_byte(c) {
-                    // C-S-[ and C-S-3 are Escape too: keep the #588 repair.
                     write_pane_input(p, &[byte]);
                 }
             }
@@ -4480,6 +4520,12 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                         crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
                     }
                 }
+                // Through write_pane_input, never straight to the writer: C-[
+                // is 0x1b, a lone ESC, and on a ConPTY that a win32 record
+                // has latched (any arrow or function key into nvim does) a
+                // bare 0x1b is held by conhost and fuses with the next key,
+                // so C-[ vanished and took the Backspace after it along
+                // (issue #860, the #588 repair this arm used to skip).
                 write_pane_input(p, &[ctrl_char]);
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {

@@ -304,7 +304,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // tmux options-table.c "key-table": keys are first looked up here, and
     // the client returns to it after every key (server_client_get_key_table).
     OptionDef { name: "key-table", scope: Session, option_type: OptionType::String, default: "root", description: "Default key table" },
-    OptionDef { name: "word-separators", scope: Session, option_type: OptionType::String, default: " -_@", description: "Characters treated as word boundaries" },
+    OptionDef { name: "word-separators", scope: Session, option_type: OptionType::String, default: crate::grid_reader::DEFAULT_WORD_SEPARATORS, description: "Characters treated as word boundaries" },
     OptionDef { name: "allow-passthrough", scope: Session, option_type: UNVALIDATED_CHOICE, default: "off", description: "Allow passthrough escape sequences" },
     OptionDef { name: "allow-rename", scope: Session, option_type: Boolean, default: "on", description: "Allow programs to rename windows" },
     OptionDef { name: "allow-set-title", scope: Session, option_type: Boolean, default: "off", description: "Allow programs to set pane title via escape sequences" },

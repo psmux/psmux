@@ -355,13 +355,20 @@ pub struct Grafted {
 /// `if (!args_has(args, 'd'))`), so `focus_new` selects it, and otherwise the
 /// pane that was active before keeps the focus.
 pub fn graft_pane(win: &mut crate::types::Window, path: &Vec<usize>, kind: LayoutKind, new_leaf: Node, before: bool, focus_new: bool) -> Option<Grafted> {
+    graft_pane_sized(win, path, kind, new_leaf, None, before, focus_new)
+}
+
+/// graft_pane with join-pane / move-pane `-l` (`size`: cells, or a share of
+/// the target pane when the flag is set), as layout_get_tiled_cell sizes it.
+pub fn graft_pane_sized(win: &mut crate::types::Window, path: &Vec<usize>, kind: LayoutKind, new_leaf: Node,
+                        size: Option<(u16, bool)>, before: bool, focus_new: bool) -> Option<Grafted> {
     let new_id = match &new_leaf { Node::Leaf(p) => Some(p.id), Node::Split { .. } => collect_pane_ids(&new_leaf).first().copied() };
     let prev_id = get_active_pane_id(&win.root, &win.active_path);
     // cmd-join-pane.c splits the target with the same layout_split_pane as
     // split-window, so the joined pane gets the same cells (60 | 59 on 120).
     if win.area.width > 0 && win.area.height > 0 {
         let area = win.area;
-        split_leaf_tmux(&mut win.root, path, area, kind, new_leaf, None, before)?;
+        split_leaf_tmux(&mut win.root, path, area, kind, new_leaf, size, before)?;
     } else {
         replace_leaf_with_split_ordered(&mut win.root, path, kind, new_leaf, before);
     }
@@ -776,21 +783,36 @@ pub fn split_sizes_at<'a>(node: &'a Node, path: Vec<usize>, idx: usize) -> Optio
     } else { None }
 }
 
+/// Move one separator in relative-weight space. `pixels` includes the node's
+/// separators, just as compute_split_borders and the client border snapshot do.
+pub fn drag_split_sizes(sizes: &mut [u16], index: usize, left_initial: u16, delta: i32, pixels: u16, horizontal: bool) {
+    let Some((&left, &right)) = sizes.get(index).zip(index.checked_add(1).and_then(|i| sizes.get(i))) else { return };
+    // Zero weights can be a zoom mask; dragging must not reveal hidden panes.
+    if left == 0 || right == 0 { return; }
+    let available = i64::from(pixels) - (sizes.len() - 1) as i64;
+    if available <= 0 { return; }
+    let total: i64 = sizes.iter().map(|&s| i64::from(s)).sum();
+    let pair = i64::from(left) + i64::from(right);
+    let change = i64::from(delta) * total / available;
+    // Preserve the five-percent drag floor and the layout's cell minimum.
+    // A pane already below that floor must still return to its press position.
+    let cell_floor = (i64::from(min_cell(horizontal)) * total + available - 1) / available;
+    let floor = (total / 20).max(cell_floor).max(1);
+    let initial = i64::from(left_initial).clamp(1, pair - 1);
+    let minimum = floor.min(initial).max(pair - i64::from(u16::MAX));
+    let maximum = (pair - floor.min(pair - initial)).min(i64::from(u16::MAX));
+    let left = (i64::from(left_initial) + change).clamp(minimum, maximum);
+    sizes[index] = left as u16;
+    sizes[index + 1] = (pair - left) as u16;
+}
+
 pub fn adjust_split_sizes(root: &mut Node, d: &DragState, x: u16, y: u16) {
     if let Some(Node::Split { sizes, .. }) = get_split_mut(root, &d.split_path) {
-        let total_pct = sizes[d.index] + sizes[d.index+1];
-        let min_pct = 5u16;
-        // Convert pixel delta to percentage delta
         let pixel_delta: i32 = match d.kind {
             LayoutKind::Horizontal => x as i32 - d.start_x as i32,
             LayoutKind::Vertical => y as i32 - d.start_y as i32,
         };
-        let total_px = d.total_pixels.max(1) as i32;
-        let pct_delta = (pixel_delta * total_pct as i32) / total_px;
-        let left = (d.left_initial as i32 + pct_delta).clamp(min_pct as i32, (total_pct - min_pct) as i32) as u16;
-        let right = total_pct - left;
-        sizes[d.index] = left;
-        sizes[d.index+1] = right;
+        drag_split_sizes(sizes, d.index, d.left_initial, pixel_delta, d.total_pixels, matches!(d.kind, LayoutKind::Horizontal));
     }
 }
 
@@ -1533,3 +1555,7 @@ mod test_issue171_layout_bugs;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue644_one_row_pane.rs"]
 mod test_issue644_one_row_pane;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_split_weight_drag.rs"]
+mod test_split_weight_drag;

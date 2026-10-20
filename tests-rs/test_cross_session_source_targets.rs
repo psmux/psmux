@@ -136,7 +136,7 @@ fn win_pane(w: usize, p: usize) -> TempTarget {
 fn source_pane_id_in_the_target_window_is_refused() {
     // `join-pane -s %3 -t sess:0` with %3 in window 0.
     let mut app = app_with_windows(&[&[1, 2, 3], &[4]]);
-    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &win(0), false, false, false);
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &win(0), false, false, false, false, None);
     assert_eq!(r, Err("can't join a pane to its own window".to_string()));
     assert_eq!(ids_in(&app, 0), vec![1, 2, 3]);
     assert_eq!(ids_in(&app, 1), vec![4]);
@@ -149,7 +149,7 @@ fn source_pane_id_is_an_id_not_an_index() {
     // with enough panes, moved the wrong one.
     let mut app = app_with_windows(&[&[1, 3], &[2, 4, 5, 6]]);
     app.active_idx = 1;
-    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &win(1), false, false, false);
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &win(1), false, false, false, false, None);
     assert_eq!(r, Ok(()));
     assert_eq!(ids_in(&app, 0), vec![1]);
     assert!(ids_in(&app, 1).contains(&3), "pane 3 joined window 1: {:?}", ids_in(&app, 1));
@@ -159,7 +159,7 @@ fn source_pane_id_is_an_id_not_an_index() {
 #[test]
 fn source_pane_id_that_does_not_exist_is_refused() {
     let mut app = app_with_windows(&[&[1, 2], &[3]]);
-    let r = crate::commands::join_pane_request(&mut app, Some("%99"), &pane_id(99), &win(1), false, false, false);
+    let r = crate::commands::join_pane_request(&mut app, Some("%99"), &pane_id(99), &win(1), false, false, false, false, None);
     assert_eq!(r, Err("can't find pane: %99".to_string()));
     assert_eq!(ids_in(&app, 0), vec![1, 2]);
 }
@@ -170,7 +170,7 @@ fn target_pane_id_puts_the_pane_right_after_it() {
     // so landing beside the active pane would be visible.
     let mut app = app_with_windows(&[&[1, 2, 3], &[4]]);
     app.windows[0].active_path = vec![2];
-    let r = crate::commands::join_pane_request(&mut app, Some(":1"), &win(1), &pane_id(1), false, false, false);
+    let r = crate::commands::join_pane_request(&mut app, Some(":1"), &win(1), &pane_id(1), false, false, false, false, None);
     assert_eq!(r, Ok(()));
     let order = ids_in(&app, 0);
     let at = order.iter().position(|&i| i == 4).expect("pane 4 joined window 0");
@@ -180,7 +180,7 @@ fn target_pane_id_puts_the_pane_right_after_it() {
 #[test]
 fn colon_specs_in_the_same_window_are_still_refused() {
     let mut app = app_with_windows(&[&[1, 2], &[3]]);
-    let r = crate::commands::join_pane_request(&mut app, Some(":0.1"), &win_pane(0, 1), &win(0), false, false, false);
+    let r = crate::commands::join_pane_request(&mut app, Some(":0.1"), &win_pane(0, 1), &win(0), false, false, false, false, None);
     assert_eq!(r, Err("can't join a pane to its own window".to_string()));
 }
 
@@ -260,4 +260,115 @@ fn window_pane_half_keeps_window_and_pane() {
     assert_eq!((pt.window, pt.pane, pt.session), (Some(1), Some(0), None));
     let pt = crate::cli::parse_target(&window_pane_half("sa:%3"));
     assert_eq!((pt.pane, pt.pane_is_id), (Some(3), true));
+}
+
+// ---- move-pane inside one window -----------------------------------------
+// tmux: move-pane is "like join-pane but allows the same window" (CHANGES
+// 1.7); cmd-join-pane.c refuses only `src_wp == dst_wp`.
+
+#[test]
+fn move_pane_moves_a_pane_inside_its_window() {
+    let mut app = app_with_windows(&[&[1, 2, 3], &[4]]);
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &pane_id(1), true, false, false, true, None);
+    assert_eq!(r, Ok(()));
+    assert_eq!(app.windows.len(), 2, "no window is made or closed");
+    assert_eq!(ids_in(&app, 0), vec![1, 3, 2], "pane 3 now follows pane 1");
+    assert_eq!(ids_in(&app, 1), vec![4]);
+    let active = crate::tree::get_active_pane_id(&app.windows[0].root, &app.windows[0].active_path);
+    assert_eq!(active, Some(3), "without -d the moved pane is active");
+}
+
+#[test]
+fn move_pane_before_places_the_pane_ahead_of_the_target() {
+    let mut app = app_with_windows(&[&[1, 2, 3]]);
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &pane_id(1), true, false, true, true, None);
+    assert_eq!(r, Ok(()));
+    assert_eq!(ids_in(&app, 0), vec![3, 1, 2]);
+}
+
+#[test]
+fn move_pane_onto_itself_is_refused() {
+    let mut app = app_with_windows(&[&[1, 2]]);
+    let r = crate::commands::join_pane_request(&mut app, Some("%2"), &pane_id(2), &pane_id(2), true, false, false, true, None);
+    assert_eq!(r, Err("source and target panes must be different".to_string()));
+    assert_eq!(ids_in(&app, 0), vec![1, 2], "nothing moved");
+}
+
+#[test]
+fn join_pane_inside_one_window_is_still_refused() {
+    let mut app = app_with_windows(&[&[1, 2, 3]]);
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &pane_id(1), true, false, false, false, None);
+    assert_eq!(r, Err("can't join a pane to its own window".to_string()));
+    assert_eq!(ids_in(&app, 0), vec![1, 2, 3]);
+}
+
+// ---- move-pane edges checked against tmux 3.8 -----------------------------
+
+fn active_id(app: &AppState, w: usize) -> Option<usize> {
+    crate::tree::get_active_pane_id(&app.windows[w].root, &app.windows[w].active_path)
+}
+
+#[test]
+fn move_pane_detached_keeps_the_active_pane() {
+    // tmux: select-pane -t %2; move-pane -d -s %3 -t %1 leaves %2 active.
+    let mut app = app_with_windows(&[&[1, 2, 3]]);
+    app.windows[0].active_path = vec![1];
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &pane_id(1), true, true, false, true, None);
+    assert_eq!(r, Ok(()));
+    assert_eq!(ids_in(&app, 0), vec![1, 3, 2]);
+    assert_eq!(active_id(&app, 0), Some(2), "-d must not focus the target or the moved pane");
+}
+
+#[test]
+fn move_pane_detached_moving_the_active_pane_keeps_it_active() {
+    let mut app = app_with_windows(&[&[1, 2, 3]]);
+    app.windows[0].active_path = vec![2];
+    let r = crate::commands::join_pane_request(&mut app, Some("%3"), &pane_id(3), &pane_id(1), true, true, false, true, None);
+    assert_eq!(r, Ok(()));
+    assert_eq!(active_id(&app, 0), Some(3));
+}
+
+#[test]
+fn move_pane_size_gives_the_moved_pane_that_many_cells() {
+    // tmux: move-pane -v -l 10 into a 40 row pane leaves 29 | 10.
+    let mut app = app_with_windows(&[&[1, 2]]);
+    let r = crate::commands::join_pane_request(&mut app, Some("%2"), &pane_id(2), &pane_id(1), false, false, false, true, Some((10, false)));
+    assert_eq!(r, Ok(()));
+    match &app.windows[0].root {
+        Node::Split { kind: LayoutKind::Vertical, sizes, .. } => assert_eq!(sizes, &vec![29, 10]),
+        _ => panic!("expected a vertical split"),
+    }
+}
+
+#[test]
+fn join_pane_size_percent_is_a_share_of_the_target() {
+    // 25% of a 160 column target is 40 columns: 119 | 40.
+    let mut app = app_with_windows(&[&[1], &[2]]);
+    let r = crate::commands::join_pane_request(&mut app, Some("%2"), &pane_id(2), &win(0), true, false, false, false, Some((25, true)));
+    assert_eq!(r, Ok(()));
+    match &app.windows[0].root {
+        Node::Split { kind: LayoutKind::Horizontal, sizes, .. } => assert_eq!(sizes, &vec![119, 40]),
+        _ => panic!("expected a horizontal split"),
+    }
+}
+
+#[test]
+fn move_pane_without_source_takes_the_marked_pane() {
+    let mut app = app_with_windows(&[&[1, 2, 3]]);
+    app.marked_pane = Some((0, 3));
+    let r = crate::commands::join_pane_request(&mut app, None, &TempTarget::default(), &pane_id(1), true, false, false, true, None);
+    assert_eq!(r, Ok(()));
+    assert_eq!(ids_in(&app, 0), vec![1, 3, 2]);
+}
+
+#[test]
+fn pane_index_targets_count_from_pane_base_index() {
+    // pane-base-index 1: :0.3 is the third pane, :0.1 the first.
+    let mut app = app_with_windows(&[&[1, 2, 3]]);
+    app.pane_base_index = 1;
+    let r = crate::commands::join_pane_request(&mut app, Some(":0.3"), &win_pane(0, 3), &win_pane(0, 1), true, false, false, true, None);
+    assert_eq!(r, Ok(()));
+    assert_eq!(ids_in(&app, 0), vec![1, 3, 2]);
+    let r = crate::commands::join_pane_request(&mut app, Some(":0.0"), &win_pane(0, 0), &win_pane(0, 1), true, false, false, true, None);
+    assert_eq!(r, Err("can't find pane: 0".to_string()));
 }

@@ -87,7 +87,7 @@ fn sync_announces_each_change_once() {
     app.windows = vec![make_window(1), make_window(2)];
     app.active_idx = 1;
     app.session_id = 5;
-    let (ntx, nrx) = std::sync::mpsc::sync_channel(64);
+    let (ntx, nrx) = std::sync::mpsc::channel();
     app.control_clients.insert(1, crate::types::ControlClient {
         client_id: 1,
         cmd_counter: 0,

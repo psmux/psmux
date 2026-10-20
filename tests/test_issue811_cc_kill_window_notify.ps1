@@ -155,6 +155,33 @@ try {
     Start-Sleep -Milliseconds 800
     $close = @((Get-Notes $from) | Where-Object { $_ -match 'window-close ' })
     if ($close.Count -eq 0) { Write-Pass "kill-pane $p2 -> no %window-close" } else { Write-Fail "kill-pane $p2 -> '$($close -join ' / ')'" }
+    # tmux sends %layout-change for the window that keeps its other pane
+    # (layout_close_pane, notify_window "window-layout-changed").
+    $lc = @((Get-Notes $from) | Where-Object { $_ -match "^%layout-change $w1 " })
+    if ($lc.Count -ge 1 -and $lc[-1] -notmatch '[\[{]') { Write-Pass "kill-pane $p2 -> '$($lc[-1])'" } else { Write-Fail "kill-pane $p2 -> no one-pane %layout-change $w1 in: $((Get-Notes $from) -join ' / ')" }
+    # $p2 was the active pane (split-window selects the new pane), so the
+    # window's active pane changed: tmux follows the %layout-change with
+    # %window-pane-changed (window_remove_pane after layout_close_pane).
+    $p1 = ((Invoke-CC "display-message -p -t '$w1' '#{pane_id}'")[0].Body[0]).Trim()
+    $notes = Get-Notes $from
+    $wpc = @($notes | Where-Object { $_ -match "^%window-pane-changed $w1 " })
+    $iLc = [array]::FindLastIndex([string[]]$notes, [Predicate[string]]{ param($s) $s -match "^%layout-change $w1 " })
+    $iWpc = [array]::FindLastIndex([string[]]$notes, [Predicate[string]]{ param($s) $s -match "^%window-pane-changed $w1 " })
+    if ($wpc.Count -eq 1 -and $wpc[0] -eq "%window-pane-changed $w1 $p1" -and $iWpc -gt $iLc) { Write-Pass "kill-pane of the active $p2 -> '$($wpc[0])' after the %layout-change" } else { Write-Fail "kill-pane of the active $p2 -> expected '%window-pane-changed $w1 $p1' after %layout-change in: $($notes -join ' / ')" }
+
+    Write-Host "`n[7] kill-pane of a pane that is not active changes no active pane" -ForegroundColor Yellow
+    Invoke-CC "split-window -t '$w1'" | Out-Null
+    Start-Sleep -Milliseconds 800
+    $p3 = ((Invoke-CC "display-message -p -t '$w1' '#{pane_id}'")[0].Body[0]).Trim()
+    Invoke-CC "select-pane -t '$p1'" | Out-Null
+    Start-Sleep -Milliseconds 400
+    $from = (Get-Lines $out).Count - 1
+    Invoke-CC "kill-pane -t '$p3'" | Out-Null
+    Start-Sleep -Milliseconds 800
+    $notes = Get-Notes $from
+    $lc = @($notes | Where-Object { $_ -match "^%layout-change $w1 " })
+    if ($lc.Count -ge 1 -and $lc[-1] -notmatch '[\[{]') { Write-Pass "kill-pane $p3 -> '$($lc[-1])'" } else { Write-Fail "kill-pane $p3 -> no one-pane %layout-change $w1 in: $($notes -join ' / ')" }
+    if (-not ($notes | Where-Object { $_ -match '^%window-pane-changed ' })) { Write-Pass "kill-pane $p3 -> no %window-pane-changed" } else { Write-Fail "kill-pane $p3 -> unexpected: $($notes -join ' / ')" }
 } catch {
     if ("$_" -ne 'no session') { Write-Fail "exception: $_" }
 } finally {

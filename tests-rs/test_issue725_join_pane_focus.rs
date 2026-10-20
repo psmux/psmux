@@ -139,7 +139,7 @@ fn focused(app: &AppState, w: usize) -> Option<usize> {
 }
 
 fn join(app: &mut AppState, src: (usize, Option<usize>), dst: (Option<usize>, Option<usize>), horizontal: bool, detach: bool, before: bool) -> bool {
-    crate::commands::join_pane_local(app, Some(src.0), src.1, dst.0, dst.1, horizontal, detach, before)
+    crate::commands::join_pane_local(app, Some(src.0), src.1, dst.0, dst.1, horizontal, detach, before, None)
 }
 
 // =========================================================================

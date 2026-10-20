@@ -49,7 +49,8 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
                     || app.windows.iter().any(|w| w.floating.iter().any(|fp| fp.id == p))
             } else {
                 let w = &app.windows[idx];
-                p < crate::tree::pane_paths(&w.root).len() + w.floating.len()
+                p.checked_sub(app.pane_base_index)
+                    .is_some_and(|pos| pos < crate::tree::pane_paths(&w.root).len() + w.floating.len())
             };
             if !found {
                 let spec = if t.pane_is_id { format!("%{}", p) } else { p.to_string() };
@@ -74,15 +75,18 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
             Some(p)
         }
         Some(p) => {
-            // Positional index within the target window, the order
-            // focus_pane_by_index and #{pane_index} use; floating panes
-            // follow the tiled ones (#767).
+            // The pane index as #{pane_index} shows it, so pane-base-index
+            // comes off before it is a position in the order
+            // focus_pane_by_index uses; floating panes follow the tiled
+            // ones (#767).
+            let pos = p.checked_sub(app.pane_base_index)
+                .ok_or_else(|| format!("can't find pane: {}", p))?;
             let win = &app.windows[idx];
             let root = &win.root;
             let paths = crate::tree::pane_paths(root);
-            match paths.get(p).and_then(|path| crate::tree::get_active_pane_id(root, path)) {
+            match paths.get(pos).and_then(|path| crate::tree::get_active_pane_id(root, path)) {
                 Some(id) => Some(id),
-                None => match p.checked_sub(paths.len()).and_then(|fi| win.floating.get(fi)) {
+                None => match pos.checked_sub(paths.len()).and_then(|fi| win.floating.get(fi)) {
                     Some(fp) => Some(fp.id),
                     None => return Err(format!("can't find pane: {}", p)),
                 },
@@ -180,6 +184,20 @@ pub(crate) fn apply_temp_target(
     }
     app.last_window_area = app.windows[app.active_idx].area;
     Ok(())
+}
+
+/// Is `pane_id` the active pane of window `win_idx` as the user left it,
+/// looking through a temporary -t focus? The focused window's real active
+/// pane is the saved one. A window the -t focus moved to had its active pane
+/// changed for the request, so its own is not known and this says no.
+pub(crate) fn is_real_active_pane(app: &AppState, saved: &Option<SavedFocus>, win_idx: usize, pane_id: usize) -> bool {
+    match saved {
+        Some(s) if s.active_idx == win_idx => s.pane_id == pane_id,
+        Some(_) if app.active_idx == win_idx => false,
+        _ => app.windows.get(win_idx)
+            .and_then(|w| crate::tree::get_active_pane_id(&w.root, &w.active_path))
+            == Some(pane_id),
+    }
 }
 
 /// Put back the focus `apply_temp_target` saved, if any.  By pane id, not

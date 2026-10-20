@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use crate::clipboard::copy_to_system_clipboard;
 use crate::types::{AppState, Mode, CopyModeState};
 use crate::tree::{active_pane, active_pane_mut};
+use crate::grid_reader::{Grid, GridReader, ScreenGrid};
 
 /// Emit an OSC 52 escape sequence to set the terminal clipboard.
 /// This works over SSH because the sequence travels through the SSH pipe
@@ -886,158 +887,85 @@ pub fn move_to_first_nonblank(app: &mut AppState) {
     }
 }
 
-/// Classify a character for word boundary detection.
-/// Returns: 0 = whitespace, 1 = word char (alnum/_), 2 = punctuation/other
-#[inline]
-fn char_class(ch: char, seps: &str) -> u8 {
-    if ch.is_whitespace() { 0 }
-    else if seps.contains(ch) { 2 }
-    else if ch.is_alphanumeric() || ch == '_' { 1 }
-    else { 2 }
+/// Run a word motion from the copy cursor over the pane's whole grid, then
+/// park the cursor where it ended, scrolling the view only as far as it takes
+/// to show that line (tmux `window_copy_acquire_cursor_up` and
+/// `window_copy_acquire_cursor_down`). A motion that ends on the second cell
+/// of a wide character stays there, as tmux's does, the same as cursor-left.
+fn word_motion(app: &mut AppState, motion: impl FnOnce(&mut GridReader<'_, ScreenGrid<'_>>)) {
+    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
+    let win = &mut app.windows[app.active_idx];
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
+    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return };
+    let (px, py, top, history, rows, cols) = {
+        let mut grid = ScreenGrid::new(parser.screen_mut());
+        let start = grid.abs_of_row(r);
+        let (top, history, rows, cols) = (grid.top(), grid.history(), grid.rows(), grid.width());
+        let mut gr = GridReader::new(&mut grid, c as usize, start);
+        motion(&mut gr);
+        (gr.cx, gr.cy, top, history, rows, cols)
+    };
+    let rows = rows.max(1);
+    let (scrollback, row) = if py < top {
+        (history - py, 0)
+    } else if py >= top + rows {
+        (history.saturating_sub(py + 1 - rows), rows - 1)
+    } else {
+        (parser.screen().scrollback(), py - top)
+    };
+    parser.screen_mut().set_scrollback(scrollback);
+    app.copy_scroll_offset = parser.screen().scrollback();
+    app.copy_pos = Some((row as u16, px.min(cols.saturating_sub(1)) as u16));
 }
 
-/// Move cursor to start of next word (w key in vi copy mode).
+/// The separators and the key table a word motion runs with.
+fn word_settings(app: &AppState) -> (String, bool) {
+    (app.word_separators.clone(), app.mode_keys == "vi")
+}
+
+/// `next-word` (w in vi copy mode).
 pub fn move_word_forward(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let seps = app.word_separators.clone();
-    let (text, cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let mut col = c as usize;
-    let rows = app.windows.get(app.active_idx)
-        .and_then(|w| active_pane(&w.root, &w.active_path))
-        .map(|p| p.last_rows).unwrap_or(24);
-
-    // Phase 1: skip current word class
-    if col < bytes.len() {
-        let cls = char_class(bytes[col], &seps);
-        while col < bytes.len() && char_class(bytes[col], &seps) == cls { col += 1; }
-    }
-    // Phase 2: skip whitespace
-    while col < bytes.len() && bytes[col].is_whitespace() { col += 1; }
-
-    if col < cols as usize {
-        app.copy_pos = Some((r, col as u16));
-    } else {
-        // Wrap to next line
-        let nr = (r + 1).min(rows.saturating_sub(1));
-        if nr != r {
-            if let Some((next_text, _)) = read_row_text(app, nr) {
-                let next_bytes: Vec<char> = next_text.chars().collect();
-                let mut nc = 0usize;
-                while nc < next_bytes.len() && next_bytes[nc].is_whitespace() { nc += 1; }
-                app.copy_pos = Some((nr, nc as u16));
-            } else {
-                app.copy_pos = Some((nr, 0));
-            }
-        }
-    }
+    let (seps, _) = word_settings(app);
+    word_motion(app, |gr| gr.cursor_next_word(&seps));
 }
 
-/// Move to the start of the word under the cursor, for select-word. tmux
-/// window_copy_cmd_select_word calls previous-word with `already` 0: on a
-/// word cell it stays in that word and goes to its first cell, so a double
-/// click on the first letter selects that word. Only from a blank does it
-/// move back to the word before, which is what the b motion always does.
-pub fn move_to_word_start(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let seps = app.word_separators.clone();
-    let (text, _) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let mut col = c as usize;
-    if col >= bytes.len() || bytes[col].is_whitespace() {
-        move_word_backward(app);
-        return;
-    }
-    let cls = char_class(bytes[col], &seps);
-    while col > 0 && char_class(bytes[col - 1], &seps) == cls { col -= 1; }
-    app.copy_pos = Some((r, col as u16));
-}
-
-/// Move cursor to start of previous word (b key in vi copy mode).
+/// `previous-word` (b in vi copy mode). With emacs keys it also stops at the
+/// end of a line that ends in whitespace, as tmux's does.
 pub fn move_word_backward(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let seps = app.word_separators.clone();
-    let (text, _) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let mut col = c as usize;
-
-    if col == 0 {
-        // Wrap to previous line
-        if r > 0 {
-            let nr = r - 1;
-            if let Some((prev_text, prev_cols)) = read_row_text(app, nr) {
-                let prev_bytes: Vec<char> = prev_text.chars().collect();
-                let mut nc = (prev_cols as usize).min(prev_bytes.len()).saturating_sub(1);
-                while nc > 0 && prev_bytes[nc].is_whitespace() { nc -= 1; }
-                let cls = char_class(prev_bytes[nc], &seps);
-                while nc > 0 && char_class(prev_bytes[nc - 1], &seps) == cls { nc -= 1; }
-                app.copy_pos = Some((nr, nc as u16));
-            } else {
-                app.copy_pos = Some((r - 1, 0));
-            }
-        }
-        return;
-    }
-
-    // Phase 1: move left past whitespace
-    while col > 0 && bytes[col - 1].is_whitespace() { col -= 1; }
-    // Phase 2: move left past current word class
-    if col > 0 {
-        let cls = char_class(bytes[col - 1], &seps);
-        while col > 0 && char_class(bytes[col - 1], &seps) == cls { col -= 1; }
-    }
-    app.copy_pos = Some((r, col as u16));
+    let (seps, vi) = word_settings(app);
+    word_motion(app, |gr| gr.cursor_previous_word(&seps, true, !vi));
 }
 
-/// Where an emacs word end lands, from the vi one. tmux's
-/// window_copy_cursor_next_word_end starts at the cursor itself and stops one
-/// cell PAST the word in emacs, and the emacs copy leaves the cursor cell out,
-/// so the whole word is copied; vi stops on the last letter and keeps it.
-fn emacs_word_end(app: &mut AppState, cols: u16) {
-    if let Some((r, c)) = app.copy_pos {
-        app.copy_pos = Some((r, (c + 1).min(cols.saturating_sub(1).max(c))));
-    }
-}
-
-/// Move cursor to end of current word (e key in vi copy mode).
+/// `next-word-end` (e in vi copy mode).
 pub fn move_word_end(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let seps = app.word_separators.clone();
-    let (text, cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let emacs = app.mode_keys == "emacs";
-    // vi starts one past the cursor, emacs at it (see emacs_word_end).
-    let mut col = if emacs { c as usize } else { (c as usize) + 1 };
-    let rows = app.windows.get(app.active_idx)
-        .and_then(|w| active_pane(&w.root, &w.active_path))
-        .map(|p| p.last_rows).unwrap_or(24);
+    let (seps, vi) = word_settings(app);
+    word_motion(app, |gr| gr.cursor_next_word_end_keys(&seps, vi));
+}
 
-    // Skip whitespace
-    while col < bytes.len() && bytes[col].is_whitespace() { col += 1; }
-    // Find end of word class
-    if col < bytes.len() {
-        let cls = char_class(bytes[col], &seps);
-        while col + 1 < bytes.len() && char_class(bytes[col + 1], &seps) == cls { col += 1; }
+/// `select-word`: the word under the cursor, or the one before it from
+/// whitespace (tmux `window_copy_cmd_select_word`).
+pub fn select_word(app: &mut AppState) {
+    let (seps, vi) = word_settings(app);
+    word_motion(app, |gr| gr.cursor_previous_word(&seps, false, !vi));
+    if let Some(pos) = get_copy_pos(app) {
+        app.copy_anchor = Some(pos);
+        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+        app.copy_selection_mode = crate::types::SelectionMode::Char;
     }
+    word_motion(app, |gr| gr.select_word_end(&seps, vi));
+}
 
-    if col < cols as usize {
-        app.copy_pos = Some((r, col as u16));
-    } else {
-        let nr = (r + 1).min(rows.saturating_sub(1));
-        if nr != r {
-            if let Some((next_text, _)) = read_row_text(app, nr) {
-                let next_bytes: Vec<char> = next_text.chars().collect();
-                let mut nc = 0usize;
-                while nc < next_bytes.len() && next_bytes[nc].is_whitespace() { nc += 1; }
-                let cls = if nc < next_bytes.len() { char_class(next_bytes[nc], &seps) } else { 0 };
-                while nc + 1 < next_bytes.len() && char_class(next_bytes[nc + 1], &seps) == cls { nc += 1; }
-                app.copy_pos = Some((nr, nc as u16));
-            } else {
-                app.copy_pos = Some((nr, 0));
-            }
-        }
-    }
-    if emacs && (col < cols as usize || app.copy_pos != Some((r, c))) { emacs_word_end(app, cols); }
+/// The kind of each cell of screen row `r` (see `GridReader::kind_at`), for
+/// the text objects that work within one row.
+fn row_kinds(app: &mut AppState, r: u16, seps: &str) -> Option<Vec<u8>> {
+    let win = &mut app.windows[app.active_idx];
+    let p = active_pane_mut(&mut win.root, &win.active_path)?;
+    let mut parser = p.term.lock().ok()?;
+    let mut grid = ScreenGrid::new(parser.screen_mut());
+    let y = grid.abs_of_row(r);
+    let cols = grid.width();
+    let mut gr = GridReader::new(&mut grid, 0, y);
+    Some((0..cols).map(|x| gr.kind_at(x, y, seps)).collect())
 }
 
 /// Scroll the active pane's scrollback buffer without entering copy mode.
@@ -1921,85 +1849,21 @@ pub fn search_next(app: &mut AppState) {
     scroll_to_abs_line(app, abs, c);
 }
 
-/// Move by WORD (whitespace-delimited) forward — W key
+/// `next-space` (W in vi copy mode): words split by whitespace alone.
 pub fn move_word_forward_big(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let (text, cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let mut col = c as usize;
-    let rows = app.windows.get(app.active_idx)
-        .and_then(|w| active_pane(&w.root, &w.active_path))
-        .map(|p| p.last_rows).unwrap_or(24);
-    // Skip non-whitespace
-    while col < bytes.len() && !bytes[col].is_whitespace() { col += 1; }
-    // Skip whitespace
-    while col < bytes.len() && bytes[col].is_whitespace() { col += 1; }
-    if col < cols as usize {
-        app.copy_pos = Some((r, col as u16));
-    } else {
-        let nr = (r + 1).min(rows.saturating_sub(1));
-        if nr != r {
-            if let Some((next_text, _)) = read_row_text(app, nr) {
-                let next_bytes: Vec<char> = next_text.chars().collect();
-                let mut nc = 0usize;
-                while nc < next_bytes.len() && next_bytes[nc].is_whitespace() { nc += 1; }
-                app.copy_pos = Some((nr, nc as u16));
-            } else { app.copy_pos = Some((nr, 0)); }
-        }
-    }
+    word_motion(app, |gr| gr.cursor_next_word(""));
 }
 
-/// Move by WORD backward — B key
+/// `previous-space` (B in vi copy mode).
 pub fn move_word_backward_big(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let (text, _prev_cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let mut col = c as usize;
-    if col == 0 {
-        if r > 0 {
-            let nr = r - 1;
-            if let Some((prev_text, prev_cols)) = read_row_text(app, nr) {
-                let prev_bytes: Vec<char> = prev_text.chars().collect();
-                let mut nc = (prev_cols as usize).min(prev_bytes.len()).saturating_sub(1);
-                while nc > 0 && prev_bytes[nc].is_whitespace() { nc -= 1; }
-                while nc > 0 && !prev_bytes[nc - 1].is_whitespace() { nc -= 1; }
-                app.copy_pos = Some((nr, nc as u16));
-            } else { app.copy_pos = Some((r - 1, 0)); }
-        }
-        return;
-    }
-    while col > 0 && bytes[col - 1].is_whitespace() { col -= 1; }
-    while col > 0 && !bytes[col - 1].is_whitespace() { col -= 1; }
-    app.copy_pos = Some((r, col as u16));
+    let (_, vi) = word_settings(app);
+    word_motion(app, |gr| gr.cursor_previous_word("", true, !vi));
 }
 
-/// Move to WORD end — E key
+/// `next-space-end` (E in vi copy mode).
 pub fn move_word_end_big(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let (text, cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let emacs = app.mode_keys == "emacs";
-    let mut col = if emacs { c as usize } else { (c as usize) + 1 };
-    let rows = app.windows.get(app.active_idx)
-        .and_then(|w| active_pane(&w.root, &w.active_path))
-        .map(|p| p.last_rows).unwrap_or(24);
-    while col < bytes.len() && bytes[col].is_whitespace() { col += 1; }
-    while col + 1 < bytes.len() && !bytes[col + 1].is_whitespace() { col += 1; }
-    if col < cols as usize {
-        app.copy_pos = Some((r, col as u16));
-    } else {
-        let nr = (r + 1).min(rows.saturating_sub(1));
-        if nr != r {
-            if let Some((next_text, _)) = read_row_text(app, nr) {
-                let next_bytes: Vec<char> = next_text.chars().collect();
-                let mut nc = 0usize;
-                while nc < next_bytes.len() && next_bytes[nc].is_whitespace() { nc += 1; }
-                while nc + 1 < next_bytes.len() && !next_bytes[nc + 1].is_whitespace() { nc += 1; }
-                app.copy_pos = Some((nr, nc as u16));
-            } else { app.copy_pos = Some((nr, 0)); }
-        }
-    }
-    if emacs && (col < cols as usize || app.copy_pos != Some((r, c))) { emacs_word_end(app, cols); }
+    let (_, vi) = word_settings(app);
+    word_motion(app, |gr| gr.cursor_next_word_end_keys("", vi));
 }
 
 /// Move to top of visible screen — H key
@@ -3346,109 +3210,51 @@ pub fn move_matching_bracket(app: &mut AppState) {
 
 // ── Text Object Selection ──────────────────────────────────────────────
 
-/// Select "inner word" (iw) — word under cursor without surrounding whitespace.
-/// Uses `char_class` for word boundary detection (same as `w`/`b`/`e` motions).
+/// Select the run of cells of one kind around the copy cursor on its row
+/// (the vi text objects `iw`, `aw`, `iW` and `aW`, which tmux does not
+/// have), adding the whitespace after it when `trailing` is set. The kinds
+/// are the ones tmux's word motions use (`GridReader::kind_at`), so a word
+/// here is the word `w` and `b` move by; with no separators, words are split
+/// by whitespace alone.
+fn select_word_object(app: &mut AppState, seps: &str, trailing: bool) {
+    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
+    let kinds = match row_kinds(app, r, seps) { Some(k) => k, None => return };
+    let col = c as usize;
+    if col >= kinds.len() { return; }
+    let kind = kinds[col];
+    let mut start = col;
+    while start > 0 && kinds[start - 1] == kind { start -= 1; }
+    let mut end = col;
+    while end + 1 < kinds.len() && kinds[end + 1] == kind { end += 1; }
+    if trailing {
+        while end + 1 < kinds.len() && kinds[end + 1] == 0 { end += 1; }
+    }
+    app.copy_anchor = Some((r, start as u16));
+    app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+    app.copy_pos = Some((r, end as u16));
+    app.copy_selection_mode = crate::types::SelectionMode::Char;
+}
+
+/// Select "inner word" (iw): the word under the cursor.
 pub fn select_inner_word(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
     let seps = app.word_separators.clone();
-    let (text, _cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let col = c as usize;
-    if col >= bytes.len() { return; }
-    let cls = char_class(bytes[col], &seps);
-    // Find start of word
-    let mut start = col;
-    while start > 0 && char_class(bytes[start - 1], &seps) == cls { start -= 1; }
-    // Find end of word
-    let mut end = col;
-    while end + 1 < bytes.len() && char_class(bytes[end + 1], &seps) == cls { end += 1; }
-    app.copy_anchor = Some((r, start as u16));
-    app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-    app.copy_pos = Some((r, end as u16));
-    app.copy_selection_mode = crate::types::SelectionMode::Char;
+    select_word_object(app, &seps, false);
 }
 
-/// Select "a word" (aw) — word under cursor plus trailing whitespace.
+/// Select "a word" (aw): the word under the cursor and the whitespace after it.
 pub fn select_a_word(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
     let seps = app.word_separators.clone();
-    let (text, _cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let col = c as usize;
-    if col >= bytes.len() { return; }
-    let cls = char_class(bytes[col], &seps);
-    // Find start of word
-    let mut start = col;
-    while start > 0 && char_class(bytes[start - 1], &seps) == cls { start -= 1; }
-    // Find end of word
-    let mut end = col;
-    while end + 1 < bytes.len() && char_class(bytes[end + 1], &seps) == cls { end += 1; }
-    // Include trailing whitespace
-    while end + 1 < bytes.len() && bytes[end + 1].is_whitespace() { end += 1; }
-    app.copy_anchor = Some((r, start as u16));
-    app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-    app.copy_pos = Some((r, end as u16));
-    app.copy_selection_mode = crate::types::SelectionMode::Char;
+    select_word_object(app, &seps, true);
 }
 
-/// Select "inner WORD" (iW) — whitespace-delimited token without surrounding whitespace.
+/// Select "inner WORD" (iW): the whitespace-delimited token under the cursor.
 pub fn select_inner_word_big(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let (text, _cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let col = c as usize;
-    if col >= bytes.len() { return; }
-    if bytes[col].is_whitespace() {
-        // Cursor on whitespace — select contiguous whitespace
-        let mut start = col;
-        while start > 0 && bytes[start - 1].is_whitespace() { start -= 1; }
-        let mut end = col;
-        while end + 1 < bytes.len() && bytes[end + 1].is_whitespace() { end += 1; }
-        app.copy_anchor = Some((r, start as u16));
-        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-        app.copy_pos = Some((r, end as u16));
-    } else {
-        // Cursor on non-whitespace — select contiguous non-whitespace
-        let mut start = col;
-        while start > 0 && !bytes[start - 1].is_whitespace() { start -= 1; }
-        let mut end = col;
-        while end + 1 < bytes.len() && !bytes[end + 1].is_whitespace() { end += 1; }
-        app.copy_anchor = Some((r, start as u16));
-        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-        app.copy_pos = Some((r, end as u16));
-    }
-    app.copy_selection_mode = crate::types::SelectionMode::Char;
+    select_word_object(app, "", false);
 }
 
-/// Select "a WORD" (aW) — whitespace-delimited token plus trailing whitespace.
+/// Select "a WORD" (aW): the token under the cursor and the whitespace after it.
 pub fn select_a_word_big(app: &mut AppState) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let (text, _cols) = match read_row_text(app, r) { Some(t) => t, None => return };
-    let bytes: Vec<char> = text.chars().collect();
-    let col = c as usize;
-    if col >= bytes.len() { return; }
-    if bytes[col].is_whitespace() {
-        // Cursor on whitespace — select contiguous whitespace
-        let mut start = col;
-        while start > 0 && bytes[start - 1].is_whitespace() { start -= 1; }
-        let mut end = col;
-        while end + 1 < bytes.len() && bytes[end + 1].is_whitespace() { end += 1; }
-        app.copy_anchor = Some((r, start as u16));
-        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-        app.copy_pos = Some((r, end as u16));
-    } else {
-        // Cursor on non-whitespace — select contiguous non-whitespace
-        let mut start = col;
-        while start > 0 && !bytes[start - 1].is_whitespace() { start -= 1; }
-        let mut end = col;
-        while end + 1 < bytes.len() && !bytes[end + 1].is_whitespace() { end += 1; }
-        // Include trailing whitespace
-        while end + 1 < bytes.len() && bytes[end + 1].is_whitespace() { end += 1; }
-        app.copy_anchor = Some((r, start as u16));
-        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-        app.copy_pos = Some((r, end as u16));
-    }
-    app.copy_selection_mode = crate::types::SelectionMode::Char;
+    select_word_object(app, "", true);
 }
 
 #[cfg(test)]
@@ -3542,3 +3348,7 @@ mod test_copy_mode_end_of_line;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue866_prompt_word_keys.rs"]
 mod test_issue866_prompt_word_keys;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue862_copy_word_motion.rs"]
+mod test_issue862_copy_word_motion;

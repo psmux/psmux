@@ -94,7 +94,7 @@ pub struct ControlClient {
     pub client_id: u64,
     pub cmd_counter: u64,
     pub echo_enabled: bool,
-    pub notification_tx: mpsc::SyncSender<ControlNotification>,
+    pub notification_tx: mpsc::Sender<ControlNotification>,
     pub paused_panes: HashSet<usize>,
     /// `refresh-client -B name:what:format` subscriptions.
     /// Key = subscription name, Value = (target, format_string).
@@ -3203,7 +3203,7 @@ impl AppState {
             priority: crate::platform::DEFAULT_PRIORITY.to_string(),
             status_style: "bg=green,fg=black".to_string(),
             default_shell: String::new(),
-            word_separators: " -_@".to_string(),
+            word_separators: crate::grid_reader::DEFAULT_WORD_SEPARATORS.to_string(),
             renumber_windows: false,
             automatic_rename: true,
             allow_rename: true,
@@ -3421,8 +3421,9 @@ pub enum WindowDumpFormat {
 /// The window and/or pane a command's -t names, as `CtrlReq::ValidateTarget`
 /// and `CtrlReq::Targeted` carry it.  `win` is a window index or, when
 /// `win_is_id` is set, an @id; `win_name` is a window name target.  `pane` is
-/// a %id when `pane_is_id` is set, otherwise a positional pane index within
-/// the target window (the active window when there is no window part).
+/// a %id when `pane_is_id` is set, otherwise the pane index as the user wrote
+/// it, pane-base-index included, within the target window (the active window
+/// when there is no window part); the resolver turns it into a position.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TempTarget {
     pub win: Option<usize>,
@@ -3977,6 +3978,11 @@ pub enum CtrlReq {
         /// Err is tmux's message (`can't join a pane to its own window`,
         /// `can't find pane: %N`), printed by the CLI at exit 1.
         resp: mpsc::Sender<Result<(), String>>,
+        /// move-pane: the source may already be in the target window
+        /// ("like join-pane but allows the same window", tmux CHANGES 1.7).
+        same_window: bool,
+        /// -l size (cells, or a share of the target pane with the flag set).
+        size: Option<(u16, bool)>,
     },
     /// respawn-pane. Fields: optional workdir (-c), kill flag (-k), command
     /// (`--`/positional shell-command), empty (-E), and the per-request reply.
@@ -4295,14 +4301,18 @@ pub enum CtrlReq {
         pause_after_secs: Option<u64>,
     },
     /// `refresh-client -A '%N:pause'` pause a pane's output for this client.
+    /// `reply` is true when a `%pause` line is due.
     ControlPausePane {
         client_id: u64,
         pane_id: usize,
+        reply: mpsc::Sender<bool>,
     },
     /// `refresh-client -A '%N:continue'` resume paused pane output.
+    /// `reply` is true when a `%continue` line is due.
     ControlContinuePane {
         client_id: u64,
         pane_id: usize,
+        reply: mpsc::Sender<bool>,
     },
     SuspendClient,
     CopyModePageUp,
@@ -4428,7 +4438,7 @@ pub enum CtrlReq {
     ControlRegister {
         client_id: u64,
         echo: bool,
-        notif_tx: mpsc::SyncSender<ControlNotification>,
+        notif_tx: mpsc::Sender<ControlNotification>,
         /// The control client's process id, read from the connection (#724).
         pid: Option<u32>,
         /// Output gate shared with the connection's writer thread (#826).
@@ -4530,7 +4540,11 @@ pub fn wake_server_loop() {
     // Nobody is watching: the frame this would produce has no destination, and
     // the loop's own 16ms/50ms cadence still picks the data up for alerts and
     // activity. Waking here would only spend CPU on a detached session.
-    if !has_frame_receivers() {
+    // A control client watches too: its %output is sent from the loop, which
+    // otherwise sat out its 50ms idle wait while a pane flooded (#875).
+    if !has_frame_receivers()
+        && !crate::control_ring::CONTROL_CLIENTS_PRESENT.load(std::sync::atomic::Ordering::Acquire)
+    {
         return;
     }
     if WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
