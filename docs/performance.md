@@ -80,6 +80,25 @@ After creating 11 windows and splitting the first window into 5 panes (16 panes 
 
 Per pane the server adds three threads (ConPTY reader, VT parser, write queue) and the scrollback grid, which is `history-limit` rows times the pane width. With the default history the server's private memory grows by well under a megabyte per pane. The shells dominate: 16 panes of pwsh is about 1.5 GB of working set, and a tab of the same shell in any other terminal costs the same, because it is the shell's memory, not the terminal's. For a one pane session measured side by side with Windows Terminal, WezTerm and Alacritty on the same machine, see [Measured against the terminals on your machine](#measured-against-the-terminals-on-your-machine) below. Use `cmd`, `nu`, or `pwsh -NoProfile` for panes that only need to run one command (see [Multi-Shell](multi-shell.md)).
 
+## Attached client memory under stalled output
+
+The attached client's incoming queue holds at most 16 messages. If the terminal
+stops accepting output, the socket reader waits for queue space instead of
+accumulating frames indefinitely. Frames and control directives remain ordered
+and are not dropped; the server's existing frame slot coalesces pending snapshots
+when TCP backpressure reaches it. This is separate from pane scrollback storage.
+
+On Windows, the isolated regression compares responsive and blocked terminal
+output, checks private committed memory stays below 16 MiB with 13.7 KB frames,
+then resumes output and verifies clean server-directed detach:
+
+```powershell
+python tests\test_client_frame_backpressure.py --exe target\release\tmux.exe
+```
+
+The test uses its own data directory and namespace with a synthetic loopback
+server; it never starts a pane or modifies the default session registry.
+
 ## The extreme scale harness
 
 `tests/test_extreme_perf.ps1` is the repository's stress benchmark. It creates 100 sequential windows, 50 windows in a burst, splits one window until psmux refuses, builds a 20 windows by 5 splits mixed session, and then measures command round trips and `dump-state` serialisation with 100 panes alive. It writes a JSON summary with these fields:
