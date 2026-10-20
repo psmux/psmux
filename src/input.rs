@@ -4403,8 +4403,8 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     return;
                 }
                 if let Some(byte) = ctrl_char_send_keys_byte(c) {
-                    let _ = p.writer.write_all(&[byte]);
-                    let _ = p.writer.flush();
+                    // C-S-[ and C-S-3 are Escape too: keep the #588 repair.
+                    write_pane_input(p, &[byte]);
                 }
             }
             // Ctrl+Break (issue #454).  The attached client traps the Ctrl+Break
@@ -4453,10 +4453,10 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 // their usual byte (a->0x01 …), so Ctrl+<letter> is unaffected.
                 let ctrl_char = ctrl_char_send_keys_byte(c)
                     .unwrap_or((c.to_ascii_lowercase() as u8) & 0x1F);
-                // Always write the raw control byte so ConPTY can generate
-                // console control events (e.g. CTRL_C_EVENT for \x03).
-                // Raw bytes do NOT start with \x1b so they never corrupt
-                // ConPTY's VT parser state.
+                // Keep control bytes raw so ConPTY can generate console
+                // control events (e.g. CTRL_C_EVENT for \x03). Escape aliases
+                // (C-[ and C-3) must use write_pane_input's #588 repair once
+                // the pane's ConPTY has latched into win32 input mode (#879).
                 //
                 // ConPTY already reconstructs the proper VK + LEFT_CTRL_PRESSED
                 // console key event from this raw C0 byte, so console apps
@@ -4480,8 +4480,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                         crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
                     }
                 }
-                let _ = p.writer.write_all(&[ctrl_char]);
-                let _ = p.writer.flush();
+                write_pane_input(p, &[ctrl_char]);
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');
@@ -4661,6 +4660,10 @@ mod tests_issue610_ctrl_backspace;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue588_win32_input_escape.rs"]
 mod tests_issue588_win32_input_escape;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue879_ctrl_bracket_escape.rs"]
+mod tests_issue879_ctrl_bracket_escape;
 
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue729_named_key_records.rs"]
