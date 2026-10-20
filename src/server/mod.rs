@@ -4694,7 +4694,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 // third character of "C-x" on a whitespace split
                                 // command line, and the generic C- arm below would read
                                 // the 'S' of "C-Space" and send Ctrl+S.  tmux byte: NUL.
-                                "C-Space" | "c-space" | "C-space" => {
+                                // This match is on `key_upper`, so the only spelling
+                                // that can ever arrive is "C-SPACE"; the mixed case
+                                // forms alone never matched and `send-keys C-Space`
+                                // wrote 0x13, an XOFF (issue #860).
+                                "C-SPACE" => {
                                     #[cfg(windows)]
                                     let handled = match ctrl_key_record_seq_for_active(&mut app, ' ', false) {
                                         Some(seq) => {

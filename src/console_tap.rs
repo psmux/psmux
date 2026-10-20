@@ -159,14 +159,24 @@ impl ConsoleTap {
             }));
         }
 
-        // A control character with no virtual key. ESC is left alone: a vk=0
-        // ESC can open a VT sequence the host typed as characters, and which
-        // way to read it is a separate question from this issue.
-        if rec.vk == 0 && u != 0 && u <= 0x1F && u != ESC {
+        // A control character with no virtual key.
+        //
+        // ESC included (issue #860): a Windows Terminal `sendInput` action
+        // delivers every character it writes in this shape, so a key mapped
+        // to "\u001b" (the usual way to make Ctrl+[ an Escape) reached
+        // crossterm as a record it drops, and the key never arrived. It goes
+        // out as the Escape key now, and an extended key typed the same way
+        // (`ESC [ 32 ; 5 u`) still decodes: the Escape is handed to
+        // EscCoalesce, which sees the `[` already queued behind it, holds it,
+        // and lets recover_csi_u take the whole sequence with it.
+        if rec.vk == 0 && u != 0 && u <= 0x1F {
             if !rec.key_down {
                 return Verdict::Consumed(None);
             }
             self.high = None;
+            if u == ESC {
+                return Verdict::Consumed(Some(press(KeyCode::Esc, KeyModifiers::empty())));
+            }
             return Verdict::Consumed(control_key(u));
         }
 

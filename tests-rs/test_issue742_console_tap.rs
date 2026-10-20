@@ -208,10 +208,40 @@ fn vk0_control_characters_become_the_keys_the_vt_route_reports() {
     assert_eq!(ev, vec![enter, tab, ctrl('j'), ctrl('h'), ctrl('\\'), ctrl('_')]);
 }
 
+// Issue #860: crossterm drops a vk = 0 ESC, which is exactly what a Windows
+// Terminal `sendInput` "\u001b" (Ctrl+[ remapped to Escape) delivers. The tap
+// now turns it into the Escape key and swallows its key up.
 #[test]
-fn vk0_escape_is_left_to_crossterm() {
+fn vk0_escape_is_the_escape_key() {
+    let esc = Event::Key(KeyEvent { code: KeyCode::Esc, modifiers: KeyModifiers::empty(), kind: KeyEventKind::Press, state: KeyEventState::empty() });
     let mut tap = ConsoleTap::new();
-    let (ev, left) = run(&mut tap, &[down(0x1B)]);
+    let (ev, left) = run(&mut tap, &[down(0x1B), up(0x1B)]);
+    assert_eq!(ev, vec![esc]);
+    assert!(left.is_empty(), "nothing of the ESC may reach crossterm: {:?}", left);
+}
+
+// The sendInput shape of an extended key: ESC is the tap's, every printable
+// byte behind it stays crossterm's, so EscCoalesce sees Esc then `[` and
+// recover_csi_u still gets the whole `[32;5u`.
+#[test]
+fn vk0_escape_leaves_the_csi_u_body_to_crossterm() {
+    let mut tap = ConsoleTap::new();
+    let mut recs = vec![down(0x1B), up(0x1B)];
+    for c in "[32;5u".chars() {
+        recs.push(down(c as u16));
+        recs.push(up(c as u16));
+    }
+    let (ev, left) = run(&mut tap, &recs);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(left.len(), 12, "the six body characters, down and up: {:?}", left);
+}
+
+// A real Escape key (vk = VK_ESCAPE) is still crossterm's.
+#[test]
+fn keyed_escape_is_still_crossterms() {
+    let mut tap = ConsoleTap::new();
+    let k = keyed(true, 0x1B, 0x1B, 0);
+    let (ev, left) = run(&mut tap, &[k]);
     assert!(ev.is_empty());
-    assert_eq!(left, vec![down(0x1B)]);
+    assert_eq!(left, vec![k]);
 }

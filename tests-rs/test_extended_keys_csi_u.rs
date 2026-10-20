@@ -672,3 +672,33 @@ fn a_repeated_key_decodes_every_time() {
         );
     }
 }
+
+// Issue #860: since the console tap turns a vk = 0 ESC into the Escape key, a
+// Windows Terminal `sendInput` "\u001b[32;5u" now reaches the coalescer WITH
+// its Escape (and with no key up behind it, the tap swallows that). The held
+// Escape must go with the sequence: one C-Space, no stray Escape, no text.
+#[test]
+fn issue860_sendinput_escape_then_csi_u_is_one_ctrl_space() {
+    let mut c = pinned();
+    let t = Instant::now();
+    let rest: Vec<Event> = "[32;5u".chars().map(|ch| press(KeyCode::Char(ch), KeyModifiers::NONE)).collect();
+    let (out, left) = drain(&mut c, press(KeyCode::Esc, KeyModifiers::NONE), rest, t);
+    assert_eq!(out.len(), 1, "exactly one key: {:?}", out);
+    let k = key_of(&out[0]);
+    assert_eq!(k.code, KeyCode::Char(' '));
+    assert!(k.modifiers.contains(KeyModifiers::CONTROL));
+    assert!(left.is_empty(), "nothing of the sequence may be left: {:?}", left);
+    assert!(c.deadline_ms(t).is_none(), "no Escape may stay held");
+}
+
+// Issue #860: a sendInput "\u001b" on its own (Ctrl+[ remapped to Escape) has
+// nothing queued behind it and goes out as the Escape key at once.
+#[test]
+fn issue860_sendinput_lone_escape_goes_straight_out() {
+    let mut c = pinned();
+    let t = Instant::now();
+    let (out, left) = drain(&mut c, press(KeyCode::Esc, KeyModifiers::NONE), vec![], t);
+    assert_eq!(codes(&out), vec![KeyCode::Esc]);
+    assert!(left.is_empty());
+    assert!(c.deadline_ms(t).is_none());
+}

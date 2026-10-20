@@ -4400,8 +4400,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     return;
                 }
                 if let Some(byte) = ctrl_char_send_keys_byte(c) {
-                    let _ = p.writer.write_all(&[byte]);
-                    let _ = p.writer.flush();
+                    write_pane_input(p, &[byte]);
                 }
             }
             // Ctrl+Break (issue #454).  The attached client traps the Ctrl+Break
@@ -4477,8 +4476,13 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                         crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
                     }
                 }
-                let _ = p.writer.write_all(&[ctrl_char]);
-                let _ = p.writer.flush();
+                // Through write_pane_input, never straight to the writer: C-[
+                // is 0x1b, a lone ESC, and on a ConPTY that a win32 record
+                // has latched (any arrow or function key into nvim does) a
+                // bare 0x1b is held by conhost and fuses with the next key,
+                // so C-[ vanished and took the Backspace after it along
+                // (issue #860, the #588 repair this arm used to skip).
+                write_pane_input(p, &[ctrl_char]);
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');
