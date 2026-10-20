@@ -2720,7 +2720,9 @@ fn establish_connection_with_timeout(
 
     // 2-second read timeout keeps the thread from blocking forever on process exit.
     let _ = reader.get_ref().set_read_timeout(Some(Duration::from_secs(2)));
-    let (frame_tx, frame_rx) = std::sync::mpsc::channel::<String>();
+    // Preserve ordered frames and directives, but backpressure the socket reader
+    // when terminal output stalls instead of retaining an unbounded backlog.
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<String>(16);
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = String::with_capacity(64 * 1024);
