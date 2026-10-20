@@ -2043,7 +2043,7 @@ if control_echo || control_quiet || control_noecho {
     let ctrl_client_id = crate::types::next_client_id();
     crate::types::register_persistent_stream(ctrl_client_id, &write_stream);
 
-    let (notif_tx, notif_rx) = std::sync::mpsc::sync_channel::<ControlNotification>(4096);
+    let (notif_tx, notif_rx) = std::sync::mpsc::channel::<ControlNotification>();
 
     // Wrap the write stream in a mutex so that the notification writer
     // thread and the command-response loop never interleave bytes on
@@ -2085,6 +2085,7 @@ if control_echo || control_quiet || control_noecho {
             let mut is_exit = is_detach || matches!(notif, ControlNotification::Exit { .. });
             match notif {
                 ControlNotification::PaneOutput { pane_id, data, seq, queued_at } => {
+                    gate_notif.written(data.len());
                     match gate_notif.dequeue(pane_id, seq, queued_at, std::time::Instant::now()) {
                         control::GateWrite::Write { age_ms, extended: true } => {
                             lines.push(control::format_notification(

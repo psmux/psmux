@@ -6,10 +6,10 @@
 // (format.c format_cb_session_attached). Registered from src/control.rs.
 
 use super::*;
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::mpsc::{channel, Receiver};
 
 fn add_control(app: &mut AppState, id: u64, size: Option<(u16, u16)>) -> Receiver<ControlNotification> {
-    let (tx, rx) = sync_channel(16);
+    let (tx, rx) = channel();
     app.control_clients.insert(id, crate::types::ControlClient {
         client_id: id,
         cmd_counter: 0,

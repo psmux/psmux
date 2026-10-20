@@ -2902,60 +2902,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::window_ops::update_mouse_proto_owner(&mut fp.pane);
                 }
             }
-            // Drain output ring buffers and send %output notifications to control clients
-            if !app.control_clients.is_empty() {
-                // Collect output from all panes first, then dispatch to clients
-                let mut pane_outputs: Vec<(usize, String)> = Vec::new();
-                for win in &app.windows {
-                    crate::tree::for_each_pane(&win.root, &mut |pane: &crate::types::Pane| {
-                        if let Ok(mut ring) = pane.output_ring.lock() {
-                            if !ring.is_empty() {
-                                let bytes: Vec<u8> = ring.drain(..).collect();
-                                let data = String::from_utf8_lossy(&bytes).to_string();
-                                pane_outputs.push((pane.id, data));
-                            }
-                        }
-                    });
-                }
-                // Dispatch to each control client. The client's output gate
-                // tracks how old the oldest unwritten output of each pane is
-                // (tmux control_check_age): past pause-after the pane is
-                // paused for that client and its backlog dropped, and a
-                // client without pause-after that falls CONTROL_MAXIMUM_AGE
-                // behind is disconnected (#826). The writer thread decides
-                // between %output and %extended-output and measures the age.
-                let now = std::time::Instant::now();
-                for (pane_id, data) in &pane_outputs {
-                    for client in app.control_clients.values_mut() {
-                        if client.paused_panes.contains(pane_id) {
-                            continue;
-                        }
-                        match client.output_gate.enqueue(*pane_id, now) {
-                            crate::control::GateEnqueue::Send(seq) => {
-                                let sent = client.notification_tx.try_send(
-                                    crate::types::ControlNotification::PaneOutput {
-                                        pane_id: *pane_id,
-                                        data: data.clone(),
-                                        seq,
-                                        queued_at: now,
-                                    }
-                                );
-                                if sent.is_err() {
-                                    client.output_gate.unqueue(*pane_id, seq);
-                                }
-                            }
-                            crate::control::GateEnqueue::Paused => {
-                                // Wakes the writer, which prints the %pause.
-                                let _ = client.notification_tx.try_send(
-                                    crate::types::ControlNotification::Pause { pane_id: *pane_id }
-                                );
-                            }
-                            crate::control::GateEnqueue::Skip
-                            | crate::control::GateEnqueue::TooFarBehind => {}
-                        }
-                    }
-                }
-            }
             // Answer any ESC[6n queries — pwsh re-issues this after lock/unlock.
             if crate::types::CPR_DATA_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 for win in &mut app.windows {
@@ -3037,6 +2983,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
             }
         }
+        // Pane output for the control clients as %output. Every pass, not
+        // only on a pass that saw new data: a pane reader waiting on a full
+        // ring, or output held back while the clients were behind, must
+        // not wait for the pane to print again (#875).
+        crate::control::flush_pane_output(&mut app);
         // Issue #597: write the DA1/DA2/DSR/DECRQM answers the parser threads
         // composed.  Deliberately outside the `data_ready` arm above: a warm
         // spare that is still starting up is exactly the pane whose console
@@ -8310,6 +8261,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Register control clients with the same idempotent
                     // counter/registry invariant as normal TUI clients.
                     app.register_client_with_pid(client_id, true, pid);
+                    // Its %output starts with what the panes write from now.
+                    crate::control::start_consuming_output(&app);
                     // Real tmux fires server hooks (session-changed, window-add,
                     // etc.) as side effects of the initial attach-session command.
                     // iTerm2 depends on %session-changed to enable writes
@@ -8352,7 +8305,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ControlContinuePane { client_id, pane_id } => {
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {
                         if cc.output_gate.continue_pane(pane_id) {
-                            let _ = cc.notification_tx.try_send(
+                            let _ = cc.notification_tx.send(
                                 crate::types::ControlNotification::Continue { pane_id }
                             );
                         }
@@ -8362,7 +8315,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {
                         if cc.output_gate.pause_pane(pane_id) {
                             // Wakes the writer, which prints the %pause.
-                            let _ = cc.notification_tx.try_send(
+                            let _ = cc.notification_tx.send(
                                 crate::types::ControlNotification::Pause { pane_id }
                             );
                         }
@@ -8976,7 +8929,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             for (cid, notif) in sub_notifs {
                 if let Some(cc) = app.control_clients.get(&cid) {
-                    let _ = cc.notification_tx.try_send(notif);
+                    let _ = cc.notification_tx.send(notif);
                 }
             }
         }

@@ -38,6 +38,7 @@ mod ssh_input;
 mod console_tap;
 mod debug_log;
 mod control;
+mod control_ring;
 mod resize_window;
 mod proxy_pane;
 mod cross_session;

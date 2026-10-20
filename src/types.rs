@@ -94,7 +94,7 @@ pub struct ControlClient {
     pub client_id: u64,
     pub cmd_counter: u64,
     pub echo_enabled: bool,
-    pub notification_tx: mpsc::SyncSender<ControlNotification>,
+    pub notification_tx: mpsc::Sender<ControlNotification>,
     pub paused_panes: HashSet<usize>,
     /// `refresh-client -B name:what:format` subscriptions.
     /// Key = subscription name, Value = (target, format_string).
@@ -4428,7 +4428,7 @@ pub enum CtrlReq {
     ControlRegister {
         client_id: u64,
         echo: bool,
-        notif_tx: mpsc::SyncSender<ControlNotification>,
+        notif_tx: mpsc::Sender<ControlNotification>,
         /// The control client's process id, read from the connection (#724).
         pid: Option<u32>,
         /// Output gate shared with the connection's writer thread (#826).
@@ -4530,7 +4530,11 @@ pub fn wake_server_loop() {
     // Nobody is watching: the frame this would produce has no destination, and
     // the loop's own 16ms/50ms cadence still picks the data up for alerts and
     // activity. Waking here would only spend CPU on a detached session.
-    if !has_frame_receivers() {
+    // A control client watches too: its %output is sent from the loop, which
+    // otherwise sat out its 50ms idle wait while a pane flooded (#875).
+    if !has_frame_receivers()
+        && !crate::control_ring::CONTROL_CLIENTS_PRESENT.load(std::sync::atomic::Ordering::Acquire)
+    {
         return;
     }
     if WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
