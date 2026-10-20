@@ -4195,11 +4195,11 @@ fn run_main() -> io::Result<()> {
                     // real value, and left the shell believing the command had
                     // succeeded. Route it to stderr with the same "psmux: "
                     // prefix the client's own target errors use, and exit 1.
-                    if resp.trim_start().starts_with("ERROR:") {
-                        eprintln!(
-                            "psmux: {}",
-                            resp.trim().trim_start_matches("ERROR:").trim()
-                        );
+                    // Only the server's own target error counts (#865): a
+                    // message that merely starts with "ERROR" is output, as
+                    // in tmux.
+                    if let Some(e) = crate::cli::display_reply_error(&resp, &msg, parsed.literal) {
+                        eprintln!("psmux: {}", e);
                         std::process::exit(1);
                     }
                     print!("{}", resp);
