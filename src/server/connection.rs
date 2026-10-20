@@ -1128,9 +1128,16 @@ pub(crate) fn select_window_requests(
     // a display index, then an exact window name. `select-window` never
     // called it, so `-t +1` was read as the literal index 1 and `-t !`,
     // `-t {end}`, `-t -` and `-t +` died on the CLI as session names.
+    // The pane part only has to exist in the selected window; tmux never
+    // focuses it (cmd-select-window.c uses the target's window alone).
+    let pane = select_window_pane_part(raw_target);
     if let Some(spec) = select_window_spec(raw_target) {
         let (s, r) = mpsc::channel();
-        return (vec![CtrlReq::SelectWindowSpec { spec, resp: s }], Some(r));
+        return (vec![CtrlReq::SelectWindowSpec { spec, pane, resp: s }], Some(r));
+    }
+    if pane.is_some() {
+        let (s, r) = mpsc::channel();
+        return (vec![CtrlReq::SelectWindowSpec { spec: String::new(), pane, resp: s }], Some(r));
     }
     if target_win_is_id {
         // #497: an @id target must never be re-sent as an INDEX.
@@ -1163,30 +1170,7 @@ pub(crate) fn select_window_requests(
 /// fallback is the CLI's routing step and a bare NAME never reaches here as a
 /// window.
 pub(crate) fn select_window_spec(raw_target: Option<&str>) -> Option<String> {
-    let t = raw_target?.trim();
-    if t.is_empty() { return None; }
-    // A `.pane` component belongs to the pane focus, not to the window
-    // resolver: `select-window -t @2.0` and `-t sess:1.0` both name window
-    // @2 / window 1 (#497).  Only an UNAMBIGUOUS suffix is split off, because
-    // a window NAME may legitimately contain a dot, which is the same rule
-    // `cli_validate_window_pane_target` uses.
-    let (prefix, rest) = match t.find(':') {
-        Some(c) => (&t[..=c], &t[c + 1..]),
-        None => ("", t),
-    };
-    let rest = rest.trim();
-    let window_part = match rest.rfind('.') {
-        Some(d) => {
-            let pane = &rest[d + 1..];
-            let unambiguous = !pane.is_empty()
-                && (pane.starts_with('%')
-                    || pane.chars().all(|c| c.is_ascii_digit())
-                    || matches!(pane, "+" | "-"));
-            if unambiguous { &rest[..d] } else { rest }
-        }
-        None => rest,
-    };
-    let window_part = window_part.trim();
+    let (prefix, window_part, _) = select_window_target_parts(raw_target)?;
     // `sess:` with nothing after it means that session's current window,
     // which is where we already are.
     if window_part.is_empty() { return None; }
@@ -1197,6 +1181,43 @@ pub(crate) fn select_window_spec(raw_target: Option<&str>) -> Option<String> {
         return Some(window_part.to_string());
     }
     None
+}
+
+/// The pane part of a `select-window` -t, which the server only checks to
+/// exist in the selected window.  A bare `%N` is a pane with no window part
+/// (cmd-find.c:1103-1104).
+pub(crate) fn select_window_pane_part(raw_target: Option<&str>) -> Option<String> {
+    select_window_target_parts(raw_target)?.2.map(str::to_string)
+}
+
+/// A `select-window` -t split into its `session:` prefix, window part and
+/// pane part.  Only an UNAMBIGUOUS `.pane` suffix is split off, because a
+/// window NAME may legitimately contain a dot, which is the same rule
+/// `cli_validate_window_pane_target` uses: `-t @2.0` and `-t sess:1.0` both
+/// name window @2 / window 1 (#497).
+fn select_window_target_parts(raw_target: Option<&str>) -> Option<(&str, &str, Option<&str>)> {
+    let t = raw_target?.trim();
+    if t.is_empty() { return None; }
+    let (prefix, rest) = match t.find(':') {
+        Some(c) => (&t[..=c], &t[c + 1..]),
+        None => ("", t),
+    };
+    let rest = rest.trim();
+    if prefix.is_empty() && rest.starts_with('%') {
+        return Some(("", "", Some(rest)));
+    }
+    let (window_part, pane) = match rest.rfind('.') {
+        Some(d) => {
+            let pane = &rest[d + 1..];
+            let unambiguous = !pane.is_empty()
+                && (pane.starts_with('%')
+                    || pane.chars().all(|c| c.is_ascii_digit())
+                    || matches!(pane, "+" | "-"));
+            if unambiguous { (&rest[..d], Some(pane)) } else { (rest, None) }
+        }
+        None => (rest, None),
+    };
+    Some((prefix, window_part.trim(), pane))
 }
 
 /// Does this `select-pane` carry an operation of its own, one that
@@ -2556,13 +2577,6 @@ if control_echo || control_quiet || control_noecho {
                         let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
                     }
                 }
-                if let Some(pid) = ctrl_target_pane {
-                    if ctrl_pane_is_id {
-                        let _ = tx_ctrl.send(CtrlReq::FocusPane(pid));
-                    } else {
-                        let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
-                    }
-                }
             } else {
                 // Validated target (issue #545): on an unresolvable
                 // window/pane target the command must not run, reply %error
@@ -3100,7 +3114,8 @@ let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" 
 // to act on it, a permanent FocusWindow here and a SelectWindow from the
 // command's arm below, and since every request carries its own hook slot
 // in the server loop, one `select-window` ran `after-select-window`
-// twice.  A pane part on a select-window target is still focused here.
+// twice.  Its pane part is never focused: tmux's select-window uses the
+// target's window alone (cmd-select-window.c) and only checks the pane.
 let selectw_owns_window_target = matches!(cmd, "select-window" | "selectw");
 // Issue #691: and `select-pane` owns its WHOLE target, window part
 // included, for the same reason. Focusing the window part here fired
@@ -3168,13 +3183,6 @@ if is_focus_cmd {
                 }
             } else if let Some(ref wname) = target_win_name {
                 let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
-            }
-        }
-        if let Some(pid) = target_pane {
-            if pane_is_id {
-                let _ = tx.send(CtrlReq::FocusPane(pid));
-            } else {
-                let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
             }
         }
     }

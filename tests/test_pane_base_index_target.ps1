@@ -21,9 +21,10 @@
 # - paste-buffer -t X:.6 pastes into pane 6 only, -t X:.1 nowhere.
 #   switch-client -t X:1.6 makes window 1 current with pane 6 active;
 #   switch-client -t X:1.1 does not move window 1's pane. select-window
-#   -t X:0.6 on the current window makes pane 6 active, X:0.1 moves nothing.
-#   (select-window to another window focuses the pane part before it switches
-#   windows, whatever the base, so that case is not checked here.)
+#   -t X:0.6 on the current window accepts pane 6 and moves nothing, X:0.1
+#   moves nothing either: tmux's select-window only checks the pane part
+#   (cmd-select-window.c, cmd-find.c:1189-1217). The other window's case is
+#   in test_select_window_pane_part.ps1.
 # - A floating pane after the two tiled ones is index 7 (X:.7, X:0.7); 8 and
 #   2 name no pane.
 # - With pane-base-index set back to 0, the corresponding targets work (0 and
@@ -302,9 +303,10 @@ try {
     Check ($Focus -match [regex]::Escape("$W1|5|1|")) "switch-client -t X:1.1 leaves window 1's active pane at 5" "exit $($Result.Code), focus '$Focus', '$($Result.Err)'"
 
     Reset-Focus
+    $Before = Get-Focus
     $Result = Invoke-Psmux @("select-window", "-t", "X:0.6")
-    $Focus = Get-Focus
-    Check ($Result.Code -eq 0 -and $Focus -match [regex]::Escape("$W0|6|1|1")) "select-window -t X:0.6 keeps window 0 current with pane 6 active" "exit $($Result.Code), focus '$Focus', '$($Result.Err)'"
+    $After = Get-Focus
+    Check ($Result.Code -eq 0 -and $After -eq $Before) "select-window -t X:0.6 accepts pane 6 and moves nothing" "exit $($Result.Code), focus '$After' (was '$Before'), '$($Result.Err)'"
 
     Reset-Focus
     $Before = Get-Focus

@@ -3816,6 +3816,8 @@ pub enum CtrlReq {
     /// item 4).
     SelectWindowSpec {
         spec: String,
+        /// The pane part of the target, only checked to exist in the window.
+        pane: Option<String>,
         resp: mpsc::Sender<Result<(), String>>,
     },
     ListPanes(mpsc::Sender<String>),

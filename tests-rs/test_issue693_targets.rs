@@ -472,3 +472,99 @@ fn issue693_a_remembered_pane_wins_and_a_stale_one_does_not_count() {
     assert_eq!(crate::server::last_pane_path(&app), None,
         "the active pane cannot be its own last pane");
 }
+
+// ------------------------- select-window: the pane part is checked, not focused
+
+use crate::server::temp_target::select_window_pos;
+
+fn add_floating(app: &mut AppState, win_pos: usize, id: usize) {
+    app.windows[win_pos].floating.push(crate::types::FloatingPane {
+        pane: make_pane(id, 6, 20),
+        x: 2, y: 2, w: 20, h: 6,
+        border: "single".to_string(),
+        id,
+        title: String::new(),
+        position: None,
+        styles: Default::default(),
+    });
+}
+
+#[test]
+fn select_window_pane_part_rides_with_the_window_request() {
+    // cmd-select-window.c uses the target's window alone, so the pane part
+    // travels in the one window request to be checked there, and no pane
+    // focus request goes out.
+    for (t, spec, pane) in [
+        ("sess:1.1", "sess:1", "1"),
+        ("@2.%4", "@2", "%4"),
+        ("sess:{end}.9", "sess:{end}", "9"),
+        (":.1", "", "1"),
+        ("%3", "", "%3"),
+        ("sess:1.+", "sess:1", "+"),
+    ] {
+        let (reqs, resp) = select_window_requests(&[], Some(t), None, false, None);
+        assert_eq!(reqs.len(), 1, "-t {} must emit exactly one request", t);
+        match &reqs[0] {
+            CtrlReq::SelectWindowSpec { spec: s, pane: p, .. } => {
+                assert_eq!(s, spec, "-t {} window part", t);
+                assert_eq!(p.as_deref(), Some(pane), "-t {} pane part", t);
+            }
+            other => panic!("-t {} took the wrong carrier: {:?}", t, std::mem::discriminant(other)),
+        }
+        assert!(resp.is_some(), "-t {} must be able to report can't find pane", t);
+    }
+    assert_eq!(select_window_pane_part(Some("sess:1")), None);
+    assert_eq!(select_window_pane_part(Some("my.session")), None,
+        "a dot inside a name is not a pane part");
+}
+
+#[test]
+fn select_window_pos_checks_the_pane_inside_the_selected_window() {
+    // ids: window 0 has %1 %2, window 1 has %3 %4.
+    let mut app = app_with_windows(&[2, 2]);
+    assert_eq!(select_window_pos(&app, "1", Some("1")), Ok(1));
+    assert_eq!(select_window_pos(&app, "1", None), Ok(1));
+    assert_eq!(select_window_pos(&app, "1", Some("+")), Ok(1));
+    assert_eq!(select_window_pos(&app, "1", Some("2")), Err("can't find pane: 2".to_string()));
+    assert_eq!(select_window_pos(&app, "{end}", Some("9")), Err("can't find pane: 9".to_string()),
+        "a symbolic window gets its pane part checked too");
+    assert_eq!(select_window_pos(&app, "9", Some("1")), Err("can't find window: 9".to_string()));
+    // An empty window part is the current window.
+    assert_eq!(select_window_pos(&app, "", Some("1")), Ok(0));
+    assert_eq!(select_window_pos(&app, "", Some("5")), Err("can't find pane: 5".to_string()));
+    // The number is #{pane_index}, so pane-base-index comes off first.
+    app.pane_base_index = 1;
+    assert_eq!(select_window_pos(&app, "1", Some("2")), Ok(1));
+    assert_eq!(select_window_pos(&app, "1", Some("0")), Err("can't find pane: 0".to_string()),
+        "below pane-base-index names no pane");
+    // A floating pane follows the tiled ones (#767).
+    app.pane_base_index = 0;
+    add_floating(&mut app, 1, 9);
+    assert_eq!(select_window_pos(&app, "1", Some("2")), Ok(1));
+    assert_eq!(select_window_pos(&app, "1", Some("%9")), Ok(1));
+}
+
+#[test]
+fn select_window_pos_refuses_a_pane_id_of_another_window() {
+    // cmd-find.c:592-598: a %id that is not in the target's window is
+    // "can't find pane", not a hop to the window holding it.
+    let mut app = app_with_windows(&[2, 2]);
+    add_floating(&mut app, 1, 9);
+    assert_eq!(select_window_pos(&app, "0", Some("%3")), Err("can't find pane: %3".to_string()));
+    assert_eq!(select_window_pos(&app, "0", Some("%9")), Err("can't find pane: %9".to_string()));
+    assert_eq!(select_window_pos(&app, "1", Some("%99")), Err("can't find pane: %99".to_string()));
+    assert_eq!(select_window_pos(&app, "1", Some("%x")), Err("can't find pane: %x".to_string()),
+        "an unparsable pane part is an error, never ignored");
+}
+
+#[test]
+fn select_window_pos_takes_a_bare_pane_id_to_its_window() {
+    // cmd-find.c:1103-1104: a bare %id names its own window.
+    let mut app = app_with_windows(&[2, 2]);
+    add_floating(&mut app, 1, 9);
+    assert_eq!(select_window_pos(&app, "", Some("%3")), Ok(1));
+    assert_eq!(select_window_pos(&app, "", Some("%9")), Ok(1));
+    assert_eq!(select_window_pos(&app, "", Some("%1")), Ok(0));
+    assert_eq!(select_window_pos(&app, "", Some("%99")), Err("can't find pane: %99".to_string()));
+    assert_eq!(select_window_pos(&app, "", Some("%x")), Err("can't find pane: %x".to_string()));
+}

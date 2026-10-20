@@ -104,6 +104,41 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
     })
 }
 
+/// The window a `select-window -t` selects: `spec` is the window part and
+/// `pane` the pane part of the target, which tmux only resolves and never
+/// focuses (cmd-select-window.c uses the target's window alone).  The pane
+/// part must exist in that window (cmd-find.c:592-598, 1189-1217), and a
+/// bare `%N` with no window part names the window holding that pane
+/// (cmd-find.c:1103-1104).  A `+`/`-` pane part always resolves.
+pub(crate) fn select_window_pos(app: &AppState, spec: &str, pane: Option<&str>) -> Result<usize, String> {
+    let missing_pane = |p: &str| format!("can't find pane: {}", p);
+    if let Some(id) = pane.and_then(|p| p.strip_prefix('%')) {
+        if spec.trim().is_empty() {
+            let id: usize = id.parse().map_err(|_| missing_pane(pane.unwrap_or_default()))?;
+            return crate::tree::find_pane_by_id_global(app, id)
+                .or_else(|| crate::tree::find_floating_by_id(app, id))
+                .map(|(wi, _)| wi)
+                .ok_or_else(|| missing_pane(pane.unwrap_or_default()));
+        }
+    }
+    let pos = app.resolve_window_spec(spec, false)
+        .and_then(|w| w.pos().ok_or_else(|| format!("can't find window: {}", spec)))?;
+    let Some(p) = pane else { return Ok(pos) };
+    if matches!(p, "+" | "-") { return Ok(pos); }
+    let win = &app.windows[pos];
+    let found = if let Some(id) = p.strip_prefix('%') {
+        id.parse::<usize>().is_ok_and(|id| {
+            crate::tree::get_pane_position_in_window(&win.root, id).is_some()
+                || win.floating.iter().any(|fp| fp.id == id)
+        })
+    } else {
+        p.parse::<usize>().ok()
+            .and_then(|n| n.checked_sub(app.pane_base_index))
+            .is_some_and(|n| n < crate::tree::pane_paths(&win.root).len() + win.floating.len())
+    };
+    if found { Ok(pos) } else { Err(missing_pane(p)) }
+}
+
 /// Does the session part of a target name the session this server holds?
 ///
 /// Issue #793: one server holds one session, so a target naming any other

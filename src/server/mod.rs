@@ -6779,14 +6779,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Ok(_) => { let _ = resp.send(Ok(())); }
                     }
                 }
-                CtrlReq::SelectWindowSpec { ref spec, ref resp } => {
+                CtrlReq::SelectWindowSpec { ref spec, ref pane, ref resp } => {
                     // Every symbolic and offset form goes through the same
                     // resolver move-window and swap-window have used since
                     // #602; select-window simply never called it (#693 item 4).
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                    match app.resolve_window_spec(spec, false).and_then(|w| {
-                        w.pos().ok_or_else(|| format!("can't find window: {}", spec))
-                    }) {
+                    match temp_target::select_window_pos(&app, spec, pane.as_deref()) {
                         Ok(pos) => {
                             focus_window_at(&mut app, pos);
                             meta_dirty = true;
