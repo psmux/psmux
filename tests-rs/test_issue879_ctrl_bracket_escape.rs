@@ -113,7 +113,8 @@ fn fixture(host_requests_win32: bool) -> (AppState, Recorder) {
 }
 
 fn pane(app: &mut AppState) -> &mut Pane {
-    crate::tree::active_pane_mut(&mut app.windows[0].root, &[]).unwrap()
+    let window = &mut app.windows[0];
+    crate::tree::active_pane_mut(&mut window.root, &window.active_path).unwrap()
 }
 
 const ESCAPE_ALIASES: &[&str] = &["C-[", "C-3", "C-S-[", "C-S-3", "c-s-3"];
