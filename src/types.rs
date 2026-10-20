@@ -3545,6 +3545,10 @@ pub struct SourceReplayResult {
     pub deferred: Vec<DeferredConfigLine>,
 }
 
+/// The move of a `select-window -n`, `-p` or `-l`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelativeWindow { Next, Prev, Last }
+
 pub enum CtrlReq {
     /// A pane parser thread published new screen state.
     ///
@@ -3818,6 +3822,9 @@ pub enum CtrlReq {
         spec: String,
         /// The pane part of the target, only checked to exist in the window.
         pane: Option<String>,
+        /// `-n`, `-p` or `-l`: the target is only checked, then the move is
+        /// relative to the current window (cmd-select-window.c:109-129).
+        relative: Option<RelativeWindow>,
         resp: mpsc::Sender<Result<(), String>>,
     },
     ListPanes(mpsc::Sender<String>),

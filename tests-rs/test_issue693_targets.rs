@@ -300,13 +300,60 @@ fn issue693_select_window_emits_one_spec_request_for_a_symbolic_target() {
 #[test]
 fn issue693_the_relative_flags_still_beat_the_target() {
     // cmd-select-window.c tests -n, then -p, then -l before the -t target.
-    // Routing the target through the resolver must not have jumped that queue.
-    let (n, _) = select_window_requests(&["-n"], Some("+1"), Some(0), false, None);
-    assert!(matches!(n[0], CtrlReq::NextWindow));
-    let (p, _) = select_window_requests(&["-p"], Some("{end}"), Some(0), false, None);
-    assert!(matches!(p[0], CtrlReq::PrevWindow));
-    let (l, _) = select_window_requests(&["-l"], Some("!"), Some(0), false, None);
-    assert!(matches!(l[0], CtrlReq::LastWindow { .. }));
+    // Routing the target through the resolver must not have jumped that queue:
+    // the target is only checked, and the flag decides the move.
+    use crate::types::RelativeWindow;
+    for (flag, t, want) in [
+        ("-n", "+1", RelativeWindow::Next),
+        ("-p", "{end}", RelativeWindow::Prev),
+        ("-l", "!", RelativeWindow::Last),
+    ] {
+        let (reqs, resp) = select_window_requests(&[flag], Some(t), Some(0), false, None);
+        assert_eq!(reqs.len(), 1, "{} -t {} must emit exactly one request", flag, t);
+        match &reqs[0] {
+            CtrlReq::SelectWindowSpec { spec, pane, relative, .. } => {
+                assert_eq!(spec, t);
+                assert_eq!(pane, &None);
+                assert_eq!(*relative, Some(want), "{} decides the move", flag);
+            }
+            other => panic!("{} -t {} took the wrong carrier: {:?}", flag, t, std::mem::discriminant(other)),
+        }
+        assert!(resp.is_some(), "{} -t {} must be able to report a target miss", flag, t);
+    }
+}
+
+#[test]
+fn select_window_relative_flags_check_the_pane_part_too() {
+    // tmux refuses `select-window -n -t 'X:{end}.99'` (can't find pane: 99)
+    // before it moves; psmux moved at exit 0.
+    use crate::types::RelativeWindow;
+    for (args, t, spec, pane, want) in [
+        (&["-n"][..], "X:{end}.99", "X:{end}", Some("99"), RelativeWindow::Next),
+        (&["-p"][..], "X:0.%3", "X:0", Some("%3"), RelativeWindow::Prev),
+        (&["-l"][..], "%3", "", Some("%3"), RelativeWindow::Last),
+        (&["-n", "-p", "-l"][..], "X:1.1", "X:1", Some("1"), RelativeWindow::Next),
+        (&["-p", "-l"][..], "X:1.1", "X:1", Some("1"), RelativeWindow::Prev),
+    ] {
+        let (reqs, resp) = select_window_requests(args, Some(t), None, false, None);
+        assert_eq!(reqs.len(), 1, "{:?} -t {} must emit exactly one request", args, t);
+        match &reqs[0] {
+            CtrlReq::SelectWindowSpec { spec: s, pane: p, relative, .. } => {
+                assert_eq!(s, spec, "{:?} -t {} window part", args, t);
+                assert_eq!(p.as_deref(), pane, "{:?} -t {} pane part", args, t);
+                assert_eq!(*relative, Some(want), "{:?}: -n, then -p, then -l", args);
+            }
+            other => panic!("{:?} -t {} took the wrong carrier: {:?}", args, t, std::mem::discriminant(other)),
+        }
+        assert!(resp.is_some());
+    }
+    // With nothing to check, the moves are the requests they always were.
+    let (n, _) = select_window_requests(&["-n"], None, None, false, None);
+    assert!(matches!(n[..], [CtrlReq::NextWindow]));
+    let (p, _) = select_window_requests(&["-p"], Some("work"), None, false, Some("work"));
+    assert!(matches!(p[..], [CtrlReq::PrevWindow]));
+    let (l, resp) = select_window_requests(&["-l"], Some("sess:"), None, false, None);
+    assert!(matches!(l[..], [CtrlReq::LastWindow { .. }]));
+    assert!(resp.is_some(), "-l still reports no last window");
 }
 
 #[test]

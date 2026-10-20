@@ -14,6 +14,12 @@
 # checked, so `-t 'X:{end}.9'` switched windows at exit 0, and
 # `-t 'X:{nosuch}.1'` exited 1 having moved window 0's pane.
 #
+# -n, -p and -l move relative to the current window, but tmux still resolves
+# the target first and refuses a miss before anything moves (measured on 3.4:
+# `select-window -n -t 'X:{end}.99'` is "can't find pane: 99" at exit 1);
+# psmux moved at exit 0. Session Y (three windows) tells the three moves
+# apart and session Z (one window) has no last window.
+#
 # Each case resets the focus (window 0 current, window 1 last, the first pane
 # active in both), checks the reset against the state recorded at the start,
 # runs one command and compares the whole state: every pane's index, id,
@@ -240,6 +246,15 @@ function Invoke-Suite([int]$Base) {
     Test-Select "11 a window alone" @("select-window", "-t", "X:1") 0 "" 1 0
     Test-Select "16 -T with a missing pane is refused" @("select-window", "-T", "-t", "X:{end}.$Pmiss") 1 "can't find pane" 0 1
 
+    Write-Host "`n--- pane-base-index ${Base}: -n, -p and -l check the target first ---" -ForegroundColor Yellow
+    Test-Select "17 -n with a missing pane is refused" @("select-window", "-n", "-t", "X:{end}.$Pmiss") 1 "can't find pane" 0 1
+    Test-Select "18 -p with a missing pane is refused" @("select-window", "-p", "-t", "X:{end}.$Pmiss") 1 "can't find pane" 0 1
+    Test-Select "19 -l with a missing pane is refused" @("select-window", "-l", "-t", "X:{end}.$Pmiss") 1 "can't find pane" 0 1
+    Test-Select "20 -n with a %id of another window is refused" @("select-window", "-n", "-t", "X:0.$($script:W1Second)") 1 "can't find pane" 0 1
+    Test-Select "21 -n with a pane that exists: next window, no pane" @("select-window", "-n", "-t", "X:{end}.$P2") 0 "" 1 0
+    Test-Select "22 -n with a session only: next window" @("select-window", "-n", "-t", "X") 0 "" 1 0
+
+
     Write-Host "`n--- pane-base-index ${Base}: X:.P is a select-window of the current window ---" -ForegroundColor Yellow
     # tmux queues the select-window hooks for every select-window
     # (cmd-select-window.c:147). Each hook appends to a user option, and
@@ -277,6 +292,7 @@ function Invoke-Suite([int]$Base) {
         Test-ControlSelect "12 another window's pane by number: window only" "select-window -t X:1.$P2" "end" 1 0
         Test-ControlSelect "15 a missing pane is %error" "select-window -t X:1.$Pmiss" "error" 0 1
         Test-ControlSelect "15 window 0 with a %id of window 1 is %error" "select-window -t X:0.$($script:W1Second)" "error" 0 1
+        Test-ControlSelect "23 -n with a missing pane is %error" "select-window -n -t X:{end}.$Pmiss" "error" 0 1
     }
     finally { Stop-Control }
 
@@ -284,6 +300,48 @@ function Invoke-Suite([int]$Base) {
     Test-InProcess "13 a missing pane is not selected" "select-window -t :1.99" 0 1
     Test-InProcess "13 a pane of window 1: window only" "select-window -t :1.$P2" 1 0
     Test-InProcess "13 a bare %id: its window" "select-window -t $($script:W1Second)" 1 0
+
+    # Sessions of one namespace share window and pane ids, so X goes before
+    # Y and Z come up; their cases use window indexes only.
+    Write-Host "`n--- pane-base-index ${Base}: three windows, so -n, -p and -l land apart ---" -ForegroundColor Yellow
+    Expect-Step @("kill-session", "-t", "X") | Out-Null
+    Start-Session "Y"
+    Expect-Step @("new-window", "-t", "Y") | Out-Null
+    Expect-Step @("new-window", "-t", "Y") | Out-Null
+    Start-Sleep -Milliseconds 1000
+    Expect-Step @("select-window", "-t", "Y:1") | Out-Null
+    Expect-Step @("select-window", "-t", "Y:0") | Out-Null
+    $script:BaselineY = Get-State "Y"
+    if ((Get-WantState 0 1 $script:BaselineY) -cne $script:BaselineY -or ($script:BaselineY -split " \|\| ")[1] -cne "0:1:0 1:0:1 2:0:0") { throw "unexpected start state of Y: '$($script:BaselineY)'" }
+    Test-Relative "24 -n checks window 2, then goes next" @("select-window", "-n", "-t", "Y:{end}.$P1") @(, @(1, 0))
+    Test-Relative "25 -p checks window 1, then goes previous" @("select-window", "-p", "-t", "Y:1.$P1") @(, @(2, 0))
+    Test-Relative "26 -l twice swaps current and last" @("select-window", "-l", "-t", "Y:{end}.$P1") @(@(1, 0), @(0, 1))
+    Start-Session "Z"
+    Start-Sleep -Milliseconds 500
+    $Before = Get-State "Z"
+    $Result = Invoke-Psmux @("select-window", "-l", "-t", "Z:0.$P1")
+    $After = Get-State "Z"
+    Check ($Result.Code -eq 1 -and $Result.Err -match "no last window" -and $After -ceq $Before) "27 -l with a valid target and no last window is refused" "exit $($Result.Code), '$($Result.Err)', state '$After' (was '$Before')"
+}
+
+# Session Y has windows 0, 1 and 2, one pane each. Each case starts from
+# window 0 current and window 1 last, runs the command once per expected
+# step without a reset in between, and compares each step's state.
+function Test-Relative([string]$Label, [string[]]$CliArgs, $Steps) {
+    Expect-Step @("select-window", "-t", "Y:1") | Out-Null
+    Expect-Step @("select-window", "-t", "Y:0") | Out-Null
+    $Start = Get-State "Y"
+    if ($Start -cne $script:BaselineY) { Fail "$Label -> skipped, reset of Y gave '$Start' (want '$($script:BaselineY)')"; return }
+    $Got = @()
+    $Ok = $true
+    foreach ($Step in $Steps) {
+        $Result = Invoke-Psmux $CliArgs
+        $State = Get-State "Y"
+        $Want = Get-WantState $Step[0] $Step[1] $script:BaselineY
+        $Got += "exit $($Result.Code) '$($Result.Err)' '$State' (want '$Want')"
+        if ($Result.Code -ne 0 -or $Result.Err -ne "" -or $State -cne $Want) { $Ok = $false }
+    }
+    Check $Ok "$Label ($($CliArgs -join ' '))" ($Got -join "; ")
 }
 
 # A hook runs select-window through the server's own command path (no

@@ -1111,6 +1111,28 @@ pub(crate) fn select_window_requests(
     target_win_is_id: bool,
     target_win_name: Option<&str>,
 ) -> (Vec<CtrlReq>, Option<mpsc::Receiver<Result<(), String>>>) {
+    let spec = select_window_spec(raw_target);
+    // The pane part only has to exist in the selected window; tmux never
+    // focuses it (cmd-select-window.c uses the target's window alone).
+    let pane = select_window_pane_part(raw_target);
+    let relative = if args.contains(&"-n") {
+        Some(crate::types::RelativeWindow::Next)
+    } else if args.contains(&"-p") {
+        Some(crate::types::RelativeWindow::Prev)
+    } else if args.contains(&"-l") {
+        Some(crate::types::RelativeWindow::Last)
+    } else {
+        None
+    };
+    // With -n, -p or -l a window or pane in the -t is still resolved first,
+    // and a miss is an error before anything moves (cmd-select-window.c
+    // gets its target before exec), so it rides in the one request that
+    // checks it and then makes the move.
+    if relative.is_some() && (spec.is_some() || pane.is_some()) {
+        let (s, r) = mpsc::channel();
+        let spec = spec.unwrap_or_default();
+        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative, resp: s }], Some(r));
+    }
     if args.iter().any(|a| *a == "-n") {
         return (vec![CtrlReq::NextWindow], None);
     }
@@ -1128,16 +1150,13 @@ pub(crate) fn select_window_requests(
     // a display index, then an exact window name. `select-window` never
     // called it, so `-t +1` was read as the literal index 1 and `-t !`,
     // `-t {end}`, `-t -` and `-t +` died on the CLI as session names.
-    // The pane part only has to exist in the selected window; tmux never
-    // focuses it (cmd-select-window.c uses the target's window alone).
-    let pane = select_window_pane_part(raw_target);
-    if let Some(spec) = select_window_spec(raw_target) {
+    if let Some(spec) = spec {
         let (s, r) = mpsc::channel();
-        return (vec![CtrlReq::SelectWindowSpec { spec, pane, resp: s }], Some(r));
+        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative: None, resp: s }], Some(r));
     }
     if pane.is_some() {
         let (s, r) = mpsc::channel();
-        return (vec![CtrlReq::SelectWindowSpec { spec: String::new(), pane, resp: s }], Some(r));
+        return (vec![CtrlReq::SelectWindowSpec { spec: String::new(), pane, relative: None, resp: s }], Some(r));
     }
     if target_win_is_id {
         // #497: an @id target must never be re-sent as an INDEX.

@@ -6779,18 +6779,48 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Ok(_) => { let _ = resp.send(Ok(())); }
                     }
                 }
-                CtrlReq::SelectWindowSpec { ref spec, ref pane, ref resp } => {
+                CtrlReq::SelectWindowSpec { ref spec, ref pane, relative, ref resp } => {
                     // Every symbolic and offset form goes through the same
                     // resolver move-window and swap-window have used since
                     // #602; select-window simply never called it (#693 item 4).
-                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    // -n/-p/-l keep the hooks of NextWindow, PrevWindow and
+                    // LastWindow: before-select-window for the first two only.
+                    if relative != Some(crate::types::RelativeWindow::Last) {
+                        if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    }
                     match temp_target::select_window_pos(&app, spec, pane.as_deref()) {
-                        Ok(pos) => {
-                            focus_window_at(&mut app, pos);
-                            meta_dirty = true;
-                            hook_event = Some("after-select-window");
-                            let _ = resp.send(Ok(()));
-                        }
+                        Ok(pos) => match relative {
+                            None => {
+                                focus_window_at(&mut app, pos);
+                                meta_dirty = true;
+                                hook_event = Some("after-select-window");
+                                let _ = resp.send(Ok(()));
+                            }
+                            // The target was only checked; the move is the
+                            // one NextWindow and PrevWindow make.
+                            Some(crate::types::RelativeWindow::Next) => {
+                                if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
+                                let _ = resp.send(Ok(()));
+                            }
+                            Some(crate::types::RelativeWindow::Prev) => {
+                                if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
+                                let _ = resp.send(Ok(()));
+                            }
+                            // And the one LastWindow makes, with its error.
+                            Some(crate::types::RelativeWindow::Last) => match app.last_window_pos() {
+                                Some(last) => {
+                                    switch_with_copy_save(&mut app, |app| {
+                                        let tmp = app.active_idx;
+                                        app.active_idx = last;
+                                        app.last_window_idx = tmp;
+                                    });
+                                    meta_dirty = true;
+                                    hook_event = Some("after-select-window");
+                                    let _ = resp.send(Ok(()));
+                                }
+                                None => { let _ = resp.send(Err("no last window".to_string())); }
+                            },
+                        },
                         Err(msg) => {
                             app.status_message = Some((format!("select-window: {}", msg), std::time::Instant::now(), None));
                             state_dirty = true;
