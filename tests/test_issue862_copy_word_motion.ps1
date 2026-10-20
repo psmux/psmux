@@ -27,6 +27,7 @@ $POWERSHELL = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powersh
 . "$PSScriptRoot\isolated_config.ps1" -Lines @("set -g default-shell $POWERSHELL")
 
 $PSMUX = $env:PSMUX_TEST_BIN
+if (-not $PSMUX) { $PSMUX = $env:PSMUX_TEST_EXE }
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -EA SilentlyContinue).Path }
 if (-not $PSMUX) { $cmd = Get-Command psmux -EA SilentlyContinue; if ($cmd) { $PSMUX = $cmd.Source } }
 if (-not $PSMUX) { Write-Error "psmux binary not found"; exit 1 }
@@ -163,6 +164,54 @@ try {
         $buf = Copied
         Check ($buf -eq $c[3]) "select-word at $($c[0]):$($c[1]) copies [$($c[3])] (tmux, emacs keys)" "select-word at $($c[0]):$($c[1]) copied [$buf], want [$($c[3])]"
     }
+
+    Write-Head "F. a wrapped line and the scrollback (20x6 pane, values from tmux 3.8)"
+    # Ten lines in a 20 column pane: the ninth wraps, and the first five go
+    # into the scrollback. Screen row 2 is "alpha bravocharliede", row 3 its
+    # continuation "ltaecho foxtrot", row 0 is "row07 aa-bb".
+    $FILE2 = Join-Path $TMP "lines2.txt"
+    $LINES2 = @(1..8 | ForEach-Object { 'row{0:D2} aa-bb' -f $_ }) + @('alpha bravocharliedeltaecho foxtrot', 'end')
+    [IO.File]::WriteAllLines($FILE2, $LINES2)
+    $S = "wrap"
+    P new-session -d -s $S -x 20 -y 6 "Get-Content '$FILE2'; Start-Sleep 100000" | Out-Null
+    $up = $false
+    for ($i = 0; $i -lt 50 -and -not $up; $i++) { Start-Sleep -Milliseconds 200; $up = ((P capture-pane -p -t $S) -join "`n") -match '(?m)^end' }
+    Check $up "the wrapped lines reach the pane" "the wrapped lines never appeared"
+    P set -g mode-keys vi | Out-Null
+    Check-Walk 2 0 next-word '2:6 3:8 4:0' ' (tmux: over the wrap)'
+    Check-Walk 2 6 next-word-end '3:6 3:14' ' (tmux: the word ends on the next row)'
+    Check-Walk 0 0 previous-word '0:9 0:8 0:6 0:0 0:9' ' (tmux: up into the scrollback)'
+    $sp = ((P display -p -t $S '#{scroll_position}') -join '').Trim()
+    Check ($sp -eq '2') "the view scrolled 2 lines to show the motion's line (tmux)" "scroll_position is $sp, want 2"
+    Enter-At 2 8
+    $word = ((P display -p -t $S '#{copy_cursor_word}') -join '')
+    Check ($word -eq 'bravocharliedeltaecho') "copy_cursor_word takes the whole wrapped word (tmux)" "copy_cursor_word is [$word]"
+    P send-keys -t $S -X select-word | Out-Null
+    $buf = Copied
+    Check ($buf -eq 'bravocharliedeltaecho') "select-word copies the whole wrapped word (tmux)" "select-word copied [$buf]"
+    P set -g mode-keys emacs | Out-Null
+    Check-Walk 2 6 next-word-end '3:7 3:15' ' (tmux, emacs keys)'
+
+    Write-Head "G. an alternate screen has no lines above it"
+    # 30 lines go into the history, then the pane takes the alternate
+    # screen. psmux's alternate grid keeps no scrollback, so previous-word
+    # from its top row stays there. It used to read row 0 again as the line
+    # above and walk 0:8 0:4 0:0 over it.
+    $S = "alt"
+    P new-session -d -s $S -x 40 -y 8 "1..30|%{ 'word{0:D2} aa' -f `$_ }; [Console]::Write([string][char]27+'[?1049h'+[char]27+'[HALT top line'); Start-Sleep 100000" | Out-Null
+    $up = $false
+    for ($i = 0; $i -lt 50 -and -not $up; $i++) { Start-Sleep -Milliseconds 200; $up = ((P capture-pane -p -t $S) -join "`n") -match 'ALT top' }
+    Check $up "the alternate screen is up" "the alternate screen never appeared"
+    P set -g mode-keys vi | Out-Null
+    Check-Walk 0 0 previous-word '0:0 0:0' ''
+    $word = ((P display -p -t $S '#{copy_cursor_word}') -join '')
+    Check ($word -eq 'ALT') "copy_cursor_word on the top row is [ALT]" "copy_cursor_word is [$word]"
+    P send-keys -t $S -X cancel | Out-Null
+
+    Write-Head "H. show-options quotes the default as tmux does"
+    $line = @(P show -g) | Where-Object { $_ -like 'word-separators *' }
+    $want = 'word-separators "!\"#$%&' + "'" + '()*+,-./:;<=>?@[\\]^`{|}~"'
+    Check ($line -eq $want) "show -g lists [$want] (tmux 3.8)" "show -g lists [$line], want [$want]"
 } finally {
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
