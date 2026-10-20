@@ -416,7 +416,7 @@ fn bell_action_none_suppresses_bell_forward() {
     assert_eq!(app.bell_action, "none");
     // With bell-action none, check_window_activity should never set bell_forward
     // (no panes to trigger, but verify the option is accepted)
-    let hooks = super::helpers::check_window_activity(&mut app);
+    let hooks = super::helpers::check_window_activity(&mut app).hooks;
     assert!(!app.bell_forward, "bell_forward must stay false with bell-action none");
     assert!(hooks.is_empty());
 }

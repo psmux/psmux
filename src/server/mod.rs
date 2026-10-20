@@ -3117,8 +3117,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         if last_alert_check.elapsed() >= Duration::from_secs(1) {
             last_alert_check = Instant::now();
-            let alert_hooks = helpers::check_window_activity(&mut app);
-            for event in &alert_hooks {
+            let alerts = helpers::check_window_activity(&mut app);
+            // A changed flag changes the tabs, which come from the cached
+            // window list, so rebuild it and push the frame.
+            if alerts.flags_changed {
+                meta_dirty = true;
+            }
+            for event in &alerts.hooks {
                 crate::commands::fire_hooks(&mut app, event);
             }
         }
@@ -3845,8 +3850,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DumpState(resp, allow_nc, dump_client_id) => {
                     state_dirty |= helpers::refresh_program_status_tabs(&app, &mut cached_program_status_version, &mut cached_windows_json)?;
                     // ── Activity / bell / silence detection ──
-                    let alert_hooks = helpers::check_window_activity(&mut app);
-                    for event in &alert_hooks {
+                    let alerts = helpers::check_window_activity(&mut app);
+                    if alerts.flags_changed {
+                        meta_dirty = true;
+                    }
+                    for event in &alerts.hooks {
                         if let Some(cmds) = app.hooks.get(*event) { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     }
 
@@ -8704,8 +8712,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         push_deferred = owe_push && pty_batch_pending;
         if owe_push && !pty_batch_pending {
             // Check bell/activity state for the pushed frame
-            let push_alert_hooks = helpers::check_window_activity(&mut app);
-            for event in &push_alert_hooks {
+            let push_alerts = helpers::check_window_activity(&mut app);
+            if push_alerts.flags_changed {
+                meta_dirty = true;
+            }
+            for event in &push_alerts.hooks {
                 crate::commands::fire_hooks(&mut app, event);
             }
             // Rebuild metadata cache if structural changes happened.
