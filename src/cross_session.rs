@@ -88,14 +88,53 @@ pub fn validate_switch_target(
     if pt.pane.is_none() && pt.window.is_none() && pt.window_name.is_none() {
         return Ok(());
     }
-    let resp = match send_to_session(
-        port,
-        key,
-        "list-panes -a -F #{window_active}|#{window_id}|#{window_index}|#{window_name}|#{pane_index}|#{pane_id}",
-    ) {
+    let resp = match send_to_session(port, key, TARGET_ROWS_QUERY) {
         Ok(r) => r,
         Err(_) => return Ok(()),
     };
+    match check_target_rows(&resp, pt, false) {
+        Some(r) => r,
+        None => Ok(()), // nothing parseable; do not block
+    }
+}
+
+/// The `list-panes -a` query both target checks read. The seventh column,
+/// #{pane_floating_flag}, is only read by the join check; a server too old
+/// to know the variable expands it to nothing, which reads as tiled.
+const TARGET_ROWS_QUERY: &str =
+    "list-panes -a -F #{window_active}|#{window_id}|#{window_index}|#{window_name}|#{pane_index}|#{pane_id}|#{pane_floating_flag}";
+
+/// The destination check of a cross-session join-pane, made before the
+/// source pane is extracted (#868). Stricter than validate_switch_target,
+/// because a refusal after the extract leaves the pane in neither session:
+///
+/// - a floating pane is refused, as tmux refuses it
+///   (layout_get_tiled_cell: "can't split a floating pane"), and as the
+///   destination's inject would (resolve_join_end only knows tiled panes);
+/// - a destination that cannot be asked, or answers nothing parseable, is
+///   refused rather than waved through.
+pub fn validate_join_target(
+    port: u16,
+    key: &str,
+    pt: &crate::types::ParsedTarget,
+) -> Result<(), String> {
+    if pt.pane.is_none() && pt.window.is_none() && pt.window_name.is_none() {
+        return Ok(());
+    }
+    let resp = send_to_session(port, key, TARGET_ROWS_QUERY)
+        .map_err(|e| format!("can't check the target: {}", e))?;
+    check_target_rows(&resp, pt, true)
+        .unwrap_or_else(|| Err("can't check the target: no pane list".to_string()))
+}
+
+/// Match a target against the destination's `TARGET_ROWS_QUERY` reply.
+/// `None` when the reply has no parseable row. With `tiled_only`, a pane
+/// target that names a floating pane is refused.
+pub(crate) fn check_target_rows(
+    resp: &str,
+    pt: &crate::types::ParsedTarget,
+    tiled_only: bool,
+) -> Option<Result<(), String>> {
     struct Row {
         active: bool,
         wid: String,
@@ -103,24 +142,40 @@ pub fn validate_switch_target(
         wname: String,
         pidx: String,
         pid: String,
+        floating: bool,
     }
     let mut rows: Vec<Row> = Vec::new();
     for line in resp.lines() {
-        let parts: Vec<&str> = line.trim().splitn(6, '|').collect();
-        if parts.len() != 6 || !parts[1].starts_with('@') {
+        let line = line.trim();
+        // The window name may hold '|': the fixed columns are the first
+        // three and the last three (or two, from a server that does not
+        // know #{pane_floating_flag} and printed the line without it).
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 6 || !parts[1].starts_with('@') {
             continue;
         }
+        let (name_end, pidx, pid, floating) = {
+            let n = parts.len();
+            if n >= 7 && parts[n - 2].starts_with('%') {
+                (n - 3, parts[n - 3], parts[n - 2], parts[n - 1] == "1")
+            } else if parts[n - 1].starts_with('%') {
+                (n - 2, parts[n - 2], parts[n - 1], false)
+            } else {
+                continue;
+            }
+        };
         rows.push(Row {
             active: parts[0] == "1",
             wid: parts[1].to_string(),
             widx: parts[2].to_string(),
-            wname: parts[3].to_string(),
-            pidx: parts[4].to_string(),
-            pid: parts[5].to_string(),
+            wname: parts[3..name_end].join("|"),
+            pidx: pidx.to_string(),
+            pid: pid.to_string(),
+            floating,
         });
     }
     if rows.is_empty() {
-        return Ok(()); // nothing parseable; do not block
+        return None;
     }
     let win_match = |r: &Row| -> bool {
         if let Some(w) = pt.window {
@@ -147,18 +202,25 @@ pub fn validate_switch_target(
         } else {
             pt.window_name.clone().unwrap_or_default()
         };
-        return Err(format!("can't find window: {}", spec));
+        return Some(Err(format!("can't find window: {}", spec)));
     }
     if let Some(p) = pt.pane {
-        if pt.pane_is_id {
-            if !rows.iter().any(|r| r.pid == format!("%{}", p)) {
-                return Err(format!("can't find pane: %{}", p));
+        let row = if pt.pane_is_id {
+            match rows.iter().find(|r| r.pid == format!("%{}", p)) {
+                Some(r) => r,
+                None => return Some(Err(format!("can't find pane: %{}", p))),
             }
-        } else if !rows.iter().any(|r| win_match(r) && r.pidx == p.to_string()) {
-            return Err(format!("can't find pane: {}", p));
+        } else {
+            match rows.iter().find(|r| win_match(r) && r.pidx == p.to_string()) {
+                Some(r) => r,
+                None => return Some(Err(format!("can't find pane: {}", p))),
+            }
+        };
+        if tiled_only && row.floating {
+            return Some(Err("size or position can't split a floating pane".to_string()));
         }
     }
-    Ok(())
+    Some(Ok(()))
 }
 
 /// Make the window and pane a target names current on the session server at
@@ -216,7 +278,7 @@ pub fn orchestrate_cross_session_join(
     let src_addr = format!("127.0.0.1:{}", src_port);
 
     // The target window and pane must exist before anything moves.
-    validate_switch_target(tgt_port, &tgt_key, &crate::cli::parse_target(tgt_spec))
+    validate_join_target(tgt_port, &tgt_key, &crate::cli::parse_target(tgt_spec))
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 
     // 2. Tell source to extract the pane and start forwarding
@@ -306,3 +368,7 @@ pub fn orchestrate_cross_session_join(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue868_join_target_rows.rs"]
+mod tests_issue868_join_target_rows;
