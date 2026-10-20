@@ -142,8 +142,7 @@ fn escape_aliases_follow_physical_escape_after_a_named_key_latches_the_pane() {
     let escape = recorder.take();
     assert_eq!(
         escape,
-        win32_input_key_seq(27, crate::platform::mouse_inject::vk_to_scan(27), 27, 0)
-            .into_bytes()
+        win32_input_key_seq(27, crate::platform::mouse_inject::vk_to_scan(27), 27, 0).into_bytes()
     );
     for key in ESCAPE_ALIASES {
         send_key_to_active(&mut app, key).unwrap();
