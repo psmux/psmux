@@ -18,7 +18,10 @@
 # active in both), checks the reset against the state recorded at the start,
 # runs one command and compares the whole state: every pane's index, id,
 # pane_active and window_active, and every window's active and last flags.
-# It runs once with pane-base-index 0 and once with 1.
+# It runs once with pane-base-index 0 and once with 1. The same targets go
+# through the CLI, a control client, and a hook (the server's own command
+# path, where select-window took the window part only and never checked the
+# pane, and a bare %id selected nothing).
 #
 # Isolation: a unique -L namespace per run, a PSMUX_DATA_DIR, USERPROFILE and
 # HOME of its own, a config of one line, and cleanup only with
@@ -276,6 +279,36 @@ function Invoke-Suite([int]$Base) {
         Test-ControlSelect "15 window 0 with a %id of window 1 is %error" "select-window -t X:0.$($script:W1Second)" "error" 0 1
     }
     finally { Stop-Control }
+
+    Write-Host "`n--- pane-base-index ${Base}: select-window run by a hook, inside the server ---" -ForegroundColor Yellow
+    Test-InProcess "13 a missing pane is not selected" "select-window -t :1.99" 0 1
+    Test-InProcess "13 a pane of window 1: window only" "select-window -t :1.$P2" 1 0
+    Test-InProcess "13 a bare %id: its window" "select-window -t $($script:W1Second)" 1 0
+}
+
+# A hook runs select-window through the server's own command path (no
+# client): after-new-window fires it, and `new-window -d` leaves windows 0
+# and 1 as they were apart from what the hook did. The new window 2 is then
+# killed, and the next reset checks that it is gone.
+function Test-InProcess([string]$Label, [string]$HookCommand, [int]$Current, [int]$Last) {
+    if (-not (Reset-Focus)) { Fail "$Label -> skipped, reset failed"; return }
+    Expect-Step @("set-hook", "-g", "after-new-window", $HookCommand) | Out-Null
+    try {
+        Expect-Step @("new-window", "-d", "-t", "X") | Out-Null
+        Start-Sleep -Milliseconds 800
+        $State = Get-State
+    }
+    finally {
+        Expect-Step @("set-hook", "-gu", "after-new-window") | Out-Null
+        $Windows = (Expect-Step @("list-windows", "-t", "X", "-F", "#{window_index}")).Out -split "`r?`n"
+        if ($Windows -contains "2") { Expect-Step @("kill-window", "-t", "X:2") | Out-Null }
+    }
+    $PanePart, $WindowPart = $State -split " \|\| "
+    $Old = ($PanePart -split " " | Where-Object { -not $_.StartsWith("2|") }) -join " "
+    $New = @($PanePart -split " " | Where-Object { $_.StartsWith("2|") })
+    $WantPanes, $WantWindows = (Get-WantState $Current $Last) -split " \|\| "
+    $Ok = $Old -ceq $WantPanes -and $WindowPart -ceq "$WantWindows 2:0:0" -and $New.Count -eq 1 -and $New[0] -match '^2\|%\d+\|\d+\|1\|0$'
+    Check $Ok "$Label (hook: $HookCommand)" "state '$State' (want '$WantPanes || $WantWindows 2:0:0' and one inactive window 2)"
 }
 
 $DefaultBefore = Get-DefaultLs

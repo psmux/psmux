@@ -2396,10 +2396,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     // here what they mean to move-window (#693 item 4).
                     // `parse_window_target` only ever understood a plain
                     // index, so every symbolic form was a silent no-op.
+                    // The pane part is only checked, never focused, as on the
+                    // server's own select-window path.
+                    let pane = crate::server::connection::select_window_pane_part(Some(t));
                     let resolved = match crate::server::connection::select_window_spec(Some(t)) {
-                        Some(spec) => app.resolve_window_spec(&spec, false)
-                            .map(|w| w.pos())
-                            .unwrap_or(None),
+                        Some(spec) => crate::server::temp_target::select_window_pos(app, &spec, pane.as_deref()).ok(),
+                        None if pane.is_some() => crate::server::temp_target::select_window_pos(app, "", pane.as_deref()).ok(),
                         None => parse_window_target(t).and_then(|idx| app.win_pos(idx)),
                     };
                     if let Some(internal_idx) = resolved {
