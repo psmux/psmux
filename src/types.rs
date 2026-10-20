@@ -3978,6 +3978,9 @@ pub enum CtrlReq {
         /// Err is tmux's message (`can't join a pane to its own window`,
         /// `can't find pane: %N`), printed by the CLI at exit 1.
         resp: mpsc::Sender<Result<(), String>>,
+        /// move-pane: the source may already be in the target window
+        /// ("like join-pane but allows the same window", tmux CHANGES 1.7).
+        same_window: bool,
     },
     /// respawn-pane. Fields: optional workdir (-c), kill flag (-k), command
     /// (`--`/positional shell-command), empty (-E), and the per-request reply.

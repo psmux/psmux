@@ -4585,7 +4585,10 @@ fn run_main() -> io::Result<()> {
                 } else { target_spec.as_str() };
                 let same_session = !effective_src.is_empty()
                     && crate::session::same_session_identity(l_socket_name.as_deref(), &effective_src, &effective_tgt);
-                if same_session && !src_after_colon_check.is_empty() && !tgt_after_colon_check.is_empty() {
+                // move-pane may stay in its window ("like join-pane but allows
+                // the same window"); the server refuses the same pane.
+                let move_pane = matches!(cmd, "move-pane" | "movep");
+                if same_session && !move_pane && !src_after_colon_check.is_empty() && !tgt_after_colon_check.is_empty() {
                     // Prefix with ':' so parse_target reads "0.2" as window=0,pane=2
                     // (a bare "0.2" is otherwise read as session="0", pane=2).
                     let sp_chk = crate::cli::parse_target(&format!(":{}", src_after_colon_check));
@@ -4618,8 +4621,9 @@ fn run_main() -> io::Result<()> {
                         }
                     }
                 } else {
-                    // Same-session join-pane: forward to server as before
-                    let mut cmd = "join-pane".to_string();
+                    // Same-session join-pane: forward to server as before,
+                    // under its own name: move-pane may stay in its window.
+                    let mut cmd = if move_pane { "move-pane" } else { "join-pane" }.to_string();
                     if horizontal { cmd.push_str(" -h"); }
                     if detach { cmd.push_str(" -d"); }
                     if before { cmd.push_str(" -b"); }

@@ -4326,6 +4326,7 @@ match cmd {
             // -b: the moved pane goes left of / above the target (#725).
             before: args.contains(&"-b"),
             resp: resp_s,
+            same_window: matches!(cmd, "move-pane" | "movep"),
         });
         if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
             if !persistent {
@@ -8227,6 +8228,7 @@ fn dispatch_control_command(
                 detach: args.contains(&"-d"),
                 before: args.contains(&"-b"),
                 resp: jp_s,
+                same_window: matches!(cmd, "move-pane" | "movep"),
             });
             match jp_r.recv_timeout(Duration::from_secs(5)) {
                 Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }

@@ -745,10 +745,13 @@ pub(crate) fn resolve_join_end(app: &AppState, t: &crate::types::TempTarget) -> 
 /// The server's join-pane / move-pane: resolve both ends strictly (pane ids
 /// included, the `-s %id` form used to be read as a pane INDEX of the active
 /// window), refuse a join into the source's own window with tmux's message,
-/// then run `join_pane_local`. Err is what the CLI prints at exit 1.
+/// then run `join_pane_local`. move-pane (`same_window`) may move a pane
+/// inside its window instead (`move_pane_in_window`). Err is what the CLI
+/// prints at exit 1.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn join_pane_request(app: &mut AppState, src_raw: Option<&str>, src: &crate::types::TempTarget,
-                   dst: &crate::types::TempTarget, horizontal: bool, detach: bool, before: bool) -> Result<(), String> {
+                   dst: &crate::types::TempTarget, horizontal: bool, detach: bool, before: bool,
+                   same_window: bool) -> Result<(), String> {
     if let Some(s) = src_raw.and_then(|r| foreign_session_in_spec(app, r)) {
         // The CLI carries a cross session join itself; a server can only
         // reach its own windows, so it must not act on the same numbers here.
@@ -757,7 +760,10 @@ pub(crate) fn join_pane_request(app: &mut AppState, src_raw: Option<&str>, src: 
     let (spos, spane) = resolve_join_end(app, src)?;
     let (dpos, dpane) = resolve_join_end(app, dst)?;
     if spos == dpos {
-        return Err("can't join a pane to its own window".to_string());
+        if !same_window {
+            return Err("can't join a pane to its own window".to_string());
+        }
+        return move_pane_in_window(app, spos, spane, dpane, horizontal, detach, before);
     }
     let sw = app.win_display_index(spos);
     let dw = app.win_display_index(dpos);
@@ -768,6 +774,58 @@ pub(crate) fn join_pane_request(app: &mut AppState, src_raw: Option<&str>, src: 
             .map(|(m, _, _)| m.trim_start_matches("join-pane: ").to_string())
             .unwrap_or_else(|| "join-pane failed".to_string()))
     }
+}
+
+/// move-pane with both panes in window `pos` (a pane order index, None: the
+/// active pane). tmux allows it (cmd-join-pane.c: only `src_wp == dst_wp` is
+/// refused); the source leaves the tree and is grafted next to the target,
+/// found again by id because the source's removal can shift its path.
+pub(crate) fn move_pane_in_window(app: &mut AppState, pos: usize, src_pane: Option<usize>,
+                   dst_pane: Option<usize>, horizontal: bool, detach: bool, before: bool) -> Result<(), String> {
+    let path_of = |app: &AppState, pane: Option<usize>| -> Vec<usize> {
+        let win = &app.windows[pos];
+        pane.and_then(|i| {
+            let mut leaves = Vec::new();
+            crate::tree::collect_leaf_paths_pub(&win.root, &mut Vec::new(), &mut leaves);
+            leaves.get(i).map(|(_, p)| p.clone())
+        }).unwrap_or_else(|| win.active_path.clone())
+    };
+    let src_path = path_of(app, src_pane);
+    let dst_path = path_of(app, dst_pane);
+    let src_id = crate::tree::get_active_pane_id(&app.windows[pos].root, &src_path);
+    let dst_id = crate::tree::get_active_pane_id(&app.windows[pos].root, &dst_path)
+        .ok_or_else(|| "can't find target pane".to_string())?;
+    if src_id == Some(dst_id) {
+        return Err("source and target panes must be different".to_string());
+    }
+    if let Some(saved) = app.windows[pos].zoom_saved.take() {
+        let win = &mut app.windows[pos];
+        for (p, sz) in saved.into_iter() {
+            if let Some(Node::Split { sizes, .. }) = crate::tree::get_split_mut(&mut win.root, &p) { *sizes = sz; }
+        }
+    }
+    crate::tree::normalize_window_sizes(&mut app.windows[pos]);
+    let win = &mut app.windows[pos];
+    let root = std::mem::replace(&mut win.root,
+        Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
+    let (remaining, extracted) = crate::tree::extract_node(root, &src_path);
+    let (Some(rem), Some(pane_node)) = (remaining, extracted) else {
+        return Err("move-pane failed".to_string());
+    };
+    win.root = rem;
+    let Some(tgt_path) = crate::tree::find_path_by_id(&win.root, dst_id) else {
+        return Err("move-pane failed".to_string());
+    };
+    win.active_path = tgt_path.clone();
+    let split_kind = if horizontal { LayoutKind::Horizontal } else { LayoutKind::Vertical };
+    let grafted = crate::tree::graft_pane(win, &tgt_path, split_kind, pane_node, before, !detach);
+    if !detach {
+        app.active_idx = pos;
+        if let Some(prev) = grafted.and_then(|g| g.prev_active_path) {
+            app.last_pane_path = prev;
+        }
+    }
+    Ok(())
 }
 
 /// join-pane / move-pane: extract the source pane and graft it into the target
@@ -3476,9 +3534,18 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         .find(|a| a.parse::<usize>().is_ok())
                         .and_then(|s| s.parse::<usize>().ok());
                 }
-                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal,
-                    parts[1..].iter().any(|a| *a == "-d"),
-                    parts[1..].iter().any(|a| *a == "-b"));
+                let detach = parts[1..].iter().any(|a| *a == "-d");
+                let before = parts[1..].iter().any(|a| *a == "-b");
+                let spos = match src_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
+                let tpos = match tgt_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
+                match (spos, tpos) {
+                    (Some(s), Some(t)) if s == t => {
+                        if let Err(e) = move_pane_in_window(app, s, src_pane, tgt_pane, horizontal, detach, before) {
+                            app.status_message = Some((format!("move-pane: {}", e), Instant::now(), None));
+                        }
+                    }
+                    _ => { join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal, detach, before); }
+                }
             }
         }
         "join-pane" | "joinp" => {

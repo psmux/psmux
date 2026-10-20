@@ -5928,12 +5928,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::JoinPane { src_raw, src, dst, horizontal, detach, before, resp } => {
+                CtrlReq::JoinPane { src_raw, src, dst, horizontal, detach, before, resp, same_window } => {
                     unzoom_if_zoomed(&mut app);
                     // One implementation with the embedded fallback (#725);
                     // join_pane_request resolves %id ends and answers the
                     // refusals the CLI prints at exit 1.
-                    let r = crate::commands::join_pane_request(&mut app, src_raw.as_deref(), &src, &dst, horizontal, detach, before);
+                    let r = crate::commands::join_pane_request(&mut app, src_raw.as_deref(), &src, &dst, horizontal, detach, before, same_window);
                     match r {
                         Ok(()) => {
                             resize_all_panes(&mut app);
