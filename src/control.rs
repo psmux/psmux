@@ -99,17 +99,25 @@ pub fn layout_change(app: &AppState, win_idx: usize, area: Rect) -> Option<Contr
     })
 }
 
-/// `%layout-change` for the window with this id, if it still exists. tmux
-/// sends it when a pane closes and its window stays (layout_close_pane,
-/// notify_window "window-layout-changed"); a window that closed gets
-/// `%window-close` from the window list diff instead.
-pub fn emit_layout_change_for(app: &AppState, window_id: usize) {
+/// A pane of the window with this id was killed. If the window stays, tmux
+/// sends `%layout-change` (layout_close_pane, notify_window
+/// "window-layout-changed"), then `%window-pane-changed` when the killed pane
+/// was the window's active one (window_remove_pane picks the new active pane
+/// after the layout closed). A window that closed gets `%window-close` from
+/// the window list diff instead.
+pub fn emit_pane_closed(app: &AppState, window_id: usize, killed_active: bool) {
     if app.control_clients.is_empty() {
         return;
     }
     if let Some(idx) = app.windows.iter().position(|w| w.id == window_id) {
         if let Some(n) = layout_change(app, idx, app.windows[idx].area) {
             emit_notification(app, n);
+        }
+        let w = &app.windows[idx];
+        if killed_active {
+            if let Some(pane_id) = crate::tree::get_active_pane_id(&w.root, &w.active_path) {
+                emit_notification(app, ControlNotification::WindowPaneChanged { window_id, pane_id });
+            }
         }
     }
 }

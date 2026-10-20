@@ -182,6 +182,20 @@ pub(crate) fn apply_temp_target(
     Ok(())
 }
 
+/// Is `pane_id` the active pane of window `win_idx` as the user left it,
+/// looking through a temporary -t focus? The focused window's real active
+/// pane is the saved one. A window the -t focus moved to had its active pane
+/// changed for the request, so its own is not known and this says no.
+pub(crate) fn is_real_active_pane(app: &AppState, saved: &Option<SavedFocus>, win_idx: usize, pane_id: usize) -> bool {
+    match saved {
+        Some(s) if s.active_idx == win_idx => s.pane_id == pane_id,
+        Some(_) if app.active_idx == win_idx => false,
+        _ => app.windows.get(win_idx)
+            .and_then(|w| crate::tree::get_active_pane_id(&w.root, &w.active_path))
+            == Some(pane_id),
+    }
+}
+
 /// Put back the focus `apply_temp_target` saved, if any.  By pane id, not
 /// path, because the request may have restructured the tree (#71); if that
 /// pane is gone the window keeps whatever active pane the request left.
