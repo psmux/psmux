@@ -565,6 +565,14 @@ function Show-T {
     Show-TrendRow "launch Windows Terminal" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "wt_pwsh" "launch_median" })
     Show-TrendRow "launch WezTerm" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "wezterm_pwsh" "launch_median" })
     Show-TrendRow "launch bare pwsh" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "bare_pwsh" "launch_median" })
+    # To the prompt VISIBLE in the console the user launched from
+    # (test_launch_visible_prompt_gate): the warm row is the path a user takes
+    # with a psmux server already running, which no marker based cell measures.
+    $lvp = { param($j, $c) Prop (Prop (Prop $j "stats_ms") $c) "p50" }
+    Show-TrendRow "visible prompt: psmux warm" "ms" 0 (Get-TrendSeries "launch-visible-prompt-*.json" @() { param($j) & $lvp $j "warm_default" })
+    Show-TrendRow "visible prompt: psmux cold cmd" "ms" 0 (Get-TrendSeries "launch-visible-prompt-*.json" @() { param($j) & $lvp $j "cold_cmd" })
+    Show-TrendRow "visible prompt: psmux cold default" "ms" 0 (Get-TrendSeries "launch-visible-prompt-*.json" @() { param($j) & $lvp $j "cold_default" })
+    Show-TrendRow "visible prompt: bare pwsh" "ms" 0 (Get-TrendSeries "launch-visible-prompt-*.json" @() { param($j) & $lvp $j "bare" })
 
     # B: keystroke
     Show-TrendRow "keystroke echo p50" "ms" 2 (Get-TrendSeries "keystroke-latency-*.json" $kExcl { param($j) Prop (Prop $j "pooled") "median" })
