@@ -3055,6 +3055,19 @@ impl AppState {
     /// and `last-window` there is `no last window` (cmd-select-window.c:118).
     /// `last_window_idx` is a single Vec slot, so it can equal the current
     /// window (a kill that hands focus to it, for one); that reads as none.
+    /// `pane-base-index` for the window at Vec position `idx`: its own value
+    /// (`set -w`), else the global one. tmux keeps it in each window's option
+    /// table (options-table.c:1552-1554, OPTIONS_TABLE_WINDOW) and reads it
+    /// from `w->options` (window.c:1124, :1162), so `set -w -t :1
+    /// pane-base-index 1` renumbers window 1 only.
+    pub fn pane_base_index_of(&self, idx: usize) -> usize {
+        self.windows
+            .get(idx)
+            .and_then(|w| w.window_options.get("pane-base-index"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(self.pane_base_index)
+    }
+
     pub fn last_window_pos(&self) -> Option<usize> {
         let p = self.last_window_idx;
         let current = self.temp_focus_saved_active.unwrap_or(self.active_idx);

@@ -3965,7 +3965,7 @@ pub fn resolve_pane_spec(app: &AppState, spec: &str) -> Result<(usize, Vec<usize
         }
         Some(idx) => {
             let wp = win_pos.unwrap_or(active);
-            let zero = idx.checked_sub(app.pane_base_index).ok_or_else(miss)?;
+            let zero = idx.checked_sub(app.pane_base_index_of(wp)).ok_or_else(miss)?;
             crate::tree::path_by_position(&app.windows[wp].root, zero)
                 .map(|p| (wp, p)).ok_or_else(miss)
         }

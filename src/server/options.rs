@@ -106,7 +106,17 @@ pub(crate) fn is_window_option(name: &str) -> bool {
 /// (#795 follow up). The format expander resolves `@` names through the
 /// window now ([`pane_user_option`]), so the write has a reader.
 pub(crate) fn is_window_scoped_write(name: &str) -> bool {
-    is_window_option(name) || name.starts_with('@')
+    is_window_option(name) || is_window_local_only(name) || name.starts_with('@')
+}
+
+/// Window options a window can override (`set -w`) that `show-options -w`
+/// does not list. `pane-base-index` is a window option in tmux
+/// (options-table.c:1552-1554) read from each window's own table
+/// (window.c:1124, :1162); the global value keeps living in
+/// `AppState::pane_base_index`, and `AppState::pane_base_index_of` resolves
+/// a window's own value over it.
+pub(crate) fn is_window_local_only(name: &str) -> bool {
+    name == "pane-base-index"
 }
 
 /// The `target` spelling [`apply_set_window_option`] and
@@ -930,7 +940,7 @@ pub(crate) fn get_window_option_value_for(
         let idx = target_window.unwrap_or(app.active_idx);
         return window_local_option(app, idx, name).unwrap_or("").to_string();
     }
-    if !is_window_option(name) {
+    if !is_window_option(name) && !is_window_local_only(name) {
         return String::new();
     }
     let idx = target_window.unwrap_or(app.active_idx);

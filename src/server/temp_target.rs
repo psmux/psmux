@@ -49,7 +49,7 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
                     || app.windows.iter().any(|w| w.floating.iter().any(|fp| fp.id == p))
             } else {
                 let w = &app.windows[idx];
-                p.checked_sub(app.pane_base_index)
+                p.checked_sub(app.pane_base_index_of(idx))
                     .is_some_and(|pos| pos < crate::tree::pane_paths(&w.root).len() + w.floating.len())
             };
             if !found {
@@ -79,7 +79,7 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
             // comes off before it is a position in the order
             // focus_pane_by_index uses; floating panes follow the tiled
             // ones (#767).
-            let pos = p.checked_sub(app.pane_base_index)
+            let pos = p.checked_sub(app.pane_base_index_of(idx))
                 .ok_or_else(|| format!("can't find pane: {}", p))?;
             let win = &app.windows[idx];
             let root = &win.root;
@@ -153,7 +153,7 @@ pub(crate) fn select_window_pos(app: &AppState, spec: &str, pane: Option<&str>) 
         })
     } else {
         p.parse::<usize>().ok()
-            .and_then(|n| n.checked_sub(app.pane_base_index))
+            .and_then(|n| n.checked_sub(app.pane_base_index_of(pos)))
             .is_some_and(|n| n < crate::tree::pane_paths(&win.root).len() + win.floating.len())
     };
     if found { Ok(pos) } else { Err(missing_pane(p)) }

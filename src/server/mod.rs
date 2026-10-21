@@ -3596,7 +3596,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(i) = other_window {
                         let moved = match (pane, pane_is_id) {
                             (Some(p), true) => crate::tree::set_window_active_pane_by_id(&mut app, i, p),
-                            (Some(p), false) => p.checked_sub(app.pane_base_index)
+                            (Some(p), false) => p.checked_sub(app.pane_base_index_of(i))
                                 .is_some_and(|pos| crate::tree::set_window_active_pane_by_index(&mut app, i, pos)),
                             // `select-pane -t <window>` with no pane part names
                             // that window's already active pane, so nothing
@@ -3618,7 +3618,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let old_path = app.windows[app.active_idx].active_path.clone();
                         if pane_is_id {
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
-                        } else if let Some(pos) = p.checked_sub(app.pane_base_index) {
+                        } else if let Some(pos) = p.checked_sub(app.pane_base_index_of(app.active_idx)) {
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
                         }
                         if app.windows[app.active_idx].active_path != old_path {
@@ -3656,7 +3656,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::FocusPaneByIndex(idx) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
-                    if let Some(pos) = idx.checked_sub(app.pane_base_index) {
+                    if let Some(pos) = idx.checked_sub(app.pane_base_index_of(app.active_idx)) {
                         switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
                     }
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
@@ -3985,7 +3985,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
                         "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"escape_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"ctrl_wheel_zoom\":{},\"drag_end_default\":{},\"mouse_overrides\":{},\"bold_is_bright\":{}}}",
-                        layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
+                        layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index_of(app.active_idx), cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                         matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                         mode_style_escaped, message_style_escaped, status_position_escaped, status_justify_escaped,
@@ -5025,7 +5025,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let tiled_count = panes.len();
                     for (pos, (id, cols, rows, _mode, _enc, _alt, hist_rows, hist_bytes)) in panes.iter().enumerate() {
-                        let idx = pos + app.pane_base_index;
+                        let idx = pos + app.pane_base_index_of(app.active_idx);
                         let active_marker = if active_pane_id == Some(*id) { " (active)" } else { "" };
                         // The rows retained and the bytes they cost, like tmux.
                         // Both used to be faked (the limit, and a literal 0),
@@ -5038,7 +5038,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // inside the size brackets (#767). They were not listed.
                     let nfloat = win.floating.len();
                     for (fi, fp) in win.floating.iter().enumerate() {
-                        let idx = tiled_count + fi + app.pane_base_index;
+                        let idx = tiled_count + fi + app.pane_base_index_of(app.active_idx);
                         let (hist_rows, hist_bytes) = match fp.pane.term.lock() {
                             Ok(term) => (term.screen().scrollback_filled(), term.screen().history_bytes()),
                             Err(_) => (0, 0),
@@ -5767,7 +5767,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // -t targeting: evaluate format for the specific pane
                             // using PANE_POS_OVERRIDE so #{pane_active} reflects
                             // the REAL active pane, not the target (#113)
-                            match pane_idx.checked_sub(app.pane_base_index) {
+                            match pane_idx.checked_sub(app.pane_base_index_of(app.active_idx)) {
                                 Some(pos) => crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pos),
                                 None => String::new(),
                             }
@@ -5865,7 +5865,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
                     for (i, (path, _)) in rects.iter().enumerate() {
                         if i >= 10 { break; }
-                        let mapped = (i + app.pane_base_index) % 10;
+                        let mapped = (i + app.pane_base_index_of(app.active_idx)) % 10;
                         if mapped == digit {
                             let new_path = path.clone();
                             let old_path = app.windows[app.active_idx].active_path.clone();
@@ -7553,7 +7553,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                         app.last_window_idx = app.active_idx;
                                                         app.active_idx = i;
                                                     }
-                                                    if let Some(pos) = pid.checked_sub(app.pane_base_index) {
+                                                    if let Some(pos) = pid.checked_sub(app.pane_base_index_of(i)) {
                                                         crate::tree::focus_pane_by_index(app, pos);
                                                     }
                                                 });
@@ -8798,7 +8798,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             };
             let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
                 "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"cursor_blink_mode\":{},\"status_visible\":{},\"repeat_time\":{},\"escape_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"mouse_selection_force\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"mouse_drag_enter_copy_mode\":{},\"ctrl_wheel_zoom\":{},\"drag_end_default\":{},\"mouse_overrides\":{},\"bold_is_bright\":{}}}",
-                layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
+                layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index_of(app.active_idx), cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                 matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                 mode_style_escaped, message_style_escaped, status_position_escaped, status_justify_escaped,

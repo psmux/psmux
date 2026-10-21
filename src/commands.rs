@@ -602,7 +602,7 @@ fn generate_list_panes(app: &AppState) -> String {
     let active_id = get_active_pane_id(&win.root, &win.active_path);
     let mut output = String::new();
     for (pos, (id, cols, rows, hist_rows, hist_bytes)) in panes.iter().enumerate() {
-        let idx = pos + app.pane_base_index;
+        let idx = pos + app.pane_base_index_of(app.active_idx);
         let marker = if active_id == Some(*id) { " (active)" } else { "" };
         output.push_str(&format!("{}: [{}x{}] [history {}/{}, {} bytes] %{}{}\n",
             idx, cols, rows, hist_rows, app.history_limit, hist_bytes, id, marker));
@@ -736,7 +736,7 @@ pub(crate) fn resolve_join_end(app: &AppState, t: &crate::types::TempTarget) -> 
     let Some(p) = t.pane else { return Ok((pos, None)) };
     // The pane index as #{pane_index} shows it: pane-base-index comes off
     // before it is a position in the window's pane order.
-    let pane_pos = p.checked_sub(app.pane_base_index)
+    let pane_pos = p.checked_sub(app.pane_base_index_of(pos))
         .filter(|pane_pos| *pane_pos < crate::tree::pane_paths(&app.windows[pos].root).len())
         .ok_or_else(|| format!("can't find pane: {}", p))?;
     Ok((pos, Some(pane_pos)))
@@ -1513,7 +1513,7 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
             app.display_map.clear();
             for (i, (path, _)) in rects.into_iter().enumerate() {
                 if i >= 10 { break; }
-                let digit = (i + app.pane_base_index) % 10;
+                let digit = (i + app.pane_base_index_of(app.active_idx)) % 10;
                 app.display_map.push((digit, path));
             }
             app.mode = Mode::PaneChooser { opened_at: Instant::now() };
@@ -1744,7 +1744,7 @@ pub(crate) fn resolve_in_server_target(app: &AppState, kind: InServerTarget, t: 
             if !app.windows.is_empty() && plain.chars().all(|c| c.is_ascii_digit()) {
                 let win = &app.windows[app.active_idx.min(app.windows.len() - 1)];
                 if let Some(path) = plain.parse::<usize>().ok()
-                    .and_then(|i| i.checked_sub(app.pane_base_index))
+                    .and_then(|i| i.checked_sub(app.pane_base_index_of(app.active_idx)))
                     .and_then(|i| crate::tree::path_by_position(&win.root, i))
                 {
                     return Ok(crate::tree::get_active_pane_id_at_path(&win.root, &path).map(|id| format!("%{}", id)));
@@ -1912,7 +1912,7 @@ fn with_paste_target<T>(
             }
             crate::tree::focus_pane_by_id_no_mru(app, p);
         } else {
-            let pos = p.checked_sub(app.pane_base_index)
+            let pos = p.checked_sub(app.pane_base_index_of(win_idx))
                 .filter(|pos| *pos < crate::tree::count_panes(&app.windows[win_idx].root));
             let Some(pos) = pos else {
                 app.active_idx = saved_idx;
@@ -2627,7 +2627,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             app.display_map.clear();
             for (i, (path, _)) in rects.into_iter().enumerate() {
                 if i >= 10 { break; }
-                let digit = (i + app.pane_base_index) % 10;
+                let digit = (i + app.pane_base_index_of(app.active_idx)) % 10;
                 app.display_map.push((digit, path));
             }
             app.mode = Mode::PaneChooser { opened_at: Instant::now() };
@@ -4110,7 +4110,7 @@ fn resolve_swap_pane_target_path(app: &AppState, target: &str) -> Option<Vec<usi
     let win = &app.windows[app.active_idx];
     match parsed.pane {
         Some(p) if parsed.pane_is_id => crate::tree::find_path_by_id(&win.root, p),
-        Some(p) => p.checked_sub(app.pane_base_index)
+        Some(p) => p.checked_sub(app.pane_base_index_of(app.active_idx))
             .and_then(|idx| crate::tree::path_by_position(&win.root, idx)),
         None => None,
     }
@@ -4287,3 +4287,7 @@ mod tests_in_process_set_option_once;
 #[cfg(test)]
 #[path = "../tests-rs/test_select_window_toggle.rs"]
 mod tests_select_window_toggle;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_base_index_window_scope.rs"]
+mod tests_pane_base_index_window_scope;

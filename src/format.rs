@@ -338,7 +338,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     if let Some(w) = app.windows.get(shorthand_idx) {
                         let active_id = get_active_pane_id(&w.root, &w.active_path).unwrap_or(0);
                         let pos = crate::tree::get_pane_position_in_window(&w.root, active_id).unwrap_or(0);
-                        result.push_str(&(pos + app.pane_base_index).to_string());
+                        result.push_str(&(pos + app.pane_base_index_of(shorthand_idx)).to_string());
                     }
                     i += 2; continue;
                 }
@@ -1695,7 +1695,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
 
         // ── Pane ──
         "pane_index" => {
-            (fmt_pane_pos + app.pane_base_index).to_string()
+            (fmt_pane_pos + app.pane_base_index_of(win_idx)).to_string()
         }
         "pane_id" => {
             if let Some(p) = target_pane() { format!("%{}", p.id) } else { "%0".into() }

@@ -444,7 +444,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     app.display_map.clear();
                     for (i, (path, _)) in rects.into_iter().enumerate() {
                         if i >= 10 { break; }
-                        let digit = (i + app.pane_base_index) % 10;
+                        let digit = (i + app.pane_base_index_of(app.active_idx)) % 10;
                         app.display_map.push((digit, path));
                     }
                     app.mode = Mode::PaneChooser { opened_at: Instant::now() };
