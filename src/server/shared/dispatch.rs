@@ -1,7 +1,7 @@
 //! Request handling of the shared server, one request of one session at a time.
 //!
 //! The arms below marked "copied" are copies of run_server's arms
-//! (server/mod.rs at 0145958f; each copy names its source line) so the shared
+//! (server/mod.rs at 86a78100; each copy names its source line) so the shared
 //! server does exactly what a per session server does for those requests. The
 //! owner ruling forbids changing run_server to share them, and copying is the
 //! approach the ruling prefers. The arms written for the shared server are
@@ -111,7 +111,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 3223 at 0145958f)
+                // copied from server/mod.rs run_server (line 3223 at 86a78100)
                 CtrlReq::NewWindow(cmd, name, detached, start_dir, title, empty, env_sets, placement, outcome) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // Expand format variables like #{pane_current_path} (#111)
@@ -154,7 +154,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 3265 at 0145958f)
+                // copied from server/mod.rs run_server (line 3265 at 86a78100)
                 CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty, env_sets, placement) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
@@ -188,7 +188,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 3298 at 0145958f)
+                // copied from server/mod.rs run_server (line 3298 at 86a78100)
                 CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title, env_sets, zoom_after_split) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
@@ -293,7 +293,7 @@ pub(crate) fn dispatch(
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                     }
                 }
-                // copied from server/mod.rs run_server (line 3402 at 0145958f)
+                // copied from server/mod.rs run_server (line 3402 at 86a78100)
                 CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title, env_sets, zoom_after_split) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
@@ -355,7 +355,7 @@ pub(crate) fn dispatch(
                     // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
-                // copied from server/mod.rs run_server (line 3463 at 0145958f)
+                // copied from server/mod.rs run_server (line 3463 at 86a78100)
                 CtrlReq::KillPane => {
                     if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // A focused floating pane is closed by kill-pane instead of a
@@ -382,7 +382,7 @@ pub(crate) fn dispatch(
                         control::emit_pane_closed(&app, win_id, killed_active);
                     }
                 }
-                // copied from server/mod.rs run_server (line 3489 at 0145958f)
+                // copied from server/mod.rs run_server (line 3489 at 86a78100)
                 CtrlReq::KillPaneById(pid) => {
                     if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // A floating %id closes that float, as `kill-pane` does
@@ -408,7 +408,7 @@ pub(crate) fn dispatch(
                         if let Some((win_id, killed_active)) = win { control::emit_pane_closed(&app, win_id, killed_active); }
                     }
                 }
-                // copied from server/mod.rs run_server (line 3514 at 0145958f)
+                // copied from server/mod.rs run_server (line 3514 at 86a78100)
                 CtrlReq::CapturePane(resp, pane_id, preserve_trailing) => {
                     // Note: do NOT gate on is_active_pane_squelched here.
                     // Returning empty during the cd+cls squelch window makes
@@ -418,15 +418,15 @@ pub(crate) fn dispatch(
                     // any stale frame is harmless (subsequent %output rewrites).
                     if let Some(text) = capture_active_pane_text(&mut app, pane_id, preserve_trailing)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
-                // copied from server/mod.rs run_server (line 3523 at 0145958f)
+                // copied from server/mod.rs run_server (line 3523 at 86a78100)
                 CtrlReq::CapturePaneStyled(resp, s, e, pane_id, preserve_trailing) => {
                     if let Some(text) = capture_active_pane_styled(&mut app, s, e, pane_id, preserve_trailing)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
-                // copied from server/mod.rs run_server (line 3526 at 0145958f)
+                // copied from server/mod.rs run_server (line 3526 at 86a78100)
                 CtrlReq::CapturePaneRange(resp, s, e, pane_id, preserve_trailing) => {
                     if let Some(text) = capture_active_pane_range(&mut app, s, e, pane_id, preserve_trailing)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
-                // copied from server/mod.rs run_server (line 3529 at 0145958f)
+                // copied from server/mod.rs run_server (line 3529 at 86a78100)
                 CtrlReq::CapturePaneSaved { resp, start, end, pane_id, styled, opts } => {
                     // A read that fails answers empty: a ? here would end the server.
                     let text = if styled {
@@ -438,7 +438,7 @@ pub(crate) fn dispatch(
                     };
                     let _ = resp.send(text);
                 }
-                // copied from server/mod.rs run_server (line 3676 at 0145958f)
+                // copied from server/mod.rs run_server (line 3676 at 86a78100)
                 CtrlReq::ResolveTarget { kind, spec, resp } => {
                     let result = crate::commands::resolve_in_server_target(&app, kind, &spec);
                     if let Err(ref msg) = result {
@@ -448,7 +448,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(result);
                 }
-                // copied from server/mod.rs run_server (line 3685 at 0145958f)
+                // copied from server/mod.rs run_server (line 3685 at 86a78100)
                 CtrlReq::ValidateTarget { target, resp } => {
                     match temp_target::resolve_temp_target(&app, &target) {
                         Ok(resolved) => { let _ = resp.send(Ok(resolved)); }
@@ -465,7 +465,7 @@ pub(crate) fn dispatch(
                 }
                 // Unwrapped at the top of this loop; TargetedSender never
                 // nests one inside another.
-                // copied from server/mod.rs run_server (line 3702 at 0145958f)
+                // copied from server/mod.rs run_server (line 3702 at 86a78100)
                 CtrlReq::SessionInfo(resp) => {
                     let num_attached = app.client_registry.len();
                     let attached = if num_attached > 0 { " (attached)" } else { "" };
@@ -479,12 +479,12 @@ pub(crate) fn dispatch(
                     let line = format!("{}: {} windows (created {}){}{}\n", app.session_name, windows, created, group, attached);
                     let _ = resp.send(line);
                 }
-                // copied from server/mod.rs run_server (line 3715 at 0145958f)
+                // copied from server/mod.rs run_server (line 3715 at 86a78100)
                 CtrlReq::SessionInfoFormat(resp, fmt) => {
                     let line = crate::format::format_list_sessions(&app, &fmt);
                     let _ = resp.send(format!("{}\n", line));
                 }
-                // copied from server/mod.rs run_server (line 3719 at 0145958f)
+                // copied from server/mod.rs run_server (line 3719 at 86a78100)
                 CtrlReq::ExpandFormat(fmt, resp) => {
                     // Synchronous by design: the caller is a connection thread
                     // that is about to run the expanded string, and it has
@@ -495,13 +495,13 @@ pub(crate) fn dispatch(
                     // not strftime (issue #734 follow up).
                     let _ = resp.send(crate::format::expand_format_untimed(&fmt, &app));
                 }
-                // copied from server/mod.rs run_server (line 3729 at 0145958f)
+                // copied from server/mod.rs run_server (line 3729 at 86a78100)
                 CtrlReq::ExpandFormatNoTarget(fmt, resp) => {
                     // Untimed, as tmux's format_single_from_target is.
                     let text = crate::format::with_sessionless(true, || crate::format::expand_format_untimed(&fmt, &app));
                     let _ = resp.send(text);
                 }
-                // copied from server/mod.rs run_server (line 3734 at 0145958f)
+                // copied from server/mod.rs run_server (line 3734 at 86a78100)
                 CtrlReq::ClientAttach(cid, pid) => {
                     lp.clients.insert(cid); // shared: frames go to this session's clients only
                     // Registration and the attached counter are one idempotent
@@ -532,12 +532,12 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 3800 at 0145958f)
+                // copied from server/mod.rs run_server (line 3800 at 86a78100)
                 CtrlReq::DumpLayout(resp) => {
                     let json = dump_layout_json(&mut app)?;
                     let _ = resp.send(json);
                 }
-                // copied from server/mod.rs run_server (line 4161 at 0145958f)
+                // copied from server/mod.rs run_server (line 4146 at 86a78100)
                 CtrlReq::SendText(s) => {
                     // A copy-mode prompt is drawn by the client from the
                     // status message, so a key that only edits that prompt
@@ -562,7 +562,7 @@ pub(crate) fn dispatch(
                     }
                     echo_pending_until = Some(Instant::now());
                 }
-                // copied from server/mod.rs run_server (line 4185 at 0145958f)
+                // copied from server/mod.rs run_server (line 4170 at 86a78100)
                 CtrlReq::ClientActivity(cid) => {
                     // `#{client_activity}` is the last input from THIS client
                     // (tmux c->activity_time), not its last resize (#724).
@@ -578,10 +578,10 @@ pub(crate) fn dispatch(
                         meta_dirty = true;
                     }
                 }
-                // copied from server/mod.rs run_server (line 4200 at 0145958f)
+                // copied from server/mod.rs run_server (line 4185 at 86a78100)
                 CtrlReq::PtyWake => { /* the wake itself is the whole point; the
                     PTY_DATA_READY swap above already set state_dirty. */ }
-                // copied from server/mod.rs run_server (line 4202 at 0145958f)
+                // copied from server/mod.rs run_server (line 4187 at 86a78100)
                 CtrlReq::SendKey(k) => {
                     // Same as SendText above: a prompt edit owes a frame even
                     // though no cell changed.
@@ -598,7 +598,7 @@ pub(crate) fn dispatch(
                     }
                     echo_pending_until = Some(Instant::now());
                 }
-                // copied from server/mod.rs run_server (line 4218 at 0145958f)
+                // copied from server/mod.rs run_server (line 4203 at 86a78100)
                 CtrlReq::SendPaste(s) => {
                     if crate::input::snap_interactive_to_live(&mut app) {
                         state_dirty = true;
@@ -606,7 +606,7 @@ pub(crate) fn dispatch(
                     send_paste_to_active(&mut app, &s)?;
                     echo_pending_until = Some(Instant::now());
                 }
-                // copied from server/mod.rs run_server (line 4238 at 0145958f)
+                // copied from server/mod.rs run_server (line 4223 at 86a78100)
                 CtrlReq::ZoomPane => {
                     toggle_zoom(&mut app);
                     // tmux window_zoom makes the zoomed pane its window's
@@ -629,11 +629,11 @@ pub(crate) fn dispatch(
                 }
                 // tmux: the prefix forces a switch to the prefix table, which
                 // drops any `switch-client -T` latch (issue #640).
-                // copied from server/mod.rs run_server (line 4260 at 0145958f)
+                // copied from server/mod.rs run_server (line 4245 at 86a78100)
                 CtrlReq::PrefixBegin => { app.client_prefix_active = true; app.current_key_table = None; state_dirty = true; }
-                // copied from server/mod.rs run_server (line 4261 at 0145958f)
+                // copied from server/mod.rs run_server (line 4246 at 86a78100)
                 CtrlReq::PrefixEnd => { app.client_prefix_active = false; state_dirty = true; }
-                // copied from server/mod.rs run_server (line 4290 at 0145958f)
+                // copied from server/mod.rs run_server (line 4275 at 86a78100)
                 CtrlReq::ClientSize(cid, w, h) => { 
                     app.client_sizes.insert(cid, (w, h));
                     app.latest_client_id = Some(cid);
@@ -658,7 +658,7 @@ pub(crate) fn dispatch(
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     hook_event = Some("client-resized");
                 }
-                // copied from server/mod.rs run_server (line 4314 at 0145958f)
+                // copied from server/mod.rs run_server (line 4299 at 86a78100)
                 CtrlReq::HostColors(spec) => {
                     // Issue #473: a client reported its host terminal's colors.
                     // Keep the most recent report: the newest attached client
@@ -693,15 +693,15 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 4409 at 0145958f)
+                // copied from server/mod.rs run_server (line 4394 at 86a78100)
                 CtrlReq::ListWindows(resp) => { helpers::propagate_osc_titles(&mut app); let json = list_windows_json(&app)?; let _ = resp.send(json); }
-                // copied from server/mod.rs run_server (line 4410 at 0145958f)
+                // copied from server/mod.rs run_server (line 4395 at 86a78100)
                 CtrlReq::ListWindowsTmux(resp) => { helpers::propagate_osc_titles(&mut app); let text = list_windows_tmux(&app); let _ = resp.send(text); }
-                // copied from server/mod.rs run_server (line 4411 at 0145958f)
+                // copied from server/mod.rs run_server (line 4396 at 86a78100)
                 CtrlReq::ListWindowsFormat(resp, fmt) => { helpers::propagate_osc_titles(&mut app); let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
-                // copied from server/mod.rs run_server (line 4412 at 0145958f)
+                // copied from server/mod.rs run_server (line 4397 at 86a78100)
                 CtrlReq::ListTree(resp) => { let json = list_tree_json(&app)?; let _ = resp.send(json); }
-                // copied from server/mod.rs run_server (line 4513 at 0145958f)
+                // copied from server/mod.rs run_server (line 4498 at 86a78100)
                 CtrlReq::SendKeys(keys, literal) => {
                     // #828: tmux's send-keys hands its keys to the target
                     // pane (`window_pane_key`, window.c), and a popup, menu
@@ -781,7 +781,20 @@ pub(crate) fn dispatch(
                                 "PAGEUP" | "PPAGE" | "PAGEDOWN" | "NPAGE" | "DELETE" | "DC" | "INSERT" | "IC" |
                                 "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
                             ) || key_upper.starts_with("C-") || key_upper.starts_with("M-") || key_upper.starts_with("S-");
-                            
+
+                            // Issue #860: a pane in an extended key mode gets
+                            // tmux's extended form of a modified key
+                            // (input-keys.c input_key) instead of the legacy
+                            // byte or record the arms below write.
+                            if key_upper.starts_with("C-") || key_upper.starts_with("M-") || key_upper.starts_with("S-")
+                                || key_upper == "BTAB" || key_upper == "BACKTAB"
+                            {
+                                if let Some(bytes) = crate::input::active_extended_named_key_bytes(&mut app, key) {
+                                    send_text_to_active(&mut app, &String::from_utf8_lossy(&bytes))?;
+                                    continue;
+                                }
+                            }
+
                             match key_upper.as_str() {
                                 "ENTER" => send_text_to_active(&mut app, "\r")?,
                                 "TAB" => send_text_to_active(&mut app, "\t")?,
@@ -990,22 +1003,22 @@ pub(crate) fn dispatch(
                         app.mode = m;
                     }
                 }
-                // copied from server/mod.rs run_server (line 4510 at 0145958f)
+                // copied from server/mod.rs run_server (line 4495 at 86a78100)
                 CtrlReq::SendBytes(bytes) => {
                     send_bytes_to_active(&mut app, &bytes)?;
                 }
-                // copied from server/mod.rs run_server (line 4801 at 0145958f)
+                // copied from server/mod.rs run_server (line 4799 at 86a78100)
                 CtrlReq::SendKeysX(cmd) => {
                     // A copy-mode key binding's `send-keys -X` (queued by
                     // input::run_copy_mode_binding, so the pane is in copy mode).
                     let _ = run_send_keys_x(&mut app, &cmd, 1);
                 }
-                // copied from server/mod.rs run_server (line 4806 at 0145958f)
+                // copied from server/mod.rs run_server (line 4804 at 86a78100)
                 CtrlReq::SendKeysXRun { cmd, count, resp } => {
                     let outcome = run_send_keys_x(&mut app, &cmd, count);
                     if let Some(resp) = resp { let _ = resp.send(outcome); }
                 }
-                // copied from server/mod.rs run_server (line 4810 at 0145958f)
+                // copied from server/mod.rs run_server (line 4808 at 86a78100)
                 CtrlReq::SetPaneInputOff { target, off, last, resp } => {
                     // select-pane -d / -e.  No hook: tmux returns from
                     // cmd-select-pane.c right after flipping the flag, before
@@ -1023,7 +1036,7 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 4827 at 0145958f)
+                // copied from server/mod.rs run_server (line 4825 at 86a78100)
                 CtrlReq::SelectPane(dir, keep_zoom) => {
                     if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let _pane_before = active_pane_identity(&app);
@@ -1181,7 +1194,7 @@ pub(crate) fn dispatch(
                         hook_event = Some("after-select-pane");
                     }
                 }
-                // copied from server/mod.rs run_server (line 5008 at 0145958f)
+                // copied from server/mod.rs run_server (line 5006 at 86a78100)
                 CtrlReq::ListPanes(resp) => {
                     helpers::propagate_osc_titles(&mut app);
                     let mut output = String::new();
@@ -1217,7 +1230,7 @@ pub(crate) fn dispatch(
                     };
                     let tiled_count = panes.len();
                     for (pos, (id, cols, rows, _mode, _enc, _alt, hist_rows, hist_bytes)) in panes.iter().enumerate() {
-                        let idx = pos + app.pane_base_index;
+                        let idx = pos + app.pane_base_index_of(app.active_idx);
                         let active_marker = if active_pane_id == Some(*id) { " (active)" } else { "" };
                         // The rows retained and the bytes they cost, like tmux.
                         // Both used to be faked (the limit, and a literal 0),
@@ -1230,7 +1243,7 @@ pub(crate) fn dispatch(
                     // inside the size brackets (#767). They were not listed.
                     let nfloat = win.floating.len();
                     for (fi, fp) in win.floating.iter().enumerate() {
-                        let idx = tiled_count + fi + app.pane_base_index;
+                        let idx = tiled_count + fi + app.pane_base_index_of(app.active_idx);
                         let (hist_rows, hist_bytes) = match fp.pane.term.lock() {
                             Ok(term) => (term.screen().scrollback_filled(), term.screen().history_bytes()),
                             Err(_) => (0, 0),
@@ -1246,13 +1259,13 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(output);
                 }
-                // copied from server/mod.rs run_server (line 5072 at 0145958f)
+                // copied from server/mod.rs run_server (line 5070 at 86a78100)
                 CtrlReq::ListPanesFormat(resp, fmt) => {
                     helpers::propagate_osc_titles(&mut app);
                     let text = format_list_panes(&app, &fmt, app.active_idx);
                     let _ = resp.send(text);
                 }
-                // copied from server/mod.rs run_server (line 5077 at 0145958f)
+                // copied from server/mod.rs run_server (line 5075 at 86a78100)
                 CtrlReq::ListAllPanes(resp) => {
                     let mut output = String::new();
                     fn collect_all_panes(node: &Node, panes: &mut Vec<(usize, u16, u16)>) {
@@ -1272,7 +1285,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(output);
                 }
-                // copied from server/mod.rs run_server (line 5096 at 0145958f)
+                // copied from server/mod.rs run_server (line 5094 at 86a78100)
                 CtrlReq::ListAllPanesFormat(resp, fmt) => {
                     let mut lines = Vec::new();
                     for wi in 0..app.windows.len() {
@@ -1280,7 +1293,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(lines.join("\n"));
                 }
-                // copied from server/mod.rs run_server (line 5771 at 0145958f)
+                // copied from server/mod.rs run_server (line 5769 at 86a78100)
                 CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms, client_sel, flags) => {
                     // Propagate OSC titles so #{pane_title} reflects latest state
                     helpers::propagate_osc_titles(&mut app);
@@ -1295,7 +1308,7 @@ pub(crate) fn dispatch(
                             // -t targeting: evaluate format for the specific pane
                             // using PANE_POS_OVERRIDE so #{pane_active} reflects
                             // the REAL active pane, not the target (#113)
-                            match pane_idx.checked_sub(app.pane_base_index) {
+                            match pane_idx.checked_sub(app.pane_base_index_of(app.active_idx)) {
                                 Some(pos) => crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pos),
                                 None => String::new(),
                             }
@@ -1311,7 +1324,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(result);
                 }
-                // copied from server/mod.rs run_server (line 5801 at 0145958f)
+                // copied from server/mod.rs run_server (line 5799 at 86a78100)
                 CtrlReq::DisplayMessageById(resp, fmt, pane_id, set_status_bar, duration_ms, client_sel, flags) => {
                     // Bare %N pane targeting (#332): resolve the pane ID
                     // globally across all windows and expand the format with
@@ -1333,7 +1346,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(result);
                 }
-                // copied from server/mod.rs run_server (line 5103 at 0145958f)
+                // copied from server/mod.rs run_server (line 5101 at 86a78100)
                 CtrlReq::KillWindow => {
                     let active = app.active_idx;
                     kill_window_at(&mut app, active);
@@ -1356,7 +1369,7 @@ pub(crate) fn dispatch(
                     notify_events.push("window-unlinked");
                     hook_event = Some("window-closed");
                 }
-                // copied from server/mod.rs run_server (line 5125 at 0145958f)
+                // copied from server/mod.rs run_server (line 5123 at 86a78100)
                 CtrlReq::KillWindowTarget { win, win_is_id, name, resp } => {
                     // Resolve the target here, on live state. An unresolvable
                     // target must be an error, never a fallback to the active
@@ -1401,16 +1414,16 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 4354 at 0145958f)
+                // copied from server/mod.rs run_server (line 4339 at 86a78100)
                 CtrlReq::FocusWindowCmd(wid) => { switch_with_copy_save(&mut app, |app| { if let Some(idx) = find_window_index_by_id(app, wid) { app.active_idx = idx; } }); resize_all_panes(&mut app); meta_dirty = true; }
-                // copied from server/mod.rs run_server (line 4348 at 0145958f)
+                // copied from server/mod.rs run_server (line 4333 at 86a78100)
                 CtrlReq::FocusPaneCmd(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
                     switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, pid); });
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
                     meta_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 3540 at 0145958f)
+                // copied from server/mod.rs run_server (line 3540 at 86a78100)
                 CtrlReq::FocusWindow(wid) => {
                     // wid is a display index (same as tmux window number), convert to internal array index
                     if let Some(internal_idx) = app.win_pos(wid) {
@@ -1419,7 +1432,7 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
-                // copied from server/mod.rs run_server (line 3555 at 0145958f)
+                // copied from server/mod.rs run_server (line 3555 at 86a78100)
                 CtrlReq::FocusWindowById(id) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
                         focus_window_at(&mut app, internal_idx);
@@ -1428,7 +1441,7 @@ pub(crate) fn dispatch(
                     hook_event = Some("after-select-window");
                 }
                 // One request for the whole `-t` of a `select-pane` (#691).
-                // copied from server/mod.rs run_server (line 3548 at 0145958f)
+                // copied from server/mod.rs run_server (line 3548 at 86a78100)
                 CtrlReq::FocusWindowByName(ref name) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
                         focus_window_at(&mut app, internal_idx);
@@ -1436,24 +1449,24 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
-                // copied from server/mod.rs run_server (line 3651 at 0145958f)
+                // copied from server/mod.rs run_server (line 3651 at 86a78100)
                 CtrlReq::FocusPane(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
                     switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, pid); });
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
                     meta_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 4389 at 0145958f)
+                // copied from server/mod.rs run_server (line 4374 at 86a78100)
                 CtrlReq::NextWindow => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
                 }
-                // copied from server/mod.rs run_server (line 4393 at 0145958f)
+                // copied from server/mod.rs run_server (line 4378 at 86a78100)
                 CtrlReq::PrevWindow => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
                 }
-                // copied from server/mod.rs run_server (line 5822 at 0145958f)
+                // copied from server/mod.rs run_server (line 5820 at 86a78100)
                 CtrlReq::LastWindow { resp } => {
                     match app.last_window_pos() {
                         Some(last) => {
@@ -1473,7 +1486,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 5841 at 0145958f)
+                // copied from server/mod.rs run_server (line 5839 at 86a78100)
                 CtrlReq::LastPane { resp } => {
                     match last_pane_path(&app) {
                         Some(target) => {
@@ -1497,7 +1510,7 @@ pub(crate) fn dispatch(
                         None => { let _ = resp.send(Err("no last pane".to_string())); }
                     }
                 }
-                // copied from server/mod.rs run_server (line 4397 at 0145958f)
+                // copied from server/mod.rs run_server (line 4382 at 86a78100)
                 CtrlReq::RenameWindow(name) => {
                     if let Some(cmds) = app.hooks.get("before-rename-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux parity (#552): the argument is a format, expanded
@@ -1510,23 +1523,23 @@ pub(crate) fn dispatch(
                     let name = crate::util::clean_name(&name);
                     let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window");
                 }
-                // copied from server/mod.rs run_server (line 7703 at 0145958f)
+                // copied from server/mod.rs run_server (line 7711 at 86a78100)
                 CtrlReq::ClientEnviron(env) => {
                     app.env_scopes.pending_client_environ = Some(env);
                 }
-                // copied from server/mod.rs run_server (line 7135 at 0145958f)
+                // copied from server/mod.rs run_server (line 7143 at 86a78100)
                 CtrlReq::SetClientReadonly(cid, readonly) => {
                     if let Some(info) = app.client_registry.get_mut(&cid) {
                         info.readonly = readonly;
                     }
                 }
-                // copied from server/mod.rs run_server (line 7365 at 0145958f)
+                // copied from server/mod.rs run_server (line 7373 at 86a78100)
                 CtrlReq::SetClientLastSession(cid, prev) => {
                     if let Some(info) = app.client_registry.get_mut(&cid) {
                         info.last_session = Some(prev);
                     }
                 }
-                // copied from server/mod.rs run_server (line 4418 at 0145958f)
+                // copied from server/mod.rs run_server (line 4403 at 86a78100)
                 CtrlReq::WindowDump(wid, format, resp) => {
                     let result = if format == crate::types::WindowDumpFormat::Layout {
                         crate::layout::dump_window_layout_json(&mut app, wid)
@@ -1583,13 +1596,13 @@ pub(crate) fn dispatch(
                     let json = result.unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }
-                // copied from server/mod.rs run_server (line 4413 at 0145958f)
+                // copied from server/mod.rs run_server (line 4398 at 86a78100)
                 CtrlReq::WindowLayout(wid, resp) => {
                     let json = crate::util::window_layout_json(&app, wid)
                         .unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }
-                // copied from server/mod.rs run_server (line 4475 at 0145958f)
+                // copied from server/mod.rs run_server (line 4460 at 86a78100)
                 CtrlReq::SetPaneTitle(title) => {
                     let win = &mut app.windows[app.active_idx];
                     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -1598,13 +1611,13 @@ pub(crate) fn dispatch(
                     }
                     meta_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 4474 at 0145958f)
+                // copied from server/mod.rs run_server (line 4459 at 86a78100)
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }
-                // copied from server/mod.rs run_server (line 4387 at 0145958f)
+                // copied from server/mod.rs run_server (line 4372 at 86a78100)
                 CtrlReq::SplitSetSizes(cid, path, sizes) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_set_sizes(&mut app, &path, &sizes); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
-                // copied from server/mod.rs run_server (line 4388 at 0145958f)
+                // copied from server/mod.rs run_server (line 4373 at 86a78100)
                 CtrlReq::SplitResizeDone(cid) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_resize_done(&mut app); state_dirty = true; meta_dirty = true; } }
-                // copied from server/mod.rs run_server (line 4984 at 0145958f)
+                // copied from server/mod.rs run_server (line 4982 at 86a78100)
                 CtrlReq::SelectWindow(idx) => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     if let Some(internal_idx) = app.win_pos(idx) {
@@ -1629,15 +1642,15 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
-                // copied from server/mod.rs run_server (line 7997 at 0145958f)
+                // copied from server/mod.rs run_server (line 8005 at 86a78100)
                 CtrlReq::ScopeSessionListing(resp, text, global, mark_inherited) => {
                     let _ = resp.send(crate::server::options::scope_session_listing(&app, &text, global, mark_inherited));
                 }
-                // copied from server/mod.rs run_server (line 7994 at 0145958f)
+                // copied from server/mod.rs run_server (line 8002 at 86a78100)
                 CtrlReq::SessionOptionQuery(resp, name, global) => {
                     let _ = resp.send(crate::server::options::session_option_query(&app, &name, global));
                 }
-                // copied from server/mod.rs run_server (line 6109 at 0145958f)
+                // copied from server/mod.rs run_server (line 6107 at 86a78100)
                 CtrlReq::SetOption(option, value) => {
                     if apply_set_option(&mut app, &option, &value, false).is_ok() {
                         app.user_set_options.insert(option.clone());
@@ -1663,7 +1676,7 @@ pub(crate) fn dispatch(
                         state_dirty = true;
                     }
                 }
-                // copied from server/mod.rs run_server (line 6199 at 0145958f)
+                // copied from server/mod.rs run_server (line 6197 at 86a78100)
                 CtrlReq::SetOptionAppend(option, value) => {
                     // Append to existing option value
                     if option.starts_with('@') {
@@ -1700,7 +1713,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 6247 at 0145958f)
+                // copied from server/mod.rs run_server (line 6245 at 86a78100)
                 CtrlReq::SetOptionOnlyIfUnset(option, value, resp) => {
                     let already_set = if option.starts_with('@') {
                         app.user_options.contains_key(&option)
@@ -1734,7 +1747,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 6145 at 0145958f)
+                // copied from server/mod.rs run_server (line 6143 at 86a78100)
                 CtrlReq::SetOptionQuiet(option, value, quiet) => {
                     if apply_set_option(&mut app, &option, &value, quiet).is_ok() {
                         app.user_set_options.insert(option.clone());
@@ -1762,7 +1775,7 @@ pub(crate) fn dispatch(
                         state_dirty = true;
                     }
                 }
-                // copied from server/mod.rs run_server (line 6235 at 0145958f)
+                // copied from server/mod.rs run_server (line 6233 at 86a78100)
                 CtrlReq::SetOptionToggle(option) => {
                     // `set -g <bool-option>` with no value flips it (#535).
                     // Only the server knows the current value, so the flip has
@@ -1775,7 +1788,7 @@ pub(crate) fn dispatch(
                         state_dirty = true;
                     }
                 }
-                // copied from server/mod.rs run_server (line 6172 at 0145958f)
+                // copied from server/mod.rs run_server (line 6170 at 86a78100)
                 CtrlReq::SetOptionUnset(option) => {
                     // Restore the table default, or remove an @user-option.
                     //
@@ -1803,7 +1816,7 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 5979 at 0145958f)
+                // copied from server/mod.rs run_server (line 5977 at 86a78100)
                 CtrlReq::SetPaneOption {
                     target,
                     option,
@@ -1828,7 +1841,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(reply);
                 }
-                // copied from server/mod.rs run_server (line 7982 at 0145958f)
+                // copied from server/mod.rs run_server (line 7990 at 86a78100)
                 CtrlReq::SetSessionOption { option, value, unset, append, only_if_unset, quiet, resp } => {
                     let reply = crate::server::options::apply_set_session_option(
                         &mut app, &option, &value, unset, append, only_if_unset, quiet,
@@ -1841,7 +1854,7 @@ pub(crate) fn dispatch(
                     state_dirty = true;
                     let _ = resp.send(reply);
                 }
-                // copied from server/mod.rs run_server (line 8000 at 0145958f)
+                // copied from server/mod.rs run_server (line 8008 at 86a78100)
                 CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
                     let reply = crate::server::options::apply_set_window_option(
                         &mut app, &target, &option, &value, unset, append, only_if_unset, quiet,
@@ -1853,12 +1866,12 @@ pub(crate) fn dispatch(
                     state_dirty = true;
                     let _ = resp.send(reply);
                 }
-                // copied from server/mod.rs run_server (line 7971 at 0145958f)
+                // copied from server/mod.rs run_server (line 7979 at 86a78100)
                 CtrlReq::ShowOptionValue(resp, name) => {
                     let val = get_option_value(&app, &name);
                     let _ = resp.send(val);
                 }
-                // copied from server/mod.rs run_server (line 6280 at 0145958f)
+                // copied from server/mod.rs run_server (line 6278 at 86a78100)
                 CtrlReq::ShowOptions(resp) => {
                     let mut output = String::new();
                     output.push_str(&format!("prefix {}\n", crate::config::format_option_key(&app.prefix_key)));
@@ -2006,7 +2019,7 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(output);
                 }
-                // copied from server/mod.rs run_server (line 6003 at 0145958f)
+                // copied from server/mod.rs run_server (line 6001 at 86a78100)
                 CtrlReq::ShowPaneOptions(raw, resp) => {
                     let pane = crate::server::options::resolve_option_target_pane(&mut app, &raw);
                     let reply = match pane {
@@ -2022,23 +2035,23 @@ pub(crate) fn dispatch(
                     };
                     let _ = resp.send(reply);
                 }
-                // copied from server/mod.rs run_server (line 7975 at 0145958f)
+                // copied from server/mod.rs run_server (line 7983 at 86a78100)
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
                     let val = crate::server::options::window_option_value_for_target(&app, &name, &target);
                     let _ = resp.send(val);
                 }
-                // copied from server/mod.rs run_server (line 8014 at 0145958f)
+                // copied from server/mod.rs run_server (line 8022 at 86a78100)
                 CtrlReq::ShowWindowOptionsFor(resp, target, listing) => {
                     let index = crate::server::options::resolve_option_target_window(&app, &target).ok();
                     let _ = resp.send(crate::server::options::render_window_options_for(
                         &app, index, listing,
                     ));
                 }
-                // copied from server/mod.rs run_server (line 7979 at 0145958f)
+                // copied from server/mod.rs run_server (line 7987 at 86a78100)
                 CtrlReq::UserOptionLookup(resp, name, target, table) => {
                     let _ = resp.send(crate::server::options::lookup_user_option(&app, &name, &target, table));
                 }
-                // copied from server/mod.rs run_server (line 7692 at 0145958f)
+                // copied from server/mod.rs run_server (line 7700 at 86a78100)
                 CtrlReq::SetEnvironment(args) => {
                     // tmux global vs session scopes, removal markers and
                     // hidden entries (#775); the process environment stays
@@ -2050,11 +2063,11 @@ pub(crate) fn dispatch(
                     let sync = crate::warm_pane_sync::for_env_change();
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                 }
-                // copied from server/mod.rs run_server (line 7706 at 0145958f)
+                // copied from server/mod.rs run_server (line 7714 at 86a78100)
                 CtrlReq::ShowEnvironment(args, resp) => {
                     let _ = resp.send(crate::environ::show(&app.environment, &app.env_scopes, &args));
                 }
-                // copied from server/mod.rs run_server (line 7729 at 0145958f)
+                // copied from server/mod.rs run_server (line 7737 at 86a78100)
                 CtrlReq::ShowHooks(resp) => {
                     let mut output = String::new();
                     for (name, commands) in &app.hooks {
@@ -2071,13 +2084,13 @@ pub(crate) fn dispatch(
                     }
                     let _ = resp.send(output);
                 }
-                // copied from server/mod.rs run_server (line 7709 at 0145958f)
+                // copied from server/mod.rs run_server (line 7717 at 86a78100)
                 CtrlReq::SetHook(hook, cmd) => {
                     // Replace (not append) to match tmux semantics, prevents
                     // duplicate hooks on config reload (issue #133).
                     app.hooks.insert(hook, vec![cmd]);
                 }
-                // copied from server/mod.rs run_server (line 7714 at 0145958f)
+                // copied from server/mod.rs run_server (line 7722 at 86a78100)
                 CtrlReq::AppendHook(hook, cmd) => {
                     // -a/-ga: append to existing hook list so multiple
                     // plugins can register separate handlers (tmux semantics).
@@ -2093,11 +2106,11 @@ pub(crate) fn dispatch(
                         entry.push(cmd);
                     }
                 }
-                // copied from server/mod.rs run_server (line 7745 at 0145958f)
+                // copied from server/mod.rs run_server (line 7753 at 86a78100)
                 CtrlReq::RemoveHook(hook) => {
                     app.hooks.remove(&hook);
                 }
-                // copied from server/mod.rs run_server (line 6056 at 0145958f)
+                // copied from server/mod.rs run_server (line 6054 at 86a78100)
                 CtrlReq::BindKey(table_name, key, command, repeat, note) => {
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
@@ -2117,7 +2130,7 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 6080 at 0145958f)
+                // copied from server/mod.rs run_server (line 6078 at 86a78100)
                 CtrlReq::UnbindKey(key, table) => {
                     if let Some(kc) = parse_key_string(&key) {
                         let target = table.unwrap_or_else(|| "prefix".to_string());
@@ -2126,7 +2139,7 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 6088 at 0145958f)
+                // copied from server/mod.rs run_server (line 6086 at 86a78100)
                 CtrlReq::UnbindAll => {
                     // `unbind-key -a` with no table: the prefix table only,
                     // as tmux cmd-unbind-key.c.
@@ -2135,13 +2148,13 @@ pub(crate) fn dispatch(
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 6096 at 0145958f)
+                // copied from server/mod.rs run_server (line 6094 at 86a78100)
                 CtrlReq::UnbindAllInTable(table) => {
                     crate::config::unbind_all_in_table(&mut app, &table);
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 6101 at 0145958f)
+                // copied from server/mod.rs run_server (line 6099 at 86a78100)
                 CtrlReq::ListKeys(resp) => {
                     // Key tables plus the built-in copy-mode keys (tmux lists
                     // its copy-mode defaults, key-bindings.c).
@@ -2150,18 +2163,18 @@ pub(crate) fn dispatch(
                     let output = help::build_list_keys_output(user_iter, app.defaults_suppressed);
                     let _ = resp.send(output);
                 }
-                // copied from server/mod.rs run_server (line 6075 at 0145958f)
+                // copied from server/mod.rs run_server (line 6073 at 86a78100)
                 CtrlReq::ListKeyNotes(resp, table, all, key) => {
                     let _ = resp.send(crate::config::list_key_notes(
                         &app, table.as_deref(), all, key.as_deref(),
                     ));
                 }
-                // copied from server/mod.rs run_server (line 8288 at 0145958f)
+                // copied from server/mod.rs run_server (line 8296 at 86a78100)
                 CtrlReq::StatusMessage(msg) => {
                     app.status_message = Some((msg, std::time::Instant::now(), None));
                     state_dirty = true;
                 }
-                // copied from server/mod.rs run_server (line 7370 at 0145958f)
+                // copied from server/mod.rs run_server (line 7378 at 86a78100)
                 CtrlReq::SwitchClient(target, flag, resp_tx) => {
                     // Resolve the target session name based on the flag
                     let current = app.port_file_base();
@@ -2230,7 +2243,7 @@ pub(crate) fn dispatch(
                         let _ = rtx.send(reply);
                     }
                 }
-                // copied from server/mod.rs run_server (line 7435 at 0145958f)
+                // copied from server/mod.rs run_server (line 7443 at 86a78100)
                 CtrlReq::SwitchClientTarget(raw, resp_tx) => {
                     // #483: `switch-client -t <target>` with a full
                     // session:window.pane / @window / %pane spec. Switch the
@@ -2349,7 +2362,7 @@ pub(crate) fn dispatch(
                                                         app.last_window_idx = app.active_idx;
                                                         app.active_idx = i;
                                                     }
-                                                    if let Some(pos) = pid.checked_sub(app.pane_base_index) {
+                                                    if let Some(pos) = pid.checked_sub(app.pane_base_index_of(i)) {
                                                         crate::tree::focus_pane_by_index(app, pos);
                                                     }
                                                 });
@@ -2421,7 +2434,7 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
-                // copied from server/mod.rs run_server (line 7633 at 0145958f)
+                // copied from server/mod.rs run_server (line 7641 at 86a78100)
                 CtrlReq::SwitchClientTable(table, resp_tx) => {
                     // tmux `cmd_switch_client_exec`: `key_bindings_get_table(name, 0)`
                     // does NOT create the table, so naming one that has no
@@ -2440,11 +2453,533 @@ pub(crate) fn dispatch(
                     }
                     state_dirty = true;
                 }
+                // copied from server/mod.rs run_server (line 3563 at 86a78100)
+                CtrlReq::SelectPaneTarget { win, win_is_id, ref win_name, pane, pane_is_id, fire_hook } => {
+                    let before = active_pane_identity(&app);
+                    let internal_idx = if let Some(w) = win {
+                        if win_is_id {
+                            app.windows.iter().position(|x| x.id == w)
+                        } else {
+                            app.win_pos(w)
+                        }
+                    } else if let Some(name) = win_name.as_deref() {
+                        app.windows.iter().position(|x| x.name == name)
+                    } else {
+                        None
+                    };
+                    // tmux's cmd-select-pane.c sets the active pane INSIDE the
+                    // target window (`window_set_active_pane(w, wp, 1)`, :274,
+                    // where `w` is `target->wl->window`) and never calls
+                    // `session_select`, so the session's current window does
+                    // not move. psmux used to focus the window first, which is
+                    // why `select-pane -t s:1.0` switched the user's window
+                    // (issue #693 item 3).
+                    //
+                    // A bare `%id` names its own window (CMD_FIND_PANE), so it
+                    // reaches another window the same way an explicit
+                    // `sess:N.M` does and must leave the current window alone
+                    // just as much.
+                    let target_window = match internal_idx {
+                        Some(i) => Some(i),
+                        None => match (pane, pane_is_id) {
+                            (Some(p), true) => crate::tree::find_window_pos_of_pane_id(&app, p),
+                            _ => None,
+                        },
+                    };
+                    let other_window = target_window.filter(|i| *i != app.active_idx);
+                    if let Some(i) = other_window {
+                        let moved = match (pane, pane_is_id) {
+                            (Some(p), true) => crate::tree::set_window_active_pane_by_id(&mut app, i, p),
+                            (Some(p), false) => p.checked_sub(app.pane_base_index_of(i))
+                                .is_some_and(|pos| crate::tree::set_window_active_pane_by_index(&mut app, i, pos)),
+                            // `select-pane -t <window>` with no pane part names
+                            // that window's already active pane, so nothing
+                            // moves anywhere (tmux: `wp == w->active`, :269).
+                            (None, _) => false,
+                        };
+                        meta_dirty = true;
+                        if moved {
+                            // The active pane of ANOTHER window changed, which
+                            // `active_pane_identity` (the current window's) can
+                            // never see, so the hook is decided here.
+                            note_pane_focus_change(&app, &mut notify_events);
+                            if fire_hook {
+                                hook_event = Some("after-select-pane");
+                            }
+                        }
+                    } else {
+                    if let Some(p) = pane {
+                        let old_path = app.windows[app.active_idx].active_path.clone();
+                        if pane_is_id {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
+                        } else if let Some(pos) = p.checked_sub(app.pane_base_index_of(app.active_idx)) {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
+                        }
+                        if app.windows[app.active_idx].active_path != old_path {
+                            // tmux pushes the pane we came from onto
+                            // `w->last_panes` inside `window_set_active_pane(w,
+                            // wp, 1)` (window.c), so a `-t` select IS what
+                            // makes a later `select-pane -l` work.  psmux only
+                            // recorded it for the directional forms, so two
+                            // `-t` selects in a row left `-l` with nothing to
+                            // go back to (#693 item 5).
+                            app.last_pane_path = old_path;
+                            unzoom_if_zoomed(&mut app);
+                        }
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                            crate::tree::touch_mru(&mut win.pane_mru, pid);
+                        }
+                    }
+                    meta_dirty = true;
+                    // cmd-select-pane.c:269 returns before the hook when the
+                    // target pane is already the active one.
+                    if active_pane_identity(&app) != before {
+                        note_pane_focus_change(&app, &mut notify_events);
+                        if fire_hook {
+                            hook_event = Some("after-select-pane");
+                        }
+                    }
+                    }
+                }
+                // copied from server/mod.rs run_server (line 6780 at 86a78100)
+                CtrlReq::SelectWindowSpec { ref spec, ref pane, relative, toggle, ref resp } => {
+                    // Every symbolic and offset form goes through the same
+                    // resolver move-window and swap-window have used since
+                    // #602; select-window simply never called it (#693 item 4).
+                    // -n/-p/-l keep the hooks of NextWindow, PrevWindow and
+                    // LastWindow: before-select-window for the first two only.
+                    // A target that names nothing runs no hook at all: tmux
+                    // resolves the target before the command runs, so a miss
+                    // never reaches it. The target is resolved again after
+                    // the hook, which may have moved or killed windows.
+                    let resolved = match temp_target::select_window_target_pos(&app, spec, pane.as_deref()) {
+                        Err(msg) => Err(msg),
+                        Ok(_) => {
+                            if relative != Some(crate::types::RelativeWindow::Last) {
+                                if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                            }
+                            temp_target::select_window_target_pos(&app, spec, pane.as_deref())
+                        }
+                    };
+                    match resolved {
+                        Ok(pos) => match relative {
+                            // `-T` on the current window selects the last
+                            // one; with none it is an error and no after
+                            // hook runs (cmd-select-window.c:131-138).
+                            None => match temp_target::select_window_destination(&app, pos, toggle) {
+                                Ok(dest) => {
+                                    focus_window_at(&mut app, dest);
+                                    meta_dirty = true;
+                                    hook_event = Some("after-select-window");
+                                    let _ = resp.send(Ok(()));
+                                }
+                                Err(msg) => {
+                                    app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                                    state_dirty = true;
+                                    let _ = resp.send(Err(msg));
+                                }
+                            },
+                            // The target was only checked; the move is the
+                            // one NextWindow and PrevWindow make.
+                            Some(crate::types::RelativeWindow::Next) => {
+                                if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
+                                let _ = resp.send(Ok(()));
+                            }
+                            Some(crate::types::RelativeWindow::Prev) => {
+                                if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
+                                let _ = resp.send(Ok(()));
+                            }
+                            // And the one LastWindow makes, with its error.
+                            Some(crate::types::RelativeWindow::Last) => match app.last_window_pos() {
+                                Some(last) => {
+                                    switch_with_copy_save(&mut app, |app| {
+                                        let tmp = app.active_idx;
+                                        app.active_idx = last;
+                                        app.last_window_idx = tmp;
+                                    });
+                                    meta_dirty = true;
+                                    hook_event = Some("after-select-window");
+                                    let _ = resp.send(Ok(()));
+                                }
+                                None => { let _ = resp.send(Err("no last window".to_string())); }
+                            },
+                        },
+                        Err(msg) => {
+                            app.status_message = Some((format!("select-window: {}", msg), std::time::Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (line 4478 at 86a78100)
+                CtrlReq::SetPaneAttrs { title, style } => {
+                    // select-pane -T/-P (#592): runs under a temporary -t
+                    // focus, so "active pane" here is the target. Both
+                    // attributes apply in this single request; the temp
+                    // focus restores right after it.
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                        if let Some(t) = title {
+                            p.title_locked = !t.is_empty();
+                            p.title = t;
+                        }
+                        if let Some(s) = style {
+                            p.pane_style = Some(s);
+                        }
+                    }
+                    meta_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 4370 at 86a78100)
+                CtrlReq::SendMouse(cid) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::send_mouse_event(&mut app); state_dirty = true; meta_dirty = true; } }
+                // copied from server/mod.rs run_server (line 6132 at 86a78100)
+                CtrlReq::SetWindowSize(value) => {
+                    match crate::resize_window::set_active_window_size_mode(&mut app, value) {
+                        Ok(()) => {
+                            meta_dirty = true;
+                            state_dirty = true;
+                        }
+                        Err(error) => {
+                            app.status_message = Some((error, Instant::now(), None));
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (line 8279 at 86a78100)
+                CtrlReq::ShowTextPopup(title, content) => {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
+                    let height = (lines.len() as u16 + 2).max(5);
+                    app.mode = Mode::PopupMode {
+                        look: crate::popup::PopupLook::titled(&title),
+                        command: title,
+                        output: content,
+                        process: None,
+                        width: width.min(120),
+                        height,
+                        close_on_exit: false,
+                        popup_pane: None,
+                        scroll_offset: 0,
+                    };
+                    state_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 4340 at 86a78100)
+                CtrlReq::MouseDown(cid,x,y) => { if app.mouse_enabled { let previous = crate::program_status::focused_identity(&app); app.latest_client_id = Some(cid); remote_mouse_down(&mut app, x, y); if crate::program_status::focused_identity(&app) != previous { crate::program_status::acknowledge_focused(&app); } state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4341 at 86a78100)
+                CtrlReq::MouseDownRight(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 2, true); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4342 at 86a78100)
+                CtrlReq::MouseDownMiddle(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 1, true); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4343 at 86a78100)
+                CtrlReq::MouseDrag(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_drag(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4344 at 86a78100)
+                CtrlReq::MouseUp(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4345 at 86a78100)
+                CtrlReq::MouseUpRight(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 2, false); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4346 at 86a78100)
+                CtrlReq::MouseUpMiddle(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_button(&mut app, x, y, 1, false); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // #604: a bare pointer move only earns a redraw if it actually
+                // reached a pane.  Nothing the server renders depends on the
+                // pointer position (border hover highlighting is drawn by the
+                // client from its own pointer state), so marking the whole
+                // state dirty here pushed a full frame and repainted the entire
+                // screen for every pointer sample.  This is the same rule as
+                // the PaneMouse arm below, for pointer samples that land
+                // outside every pane.
+                // copied from server/mod.rs run_server (line 4355 at 86a78100)
+                CtrlReq::MouseMove(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); if remote_mouse_motion(&mut app, x, y) { state_dirty = true; echo_pending_until = Some(Instant::now()); } } }
+                // copied from server/mod.rs run_server (line 4368 at 86a78100)
+                CtrlReq::MouseKey(cid, name, target, col, row, btn) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_mouse_key(&mut app, &name, &target, col, row, btn); state_dirty = true; meta_dirty = true; } }
+                // copied from server/mod.rs run_server (line 4369 at 86a78100)
+                CtrlReq::MouseForward(cid, pane_id, btn, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::forward_mouse_to_pane(&mut app, pane_id, btn, press, Some((col, row))); state_dirty = true; } }
+                // copied from server/mod.rs run_server (line 4356 at 86a78100)
+                CtrlReq::ScrollUp(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4357 at 86a78100)
+                CtrlReq::ScrollDown(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_down(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // #604: `pane-mouse <id> 35 ...` is a bare pointer move.  When
+                // the pane never asked for any-event tracking it changes
+                // nothing, so it must not push a frame and repaint the client.
+                // Measured on this tree with PSMUX_CLIENT_DEBUG=1: sweeping the
+                // pointer 60 times across a pane running nvim drove 24 full
+                // client redraws, against 0 while idle.  With this gate and the
+                // client-side one in client.rs it is 1, the same as idle.
+                // copied from server/mod.rs run_server (line 4365 at 86a78100)
+                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); handle_pane_mouse(&mut app, pane_id, button, col, row, press); if button == 0 && press { crate::window_ops::note_pane_press(&mut app, pane_id, col, row); } if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
+                // copied from server/mod.rs run_server (line 4371 at 86a78100)
+                CtrlReq::PaneScroll(cid, pane_id, up, at, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_pane_wheel(&mut app, pane_id, up, at, mods); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4247 at 86a78100)
+                CtrlReq::CopyEnter => { enter_copy_mode(&mut app); hook_event = Some("pane-mode-changed"); }
+                // copied from server/mod.rs run_server (line 4248 at 86a78100)
+                CtrlReq::CopyModeCmd(flags) => {
+                    match crate::copy_mode::run_copy_mode_command(&mut app, flags) {
+                        crate::copy_mode::CopyModeOutcome::ModeChanged => {
+                            state_dirty = true;
+                            hook_event = Some("pane-mode-changed");
+                        }
+                        crate::copy_mode::CopyModeOutcome::Nothing => {}
+                        crate::copy_mode::CopyModeOutcome::ForwardPageUp => {
+                            // scroll-enter-copy-mode is off: forward PageUp to the
+                            // active pane so apps like less/vim/WSL receive it (#284).
+                            send_text_to_active(&mut app, "\x1b[5~")?;
+                            echo_pending_until = Some(Instant::now());
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (line 7672 at 86a78100)
+                CtrlReq::CopyModePageUp => {
+                    // Same motion as `copy-mode -u`: enter copy mode and scroll
+                    // up one page.  This used to move the cursor 20 rows, which
+                    // is neither a page nor anything tmux does.
+                    enter_copy_mode(&mut app);
+                    crate::copy_mode::page_scroll(&mut app, true, false);
+                }
+                // copied from server/mod.rs run_server (line 4264 at 86a78100)
+                CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }
+                // copied from server/mod.rs run_server (line 4265 at 86a78100)
+                CtrlReq::CopyAnchor => { if let Some((r,c)) = current_prompt_pos(&mut app) { app.copy_anchor = Some((r,c)); app.copy_anchor_scroll_offset = app.copy_scroll_offset; app.copy_pos = Some((r,c)); } }
+                // copied from server/mod.rs run_server (line 4266 at 86a78100)
+                CtrlReq::CopyYank => {
+                    let _ = yank_selection(&mut app);
+                    if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    exit_copy_mode(&mut app);
+                    hook_event = Some("pane-mode-changed");
+                }
+                // copied from server/mod.rs run_server (line 4272 at 86a78100)
+                CtrlReq::CopyRectToggle => {
+                    crate::copy_mode::toggle_rectangle(&mut app);
+                }
+                // copied from server/mod.rs run_server (line 4366 at 86a78100)
+                CtrlReq::CopyDragBegin(cid, pane_id, a_col, a_row, c_col, c_row, rect_sel) => { if app.mouse_enabled { app.latest_client_id = Some(cid); copy_drag_begin(&mut app, pane_id, a_col, a_row, c_col, c_row, rect_sel); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                // copied from server/mod.rs run_server (line 4263 at 86a78100)
+                CtrlReq::ClockMode => { app.mode = Mode::ClockMode; state_dirty = true; hook_event = Some("pane-mode-changed"); }
+                // copied from server/mod.rs run_server (line 4367 at 86a78100)
+                CtrlReq::StatusWheel(cid, up, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_status_wheel(&mut app, up, mods); state_dirty = true; meta_dirty = true; } }
+                // copied from server/mod.rs run_server (line 8072 at 86a78100)
+                CtrlReq::FocusIn => {
+                    if app.focus_events {
+                        // Forward focus-in escape sequence to all panes in active window
+                        let win = &mut app.windows[app.active_idx];
+                        fn send_focus_seq(node: &mut Node, seq: &[u8]) {
+                            match node {
+                                Node::Leaf(p) => { let _ = p.writer.write_all(seq); let _ = p.writer.flush(); }
+                                Node::Split { children, .. } => { for c in children { send_focus_seq(c, seq); } }
+                            }
+                        }
+                        send_focus_seq(&mut win.root, b"\x1b[I");
+                    }
+                    hook_event = Some("pane-focus-in");
+                }
+                // copied from server/mod.rs run_server (line 8086 at 86a78100)
+                CtrlReq::FocusOut => {
+                    if app.focus_events {
+                        let win = &mut app.windows[app.active_idx];
+                        fn send_focus_seq(node: &mut Node, seq: &[u8]) {
+                            match node {
+                                Node::Leaf(p) => { let _ = p.writer.write_all(seq); let _ = p.writer.flush(); }
+                                Node::Split { children, .. } => { for c in children { send_focus_seq(c, seq); } }
+                            }
+                        }
+                        send_focus_seq(&mut win.root, b"\x1b[O");
+                    }
+                    hook_event = Some("pane-focus-out");
+                }
+                // copied from server/mod.rs run_server (line 7162 at 86a78100)
+                CtrlReq::SetClientFocus(cid, focused) => {
+                    if let Some(info) = app.client_registry.get_mut(&cid) {
+                        info.focused = focused;
+                    }
+                }
+                // copied from server/mod.rs run_server (line 8099 at 86a78100)
+                CtrlReq::CommandPrompt(args, wait, resp) => {
+                    // Opened on an attached client, which gets it in its next
+                    // state frame (#789 follow up). It used to open a prompt in
+                    // the server that no client drew, with only -I kept.
+                    match helpers::request_client_prompt(&mut app, &args) {
+                        Ok(helpers::PromptRequestOutcome::Queued(id)) => {
+                            if wait {
+                                app.prompt_waiters.push((id, resp));
+                            } else {
+                                let _ = resp.send(String::new());
+                            }
+                            state_dirty = true;
+                        }
+                        Ok(helpers::PromptRequestOutcome::Ignored) => { let _ = resp.send(String::new()); }
+                        Err(e) => { let _ = resp.send(format!("ERROR: {}", e)); }
+                    }
+                }
+                // copied from server/mod.rs run_server (line 8116 at 86a78100)
+                CtrlReq::PromptDone(id) => {
+                    app.finish_prompt_request(id);
+                    state_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 8221 at 86a78100)
+                CtrlReq::OverlayClose => {
+                    match app.mode {
+                        Mode::PopupMode { .. } | Mode::MenuMode { .. } | Mode::ConfirmMode { .. } | Mode::PaneChooser { .. } | Mode::ClockMode | Mode::CustomizeMode { .. } => {
+                            app.mode = Mode::Passthrough;
+                            state_dirty = true;
+                        }
+                        _ => {}
+                    }
+                }
+                // copied from server/mod.rs run_server (line 5647 at 86a78100)
+                CtrlReq::ResizePane(dir, amount) => {
+                    // A focused floating pane resizes itself (and its PTY) instead
+                    // of the tiled layout.
+                    let mut handled_float = false;
+                    {
+                        let win_w = app.last_window_area.width.max(10);
+                        let win_h = app.last_window_area.height.max(10);
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(fi) = win.floating_focus {
+                            if let Some(fp) = win.floating.get_mut(fi) {
+                                let d = amount as i16;
+                                match dir.as_str() {
+                                    "L" => fp.w = (fp.w as i16 - d).max(3) as u16,
+                                    "R" => fp.w = (fp.w as i16 + d).max(3) as u16,
+                                    "U" => fp.h = (fp.h as i16 - d).max(3) as u16,
+                                    "D" => fp.h = (fp.h as i16 + d).max(3) as u16,
+                                    _ => {}
+                                }
+                                fp.w = fp.w.min(win_w);
+                                fp.h = fp.h.min(win_h);
+                                let (nx, ny) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
+                                fp.x = nx; fp.y = ny;
+                                let inner_h = fp.h.saturating_sub(2).max(1);
+                                let inner_w = fp.w.saturating_sub(2).max(1);
+                                if fp.pane.last_rows != inner_h || fp.pane.last_cols != inner_w {
+                                    let _ = fp.pane.master.resize(portable_pty::PtySize { rows: inner_h, cols: inner_w, pixel_width: 0, pixel_height: 0 });
+                                    if let Ok(mut parser) = fp.pane.term.lock() { parser.screen_mut().set_size(inner_h, inner_w); }
+                                    fp.pane.last_rows = inner_h;
+                                    fp.pane.last_cols = inner_w;
+                                }
+                                handled_float = true;
+                            }
+                        }
+                    }
+                    if handled_float {
+                        state_dirty = true;
+                    } else {
+                        unzoom_if_zoomed(&mut app);
+                        match dir.as_str() {
+                            "U" | "D" => { resize_pane_vertical(&mut app, if dir == "U" { -(amount as i16) } else { amount as i16 }); }
+                            "L" | "R" => { resize_pane_horizontal(&mut app, if dir == "L" { -(amount as i16) } else { amount as i16 }); }
+                            _ => {}
+                        }
+                        resize_all_panes(&mut app); meta_dirty = true;
+                        hook_event = Some("after-resize-pane");
+                    }
+                }
+                // copied from server/mod.rs run_server (line 7931 at 86a78100)
+                CtrlReq::ResizePaneAbsolute(axis, size) => {
+                    // tmux: resize-pane -x/-y sets the focused float's absolute
+                    // OUTER size (and its PTY) instead of the tiled pane.
+                    let mut handled_float = false;
+                    {
+                        let win_w = app.last_window_area.width.max(10);
+                        let win_h = app.last_window_area.height.max(10);
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(fi) = win.floating_focus {
+                            if let Some(fp) = win.floating.get_mut(fi) {
+                                match axis.as_str() {
+                                    "x" => fp.w = size.max(3).min(win_w),
+                                    "y" => fp.h = size.max(3).min(win_h),
+                                    _ => {}
+                                }
+                                let (nx, ny) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
+                                fp.x = nx; fp.y = ny;
+                                let inner_h = fp.h.saturating_sub(2).max(1);
+                                let inner_w = fp.w.saturating_sub(2).max(1);
+                                if fp.pane.last_rows != inner_h || fp.pane.last_cols != inner_w {
+                                    let _ = fp.pane.master.resize(portable_pty::PtySize { rows: inner_h, cols: inner_w, pixel_width: 0, pixel_height: 0 });
+                                    if let Ok(mut parser) = fp.pane.term.lock() { parser.screen_mut().set_size(inner_h, inner_w); }
+                                    fp.pane.last_rows = inner_h;
+                                    fp.pane.last_cols = inner_w;
+                                }
+                                handled_float = true;
+                            }
+                        }
+                    }
+                    if handled_float {
+                        state_dirty = true;
+                    } else {
+                        unzoom_if_zoomed(&mut app);
+                        resize_pane_absolute(&mut app, &axis, size);
+                        resize_all_panes(&mut app);
+                        hook_event = Some("after-resize-pane");
+                    }
+                }
+                // copied from server/mod.rs run_server (line 7969 at 86a78100)
+                CtrlReq::ResizePanePercent(axis, pct) => {
+                    unzoom_if_zoomed(&mut app);
+                    // Convert percentage to absolute size based on current window dimensions
+                    let area = app.last_window_area;
+                    let total = if axis == "x" { area.width } else { area.height };
+                    let abs_size = ((total as u32) * (pct as u32) / 100).max(1) as u16;
+                    resize_pane_absolute(&mut app, &axis, abs_size);
+                    resize_all_panes(&mut app);
+                    hook_event = Some("after-resize-pane");
+                }
+                // copied from server/mod.rs run_server (line 8045 at 86a78100)
+                CtrlReq::SendPrefix => {
+                    // Send the prefix key to the active pane as if typed
+                    // Nothing to send when the prefix is None (tmux cmd-send-keys.c).
+                    let encoded: Vec<u8> = match app.prefix_key {
+                        Some((crossterm::event::KeyCode::Char(c), m)) if m.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                            vec![(c.to_ascii_lowercase() as u8) & 0x1F]
+                        }
+                        Some((crossterm::event::KeyCode::Char(c), _)) => format!("{}", c).into_bytes(),
+                        _ => vec![],
+                    };
+                    if !encoded.is_empty() {
+                        let win = &mut app.windows[app.active_idx];
+                        // send-prefix is a key (tmux window_pane_key), so an
+                        // input-off pane does not get it.
+                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
+                            let _ = p.writer.write_all(&encoded);
+                            let _ = p.writer.flush();
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (line 5869 at 86a78100)
+                CtrlReq::DisplayPanes => {
+                    app.mode = Mode::PaneChooser { opened_at: std::time::Instant::now() };
+                    state_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 5873 at 86a78100)
+                CtrlReq::DisplayPaneSelect(digit) => {
+                    let previous = crate::program_status::focused_identity(&app);
+                    // User pressed a digit during display-panes overlay: select the matching pane
+                    let win = &app.windows[app.active_idx];
+                    let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
+                    crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                    for (i, (path, _)) in rects.iter().enumerate() {
+                        if i >= 10 { break; }
+                        let mapped = (i + app.pane_base_index_of(app.active_idx)) % 10;
+                        if mapped == digit {
+                            let new_path = path.clone();
+                            let old_path = app.windows[app.active_idx].active_path.clone();
+                            app.windows[app.active_idx].active_path = new_path;
+                            if crate::program_status::focused_identity(&app) != previous {
+                                crate::program_status::acknowledge_focused(&app);
+                            }
+                            if app.windows[app.active_idx].active_path != old_path {
+                                app.last_pane_path = old_path;
+                            }
+                            break;
+                        }
+                    }
+                    app.mode = Mode::Passthrough;
+                    state_dirty = true;
+                    meta_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 5694 at 86a78100)
+                CtrlReq::SetBuffer(content) => {
+                    app.paste_add(content);
+                }
                 // shared: everything step 2 does not handle (see the module
                 // comment). Its reply channel, if any, closes here.
                 _ => {}
         }
-        // copied from run_server (server/mod.rs at 0145958f, after the match):
+        // copied from run_server (server/mod.rs at 86a78100, after the match):
         // notification hooks, the after-<command> hook, the focus restore.
         for event in std::mem::take(&mut notify_events) {
             let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();

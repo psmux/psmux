@@ -129,8 +129,30 @@ enum Msg {
 #[derive(Clone)]
 struct Peer {
     sid: usize,
+    name: String,
     port: u16,
     key: String,
+}
+
+/// Deliver one server wide write to a session through its own listener,
+/// exactly as a client sends it, and wait for the reply. Registered as an
+/// echo first, so the session runs it without propagating it again.
+fn deliver(globals: &Globals, p: &Peer, line: &str) {
+    globals.expect_echo(p.sid, line);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], p.port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+        return;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = write!(s, "AUTH {}\n{}\n", p.key, line);
+    let _ = s.flush();
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let mut sink = [0u8; 4096];
+    while let Ok(k) = io::Read::read(&mut s, &mut sink) {
+        if k == 0 {
+            break;
+        }
+    }
 }
 
 /// What every session's connection threads share about the server.
@@ -280,16 +302,19 @@ fn run(ns: Option<String>) -> ! {
         port: control_port,
         key: control_key.clone(),
     };
+    let globals: Arc<Globals> = Arc::new(Globals::default());
     {
         let tx = msg_tx.clone();
         let key = control_key.clone();
+        let globals = globals.clone();
         thread::spawn(move || {
             for conn in control.incoming() {
                 let Ok(stream) = conn else { continue };
                 clear_inherit_socket(&stream);
                 let tx = tx.clone();
                 let key = key.clone();
-                thread::spawn(move || serve_control(stream, &key, tx));
+                let globals = globals.clone();
+                thread::spawn(move || serve_control(stream, &key, tx, &globals));
             }
         });
     }
@@ -299,7 +324,6 @@ fn run(ns: Option<String>) -> ! {
     }
 
     let pty_system = native_pty_system();
-    let globals: Arc<Globals> = Arc::new(Globals::default());
     let mut ids = ServerIds::new();
     let mut sessions: BTreeMap<usize, Session> = BTreeMap::new();
     let mut had_session = false;
@@ -465,8 +489,27 @@ fn enter(s: &mut Session, ids: &ServerIds, ns: &Option<String>) {
 /// One session's upkeep for one loop pass (copied from the tail of
 /// run_server's loop iteration, server/mod.rs at 0145958f).
 fn upkeep(app: &mut AppState, lp: &mut SessionLoop, pty_system: &dyn portable_pty::PtySystem) -> io::Result<Flow> {
-    let _ = pty_system;
     crate::format::set_sessionless(false);
+    // copied from run_server (cc32087b): a set-option a hook or a key binding
+    // ran in process already wrote its value; this is the rest of what the
+    // SetOption request does.
+    for option in std::mem::take(&mut app.in_process_option_writes) {
+        let sync = crate::warm_pane_sync::for_option_change(&option, app);
+        crate::warm_pane_sync::apply(app, pty_system, sync);
+        if option == "command-alias" {
+            if let Ok(mut map) = lp.aliases.write() {
+                *map = app.command_aliases.clone();
+            }
+        }
+        if option == "pane-border-status" {
+            resize_all_panes(app);
+        }
+        if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
+            resize_all_panes(app);
+        }
+        lp.meta_dirty = true;
+        lp.state_dirty = true;
+    }
     if lp.last_alert_check.elapsed() >= Duration::from_secs(1) {
         lp.last_alert_check = Instant::now();
         let alerts = helpers::check_window_activity(app);
@@ -757,13 +800,9 @@ fn create_session(
         }
         // The server wide writes made so far (set -g, setenv -g, set-hook -g,
         // bind): tmux keeps them once per server, so a new session sees them.
-        let replay: Vec<String> = globals.replay.lock().map(|r| r.clone()).unwrap_or_default();
-        for w in &replay {
-            // execute_command_string applies it and also hands it to this
-            // session's own listener: that delivery is not a new write.
-            globals.expect_echo(sid, w);
-            let _ = execute_command_string(&mut app, w);
-        }
+        // The server wide writes made so far are delivered to this session by
+        // the control connection that asked for it (`serve_control`), through
+        // its listener like any other delivery, before the CLI gets its reply.
         // No spare panes in step 2 (the refill channel is never set).
         app.warm_pane.target = 0;
         if let Ok(mut w) = aliases.write() {
@@ -791,7 +830,7 @@ fn create_session(
         return Err(msg);
     }
     if let Ok(mut p) = globals.peers.write() {
-        p.push(Peer { sid, port, key: session_key });
+        p.push(Peer { sid, name: name.clone(), port, key: session_key });
     }
     Ok(Session { app, lp: SessionLoop::new(aliases), cwd, port, stop, _guard: guard })
 }
@@ -930,21 +969,7 @@ fn apply_global_writes(line: &str, sid: usize, globals: &Globals) {
         .unwrap_or_default();
     for p in others {
         for w in &writes {
-            globals.expect_echo(p.sid, w);
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], p.port));
-            let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
-                continue;
-            };
-            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-            let _ = write!(s, "AUTH {}\n{}\n", p.key, w);
-            let _ = s.flush();
-            let _ = s.shutdown(std::net::Shutdown::Write);
-            let mut sink = [0u8; 4096];
-            while let Ok(k) = io::Read::read(&mut s, &mut sink) {
-                if k == 0 {
-                    break;
-                }
-            }
+            deliver(globals, &p, w);
         }
     }
 }
@@ -980,7 +1005,7 @@ fn refuse(stream: std::net::TcpStream, outcome: &Outcome, opening_lines: usize) 
 /// `AUTH <key>`, then `new-session` followed by `field=value` lines (values
 /// escaped by `router::encode_field`) and `end`, or `ping`. The reply is
 /// written by `reply::reply_text`.
-fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>) {
+fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>, globals: &Globals) {
     use std::io::BufRead;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut w = match stream.try_clone() {
@@ -1033,6 +1058,21 @@ fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>) 
     let outcome = rrx
         .recv_timeout(Duration::from_secs(60))
         .unwrap_or_else(|_| Outcome::Failed("no response from server (timed out)".into()));
+    // A new session gets the server wide writes made so far (tmux keeps them
+    // once per server), delivered from this thread through its listener so
+    // the loop is free to serve them, before the CLI hears it was made.
+    if let Outcome::Done(ref text) = outcome {
+        let name = text.lines().next().and_then(|l| l.strip_prefix("session="));
+        let peer = name.and_then(|n| {
+            globals.peers.read().ok().and_then(|p| p.iter().find(|p| p.name == n).cloned())
+        });
+        if let Some(peer) = peer {
+            let writes: Vec<String> = globals.replay.lock().map(|r| r.clone()).unwrap_or_default();
+            for w in &writes {
+                deliver(globals, &peer, w);
+            }
+        }
+    }
     let mut text = String::from("OK\n");
     text.push_str(&reply::reply_text(&outcome));
     let _ = w.write_all(text.as_bytes());
