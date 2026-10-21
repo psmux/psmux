@@ -136,7 +136,9 @@ fn issue690_relative_beats_an_id_target_too() {
 #[test]
 fn issue690_no_target_emits_nothing() {
     assert_eq!(count(&[], None, false, None), 0);
-    assert_eq!(count(&["-T"], None, true, None), 0);
+    // `-T` with no target names the current window, which it toggles away
+    // from (cmd-select-window.c:131-138): one request, still at most one.
+    assert_eq!(count(&["-T"], None, true, None), 1);
 }
 
 #[test]
