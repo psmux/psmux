@@ -355,6 +355,93 @@ try {
     Check ($after.Count -eq 1 -and $after[0].ProcessId -eq $warmPid) "the standby is the same process, unclaimed" (($after | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }) -join ' | ')
     Check ((Pid-Of $w 'SH') -eq (Shared-Procs $w.Ns)[0].ProcessId) "SH lives in the shared server, not in the standby"
     Check ((((Run $w '<unset>' @('ls', '-F', '#{session_name}')).Out -split "`n" | Sort-Object) -join ',') -eq 'PS,SH') "ls sees both kinds in a mixed namespace"
+
+    Head "Part 10: master's fixes since 0145958f, in shared mode"
+    $k = New-Ns "k"
+    foreach ($s in 'H', 'J') { Run $k 'shared' @('new-session', '-d', '-s', $s, '-x', '120', '-y', '30') | Out-Null }
+    Check (@(Server-Procs $k.Ns).Count -eq 1) "H and J in one shared server"
+
+    # cc32087b: a set-option run from a hook applies once.
+    S $k @('set-hook', '-t', 'H', 'after-new-window', 'set -ga @hk a') | Out-Null
+    S $k @('new-window', '-t', 'H') | Out-Null
+    $null = Wait-Until { (S $k @('show', '-gv', '-t', 'H', '@hk')).Out -ne '' } 5000
+    Start-Sleep -Milliseconds 300
+    $v = (S $k @('show', '-gv', '-t', 'H', '@hk')).Out
+    Check ($v -eq 'a') "set -ga from an after-new-window hook appends once (cc32087b)" "[$v]"
+
+    # 8c3708bb: select-window -T on the current window selects the last one.
+    $cur = { (S $k @('display-message', '-p', '-t', 'H', '#{window_index}')).Out }
+    $before = & $cur
+    S $k @('select-window', '-T', '-t', 'H:1') | Out-Null
+    $after1 = & $cur
+    Check ($before -eq '1' -and $after1 -eq '0') "select-window -T on the current window goes to the last window (8c3708bb)" "($before -> $after1)"
+    S $k @('select-window', '-T', '-t', 'H:1') | Out-Null
+    Check ((& $cur) -eq '1') "select-window -T on another window selects it"
+    $r = S $k @('select-window', '-T', '-t', 'J:0')
+    Check ($r.Out -match 'no last window') "select-window -T with no last window is tmux's error" "($($r.Code)) $($r.Out)"
+
+    # 7cd8dc4e: set -w pane-base-index renumbers that window only.
+    S $k @('split-window', '-t', 'H:0') | Out-Null
+    S $k @('split-window', '-t', 'H:1') | Out-Null
+    S $k @('set', '-w', '-t', 'H:1', 'pane-base-index', '1') | Out-Null
+    $p1 = ((S $k @('list-panes', '-t', 'H:1', '-F', '#{pane_index}')).Out -split "`n") -join ' '
+    $p0 = ((S $k @('list-panes', '-t', 'H:0', '-F', '#{pane_index}')).Out -split "`n") -join ' '
+    Check ($p1 -eq '1 2' -and $p0 -eq '0 1') "set -w pane-base-index renumbers that window only (7cd8dc4e)" "H:1=[$p1] H:0=[$p0]"
+    Check ((S $k @('select-pane', '-t', 'H:0.0')).Code -eq 0) "and H:0.0 still names a pane"
+
+    # 063ca702: a pane's OSC 52 write reaches its session's attached client.
+    function Open-Client($c, $session) {
+        $port = [int](Get-Content (Join-Path $c.Dir "$($c.Ns)__$session.port")).Trim()
+        $key = (Get-Content (Join-Path $c.Dir "$($c.Ns)__$session.key")).Trim()
+        $t = New-Object Net.Sockets.TcpClient; $t.Connect('127.0.0.1', $port)
+        $st = $t.GetStream(); $wr = New-Object IO.StreamWriter($st); $wr.NewLine = "`n"
+        $wr.WriteLine("AUTH $key"); $wr.WriteLine("PERSISTENT"); $wr.WriteLine("client-size 120 30"); $wr.WriteLine("client-attach"); $wr.WriteLine("dump-state"); $wr.Flush()
+        return @{ T = $t; W = $wr; R = (New-Object IO.StreamReader($st)); S = $st; Lines = (New-Object Collections.Generic.List[string]) }
+    }
+    function Pump-Client($c, $ms) {
+        $c.S.ReadTimeout = 200
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt $ms) { try { $l = $c.R.ReadLine(); if ($null -eq $l) { break }; $c.Lines.Add($l) } catch { } }
+    }
+    S $k @('set', '-g', 'set-clipboard', 'on') | Out-Null
+    $ch = Open-Client $k 'H'; $cj = Open-Client $k 'J'
+    Pump-Client $ch 1500; Pump-Client $cj 300
+    $ch.Lines.Clear(); $cj.Lines.Clear()
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('OSCSHARED798'))
+    S $k @('send-keys', '-t', 'H', ("[Console]::Write([char]27 + ']52;c;' + '" + $b64 + "' + [char]7)"), 'Enter') | Out-Null
+    Pump-Client $ch 4000; Pump-Client $cj 1000
+    $hasClip = @($ch.Lines | Where-Object { $_ -match ('"clipboard_osc52":"' + [regex]::Escape($b64) + '"') }).Count
+    $jClip = @($cj.Lines | Where-Object { $_ -match 'clipboard_osc52' }).Count
+    Check ($hasClip -ge 1) "an OSC 52 write in H reaches H's attached client as clipboard_osc52 (063ca702)" "($hasClip of $($ch.Lines.Count) lines)"
+    Check ($jClip -eq 0) "and never J's client" "($jClip)"
+    foreach ($c in $ch, $cj) { try { $c.W.WriteLine("client-detach"); $c.W.Flush() } catch {}; $c.T.Close() }
+
+    # e3a0498c: C-Space reaches a pane in extended key mode 2 as CSI 27;5;32~.
+    $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    if (-not (Test-Path $csc)) { $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe" }
+    $REC = Join-Path $ROOT "rec860.exe"
+    & $csc /nologo /platform:x64 /out:$REC "$PSScriptRoot\rec860.cs" 2>&1 | Out-Null
+    if (Test-Path $REC) {
+        S $k @('set', '-g', 'extended-keys', 'on') | Out-Null
+        $log = Join-Path $ROOT "rec798.txt"
+        S $k @('new-window', '-t', 'J', '--', $REC, 'vt', $log, '\e[>4;2m') | Out-Null
+        $null = Wait-Until { (Get-Content $log -EA SilentlyContinue) -match 'READY' } 10000
+        Start-Sleep -Milliseconds 700
+        Check ((S $k @('display-message', '-p', '-t', 'J', '#{pane_key_mode}')).Out -eq 'Ext 2') "the recorder pane is in extended key mode 2"
+        foreach ($key in '|', 'C-Space', '|') { S $k @('send-keys', '-t', 'J', $key) | Out-Null; Start-Sleep -Milliseconds 150 }
+        Start-Sleep -Milliseconds 800
+        $bytes = @()
+        foreach ($l in (Get-Content $log -EA SilentlyContinue)) {
+            if ($l -match '^BYTES .*hex=\[ ([0-9A-Fa-f ]+) \]') { $bytes += ($Matches[1].Trim() -split '\s+') }
+        }
+        $stream = ($bytes -join ' ').ToUpper()
+        $want = '7C 1B 5B 32 37 3B 35 3B 33 32 7E 7C'
+        Check ($stream -match [regex]::Escape($want)) "send-keys C-Space reaches it as CSI 27;5;32~ (e3a0498c)" "[$stream]"
+    } else {
+        Fail "could not build tests\rec860.cs for the extended keys check"
+    }
+    $r = Run $k '<unset>' @('kill-server')
+    Check ($r.Code -eq 0 -and (Wait-Until { @(Server-Procs $k.Ns).Count -eq 0 } 5000)) "kill-server ends that shared server"
 } finally {
     Remove-Item Env:PSMUX_SERVER_MODE -EA SilentlyContinue
     foreach ($p in $script:Windows) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -EA SilentlyContinue } }
