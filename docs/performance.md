@@ -82,11 +82,15 @@ Per pane the server adds three threads (ConPTY reader, VT parser, write queue) a
 
 ## Attached client memory under stalled output
 
-The attached client's incoming queue holds at most 16 messages. If the terminal
-stops accepting output, the socket reader waits for queue space instead of
-accumulating frames indefinitely. Frames and control directives remain ordered
-and are not dropped; the server's existing frame slot coalesces pending snapshots
-when TCP backpressure reaches it. This is separate from pane scrollback storage.
+If the terminal stops accepting output (a console selection, a stalled SSH
+pipe), the attached client keeps reading from the server but keeps only the
+newest frame: a frame that arrives behind a frame still waiting to be drawn
+replaces it, the same thing the render loop does with a backlog. Directives
+such as detach and session switch keep their order. Memory stays at one frame,
+the server keeps counting the client as attached however long the stall lasts,
+and the screen is redrawn from current state when the terminal catches up,
+which is how tmux treats a tty that cannot keep up. This is separate from pane
+scrollback storage.
 
 On Windows, the isolated regression compares responsive and blocked terminal
 output, checks private committed memory stays below 16 MiB with 13.7 KB frames,
@@ -94,10 +98,14 @@ then resumes output and verifies clean server-directed detach:
 
 ```powershell
 python tests\test_client_frame_backpressure.py --exe target\release\tmux.exe
+$env:PSMUX_TEST_EXE = "$PWD\target\release\psmux.exe"; .\tests\test_issue882_client_output_stall.ps1
 ```
 
-The test uses its own data directory and namespace with a synthetic loopback
-server; it never starts a pane or modifies the default session registry.
+The Python test uses its own data directory and namespace with a synthetic
+loopback server and never starts a pane. The PowerShell test runs a real server
+in its own data directory and `-L` namespace, floods a pane, leaves the client's
+output unread past the server's 5 second write timeout, and checks memory,
+`list-clients`, `destroy-unattached` and a clean detach.
 
 ## The extreme scale harness
 
