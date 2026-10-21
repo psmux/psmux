@@ -5075,7 +5075,14 @@ pub fn push_frame(frame: &str) {
                     // is what keeps a flooding pane from queueing one message
                     // per batch.
                     let was_empty = s.is_none();
-                    *s = Some(frame.to_string());
+                    let mut frame = frame.to_string();
+                    // An unread frame being replaced keeps its clipboard
+                    // write and bell (frame_oneshot): they are events, not
+                    // screen state, and the newer snapshot does not have them.
+                    if let Some(mut older) = s.take() {
+                        crate::frame_oneshot::supersede(&mut older, &mut frame);
+                    }
+                    *s = Some(frame);
                     drop(s);
                     if was_empty {
                         let _ = poke.send(WriterWake::Frame);

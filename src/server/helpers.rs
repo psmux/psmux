@@ -823,6 +823,15 @@ pub(crate) fn drain_osc52(app: &mut AppState) {
     app.clipboard_osc52 = Some(text);
 }
 
+/// The clipboard write and bell staged for the next frame, taken so they go
+/// out once.
+pub(crate) fn take_frame_oneshots(app: &mut AppState) -> crate::frame_oneshot::OneShots {
+    crate::frame_oneshot::OneShots {
+        clip_b64: app.clipboard_osc52.take().map(|t| crate::util::base64_encode(&t)),
+        bell: std::mem::take(&mut app.bell_forward),
+    }
+}
+
 /// Drain a pending OSC 52 clipboard payload from any pane in the tree.
 /// Returns the first `(selector, base64_data)` found and clears it on the
 /// source pane.  Lets a child process inside any pane (e.g. Claude Code's

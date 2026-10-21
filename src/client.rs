@@ -4146,7 +4146,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Buffered OSC 52 clipboard text — written AFTER terminal.draw() to
     // avoid corrupting ratatui's output buffer.
     let mut pending_osc52: Option<String> = None;
-    let mut pending_bell = false;
     // Last OSC 0 (host terminal title) value emitted to the host terminal.
     // Tracked across iterations so we only re-emit when the title changes.
     let mut last_emitted_host_title: Option<String> = None;
@@ -4233,6 +4232,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Drain channel, keeping only the most recent frame.
         let mut got_frame = false;
         let mut _nc_count = 0u32;
+        let mut drained_oneshots = crate::frame_oneshot::OneShots::default();
         loop {
             match frame_rx.try_recv() {
                 Ok(line) => {
@@ -4291,6 +4291,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             client_log("frame", &format!("received {} bytes", line.len()));
                         }
                         crate::pty_trace::mark_plain("d", line.len());
+                        // The clipboard write and bell come off the frame
+                        // here, before the next frame in this drain replaces
+                        // it, and the frame kept for rendering never carries
+                        // them, so a redraw from it cannot repeat them.
+                        let mut line = line;
+                        drained_oneshots.merge_newer(crate::frame_oneshot::take(&mut line));
                         dump_buf = line; got_frame = true; dump_in_flight = false;
                     }
                 }
@@ -4304,6 +4310,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     break;
                 }
             }
+        }
+        // ── OSC 52 and bell from the server, once each, now ─────────────
+        // Not tied to drawing a frame: the frame they came in may be
+        // identical to the last one drawn, or never be drawn at all. Neither
+        // moves the cursor or touches a cell, so writing them between frames
+        // cannot disturb ratatui's output.
+        if let Some(clip_b64) = drained_oneshots.clip_b64.take() {
+            if let Some(clip_text) = crate::util::base64_decode(&clip_b64) {
+                // Also set the local Win32 clipboard for non-SSH scenarios
+                copy_to_system_clipboard(&clip_text);
+                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
+            }
+        }
+        if drained_oneshots.bell {
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
         if quit && !got_frame {
             if reconnect_log_enabled() {
@@ -8430,23 +8452,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
         }
 
-        // ── OSC 52: propagate server-side clipboard to local terminal ────
-        // When the server copies text (yank_selection / copy mode),
-        // it includes a one-shot clipboard_osc52 field in the dump.
-        // Buffer for emission after terminal.draw() to avoid corrupting
-        // ratatui's output.
-        if let Some(ref clip_b64) = state.clipboard_osc52 {
-            if let Some(clip_text) = crate::util::base64_decode(clip_b64) {
-                // Also set the local Win32 clipboard for non-SSH scenarios
-                copy_to_system_clipboard(&clip_text);
-                pending_osc52 = Some(clip_text);
-            }
-        }
-
-        // ── Audible bell: forward BEL to host terminal ──────────────
-        if state.bell {
-            pending_bell = true;
-        }
+        // The server's one-shot clipboard_osc52 and bell were taken off the
+        // frame and written when it arrived (see the drain above), so
+        // `state` never carries them.
 
         // ── set-titles: capture host title for post-draw OSC 0 emit ──
         // The server has already expanded set-titles-string, so we
@@ -10194,13 +10202,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // ratatui's VT output buffer.
         if let Some(clip_text) = pending_osc52.take() {
             crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
-        }
-
-        // ── Post-draw: emit audible bell ─────────────────────────────
-        if pending_bell {
-            pending_bell = false;
-            let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
 
         // ── Post-draw: forward host terminal title (set-titles) ──────

@@ -3,7 +3,8 @@
 //! The socket reader thread reads one line per server message and hands it to
 //! the main loop, which drains everything queued on each iteration and keeps
 //! only the LAST frame it saw: frames are full snapshots, so an older one has
-//! nothing a newer one lacks. Directives (`SWITCH`, `DETACH`,
+//! nothing a newer one lacks, except the one shot clipboard write and bell it
+//! may carry, which move into the newer frame (frame_oneshot.rs). Directives (`SWITCH`, `DETACH`,
 //! `DETACH-KILL-PARENT`) and `NC` are acted on one by one, in order.
 //!
 //! A plain unbounded `mpsc::channel` kept every frame until the main loop got
@@ -102,7 +103,13 @@ impl FrameSender {
             return false;
         }
         match (st.items.back_mut(), kind) {
-            (Some((LineKind::Frame, last)), LineKind::Frame) => *last = line,
+            // The replaced frame's clipboard write and bell ride on in the
+            // newer one (frame_oneshot): they happened, the screen did not.
+            (Some((LineKind::Frame, last)), LineKind::Frame) => {
+                let mut line = line;
+                crate::frame_oneshot::supersede(last, &mut line);
+                *last = line;
+            }
             (Some((LineKind::NoChange, _)), LineKind::NoChange) => {}
             _ => st.items.push_back((kind, line)),
         }

@@ -44,7 +44,7 @@ use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remot
     handle_pane_mouse, copy_drag_begin, handle_split_set_sizes, handle_split_resize_done};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding};
 use crate::commands::{parse_command_to_action, parse_menu_definition, execute_command_string};
-use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
+use crate::util::{list_windows_json, list_tree_json, list_windows_tmux};
 use crate::control;
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override, set_named_buffer_override};
 use crate::help;
@@ -4104,28 +4104,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // on the client's stdout to the host terminal.  Gated by
                     // `set-clipboard` inside the helper.
                     crate::server::helpers::drain_osc52(&mut app);
-                    // Inject one-shot clipboard data for OSC 52 delivery to
-                    // the client.  Only the *response* includes this field;
-                    // the cached copy does not, so subsequent NC frames won't
-                    // re-trigger clipboard emission on the client.
-                    if let Some(clip_text) = app.clipboard_osc52.take() {
-                        let clip_b64 = base64_encode(&clip_text);
-                        // Replace trailing '}' with the extra field
-                        if combined_buf.ends_with('}') {
-                            combined_buf.pop();
-                            combined_buf.push_str(",\"clipboard_osc52\":\"");
-                            combined_buf.push_str(&clip_b64);
-                            combined_buf.push_str("\"}");
-                        }
-                    }
-                    // Forward audible bell to client terminal
-                    if app.bell_forward {
-                        app.bell_forward = false;
-                        if combined_buf.ends_with('}') {
-                            combined_buf.pop();
-                            combined_buf.push_str(",\"bell\":true}");
-                        }
-                    }
+                    // Inject the one-shot clipboard data (OSC 52) and bell for
+                    // the client.  Only the *response* includes them; the
+                    // cached copy does not, so subsequent NC frames won't
+                    // re-trigger them on the client. They go last in the
+                    // frame, where a frame that supersedes this one unread
+                    // picks them up (frame_oneshot::supersede).
+                    crate::frame_oneshot::append(&mut combined_buf, &helpers::take_frame_oneshots(&mut app));
                     cached_data_version = combined_data_version(&app);
                     state_dirty = false;
                     // Timing log: dump-state build time
@@ -8921,26 +8906,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // `/copy`).  See sibling call in the dump-state response path
             // for full context.  Gated by `set-clipboard` inside the helper.
             crate::server::helpers::drain_osc52(&mut app);
-            // Inject clipboard data if pending
-            if let Some(clip_text) = app.clipboard_osc52.take() {
-                let clip_b64 = base64_encode(&clip_text);
-                if combined_buf.ends_with('}') {
-                    combined_buf.pop();
-                    combined_buf.push_str(",\"clipboard_osc52\":\"");
-                    combined_buf.push_str(&clip_b64);
-                    combined_buf.push_str("\"}");
-                }
-            }
             cached_dump_state.clear();
             cached_dump_state.push_str(&combined_buf);
-            // Inject bell AFTER caching (one-shot: should not persist in cache)
-            if app.bell_forward {
-                app.bell_forward = false;
-                if combined_buf.ends_with('}') {
-                    combined_buf.pop();
-                    combined_buf.push_str(",\"bell\":true}");
-                }
-            }
+            // One-shot clipboard and bell AFTER caching (they must not
+            // persist in the cache), last in the frame (frame_oneshot).
+            crate::frame_oneshot::append(&mut combined_buf, &helpers::take_frame_oneshots(&mut app));
             cached_data_version = combined_data_version(&app);
             state_dirty = false;
             crate::pty_trace::mark_plain("f", combined_buf.len());
