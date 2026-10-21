@@ -989,7 +989,7 @@ fn list_keys_notes_args(args: &[&str]) -> (Option<String>, bool, Option<String>)
 /// `new-window -d`; it used to keep the quotes on the control mode and raw
 /// TCP routes and the hook ran nothing. Several words are re-quoted so they
 /// parse back the same.
-fn set_hook_request(args: &[&str]) -> Option<CtrlReq> {
+pub(crate) fn set_hook_request(args: &[&str]) -> Option<CtrlReq> {
     let mut flag_chars = String::new();
     let mut non_flag: Vec<&str> = Vec::new();
     let mut i = 0;

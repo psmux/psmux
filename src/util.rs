@@ -726,6 +726,14 @@ pub fn quote_arg_if_needed(s: &str) -> String {
     }
 }
 
+/// An argv as one wire line whose arguments the server reads back unchanged:
+/// each argument that needs it is quoted ([`quote_arg_if_needed`]), so one
+/// holding `cmd1 \; cmd2` stays one argument instead of being cut at the
+/// separator by the server's line splitter.
+pub fn quoted_wire_line<S: AsRef<str>>(argv: &[S]) -> String {
+    argv.iter().map(|a| quote_arg_if_needed(a.as_ref())).collect::<Vec<_>>().join(" ")
+}
+
 /// The wire line for a CLI `bind-key` argv (`argv[0]` is the command name).
 ///
 /// tmux keeps every argument of the bound command as its own argument, so

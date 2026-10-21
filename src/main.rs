@@ -5632,7 +5632,14 @@ fn run_main() -> io::Result<()> {
             }
             // set-hook - Set a hook
             "set-hook" => {
-                let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
+                // Each argument that needs it goes quoted, so the hook's
+                // command stays ONE argument: `set-hook -g h 'cmd1 \; cmd2'`
+                // stores the whole list, as tmux does (an argv element is only
+                // split when it ENDS in `;`, cmd-parse.y:1094-1103). Joined
+                // bare, the server's line splitter cut it at the `\;`, stored
+                // `cmd1` and ran `cmd2` there and then. A lone `;` or `\;`
+                // argument is left as it was.
+                let cmd_str = crate::util::quoted_wire_line(&cmd_args);
                 send_control(format!("{}\n", cmd_str))?;
                 return Ok(());
             }

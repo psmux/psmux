@@ -4291,3 +4291,7 @@ mod tests_select_window_toggle;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_base_index_window_scope.rs"]
 mod tests_pane_base_index_window_scope;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_set_hook_cli_command_list.rs"]
+mod tests_set_hook_cli_command_list;
