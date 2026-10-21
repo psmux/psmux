@@ -213,6 +213,63 @@ if ($recs -notmatch 'uChar=0x005B') { Write-Pass "no '[' character record: no es
 Kill-Ns
 
 # ---------------------------------------------------------------------------
+# PART A3: modifiers in any order (send-keys M-C-a wrote ESC C)
+# ---------------------------------------------------------------------------
+# tmux reads C-, M- and S- in any order and case (key-string.c:213) and, in
+# the standard mode, writes the meta prefix plus the standard_map byte with
+# Shift ignored (input-keys.c input_key_vt10x).  C-a goes first so every
+# later key also crosses a ConPTY that a win32 record has latched (#588),
+# where ESC [ and ESC ESC used to vanish; ESC NUL lost its NUL on any ConPTY.
+# Case matters (M-A is not M-a), so a list, not a hash table: name, legacy, mode 2.
+$orderKeys = @(
+    ,@('C-a', '01', (Hex "$E[27;5;97~"))
+    ,@('C-M-a', '1B 01', (Hex "$E[27;7;97~"))
+    ,@('M-C-a', '1B 01', (Hex "$E[27;7;97~"))
+    ,@('m-c-a', '1B 01', (Hex "$E[27;7;97~"))
+    ,@('M-C-A', '1B 01', (Hex "$E[27;7;65~"))
+    ,@('M-S-a', '1B 61', (Hex "$E[27;4;97~"))
+    ,@('S-M-a', '1B 61', (Hex "$E[27;4;97~"))
+    ,@('C-S-a', '01', (Hex "$E[27;6;97~"))
+    ,@('S-C-a', '01', (Hex "$E[27;6;97~"))
+    ,@('C-M-S-a', '1B 01', (Hex "$E[27;8;97~"))
+    ,@('S-M-C-a', '1B 01', (Hex "$E[27;8;97~"))
+    ,@('M-C-Space', '1B 00', (Hex "$E[27;7;32~"))
+    ,@('C-S-M-Space', '1B 00', (Hex "$E[27;8;32~"))
+    ,@('M-C-[', '1B 1B', (Hex "$E[27;7;91~"))
+    ,@('C-M-[', '1B 1B', (Hex "$E[27;7;91~"))
+    ,@('M-C-1', '1B 31', (Hex "$E[27;7;49~"))
+    ,@('M-Space', '1B 20', (Hex "$E[27;3;32~"))
+    ,@('M-[', '1B 5B', (Hex "$E[27;3;91~"))
+    ,@('M-Escape', '1B 1B', (Hex "$E[27;3;27~"))
+    ,@('M-a', '1B 61', (Hex "$E[27;3;97~"))
+    ,@('M-A', '1B 41', (Hex "$E[27;3;65~"))
+    ,@('S-a', '61', (Hex "$E[27;2;97~"))
+)
+foreach ($oc in @(@{ n = 'ordL'; conf = ''; emit = ''; col = 'L' }, @{ n = 'ordX'; conf = 'set -g extended-keys on'; emit = '\e[>4;2m'; col = 'X' })) {
+    Write-Host "`n[A3/$($oc.n)] modifier order, conf=[$($oc.conf)]" -ForegroundColor Yellow
+    $conf = Conf $oc.n $oc.conf
+    $log = Start-Rec $oc.n $conf $oc.emit
+    & $PSMUX -L $NS send-keys -t $oc.n '|' 2>&1 | Out-Null
+    foreach ($ok in $orderKeys) {
+        & $PSMUX -L $NS send-keys -t $oc.n $ok[0] 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 100
+        & $PSMUX -L $NS send-keys -t $oc.n '|' 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 100
+    }
+    Start-Sleep -Milliseconds 800
+    $parts = (Stream $log) -split ' ?7C ?'
+    $i = 1
+    foreach ($ok in $orderKeys) {
+        $k = $ok[0]
+        $want = if ($oc.col -eq 'L') { $ok[1] } else { $ok[2] }
+        if ($parts[$i] -eq $want) { Write-Pass "$($oc.n) $k -> [$want]" } else { Write-Fail "$($oc.n) $k got [$($parts[$i])] want [$want]" }
+        $i++
+    }
+    & $PSMUX -L $NS kill-session -t $oc.n 2>&1 | Out-Null
+}
+Kill-Ns
+
+# ---------------------------------------------------------------------------
 # PART B: real key records through a REAL attached client
 # ---------------------------------------------------------------------------
 function Start-Attached($sess, $conf, $pane, $extra = "") {
@@ -299,6 +356,28 @@ foreach ($c in $attCases) {
     }
     Stop-Attached $a
 }
+
+# Real Ctrl+Alt chords through the attached client, standard mode, after Up
+# latched the ConPTY: Ctrl+Alt+A is ESC ^A (with the record's character 0x01
+# and with none), Alt+[ is ESC [ (tmux input_key_vt10x).  The Ctrl+Alt+A
+# record used to reach the pane as 01 alone: the client's native Ctrl+Alt
+# injection lost the Alt for a VT reader.
+Write-Host "`n[B2] real Ctrl+Alt chords through an attached client" -ForegroundColor Yellow
+$conf = Conf "attord" ''
+$log = Join-Path $TMP "attord.txt"
+$a = Start-Attached "attord" $conf "`"$REC`" vt `"$log`""
+if (-not $a.client -or -not (Wait-Pump $a.client $log 'hex=\[ 30 \]')) {
+    Write-Skip "attached client did not start or never read input"
+} else {
+    & $INJECT $a.client "g:31.31.0" "sleep:250" "g:26.0.100" "sleep:250" "g:32.32.0" "sleep:250" "g:41.1.A" "sleep:250" "g:36.36.0" "sleep:250" "g:41.0.A" "sleep:250" `
+        "g:33.33.0" "sleep:250" "g:DB.5B.2" "sleep:250" "g:34.34.0" "sleep:500" | Out-Null
+    Start-Sleep -Milliseconds 1200
+    $s = Stream $log
+    foreach ($e in @(@('Ctrl+Alt+A (uChar 01)', '32 1B 01 36'), @('Ctrl+Alt+A (uChar 00)', '36 1B 01 33'), @('Alt+[', '33 1B 5B 34'))) {
+        if ($s.Contains($e[1])) { Write-Pass "attached: $($e[0]) -> [$($e[1])]" } else { Write-Fail "attached: $($e[0]) want [$($e[1])] in [$s]" }
+    }
+}
+Stop-Attached $a
 
 # ---------------------------------------------------------------------------
 # PART C: nvim reads <C-Space>
