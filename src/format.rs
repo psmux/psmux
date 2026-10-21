@@ -1424,7 +1424,9 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
         },
         "client_height" => {
             let h = format_client(app).map(|ci| ci.height).unwrap_or(app.client_area.height);
-            (h + if app.status_visible { 1 } else { 0 }).to_string()
+            // The client reports the rows left after its status line, so the
+            // terminal height is that plus every status row (issue #883).
+            (h + crate::client::status_rows_reserved(app.status_visible, app.status_lines)).to_string()
         }
         "client_session" => if sessionless() { String::new() } else { app.session_name.clone() },
         // The session this client came from, empty when it has not switched.
@@ -2365,7 +2367,10 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "choose-tree-preview" => if app.choose_tree_preview { "on".into() } else { "off".into() },
         "prefix" => crate::config::format_option_key(&app.prefix_key),
         "prefix2" => crate::config::format_option_key(&app.prefix2_key),
-        "status" => if app.status_visible { "on".into() } else { "off".into() },
+        // Same value show-options prints, so `status 2` reads back as 2.
+        "status" => if !app.status_visible { "off".into() }
+            else if app.status_lines >= 2 { app.status_lines.to_string() }
+            else { "on".into() },
         "mode_keys" => app.mode_keys.clone(),
         "history_limit" => app.history_limit.to_string(),
         "alternate_screen" => if app.allow_alternate_screen { "on".into() } else { "off".into() },
@@ -2712,3 +2717,7 @@ mod tests_issue767_floating_panes;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue734_side_sessionless.rs"]
 mod tests_issue734_side_sessionless;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue883_status_off_space.rs"]
+mod test_issue883_status_off_space;
