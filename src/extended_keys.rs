@@ -127,3 +127,7 @@ pub fn mode_name(mode: u8) -> &'static str {
         _ => "VT10x",
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue860_extended_keys_mode.rs"]
+mod tests_issue860_extended_keys_mode;

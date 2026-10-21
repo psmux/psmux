@@ -270,6 +270,37 @@ fn initial_extended_keys_mode() -> u8 {
     if extended_keys_option() == 2 { 1 } else { 0 }
 }
 
+/// The extended key mode after `CSI > resource ; level m` arrives in a pane
+/// whose mode is `current`, with the `extended-keys` option at `ek` (0 off,
+/// 1 on, 2 always).  tmux input.c INPUT_CSI_MODSET: only resource 4 counts,
+/// nothing changes while the option is off, level 2 is mode 2, and level 1
+/// (or any level under `always`) is mode 1.  Pure, so the state machine is
+/// pinned by unit tests whatever the process option holds.
+#[must_use]
+pub fn xtmodkeys_set_mode(current: u8, ek: u8, resource: u16, level: u16) -> u8 {
+    if resource != 4 || ek == 0 {
+        return current;
+    }
+    if level == 2 {
+        2
+    } else if level == 1 || ek == 2 {
+        1
+    } else {
+        0
+    }
+}
+
+/// The extended key mode after `CSI > resource n`.  tmux input.c
+/// INPUT_CSI_MODOFF: resource 4 clears the mode, then `always` puts mode 1
+/// back.
+#[must_use]
+pub fn xtmodkeys_off_mode(current: u8, ek: u8, resource: u16) -> u8 {
+    if resource != 4 {
+        return current;
+    }
+    if ek == 2 { 1 } else { 0 }
+}
+
 impl Screen {
     pub(crate) fn new(
         size: crate::grid::Size,
@@ -956,30 +987,16 @@ impl Screen {
     /// while `extended-keys` is off, level 2 selects mode 2, and level 1 (or
     /// any level under `always`) selects mode 1.
     pub(crate) fn xtmodkeys_set(&mut self, resource: u16, level: u16) {
-        if resource != 4 {
-            return;
-        }
-        let ek = extended_keys_option();
-        if ek == 0 {
-            return;
-        }
-        self.extended_keys_mode = if level == 2 {
-            2
-        } else if level == 1 || ek == 2 {
-            1
-        } else {
-            0
-        };
+        self.extended_keys_mode =
+            xtmodkeys_set_mode(self.extended_keys_mode, extended_keys_option(), resource, level);
     }
 
     /// `CSI > n n` (xterm disable modifiers), tmux input.c INPUT_CSI_MODOFF:
     /// resource 4 drops back to the standard mode, or to mode 1 under
     /// `extended-keys always`.
     pub(crate) fn xtmodkeys_off(&mut self, resource: u16) {
-        if resource != 4 {
-            return;
-        }
-        self.extended_keys_mode = initial_extended_keys_mode();
+        self.extended_keys_mode =
+            xtmodkeys_off_mode(self.extended_keys_mode, extended_keys_option(), resource);
     }
 
     /// Carry [`Self::win32_input_requested`] into a fresh screen that replaces
