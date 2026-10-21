@@ -8719,6 +8719,25 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // halves the frames a keystroke produces.
         // `refresh-on`: a pushed frame rebuilds the copy-mode snapshot too,
         // or the output that caused it never reaches the view.
+        // A set-option a hook or a key binding ran in process already wrote
+        // its value; this is the rest of what the SetOption request does.
+        for option in std::mem::take(&mut app.in_process_option_writes) {
+            let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+            crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+            if option == "command-alias" {
+                if let Ok(mut map) = shared_aliases_main.write() {
+                    *map = app.command_aliases.clone();
+                }
+            }
+            if option == "pane-border-status" {
+                resize_all_panes(&mut app);
+            }
+            if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
+                resize_all_panes(&mut app);
+            }
+            meta_dirty = true;
+            state_dirty = true;
+        }
         if state_dirty {
             crate::copy_mode::tick_auto_refresh(&mut app);
         }

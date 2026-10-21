@@ -2762,10 +2762,20 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             app.sync_input = !app.sync_input;
         }
         "set-option" | "set" | "set-window-option" | "setw" => {
-            // Always apply locally first (fix #179: TCP server drops these)
+            // Applied here, once, in order: a later command of the same chain
+            // (`set -g mouse \; display '#{mouse}'`) reads the new value, as
+            // tmux's queue gives it. Only the server has a control port, and
+            // this IS the server, so the command is not sent back to it: that
+            // ran it a second time, and `set -ga` appended twice while a bare
+            // `set -g mouse` toggled straight back (tmux appends once,
+            // cmd-set-option.c:347 and :351-353). The server loop runs the
+            // after-write work a client's set-option gets.
             crate::config::parse_config_line(app, cmd);
-            if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            if app.control_port.is_some() {
+                let parsed = crate::cli::parse_set_option_args(&parts[1..]);
+                if let Some(option) = parsed.positionals.first() {
+                    app.in_process_option_writes.push(option.trim_matches('"').to_string());
+                }
             }
         }
         "bind-key" | "bind" => {
@@ -4242,3 +4252,7 @@ mod tests_bare_window_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue836_set_buffer_flags.rs"]
 mod tests_issue836_set_buffer_flags;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_in_process_set_option_once.rs"]
+mod tests_in_process_set_option_once;

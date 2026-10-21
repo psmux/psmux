@@ -1722,6 +1722,14 @@ pub struct AppState {
     /// into one frame and clears it. tmux says the same thing by returning
     /// `WINDOW_COPY_CMD_REDRAW` from the command (#704).
     pub copy_needs_redraw: bool,
+    /// Options a `set-option` on the server's own command path (a hook, a key
+    /// binding, a menu, confirm-before) wrote in process. The value is already
+    /// in place; the server loop runs what a client's set-option request runs
+    /// after the write (warm pane, command-alias, pane-border-status, a fresh
+    /// frame) and clears the list. The command used to send itself back to the
+    /// server as well, so the write happened twice: `set -ga` appended twice
+    /// and a bare `set -g mouse` toggled straight back.
+    pub in_process_option_writes: Vec<String>,
     /// Named registers a-z for copy-mode yank/paste
     pub named_registers: std::collections::HashMap<char, String>,
     pub display_map: Vec<(usize, Vec<usize>)>,
@@ -3146,6 +3154,7 @@ impl AppState {
             copy_search_marks: false,
             copy_hide_position: false,
             copy_needs_redraw: false,
+            in_process_option_writes: Vec::new(),
             named_registers: std::collections::HashMap::new(),
             display_map: Vec::new(),
             key_tables: std::collections::HashMap::new(),
