@@ -2904,9 +2904,11 @@ fn establish_connection_with_timeout(
 
     // 2-second read timeout keeps the thread from blocking forever on process exit.
     let _ = reader.get_ref().set_read_timeout(Some(Duration::from_secs(2)));
-    // Preserve ordered frames and directives, but backpressure the socket reader
-    // when terminal output stalls instead of retaining an unbounded backlog.
-    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<String>(16);
+    // A frame queued behind another frame replaces it, so a terminal that
+    // stops reading cannot pile up frames here, and the reader never blocks:
+    // blocking it would stall the server's writer into its 5 s write timeout
+    // and get this client dropped. See client_frame_queue.rs.
+    let (frame_tx, frame_rx) = crate::client_frame_queue::frame_queue();
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = String::with_capacity(64 * 1024);
@@ -2951,7 +2953,7 @@ fn establish_connection_with_timeout(
             // directives like SWITCH want to be acted on now. Both are rare
             // enough that they cannot spin.
             let worth_waking = line.trim_end() != "NC";
-            if frame_tx.send(line).is_err() { return; }
+            if !frame_tx.send(line) { return; }
             if worth_waking {
                 // Break the main loop out of its console wait NOW. Without this
                 // the frame sits in the channel until the poll interval expires.
@@ -2964,7 +2966,7 @@ fn establish_connection_with_timeout(
 }
 
 /// A live connection: write half + incoming-frame channel.
-type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
+type Connection = (std::net::TcpStream, crate::client_frame_queue::FrameReceiver);
 
 /// The one answer to a connection that has gone away, whoever notices first.
 ///

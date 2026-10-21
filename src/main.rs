@@ -46,6 +46,7 @@ mod cross_session;
 mod cross_session_server;
 mod paths;
 mod client_env;
+mod client_frame_queue;
 mod timer_res;
 mod pty_trace;
 mod startup_trace;
