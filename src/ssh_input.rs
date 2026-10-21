@@ -1310,11 +1310,13 @@ fn pull_queued() -> Option<Event> {
 /// has not, reading at most one record.
 ///
 /// On Windows the #742 tap goes first: when the record at the head of the
-/// console input buffer is one crossterm 0.29 would lose (a UTF-16 surrogate
-/// half, or a control character with no virtual key), psmux consumes and
-/// decodes it itself. Otherwise `poll(Duration::ZERO)` hands crossterm exactly
-/// that one record, since with a zero timeout crossterm's reader stops after a
-/// single `ReadConsoleInputW` whether or not it produced an event.
+/// console input buffer is one crossterm 0.29 would lose or misread (a UTF-16
+/// surrogate half, a control character with no virtual key, an Alt code
+/// character, or a lowercase ASCII letter with the AltGr signature, which is
+/// normalized to the plain letter), psmux consumes and decodes it itself.
+/// Otherwise `poll(Duration::ZERO)` hands crossterm exactly that one record,
+/// since with a zero timeout crossterm's reader stops after a single
+/// `ReadConsoleInputW` whether or not it produced an event.
 #[inline]
 fn next_queued() -> io::Result<Option<Event>> {
     #[cfg(windows)]

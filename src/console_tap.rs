@@ -1,10 +1,11 @@
-//! Console input records crossterm 0.29 loses, taken before crossterm reads
-//! them (issue #742).
+//! Console input records crossterm 0.29 loses or misreads, taken before
+//! crossterm reads them (issue #742).
 //!
 //! On the console input route (Windows Terminal, conhost, every host where
 //! `needs_vt_input()` is false) the client reads its input through crossterm,
-//! which calls `ReadConsoleInputW` and parses each `KEY_EVENT` record. Two kinds
-//! of record never come out of that parser:
+//! which calls `ReadConsoleInputW` and parses each `KEY_EVENT` record. Four kinds
+//! of record do not come out of that parser as the client needs them. The first
+//! two never come out at all:
 //!
 //! 1. Characters outside the Basic Multilingual Plane. The console hands one
 //!    over as a key down AND a key up record per UTF-16 code unit, all with
@@ -28,6 +29,17 @@
 //!    that carried a virtual key passes through here. A SendInput
 //!    KEYEVENTF_UNICODE control character arrives as vk = VK_PACKET (0xE7),
 //!    which is not this shape and is still crossterm's.
+//! 3. An Alt code character (issue #766): Alt up carrying the character in
+//!    `uChar`. crossterm reports a Release, which the client does not forward,
+//!    so the character vanished. It is decoded here as a key press.
+//! 4. Not lost, but misread (a normalization, not a repair of a loss): a key
+//!    record with the AltGr signature (LEFT_CTRL and RIGHT_ALT held, LEFT_ALT
+//!    not held) and a lowercase ASCII letter in `uChar`. The console reports
+//!    AltGr that way (Turkish Q `i`, and every `i` of a paste on that layout).
+//!    crossterm hands it on as Char with CONTROL | ALT, which the client reads
+//!    as a Ctrl+Alt chord. It is decoded here as the plain letter, with no
+//!    modifiers. This is a policy on the console route: such a record is
+//!    treated as text, and any other Ctrl+Alt shape stays a chord.
 //!
 //! The seam: every read on the console route goes through
 //! `crossterm::event::poll(Duration::ZERO)`, and with a zero timeout crossterm
@@ -35,9 +47,11 @@
 //! the head of the console input buffer. When the head is one of the records
 //! above, psmux consumes it itself and decodes it the way its own VT route
 //! reader does (`ssh_input.rs`: key up records are skipped before pairing, and
-//! control bytes map to the same keys). Every other record (ordinary keys,
-//! modifiers, mouse, resize, focus, the win32 input mode keys) stays in the
-//! buffer for crossterm to read exactly as before.
+//! control bytes map to the same keys; the AltGr letter of item 4 becomes the
+//! plain letter). Every other record (ordinary keys, modifiers, mouse, resize,
+//! focus, the win32 input mode keys, Ctrl+Alt records without the AltGr
+//! signature or without a lowercase ASCII letter in `uChar`) stays in the
+//! buffer for crossterm to read as before.
 //!
 //! The decision logic is [`ConsoleTap::classify`], pure and unit tested; the
 //! Win32 peek and read live in [`take_head`].
@@ -124,6 +138,16 @@ pub(crate) fn alt_code_release_char(key_down: bool, vk: u16, u_char: u16) -> boo
     !key_down && vk == VK_MENU && u_char > 0x1F && !(0xD800..=0xDFFF).contains(&u_char)
 }
 
+/// The AltGr signature (LEFT_CTRL and RIGHT_ALT held, LEFT_ALT not held) with
+/// a lowercase ASCII letter in uChar: AltGr text (see the branch in
+/// [`ConsoleTap::classify`]). Shift and the lock bits are not looked at.
+fn altgr_ascii_letter(rec: &KeyRec) -> bool {
+    rec.ctrl_state & LEFT_CTRL_PRESSED != 0
+        && rec.ctrl_state & RIGHT_ALT_PRESSED != 0
+        && rec.ctrl_state & LEFT_ALT_PRESSED == 0
+        && (b'a' as u16..=b'z' as u16).contains(&rec.u_char)
+}
+
 impl ConsoleTap {
     pub fn new() -> Self { Self::default() }
 
@@ -194,6 +218,24 @@ impl ConsoleTap {
             );
         }
 
+        // A lowercase ASCII letter the layout typed with AltGr. Windows reports
+        // AltGr as Ctrl+Alt, and the client tells AltGr text from a Ctrl+Alt
+        // chord by the character (`is_altgr_char`): anything but a lowercase
+        // ASCII letter is AltGr. Turkish Q also types `i` as AltGr+I, and a
+        // pasted `i` arrives exactly that way (the console host picks the key
+        // with VkKeyScanW), so every `i` of a paste went to the pane as C-M-i,
+        // a Tab, and broke the paste in two. The policy: a record with the
+        // AltGr signature (LEFT_CTRL | RIGHT_ALT, no LEFT_ALT, as the paste
+        // records carry) and a lowercase ASCII letter in uChar is text. Every
+        // other Ctrl+Alt shape, left Ctrl + left Alt above all, stays a chord.
+        if altgr_ascii_letter(&rec) {
+            if !rec.key_down {
+                return Verdict::Consumed(None);
+            }
+            self.high = None;
+            return Verdict::Consumed(Some(press(KeyCode::Char(u as u8 as char), KeyModifiers::empty())));
+        }
+
         // Anything else is crossterm's. A character key arriving between two
         // halves breaks the pair, which is what crossterm itself does with its
         // buffer when any other key event comes first.
@@ -242,8 +284,9 @@ thread_local! {
 }
 
 /// Consume the records at the head of the console input buffer that crossterm
-/// would lose, and return the first event they complete. Returns `None` as
-/// soon as the head is a record crossterm should read, or the buffer is empty.
+/// would lose or misread (the four kinds in the module notes), and return the
+/// first event they complete. Returns `None` as soon as the head is a record
+/// crossterm should read, or the buffer is empty.
 ///
 /// Costs one `PeekConsoleInputW` when the head is not ours, which is every
 /// ordinary keystroke.
@@ -307,3 +350,7 @@ mod tests_issue742_console_tap;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue766_alt_code_char.rs"]
 mod tests_issue766_alt_code_char;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_altgr_letter_console_tap.rs"]
+mod tests_altgr_letter_console_tap;
