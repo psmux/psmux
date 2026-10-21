@@ -253,8 +253,8 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // always decoded (ssh_input.rs csi_key), and a modifier ConPTY cannot
     // carry in VT goes to the pane in win32 input mode, which conhost needs
     // no negotiation for (input.rs ctrl_key_win32_seq).
-    OptionDef { name: "extended-keys", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeys), default: "off", description: "tmux compatibility (off/on/always): stored and reported; psmux always decodes extended keys from the terminal and needs no request to deliver modifiers to panes" },
-    OptionDef { name: "extended-keys-format", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeysFormat), default: "xterm", description: "tmux compatibility (csi-u/xterm): stored and reported, not consulted" },
+    OptionDef { name: "extended-keys", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeys), default: "off", description: "Whether a pane may ask for extended keys (off/on/always), as in tmux: with on, a program that writes CSI > 4 ; 1 m or ; 2 m gets modified keys such as C-Space in the extended form; always puts every pane in mode 1" },
+    OptionDef { name: "extended-keys-format", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeysFormat), default: "xterm", description: "The format of extended keys written to a pane (csi-u/xterm): CSI k;mu or CSI 27;m;k~" },
     // ── Session options ──
     OptionDef { name: "prefix", scope: Session, option_type: OptionType::Key, default: "C-b", description: "Primary prefix key" },
     OptionDef { name: "prefix2", scope: Session, option_type: OptionType::Key, default: "None", description: "Secondary prefix key" },

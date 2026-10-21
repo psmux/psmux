@@ -194,8 +194,8 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `bell-action` | Str | `any` | Bell action: controls audible bell forwarding and status bar flag (`any`, `none`, `current`, `other`) |
 | `visual-bell` | Bool | `off` | Visual bell indicator |
 | `allow-passthrough` | Str | `off` | Allow terminal passthrough sequences (`on`/`off`/`all`) |
-| `extended-keys` | Choice | `off` | tmux compatibility (`off`/`on`/`always`): stored and reported so a program probing `show -gv extended-keys` reads what tmux gives. psmux does not need it: extended keys from the terminal are always decoded, and modifiers reach panes through win32 input mode |
-| `extended-keys-format` | Choice | `xterm` | tmux compatibility (`csi-u`/`xterm`): stored and reported, not consulted |
+| `extended-keys` | Choice | `off` | Whether a pane may ask for extended keys, as in tmux (`off`/`on`/`always`). Extended keys from the terminal are always decoded. With `on`, a program that writes `CSI > 4 ; 1 m` or `CSI > 4 ; 2 m` (Neovim does) gets modified keys such as `C-Space` in the extended form; `always` puts every pane in mode 1. `#{pane_key_mode}` shows `VT10x`, `Ext 1` or `Ext 2`. A pane that reads console records keeps win32 input mode records |
+| `extended-keys-format` | Choice | `xterm` | The format of extended keys written to a pane: `xterm` is `CSI 27;m;k~`, `csi-u` is `CSI k;mu` |
 | `allow-rename` | Bool | `on` | Allow programs to set window title via escape sequences |
 | `allow-set-title` | Bool | `off` | Allow programs to set pane title via OSC 0/2 escape sequences (see [pane-titles.md](pane-titles.md)) |
 | `allow-predictions` | Bool | `off` | Preserve PSReadLine prediction settings (see below) |
