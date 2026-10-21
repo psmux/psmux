@@ -6785,10 +6785,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // #602; select-window simply never called it (#693 item 4).
                     // -n/-p/-l keep the hooks of NextWindow, PrevWindow and
                     // LastWindow: before-select-window for the first two only.
-                    if relative != Some(crate::types::RelativeWindow::Last) {
-                        if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                    }
-                    match temp_target::select_window_pos(&app, spec, pane.as_deref()) {
+                    // A target that names nothing runs no hook at all: tmux
+                    // resolves the target before the command runs, so a miss
+                    // never reaches it. The target is resolved again after
+                    // the hook, which may have moved or killed windows.
+                    let resolved = match temp_target::select_window_pos(&app, spec, pane.as_deref()) {
+                        Err(msg) => Err(msg),
+                        Ok(_) => {
+                            if relative != Some(crate::types::RelativeWindow::Last) {
+                                if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                            }
+                            temp_target::select_window_pos(&app, spec, pane.as_deref())
+                        }
+                    };
+                    match resolved {
                         Ok(pos) => match relative {
                             None => {
                                 focus_window_at(&mut app, pos);
