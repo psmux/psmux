@@ -1189,6 +1189,58 @@ impl WarmPool {
             crate::warm_trace!("pool: killed {n} pooled spare(s)");
         }
     }
+    /// Empty the pool now and kill what was in it on a thread of its own.
+    ///
+    /// For a respawn on a live server (a claim adopting the client's
+    /// environment, an option change): the stale spares must leave the pool
+    /// before anything can claim them, but killing them is a process table
+    /// walk plus a pseudoconsole close each, and doing it on the loop thread
+    /// held up the claimed session's first frame by 15 to 20 ms. Each one is
+    /// registered with the in flight reaper until it is dead, so a teardown
+    /// that starts meanwhile still kills it. Teardown itself keeps using
+    /// [`WarmPool::kill_all`], which finishes before the process exits.
+    pub fn retire_all(&mut self) -> usize {
+        let mut spares: Vec<WarmPane> = self.spares.drain(..).collect();
+        let n = spares.len();
+        if n == 0 {
+            return 0;
+        }
+        let ids: Vec<usize> = spares.iter().map(|w| w.pane_id).collect();
+        let mut tearing_down = false;
+        for wp in &spares {
+            crate::warm_pane_sync::inflight::issue(wp.pane_id);
+            if !crate::warm_pane_sync::inflight::record_pid(wp.pane_id, wp.child_pid) {
+                tearing_down = true;
+            }
+        }
+        if tearing_down {
+            // Teardown has begun and is waiting on these ids: kill here.
+            let mut children: Vec<&mut Box<dyn portable_pty::Child>> =
+                spares.iter_mut().map(|w| &mut w.child).collect();
+            crate::platform::process_kill::kill_process_trees_batch(&mut children);
+            for id in &ids {
+                crate::warm_pane_sync::inflight::release(*id);
+            }
+            return n;
+        }
+        let started = std::thread::Builder::new()
+            .name("psmux-retire-spares".into())
+            .spawn(move || {
+                let mut children: Vec<&mut Box<dyn portable_pty::Child>> =
+                    spares.iter_mut().map(|w| &mut w.child).collect();
+                crate::platform::process_kill::kill_process_trees_batch(&mut children);
+                drop(spares);
+                for id in ids {
+                    crate::warm_pane_sync::inflight::release(id);
+                }
+            });
+        if started.is_err() {
+            // No thread: nothing else will release those ids, and the spares
+            // went with the closure. The reaper still holds their pids.
+            crate::warm_trace!("pool: retire thread failed to start");
+        }
+        n
+    }
     /// Drop spares whose shell died while idling (#450). Returns how many were
     /// removed so the caller can decide whether to log.
     pub fn reap_dead(&mut self) -> usize {

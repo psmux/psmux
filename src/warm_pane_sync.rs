@@ -336,8 +336,8 @@ fn respawn(app: &mut AppState, _pty_system: &dyn portable_pty::PtySystem, refuse
     // loop for the length of a CreateProcess. `warm_enabled` and
     // `warm-pool-size 0` are honoured there: a target of zero simply never
     // produces a deficit, so an opted-out user's pool stays empty.
-    let killed = app.warm_pane.len();
-    app.warm_pane.kill_all();
+    // Out of the pool now, killed off the loop thread (see `retire_all`).
+    let killed = app.warm_pane.retire_all();
     // The spares still being spawned are just as stale: a refill issued before
     // this point captured the old environment block (or shell) the moment its
     // CreateProcessW began, and it lands in the pool AFTER `kill_all` has run.

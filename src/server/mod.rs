@@ -378,6 +378,96 @@ fn ensure_session_registry_files(app: &AppState) {
     }
 }
 
+/// Automatic rename / allow-rename: resolve window names from each pane's
+/// foreground process or title. Returns whether any window name changed.
+///
+/// Run AFTER a dump-state has been answered, not before: the foreground
+/// process lookup walks the process table (9 to 11 ms), and on the first
+/// dump of a freshly attached client (a pane that has just printed is always
+/// due) it sat between the client's request and its first frame, measured as
+/// 14.5 ms of a 100 ms warm launch to prompt.
+fn auto_rename_windows(app: &mut AppState) -> bool {
+    let mut changed = false;
+    {
+        let in_copy = app.mode.in_copy();
+        let global_auto_rename = app.automatic_rename;
+        let allow_rename = app.allow_rename;
+        // #648: automatic-rename is a WINDOW option, so each
+        // window decides for itself whether the rename loop
+        // touches it. Resolved per window inside the loop from
+        // the window's own table, so this tick allocates nothing.
+        let any_auto_rename = global_auto_rename
+            || app.windows.iter().any(|w| {
+                crate::server::options::win_flag(w, "automatic-rename", global_auto_rename)
+            });
+        if (any_auto_rename || allow_rename) && !in_copy {
+            for win in app.windows.iter_mut() {
+                if win.manual_rename { continue; }
+                let auto_rename =
+                    crate::server::options::win_flag(win, "automatic-rename", global_auto_rename);
+                if !auto_rename && !allow_rename { continue; }
+                let last_output = win.last_output_time;
+                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                    if p.dead { continue; }
+                    // tmux names.c:66: no output since the last
+                    // check means nothing to rename, so the
+                    // process table walk is skipped. Without this
+                    // the #658 idle floor made every attached
+                    // client cost one walk per window per second.
+                    if !helpers::window_name_check_due(last_output, p.last_title_check, 1000) { continue; }
+                    p.last_title_check = std::time::Instant::now();
+                    if p.child_pid.is_none() {
+                        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+                    }
+                    let new_name = if auto_rename {
+                        // automatic-rename: use foreground process name
+                        if let Some(pid) = p.child_pid {
+                            match crate::platform::process_info::get_foreground_process_name(pid) {
+                                Some(name) => name,
+                                None => {
+                                    // No foreground child found.  Keep the current
+                                    // window name to avoid flashing to the shell
+                                    // name before a child process spawns (#229).
+                                    // Once a child appears, auto-rename will pick
+                                    // it up on the next tick.
+                                    continue;
+                                }
+                            }
+                        } else if allow_rename && !p.title.is_empty() {
+                            p.title.clone()
+                        } else {
+                            continue;
+                        }
+                    } else if allow_rename {
+                        // allow-rename only: use OSC title from child
+                        if let Ok(parser) = p.term.lock() {
+                            let title = parser.screen().title();
+                            if !title.is_empty() {
+                                title.to_string()
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    };
+                    // #647 (WIN-03): an inferred name comes from a
+                    // process or path and must be sanitized the same
+                    // way an explicit rename is (tmux names.c:169).
+                    let new_name = crate::util::clean_name(&new_name);
+                    if !new_name.is_empty() && win.name != new_name {
+                        win.name = new_name;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
 /// Diagnostic-only logging for warm-server lifecycle races. Gated behind
 /// PSMUX_WARM_DEBUG=1 so it is a no-op in normal operation and tests. Writes to
 /// %TEMP%\psmux_warm_debug.log (never inside the repo).
@@ -2796,6 +2886,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // handing the push to the next iteration costs an iteration and not a
     // millisecond of keystroke-to-screen latency.
     let mut push_deferred = false;
+    // A dump-state was answered this iteration: resolve window names once the
+    // reply is out (see auto_rename_windows).
+    let mut auto_rename_owed = false;
     // The standby spawn the boot hold owes, and since when (see the release).
     let mut standby_owed_at: Option<Instant> = None;
     loop {
@@ -3877,85 +3970,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                     }
 
-                    // ── Automatic rename / allow-rename: resolve window names ──
-                    {
-                        let in_copy = app.mode.in_copy();
-                        let global_auto_rename = app.automatic_rename;
-                        let allow_rename = app.allow_rename;
-                        // #648: automatic-rename is a WINDOW option, so each
-                        // window decides for itself whether the rename loop
-                        // touches it. Resolved per window inside the loop from
-                        // the window's own table, so this tick allocates nothing.
-                        let any_auto_rename = global_auto_rename
-                            || app.windows.iter().any(|w| {
-                                crate::server::options::win_flag(w, "automatic-rename", global_auto_rename)
-                            });
-                        if (any_auto_rename || allow_rename) && !in_copy {
-                            for win in app.windows.iter_mut() {
-                                if win.manual_rename { continue; }
-                                let auto_rename =
-                                    crate::server::options::win_flag(win, "automatic-rename", global_auto_rename);
-                                if !auto_rename && !allow_rename { continue; }
-                                let last_output = win.last_output_time;
-                                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
-                                    if p.dead { continue; }
-                                    // tmux names.c:66: no output since the last
-                                    // check means nothing to rename, so the
-                                    // process table walk is skipped. Without this
-                                    // the #658 idle floor made every attached
-                                    // client cost one walk per window per second.
-                                    if !helpers::window_name_check_due(last_output, p.last_title_check, 1000) { continue; }
-                                    p.last_title_check = std::time::Instant::now();
-                                    if p.child_pid.is_none() {
-                                        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
-                                    }
-                                    let new_name = if auto_rename {
-                                        // automatic-rename: use foreground process name
-                                        if let Some(pid) = p.child_pid {
-                                            match crate::platform::process_info::get_foreground_process_name(pid) {
-                                                Some(name) => name,
-                                                None => {
-                                                    // No foreground child found.  Keep the current
-                                                    // window name to avoid flashing to the shell
-                                                    // name before a child process spawns (#229).
-                                                    // Once a child appears, auto-rename will pick
-                                                    // it up on the next tick.
-                                                    continue;
-                                                }
-                                            }
-                                        } else if allow_rename && !p.title.is_empty() {
-                                            p.title.clone()
-                                        } else {
-                                            continue;
-                                        }
-                                    } else if allow_rename {
-                                        // allow-rename only: use OSC title from child
-                                        if let Ok(parser) = p.term.lock() {
-                                            let title = parser.screen().title();
-                                            if !title.is_empty() {
-                                                title.to_string()
-                                            } else {
-                                                continue;
-                                            }
-                                        } else {
-                                            continue;
-                                        }
-                                    } else {
-                                        continue;
-                                    };
-                                    // #647 (WIN-03): an inferred name comes from a
-                                    // process or path and must be sanitized the same
-                                    // way an explicit rename is (tmux names.c:169).
-                                    let new_name = crate::util::clean_name(&new_name);
-                                    if !new_name.is_empty() && win.name != new_name {
-                                        win.name = new_name;
-                                        meta_dirty = true;
-                                        state_dirty = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Window names are resolved after this request is answered
+                    // (auto_rename_windows, end of the iteration).
+                    auto_rename_owed = true;
                     // Every pane in copy mode must be showing a snapshot of its
                     // own screen (tmux's copy-mode grid) and no other pane may
                     // still hold one.  Cheap, idempotent, and the place where
@@ -9001,6 +9018,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             state_dirty = false;
             crate::pty_trace::mark_plain("f", combined_buf.len());
             crate::types::push_frame(&combined_buf);
+        }
+        if auto_rename_owed {
+            auto_rename_owed = false;
+            if auto_rename_windows(&mut app) {
+                meta_dirty = true;
+                state_dirty = true;
+            }
         }
         // ── Status-interval timer: fire hooks periodically ──
         if app.should_run_status_interval_timer() {
