@@ -2493,6 +2493,7 @@ fn run_main() -> io::Result<()> {
                 } else { false };
 
                 held_claim_taken = held_claim && claimed_warm;
+                if claimed_warm { crate::startup_trace::mark("cli.warm.claimed"); }
                 if !claimed_warm {
                 // Cold path: spawn a background server from scratch
                 let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));

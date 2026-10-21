@@ -33,6 +33,13 @@
 //!                      warnings are lost (#706)
 //!   `cli.attach`       the attach/TUI path is entered
 //!   `cli.connected`    the client's socket to the server is up
+//!   `cli.frame`        the client's reader received a frame line, with its size
+//!   `cli.draw`         the client started drawing a frame
+//!   `srv.boot.spawned` the first pane's process, started on its own thread
+//!                      right after `srv.listen`, is in its pseudoconsole
+//!   `srv.boot.respawn` the config changed that early pane's spawn inputs, with
+//!                      which one; the window is created from scratch instead
+//!   `srv.boot.envdiff` for an `environment` respawn, the names that differ
 //!   `srv.entry`        first line of `run_server`
 //!   `srv.appstate`     `AppState::new` returned
 //!   `srv.priority`     scheduling class claimed (#608)

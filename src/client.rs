@@ -4320,6 +4320,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             client_log("frame", &format!("received {} bytes", line.len()));
                         }
                         crate::pty_trace::mark_plain("d", line.len());
+                        if crate::startup_trace::on() {
+                            crate::startup_trace::mark_detail("cli.frame", &format!("len={}", line.len()));
+                        }
                         // The clipboard write and bell come off the frame
                         // here, before the next frame in this drain replaces
                         // it, and the frame kept for rendering never carries
@@ -8698,6 +8701,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // this closure returns, so once it has run this is exactly what the
         // user saw — the value a release must re-report.
         let drawn_copy_sel = active_copy_sel_end(&root);
+        crate::startup_trace::mark("cli.draw");
         // Hold the frame's output until the cursor is settled (#697).
         terminal.backend_mut().begin_frame();
         // Where an open prompt put its cursor during the draw (#741), so the

@@ -1580,6 +1580,21 @@ pub struct WarmSpawnParams {
     pub env_removals: Vec<String>,
     pub history_limit: usize,
     pub allow_alternate_screen: bool,
+    /// What the child runs. Always the default shell for a pool spare; a
+    /// starting server's first pane can be a command (see `boot_spawn_params`).
+    pub boot: BootCommand,
+}
+
+/// What a starting server's first window runs, so it can be spawned before the
+/// session registry and the config instead of after them (`run_server`).
+#[derive(Clone, PartialEq)]
+pub enum BootCommand {
+    DefaultShell,
+    /// `new-session "<command>"`, through the same `build_command` the first
+    /// window would have used.
+    Command(String),
+    /// `new-session -- prog args`, through `build_raw_command`.
+    Raw(Vec<String>),
 }
 
 /// Snapshot the spawn inputs and reserve a pane id. Returns `None` when the
@@ -1588,6 +1603,13 @@ pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
     if !app.warm_enabled {
         return None;
     }
+    Some(boot_spawn_params(app, BootCommand::DefaultShell))
+}
+
+/// The same snapshot for a starting server's first pane, whatever it runs and
+/// whether or not the spare pool is on: this pane is the session's own first
+/// window spawned early, not a spare.
+pub fn boot_spawn_params(app: &mut AppState, boot: BootCommand) -> WarmSpawnParams {
     let area = app.client_area;
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
@@ -1599,7 +1621,7 @@ pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
     // Track the spawn from the moment it is issued, so a teardown that happens
     // while it is still inside CreateProcessW can still reap the shell (#686).
     crate::warm_pane_sync::inflight::issue(pane_id);
-    Some(WarmSpawnParams {
+    WarmSpawnParams {
         rows,
         cols,
         expanded_shell,
@@ -1616,7 +1638,105 @@ pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
         env_removals: app.env_scopes.child_removals(&app.environment),
         history_limit: app.history_limit,
         allow_alternate_screen: app.allow_alternate_screen,
-    })
+        boot,
+    }
+}
+
+/// Whether a first pane spawned from `early` before the config ran is still
+/// exactly what a spawn now would produce. Every input that reaches the
+/// child's command line or environment block is compared; anything else (the
+/// scrollback cap, the alternate screen flag) is a parser setting and is
+/// reconciled on adoption. A config `set-environment -g` lives in the process
+/// environment the early child already copied, so any is a mismatch.
+pub fn boot_params_match(early: &WarmSpawnParams, app: &AppState) -> bool {
+    let why = boot_params_mismatch(early, app);
+    if let Some(w) = why {
+        crate::startup_trace::mark_detail("srv.boot.respawn", w);
+    }
+    why.is_none()
+}
+
+fn boot_params_mismatch(early: &WarmSpawnParams, app: &AppState) -> Option<&'static str> {
+    if early.boot == BootCommand::DefaultShell
+        && early.expanded_shell != crate::format::expand_format(&app.default_shell, app)
+    {
+        return Some("default-shell");
+    }
+    if early.env_shim != app.env_shim { return Some("env_shim"); }
+    if early.allow_predictions != app.allow_predictions { return Some("allow-predictions"); }
+    if early.control_port != app.control_port
+        || early.socket_name != app.socket_name
+        || early.session_name != app.session_name
+    {
+        return Some("identity");
+    }
+    if early.claude_code_fix_tty != app.claude_code_fix_tty
+        || early.claude_code_force_interactive != app.claude_code_force_interactive
+    {
+        return Some("claude-code options");
+    }
+    if early.host_colors != app.host_colors { return Some("host colors"); }
+    if !app.env_scopes.global_set.is_empty() || !app.env_scopes.global_removed.is_empty() {
+        return Some("set-environment -g");
+    }
+    // A removal only changes a child that would otherwise have the name. The
+    // update-environment seed (#775) records a removal for every listed name
+    // the start environment lacks, and the early child lacks those already.
+    let effective = |v: &[String]| -> std::collections::BTreeSet<String> {
+        v.iter()
+            .filter(|k| std::env::var_os(k.as_str()).is_some() || early.environment.contains_key(k.as_str()) || app.environment.contains_key(k.as_str()))
+            .cloned()
+            .collect()
+    };
+    if effective(&early.env_removals) != effective(&app.env_scopes.child_removals(&app.environment)) {
+        return Some("environment removals");
+    }
+    // Names the update-environment seed copied from the start environment
+    // (#775) carry values the early child inherited from that same
+    // environment, so they are not a difference.
+    let seeded = &app.env_scopes.seeded;
+    let now: std::collections::HashMap<&String, &String> =
+        app.environment.iter().filter(|(k, _)| !seeded.contains(*k)).collect();
+    let then: std::collections::HashMap<&String, &String> =
+        early.environment.iter().filter(|(k, _)| !seeded.contains(*k)).collect();
+    if now != then {
+        if crate::startup_trace::on() {
+            let mut diff: Vec<String> = now.iter().filter(|(k, v)| then.get(*k) != Some(*v)).map(|(k, _)| (*k).clone()).collect();
+            diff.extend(then.keys().filter(|k| !now.contains_key(*k)).map(|k| format!("-{}", k)));
+            crate::startup_trace::mark_detail("srv.boot.envdiff", &diff.join(","));
+        }
+        return Some("environment");
+    }
+    None
+}
+
+/// Install a first pane spawned early by `run_server` as the session's first
+/// window, exactly as `create_window` / `create_window_raw` would have built it.
+pub fn adopt_boot_pane(app: &mut AppState, wp: crate::types::WarmPane, boot: &BootCommand) {
+    let prev_pane = crate::copy_mode::active_pane_id(app);
+    crate::copy_mode::park_mode_on_active_pane(app);
+    if let Ok(mut parser) = wp.term.lock() {
+        crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
+    }
+    let (start_command, win_name) = match boot {
+        BootCommand::Command(c) => (start_command_raw(Some(c)), default_shell_name(Some(c), None)),
+        BootCommand::Raw(args) => (
+            start_command_raw_argv(args),
+            std::path::Path::new(&args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&args[0]).to_string(),
+        ),
+        BootCommand::DefaultShell => {
+            let configured = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
+            (String::new(), default_shell_name(None, configured))
+        }
+    };
+    let epoch = std::time::Instant::now() - Duration::from_secs(2);
+    let pane_id = wp.pane_id;
+    let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: wp.rows, last_cols: wp.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(wp.spawned_at), start_command, cwd_hint: None };
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+    app.next_win_id += 1;
+    app.active_idx = app.windows.len() - 1;
+    app.on_window_appended();
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
 }
 
 /// Create one spare shell from a snapshot. Touches no shared state, so it is
@@ -1629,10 +1749,14 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
         .openpty(size)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     let t_openpty = t0.elapsed();
-    let mut shell_cmd = if !p.expanded_shell.is_empty() {
-        build_default_shell(&p.expanded_shell, p.env_shim, p.allow_predictions)
-    } else {
-        build_command(None, p.env_shim, p.allow_predictions)
+    let mut shell_cmd = match &p.boot {
+        BootCommand::Raw(args) => build_raw_command(args),
+        BootCommand::Command(c) => build_command(Some(c.as_str()), p.env_shim, p.allow_predictions),
+        BootCommand::DefaultShell => if !p.expanded_shell.is_empty() {
+            build_default_shell(&p.expanded_shell, p.env_shim, p.allow_predictions)
+        } else {
+            build_command(None, p.env_shim, p.allow_predictions)
+        },
     };
     let pane_id = p.pane_id;
     set_tmux_env(&mut shell_cmd, pane_id, p.control_port, p.socket_name.as_deref(), &p.session_name, p.claude_code_fix_tty, p.claude_code_force_interactive);

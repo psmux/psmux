@@ -22,7 +22,7 @@ use crate::types::LayoutKind;
 use crate::types::{AppState, CtrlReq, Mode, FocusDir, PipePaneState, VERSION,
     WaitChannel, WaitForOp, Node, Action, Bind};
 use crate::platform::install_console_ctrl_handler;
-use crate::pane::{create_window, create_window_with_env, create_window_raw, kill_active_pane, kill_pane_by_id, spawn_warm_pane};
+use crate::pane::{create_window, create_window_with_env, create_window_raw, kill_active_pane, kill_pane_by_id};
 use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all_children,
     find_window_index_by_id, focus_pane_by_id, focus_pane_by_index, get_active_pane_id,
     path_exists};
@@ -2284,6 +2284,55 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     crate::startup_trace::mark("srv.listen");
     warm_debug(&format!("server STARTUP: session='{}' bound port={}", app.session_name, port));
 
+    // Expose the server identity via env var so that child processes spawned
+    // by run-shell (from hooks, keybindings, etc.) can find this server when
+    // they call `psmux set -g ...` or other CLI commands. Set before the first
+    // pane below is spawned, which inherits it.
+    env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
+    // Job children (run-shell, if-shell, #(), popups) get $TMUX (#804).
+    crate::commands::publish_job_env(app.control_port, app.socket_name.as_deref());
+    // Apply initial dimensions BEFORE the first pane spawn so it gets the
+    // correct terminal size.
+    if let Some((w, h)) = init_size {
+        let area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
+        app.client_area = area;
+        app.last_window_area = area;
+    }
+    // Apply -e environment variables BEFORE pane spawn so the first pane
+    // inherits them via apply_user_environment().
+    crate::util::merge_session_env_into_app(&mut app, &env_vars);
+
+    // ── The first window's process starts NOW, on its own thread ─────────────
+    // Everything it needs (port, session name, size, -e environment) is known
+    // at this point. Until 2026-10-22 it waited for the session registry (six
+    // small files, ~22 ms with realtime AV scanning) and, for a command, for
+    // the config as well, and then ran CreateProcessW into the pseudoconsole
+    // (~95 ms, the console handshake) on this thread. Started here it overlaps
+    // all of that; the shell's own boot is the long pole of a cold launch and
+    // every millisecond it starts sooner is a millisecond off launch to
+    // prompt. The config can still change what the pane should have been: the
+    // default shell goes through the warm pane reconciliation as it always
+    // did, and a command pane is only adopted when `boot_params_match` says a
+    // spawn now would be identical, otherwise it is killed and the window is
+    // created as before.
+    let boot_params = if start_dir.is_some() || app.session_group.is_some() {
+        None
+    } else if let Some(ref raw) = raw_command {
+        Some(crate::pane::boot_spawn_params(&mut app, crate::pane::BootCommand::Raw(raw.clone())))
+    } else if let Some(ref cmd) = initial_command {
+        Some(crate::pane::boot_spawn_params(&mut app, crate::pane::BootCommand::Command(cmd.clone())))
+    } else {
+        crate::pane::warm_spawn_params(&mut app)
+    };
+    let boot_spawn = boot_params.map(|p| {
+        thread::spawn(move || {
+            let pty = native_pty_system();
+            let r = crate::pane::spawn_warm_pane_from(&*pty, &p);
+            crate::startup_trace::mark("srv.boot.spawned");
+            (p, r)
+        })
+    });
+
     // Write port and key files IMMEDIATELY after binding, BEFORE loading
     // config or creating windows.  run-shell scripts (e.g. PPM) need the
     // port file to discover the server, and the client polls for it to know
@@ -2362,13 +2411,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let regpath = crate::paths::port_file(&app.port_file_base());
     let keypath = crate::paths::key_file(&app.port_file_base());
 
-    // Expose the server identity via env var so that child processes spawned
-    // by run-shell (from hooks, keybindings, etc.) can find this server when
-    // they call `psmux set -g ...` or other CLI commands.
-    env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
-    // Job children (run-shell, if-shell, #(), popups) get $TMUX (#804).
-    crate::commands::publish_job_env(app.control_port, app.socket_name.as_deref());
-
     // NOTE: the .key file is written BEFORE ensure_session_registry_files
     // above — never recreate/truncate it here, after the .port beacon is
     // already visible to attaching clients (issue #496).
@@ -2417,32 +2459,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // and the accept thread is running.  This ensures that run-shell commands
     // in the config (e.g. `run '~/.psmux/plugins/ppm/ppm.ps1'`) can connect
     // back to the server to apply settings.
-
-    // Apply initial dimensions BEFORE warm pane spawn so spawn_warm_pane()
-    // uses the correct terminal size.
-    if let Some((w, h)) = init_size {
-        let area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
-        app.client_area = area;
-        app.last_window_area = area;
-    }
-
-    // Apply -e environment variables BEFORE pane spawn so the first pane
-    // inherits them via apply_user_environment().
-    crate::util::merge_session_env_into_app(&mut app, &env_vars);
-
-    // Pre-spawn a warm pane BEFORE loading config: the shell (pwsh) starts
-    // loading immediately and runs in parallel with config parsing / plugin
-    // initialization.  By the time create_window() consumes it, the shell
-    // has had the full config-load duration (~100-500ms) as a head start.
-    // Only when using default shell (no custom command).
-    // For detached sessions without -x/-y, last_window_area defaults to
-    // 120x30 which is fine for the warm pane (resized later on first attach).
-    let early_warm = if initial_command.is_none() && raw_command.is_none() && start_dir.is_none() {
-        match spawn_warm_pane(&*pty_system, &mut app) {
-            Ok(wp) => Some(wp),
-            Err(_) => None,
-        }
-    } else { None };
 
     crate::startup_trace::mark("srv.prewarm");
     crate::config::populate_default_bindings(&mut app);
@@ -2520,10 +2536,44 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // The decision lives in warm_pane_sync::for_post_config; this site
     // just stages the early pane into `app.warm_pane` so the policy
     // module can act on it uniformly.
-    if let Some(wp) = early_warm {
-        app.warm_pane.push(wp);
-        let sync = crate::warm_pane_sync::for_post_config(&app);
-        crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+    //
+    // The first pane started above lands here. A default shell is staged in
+    // the pool exactly as the early warm pane always was, and create_window's
+    // fast path transplants it. A command pane is adopted directly when the
+    // config left its spawn inputs alone, otherwise it is retired and the
+    // window below is created from scratch with what the config set.
+    let mut boot_command_pane: Option<(crate::types::WarmPane, crate::pane::BootCommand)> = None;
+    if let Some(h) = boot_spawn {
+        if let Ok((p, r)) = h.join() {
+            crate::warm_pane_sync::inflight::release(p.pane_id);
+            match r {
+                Ok(wp) if p.boot == crate::pane::BootCommand::DefaultShell => {
+                    app.warm_pane.push(wp);
+                    let sync = crate::warm_pane_sync::for_post_config(&app);
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                }
+                Ok(mut wp) => {
+                    if crate::pane::boot_params_match(&p, &app) {
+                        boot_command_pane = Some((wp, p.boot.clone()));
+                    } else {
+                        if let Some(pid) = wp.child_pid {
+                            crate::platform::process_kill::kill_pid_tree(pid);
+                        }
+                        let _ = wp.child.kill();
+                        // Nothing else took an id since: hand the first window
+                        // the id it would have had.
+                        if app.next_pane_id == p.pane_id + 1 {
+                            app.next_pane_id = p.pane_id;
+                        }
+                    }
+                }
+                Err(_) => {
+                    if app.next_pane_id == p.pane_id + 1 {
+                        app.next_pane_id = p.pane_id;
+                    }
+                }
+            }
+        }
     }
     // `set -g warm off` in the config zeroes the pool. Belt and braces: the
     // option handler already does this, but a server that reached here with
@@ -2566,7 +2616,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // open in the session start directory, while preserving the warm-pane fast
     // path (warm panes are replenished in this same directory).
     if let Some(ref dir) = start_dir { env::set_current_dir(dir).ok(); }
-    let create_result = if let Some(ref raw_args) = raw_command {
+    let create_result = if let Some((wp, boot)) = boot_command_pane.take() {
+        crate::pane::adopt_boot_pane(&mut app, wp, &boot);
+        Ok(())
+    } else if let Some(ref raw_args) = raw_command {
         create_window_raw(&*pty_system, &mut app, raw_args)
     } else {
         create_window(&*pty_system, &mut app, initial_command.as_deref(), None, false)
