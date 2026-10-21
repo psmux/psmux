@@ -3264,6 +3264,10 @@ fn run_main() -> io::Result<()> {
                         "-l" => { cmd.push_str(" -l"); }
                         "-n" => { cmd.push_str(" -n"); }
                         "-p" => { cmd.push_str(" -p"); }
+                        // -T: the current window as target toggles to the
+                        // last one (cmd-select-window.c:131-138); it was
+                        // dropped here, so the server never saw it.
+                        "-T" => { cmd.push_str(" -T"); }
                         _ => {}
                     }
                     i += 1;

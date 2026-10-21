@@ -6779,7 +6779,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Ok(_) => { let _ = resp.send(Ok(())); }
                     }
                 }
-                CtrlReq::SelectWindowSpec { ref spec, ref pane, relative, ref resp } => {
+                CtrlReq::SelectWindowSpec { ref spec, ref pane, relative, toggle, ref resp } => {
                     // Every symbolic and offset form goes through the same
                     // resolver move-window and swap-window have used since
                     // #602; select-window simply never called it (#693 item 4).
@@ -6789,23 +6789,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // resolves the target before the command runs, so a miss
                     // never reaches it. The target is resolved again after
                     // the hook, which may have moved or killed windows.
-                    let resolved = match temp_target::select_window_pos(&app, spec, pane.as_deref()) {
+                    let resolved = match temp_target::select_window_target_pos(&app, spec, pane.as_deref()) {
                         Err(msg) => Err(msg),
                         Ok(_) => {
                             if relative != Some(crate::types::RelativeWindow::Last) {
                                 if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             }
-                            temp_target::select_window_pos(&app, spec, pane.as_deref())
+                            temp_target::select_window_target_pos(&app, spec, pane.as_deref())
                         }
                     };
                     match resolved {
                         Ok(pos) => match relative {
-                            None => {
-                                focus_window_at(&mut app, pos);
-                                meta_dirty = true;
-                                hook_event = Some("after-select-window");
-                                let _ = resp.send(Ok(()));
-                            }
+                            // `-T` on the current window selects the last
+                            // one; with none it is an error and no after
+                            // hook runs (cmd-select-window.c:131-138).
+                            None => match temp_target::select_window_destination(&app, pos, toggle) {
+                                Ok(dest) => {
+                                    focus_window_at(&mut app, dest);
+                                    meta_dirty = true;
+                                    hook_event = Some("after-select-window");
+                                    let _ = resp.send(Ok(()));
+                                }
+                                Err(msg) => {
+                                    app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                                    state_dirty = true;
+                                    let _ = resp.send(Err(msg));
+                                }
+                            },
                             // The target was only checked; the move is the
                             // one NextWindow and PrevWindow make.
                             Some(crate::types::RelativeWindow::Next) => {

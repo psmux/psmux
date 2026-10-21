@@ -3834,6 +3834,9 @@ pub enum CtrlReq {
         /// `-n`, `-p` or `-l`: the target is only checked, then the move is
         /// relative to the current window (cmd-select-window.c:109-129).
         relative: Option<RelativeWindow>,
+        /// `-T`: a target that is already the current window selects the
+        /// last window instead (cmd-select-window.c:131-138).
+        toggle: bool,
         resp: mpsc::Sender<Result<(), String>>,
     },
     ListPanes(mpsc::Sender<String>),

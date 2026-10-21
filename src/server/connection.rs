@@ -1131,7 +1131,21 @@ pub(crate) fn select_window_requests(
     if relative.is_some() && (spec.is_some() || pane.is_some()) {
         let (s, r) = mpsc::channel();
         let spec = spec.unwrap_or_default();
-        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative, resp: s }], Some(r));
+        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative, toggle: false, resp: s }], Some(r));
+    }
+    // `-T` (tmux 3.8): selecting the window that is already current selects
+    // the last window instead, and with no last window it is the error
+    // "no last window" (cmd-select-window.c:131-138). Only the server knows
+    // which window is current, so every target form, none included (the
+    // current window), rides in the one request that resolves it.
+    if relative.is_none() && args.contains(&"-T") {
+        let spec = spec
+            .or_else(|| if target_win_is_id { target_win.map(|id| format!("@{}", id)) } else { None })
+            .or_else(|| if target_win_is_id { None } else { target_win.map(|i| i.to_string()) })
+            .or_else(|| target_win_name.map(str::to_string))
+            .unwrap_or_default();
+        let (s, r) = mpsc::channel();
+        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative: None, toggle: true, resp: s }], Some(r));
     }
     if args.iter().any(|a| *a == "-n") {
         return (vec![CtrlReq::NextWindow], None);
@@ -1152,11 +1166,11 @@ pub(crate) fn select_window_requests(
     // `-t {end}`, `-t -` and `-t +` died on the CLI as session names.
     if let Some(spec) = spec {
         let (s, r) = mpsc::channel();
-        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative: None, resp: s }], Some(r));
+        return (vec![CtrlReq::SelectWindowSpec { spec, pane, relative: None, toggle: false, resp: s }], Some(r));
     }
     if pane.is_some() {
         let (s, r) = mpsc::channel();
-        return (vec![CtrlReq::SelectWindowSpec { spec: String::new(), pane, relative: None, resp: s }], Some(r));
+        return (vec![CtrlReq::SelectWindowSpec { spec: String::new(), pane, relative: None, toggle: false, resp: s }], Some(r));
     }
     if target_win_is_id {
         // #497: an @id target must never be re-sent as an INDEX.

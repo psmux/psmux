@@ -110,6 +110,26 @@ pub(crate) fn resolve_temp_target(app: &AppState, t: &TempTarget) -> Result<Temp
 /// part must exist in that window (cmd-find.c:592-598, 1189-1217), and a
 /// bare `%N` with no window part names the window holding that pane
 /// (cmd-find.c:1103-1104).  A `+`/`-` pane part always resolves.
+/// [`select_window_pos`], where no window part and no pane part is the
+/// current window, tmux's default target (`select-window -T` with no -t).
+pub(crate) fn select_window_target_pos(app: &AppState, spec: &str, pane: Option<&str>) -> Result<usize, String> {
+    if spec.trim().is_empty() && pane.is_none() {
+        return Ok(app.active_idx);
+    }
+    select_window_pos(app, spec, pane)
+}
+
+/// The window a `select-window` whose target resolved to `pos` lands on: the
+/// target itself, or, with `-T` (`toggle`) and a target that is already the
+/// current window, the last window, which is the error "no last window" when
+/// there is none (cmd-select-window.c:131-138).
+pub(crate) fn select_window_destination(app: &AppState, pos: usize, toggle: bool) -> Result<usize, String> {
+    if toggle && pos == app.active_idx {
+        return app.last_window_pos().ok_or_else(|| "no last window".to_string());
+    }
+    Ok(pos)
+}
+
 pub(crate) fn select_window_pos(app: &AppState, spec: &str, pane: Option<&str>) -> Result<usize, String> {
     let missing_pane = |p: &str| format!("can't find pane: {}", p);
     if let Some(id) = pane.and_then(|p| p.strip_prefix('%')) {

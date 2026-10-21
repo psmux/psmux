@@ -2390,6 +2390,22 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "select-window" | "selectw" => {
+            // -T on the current window selects the last window, and with no
+            // last window is the error "no last window" (tmux 3.8,
+            // cmd-select-window.c:131-138). With no -t the target is the
+            // current window. It used to be ignored on this route.
+            let toggle = parts.contains(&"-T")
+                && !parts.iter().any(|p| matches!(*p, "-l" | "-n" | "-p"));
+            if toggle && !parts.contains(&"-t") {
+                match crate::server::temp_target::select_window_destination(app, app.active_idx, true) {
+                    Ok(dest) => switch_with_copy_save(app, |app| {
+                        app.last_window_idx = app.active_idx;
+                        app.active_idx = dest;
+                    }),
+                    Err(e) => app.status_message = Some((e, std::time::Instant::now(), None)),
+                }
+                return Ok(());
+            }
             if let Some(t_pos) = parts.iter().position(|p| *p == "-t") {
                 if let Some(t) = parts.get(t_pos + 1) {
                     // The shared #602 resolver, so `+1`, `!` and `{end}` mean
@@ -2407,6 +2423,17 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     // Selecting the current window changes nothing, the last
                     // window included (session_set_current returns early when
                     // wl is already curw); it used to become the last window.
+                    // With -T the current window toggles to the last one.
+                    let resolved = match resolved {
+                        Some(pos) => match crate::server::temp_target::select_window_destination(app, pos, toggle) {
+                            Ok(dest) => Some(dest),
+                            Err(e) => {
+                                app.status_message = Some((e, std::time::Instant::now(), None));
+                                None
+                            }
+                        },
+                        None => None,
+                    };
                     if let Some(internal_idx) = resolved.filter(|&i| i != app.active_idx) {
                         switch_with_copy_save(app, |app| {
                             app.last_window_idx = app.active_idx;
@@ -4256,3 +4283,7 @@ mod tests_issue836_set_buffer_flags;
 #[cfg(test)]
 #[path = "../tests-rs/test_in_process_set_option_once.rs"]
 mod tests_in_process_set_option_once;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_select_window_toggle.rs"]
+mod tests_select_window_toggle;
