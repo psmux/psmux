@@ -73,7 +73,7 @@ pub use palette::{parse_palette_index, parse_x11_colour, ColourPalette};
 pub use parser::Parser;
 pub use queries::QueryDetector;
 pub use program_status::{ProgramKind, ProgramRecord, ProgramState, ProgramStatus, ProgramStatuses, TerminalQuery, PROGRAM_STATUS_REPLY};
-pub use screen::{MouseProtocolEncoding, MouseProtocolMode, Screen};
+pub use screen::{extended_keys_option, set_extended_keys_option, MouseProtocolEncoding, MouseProtocolMode, Screen};
 pub use width::{
     char_width, clear_codepoint_widths, has_overrides, parse_entry as parse_codepoint_width_entry,
     set_codepoint_widths, str_cells, str_width, WidthOverride, MAX_OVERRIDE_WIDTH,

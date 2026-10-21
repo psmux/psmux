@@ -197,6 +197,28 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                     );
                 }
             },
+            // XTMODKEYS (`CSI > 4 ; n m`) and its reset (`CSI > 4 n`): the
+            // extended key mode tmux keeps per pane (issue #860).  The
+            // callback still runs, as it did before for every `>` sequence.
+            Some(b'>') if c == 'm' || c == 'n' => {
+                let mut it = params.iter();
+                // tmux input_get(ictx, 0, 0, 0) / (ictx, 1, 0, 0): a missing
+                // parameter reads as 0.
+                let resource = it.next().and_then(|x| x.first().copied()).unwrap_or(0);
+                if c == 'm' {
+                    let level = it.next().and_then(|x| x.first().copied()).unwrap_or(0);
+                    self.screen.xtmodkeys_set(resource, level);
+                } else {
+                    self.screen.xtmodkeys_off(resource);
+                }
+                self.callbacks.unhandled_csi(
+                    &mut self.screen,
+                    Some(b'>'),
+                    intermediates.get(1).copied(),
+                    &params.iter().collect::<Vec<_>>(),
+                    c,
+                );
+            }
             Some(i) => {
                 self.callbacks.unhandled_csi(
                     &mut self.screen,

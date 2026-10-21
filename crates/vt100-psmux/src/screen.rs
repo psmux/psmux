@@ -233,6 +233,41 @@ pub struct Screen {
     /// that turns the mode off again on exit says nothing about the host, and
     /// RIS keeps it because a reset of the screen is not a new host.
     win32_input_requested: bool,
+
+    /// tmux's `MODE_KEYS_EXTENDED` / `MODE_KEYS_EXTENDED_2` (tmux.h), the
+    /// extended key reporting mode this pane's application asked for:
+    /// 0 is the standard (VT10x) mode, 1 is xterm modifyOtherKeys=1 and 2
+    /// is modifyOtherKeys=2.  Set by `CSI > 4 ; n m` and cleared by
+    /// `CSI > 4 n`, both filtered through the `extended-keys` server option
+    /// exactly as tmux's input.c does (INPUT_CSI_MODSET / INPUT_CSI_MODOFF),
+    /// and reset by RIS.  Issue #860.
+    extended_keys_mode: u8,
+}
+
+/// The `extended-keys` server option as a number, tmux's
+/// `options_table_extended_keys_list` order: 0 off, 1 on, 2 always.  One per
+/// process because tmux reads it from `global_options` while it parses pane
+/// output; psmux stores it here so the parser can do the same.
+static EXTENDED_KEYS_OPTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Record the `extended-keys` server option (0 off, 1 on, 2 always) for every
+/// pane parser in this process.  See [`Screen::extended_keys_mode`].
+pub fn set_extended_keys_option(value: u8) {
+    EXTENDED_KEYS_OPTION.store(value.min(2), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The `extended-keys` server option last given to
+/// [`set_extended_keys_option`].
+#[must_use]
+pub fn extended_keys_option() -> u8 {
+    EXTENDED_KEYS_OPTION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The mode a fresh or reset screen starts in: tmux's `screen_reinit` and
+/// `screen_write_reset` put a screen into mode 1 when `extended-keys` is
+/// `always`, and into the standard mode otherwise.
+fn initial_extended_keys_mode() -> u8 {
+    if extended_keys_option() == 2 { 1 } else { 0 }
 }
 
 impl Screen {
@@ -272,6 +307,7 @@ impl Screen {
             audible_bell_count: 0,
             allow_alternate_screen: true,
             win32_input_requested: false,
+            extended_keys_mode: initial_extended_keys_mode(),
         }
     }
 
@@ -899,6 +935,51 @@ impl Screen {
     #[must_use]
     pub fn win32_input_requested(&self) -> bool {
         self.win32_input_requested
+    }
+
+    /// The extended key reporting mode of this pane: 0 standard (VT10x), 1
+    /// for xterm modifyOtherKeys=1, 2 for modifyOtherKeys=2.  tmux's
+    /// `#{pane_key_mode}` shows it as `VT10x`, `Ext 1` and `Ext 2`.
+    #[must_use]
+    pub fn extended_keys_mode(&self) -> u8 {
+        self.extended_keys_mode
+    }
+
+    /// Carry [`Self::extended_keys_mode`] into a fresh screen that replaces
+    /// this one for the same application (clear-history swaps the parser).
+    pub fn set_extended_keys_mode(&mut self, mode: u8) {
+        self.extended_keys_mode = mode.min(2);
+    }
+
+    /// `CSI > n ; m m` (xterm XTMODKEYS), tmux input.c INPUT_CSI_MODSET:
+    /// only resource 4 (modifyOtherKeys) counts, the request is ignored
+    /// while `extended-keys` is off, level 2 selects mode 2, and level 1 (or
+    /// any level under `always`) selects mode 1.
+    pub(crate) fn xtmodkeys_set(&mut self, resource: u16, level: u16) {
+        if resource != 4 {
+            return;
+        }
+        let ek = extended_keys_option();
+        if ek == 0 {
+            return;
+        }
+        self.extended_keys_mode = if level == 2 {
+            2
+        } else if level == 1 || ek == 2 {
+            1
+        } else {
+            0
+        };
+    }
+
+    /// `CSI > n n` (xterm disable modifiers), tmux input.c INPUT_CSI_MODOFF:
+    /// resource 4 drops back to the standard mode, or to mode 1 under
+    /// `extended-keys always`.
+    pub(crate) fn xtmodkeys_off(&mut self, resource: u16) {
+        if resource != 4 {
+            return;
+        }
+        self.extended_keys_mode = initial_extended_keys_mode();
     }
 
     /// Carry [`Self::win32_input_requested`] into a fresh screen that replaces
