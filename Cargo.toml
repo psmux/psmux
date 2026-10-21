@@ -80,7 +80,7 @@ name = "test_codepoint_widths"
 path = "tests-rs/test_codepoint_widths.rs"
 
 [dev-dependencies]
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 
 # Embeds the application icon and the VS_VERSIONINFO block into the .exe
 # (issue #620). Windows hosts only: this is what build.rs's #[cfg(windows)]
@@ -121,7 +121,7 @@ chrono = "0.4.45"
 vt100 = { version = "0.16.13", path = "crates/vt100-psmux", package = "vt100-psmux" }
 unicode-width = "0.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 regex = "1.13.1"
 glob = "0.3.4"
 anyhow = "1.0.104"
