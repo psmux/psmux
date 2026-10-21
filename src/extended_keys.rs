@@ -32,11 +32,26 @@ const CTRL: u8 = 4;
 ///
 /// `xterm` selects `extended-keys-format xterm` (`CSI 27;m;k~`) over `csi-u`
 /// (`CSI k;mu`).
+///
+/// This is the KEY EVENT form: a Ctrl+Alt punctuation character is what
+/// Windows reports for AltGr, so it is text.  A key NAME is never AltGr and
+/// goes through [`encode_name`].
 pub fn encode(mode: u8, xterm: bool, code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
+    encode_inner(mode, xterm, code, mods, true)
+}
+
+/// [`encode`] for a key NAME (`send-keys C-M-[`): `C-M-[` is the chord tmux
+/// names, so it is reported extended like any other (input-keys.c
+/// input_key), where the key event form would take it for AltGr text.
+pub fn encode_name(mode: u8, xterm: bool, code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
+    encode_inner(mode, xterm, code, mods, false)
+}
+
+fn encode_inner(mode: u8, xterm: bool, code: KeyCode, mods: KeyModifiers, key_event: bool) -> Option<Vec<u8>> {
     if mode == 0 {
         return None;
     }
-    let (key, bits) = tmux_key(mode, code, mods)?;
+    let (key, bits) = tmux_key(mode, code, mods, key_event)?;
     if bits == 0 {
         // input_key_extended returns -1 for an unmodified key; such a key
         // never gets this far in tmux (it is the trivial case).
@@ -57,7 +72,7 @@ pub fn encode(mode: u8, xterm: bool, code: KeyCode, mods: KeyModifiers) -> Optio
 /// point and its modifier bits.  `None` for keys that have a builtin sequence
 /// (arrows, the editing block, function keys: tmux writes those as `CSI 1;m x`
 /// and `CSI n;m ~` in every mode) or that are plain text.
-fn tmux_key(mode: u8, code: KeyCode, mods: KeyModifiers) -> Option<(u32, u8)> {
+fn tmux_key(mode: u8, code: KeyCode, mods: KeyModifiers, key_event: bool) -> Option<(u32, u8)> {
     let mut bits = 0u8;
     if mods.contains(KeyModifiers::SHIFT) { bits |= SHIFT; }
     if mods.contains(KeyModifiers::ALT) { bits |= META; }
@@ -75,12 +90,14 @@ fn tmux_key(mode: u8, code: KeyCode, mods: KeyModifiers) -> Option<(u32, u8)> {
             }
             // AltGr arrives as Ctrl+Alt with the character it produced
             // (`\`, `@`, `{`, a Euro sign): that is text, not a chord.
-            if bits & (CTRL | META) == CTRL | META && !c.is_ascii_alphanumeric() && c != ' ' {
+            if key_event && bits & (CTRL | META) == CTRL | META && !c.is_ascii_alphanumeric() && c != ' ' {
                 return None;
             }
-            // Shift alone on a character is the shifted character itself,
-            // tmux's trivial case.
-            if bits & (CTRL | META) == 0 {
+            // Shift alone on a typed character is the shifted character
+            // itself (crossterm reports `A` with SHIFT).  A NAME such as
+            // `S-a` is the key 'a'|KEYC_SHIFT, which tmux reports extended
+            // in both modes (input_key_mode1 returns -1 for it).
+            if key_event && bits & (CTRL | META) == 0 {
                 return None;
             }
             Some((cp, bits))

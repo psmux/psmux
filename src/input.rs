@@ -2153,6 +2153,66 @@ pub fn ctrl_char_send_keys_byte(c: char) -> Option<u8> {
     None
 }
 
+/// The spelling the `send-keys` token arms expect for a modified CHARACTER
+/// key written in any modifier order, or `None` when `token` is not one.
+///
+/// tmux reads `C-`, `M-` and `S-` in any order and case
+/// (key-string.c:213 key_string_get_modifiers), so `M-C-a`, `c-m-a` and
+/// `S-M-C-a` all name the same key as `C-M-a`.  The send-keys arms match on
+/// fixed prefixes instead, and took the character at a fixed offset: `M-C-a`
+/// went to the `M-` arm and wrote ESC `C` (1B 43), `C-S-a` to the `C-` arm
+/// and wrote Ctrl+S (0x13), `S-M-a` was typed as the text `S-M-a`, and
+/// `M-Space` wrote ESC `S`.
+///
+/// The canonical spelling follows tmux's VT10x encoding (input-keys.c
+/// input_key_vt10x), which ignores Shift on a character ("no terminal will
+/// send <base key>|SHIFT"): Shift is dropped, except on a Ctrl + non letter
+/// key, whose `C-S-` arm keeps it for a record reading pane (#394, #623).
+/// Ctrl folds a letter to lower case (`C-A` is `C-a`, both 0x01).
+///
+/// Results: `C-x`, `C-S-x`, `C-M-x`, `M-x`, `C-Space`, `M-Space`,
+/// `C-M-Space`, `M-Escape`, or the bare character for Shift alone.  Names
+/// that are not a single character, Space or Escape (arrows, F keys, Enter,
+/// Tab, BSpace, which `parse_modified_special_key` already reads in any
+/// order) give `None`, as does an unmodified token.
+pub(crate) fn canonical_modified_char_name(token: &str) -> Option<String> {
+    // Only a token that starts with a modifier prefix is a candidate; a
+    // plain word must stay text (`send-keys S-M-a` aside, "S" alone is text).
+    let has_prefix = token.len() > 2
+        && matches!(token.as_bytes()[0].to_ascii_uppercase(), b'C' | b'M' | b'S')
+        && token.as_bytes()[1] == b'-';
+    if !has_prefix {
+        return None;
+    }
+    let (code, mods) = crate::config::parse_key_string(token)?;
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let meta = mods.contains(KeyModifiers::ALT);
+    let shift = mods.contains(KeyModifiers::SHIFT);
+    if !(ctrl || meta || shift) {
+        return None;
+    }
+    match code {
+        KeyCode::Esc if meta => Some("M-Escape".to_string()),
+        KeyCode::Char(' ') => Some(match (ctrl, meta) {
+            (true, true) => "C-M-Space".to_string(),
+            (true, false) => "C-Space".to_string(),
+            (false, true) => "M-Space".to_string(),
+            (false, false) => " ".to_string(),
+        }),
+        KeyCode::Char(c) => {
+            let c = if ctrl && c.is_ascii_alphabetic() { c.to_ascii_lowercase() } else { c };
+            Some(match (ctrl, meta) {
+                (true, true) => format!("C-M-{}", c),
+                (true, false) if shift && !c.is_ascii_alphabetic() => format!("C-S-{}", c),
+                (true, false) => format!("C-{}", c),
+                (false, true) => format!("M-{}", c),
+                (false, false) => c.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
 pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     let encoded: Vec<u8> = match key.code {
         // AltGr detection: On Windows, AltGr is reported as Ctrl+Alt by the
@@ -2705,9 +2765,84 @@ pub(crate) fn write_pane_input(p: &mut crate::types::Pane, bytes: &[u8]) {
             let _ = p.writer.flush();
             return;
         }
+        if let Some((vk, uchar, ctrl_state)) = meta_key_record(bytes) {
+            if meta_key_needs_record(bytes, p.win32_input_latched) && pane_host_parses_win32_input(p) {
+                let scan = crate::platform::mouse_inject::vk_to_scan(vk);
+                let mut seq = win32_input_key_seq(vk, scan, uchar, ctrl_state);
+                if bytes == b"\x1b\x1b" {
+                    // Two Escape records (see meta_key_record).
+                    seq = seq.repeat(2);
+                }
+                let _ = p.writer.write_all(seq.as_bytes());
+                let _ = p.writer.flush();
+                p.win32_input_latched = true;
+                crate::debug_log::input_log(
+                    "meta-key-record",
+                    &format!("{:02X?} as win32 record vk=0x{:02X} cs=0x{:X}", bytes, vk, ctrl_state),
+                );
+                return;
+            }
+        }
     }
     let _ = p.writer.write_all(bytes);
     let _ = p.writer.flush();
+}
+
+/// The win32 input mode record for a two byte META key, `ESC` + one byte,
+/// that conhost's input parser loses when it arrives as VT bytes.  `None` for
+/// every other payload.
+///
+/// Measured with a VT input reader in the pane (`send-keys`, legacy mode):
+///
+/// ```text
+///                 fresh ConPTY     after a win32 record latched it (#588)
+///   1b 00         1b               1b            (M-C-Space: NUL dropped)
+///   1b 5b         1b 5b            nothing       (M-[)
+///   1b 4f         1b 4f            nothing       (M-O)
+///   1b 1b         1b 1b            nothing       (M-Escape, C-M-[)
+///   1b 61         1b 61            1b 61         (M-a: fine either way)
+/// ```
+///
+/// conhost reads `ESC [`, `ESC O` and `ESC ESC` as the start of a longer
+/// sequence once latched and holds them, and never passes a NUL after ESC.
+/// The same key as an Alt (+ Ctrl) record arrives intact, conhost writing the
+/// meta prefix itself, which is also what a record reading pane wants.  The
+/// bytes are tmux's: input_key_vt10x writes the meta prefix, then the key
+/// (`standard_map` NUL for C-Space, ESC for C-[).
+#[cfg(windows)]
+pub(crate) fn meta_key_record(bytes: &[u8]) -> Option<(u16, u16, u32)> {
+    if bytes.len() != 2 || bytes[0] != 0x1b {
+        return None;
+    }
+    match bytes[1] {
+        0x00 => Some((0x20, 0, LEFT_CTRL_PRESSED | LEFT_ALT_PRESSED)), // VK_SPACE
+        // VK_ESCAPE, written TWICE by write_pane_input: an Alt+Escape record
+        // reached a VT reader as nothing at all, two Escape records arrive
+        // as the two bytes.
+        0x1b => Some((0x1B, 0x1b, 0)),
+        b @ (b'[' | b'O') => {
+            let vk = crate::platform::mouse_inject::char_to_vk(b as char);
+            if vk == 0 {
+                return None;
+            }
+            let shift = if (b as char).is_ascii_uppercase() { SHIFT_PRESSED } else { 0 };
+            Some((vk, b as u16, LEFT_ALT_PRESSED | shift))
+        }
+        _ => None,
+    }
+}
+
+/// Does the meta key `bytes` ([`meta_key_record`]) need the record form on a
+/// pane whose ConPTY is (`latched`) or is not yet in win32 input mode?  The
+/// NUL is lost on any ConPTY; the sequence introducers only once latched, so
+/// an unlatched pane keeps the plain bytes it has always had.
+#[cfg(windows)]
+pub(crate) fn meta_key_needs_record(bytes: &[u8], latched: bool) -> bool {
+    match bytes {
+        [0x1b, 0x00] => true,
+        [0x1b, b'[' | b'O' | 0x1b] => latched,
+        _ => false,
+    }
 }
 
 /// The extended key mode (0, 1 or 2) the application in `p` asked for, read
@@ -2736,25 +2871,38 @@ pub(crate) fn pane_extended_key_bytes(
 ) -> Option<Vec<u8>> {
     let mode = pane_extended_keys_mode(p);
     let bytes = crate::extended_keys::encode(mode, xterm, code, mods)?;
+    pane_takes_extended_bytes(p).then_some(bytes)
+}
+
+/// Only a pane reading VT input takes an extended sequence; see
+/// [`pane_extended_key_bytes`].
+fn pane_takes_extended_bytes(p: &mut crate::types::Pane) -> bool {
     #[cfg(windows)]
-    if !crate::window_ops::pane_reads_vt_bytes(p) {
-        return None;
+    {
+        crate::window_ops::pane_reads_vt_bytes(p)
     }
-    Some(bytes)
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        true
+    }
 }
 
 /// [`pane_extended_key_bytes`] for a key NAME (`C-Space`, `M-a`, `S-Enter`),
-/// the form send-keys and the attached client hand the server.
+/// the form send-keys and the attached client hand the server.  A name is
+/// never AltGr text, so `C-M-[` is the chord ([`crate::extended_keys::encode_name`]).
 pub(crate) fn pane_extended_named_key_bytes(
     p: &mut crate::types::Pane,
     xterm: bool,
     name: &str,
 ) -> Option<Vec<u8>> {
-    if pane_extended_keys_mode(p) == 0 {
+    let mode = pane_extended_keys_mode(p);
+    if mode == 0 {
         return None;
     }
     let (code, mods) = crate::config::parse_key_string(name)?;
-    pane_extended_key_bytes(p, xterm, code, mods)
+    let bytes = crate::extended_keys::encode_name(mode, xterm, code, mods)?;
+    pane_takes_extended_bytes(p).then_some(bytes)
 }
 
 /// [`pane_extended_named_key_bytes`] for the pane that `send_text_to_active`
@@ -4676,6 +4824,19 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if (s.starts_with("C-M-") || s.starts_with("c-m-")) && s.len() == 5 => {
                 let c = s.chars().nth(4).unwrap_or('c');
+                // A pane that reads VT bytes gets tmux's bytes, the meta
+                // prefix and the standard_map byte (input-keys.c
+                // input_key_vt10x).  The injected Ctrl+Alt record below
+                // reached such a pane as the control byte ALONE: a real
+                // Ctrl+Alt+A through an attached client arrived as 01, not
+                // 1B 01, so nvim saw <C-a> instead of <C-M-a>.
+                #[cfg(windows)]
+                if crate::window_ops::pane_reads_vt_bytes(p) {
+                    if let Some(b) = ctrl_char_send_keys_byte(c) {
+                        write_pane_input(p, &[0x1b, b]);
+                    }
+                    return;
+                }
                 // Try native console injection (WriteConsoleInputW with
                 // LEFT_CTRL_PRESSED | LEFT_ALT_PRESSED).  ConPTY does NOT
                 // reassemble ESC + ctrl-char into Ctrl+Alt+key.
@@ -4882,3 +5043,7 @@ mod tests_paste_no_server_stall;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue783_prompt_edit_unify_server.rs"]
 mod tests_issue783_prompt_edit_unify_server;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue860_modifier_order.rs"]
+mod tests_issue860_modifier_order;

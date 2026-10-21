@@ -4603,7 +4603,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                             }
 
+                            // tmux reads modifiers in any order and case
+                            // (key-string.c key_string_get_modifiers); the arms
+                            // below match fixed prefixes, so a modified
+                            // character key is respelled first: `M-C-a` wrote
+                            // ESC C, `C-S-a` Ctrl+S, `M-Space` ESC S.
+                            let canon = crate::input::canonical_modified_char_name(key);
+                            let key: &str = canon.as_deref().unwrap_or(key);
+                            let key_upper = key.to_uppercase();
+
                             match key_upper.as_str() {
+                                // tmux input_key_vt10x: the meta prefix, then
+                                // Space (0x20) or, with Ctrl, NUL
+                                // (standard_map).  Escape takes the meta prefix
+                                // too (#766).  Checked before the generic C-M-
+                                // and M- arms, which would read the `S` or `E`.
+                                "M-SPACE" => send_text_to_active(&mut app, "\x1b ")?,
+                                "C-M-SPACE" => send_text_to_active(&mut app, "\x1b\x00")?,
+                                "M-ESCAPE" => send_text_to_active(&mut app, "\x1b\x1b")?,
                                 "ENTER" => send_text_to_active(&mut app, "\r")?,
                                 "TAB" => send_text_to_active(&mut app, "\t")?,
                                 "BTAB" | "BACKTAB" => send_text_to_active(&mut app, "\x1b[Z")?,
