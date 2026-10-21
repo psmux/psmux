@@ -2814,6 +2814,17 @@ const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
 /// (see `tests-rs/test_client_size_after_reconnect.rs`).
 const SIZE_NOT_REPORTED: (u16, u16) = (0, 0);
 
+/// Rows the status line takes from the terminal, which is what the client
+/// subtracts before it reports its size to the server (issue #883). With
+/// `status off` that is zero, as in tmux, where `status_line_size` returns
+/// `s->statuslines` (status.c:113) and that is 0 for off; the window then gets
+/// `tty.sy - 0` rows (resize.c:194, resize.c:299). The draw already gives the
+/// panes every row when the status is off, so reserving a row here left the
+/// panes one row short of what the client draws and the bottom row blank.
+pub(crate) fn status_rows_reserved(status_visible: bool, status_lines: usize) -> u16 {
+    if status_visible { status_lines.max(1).min(u16::MAX as usize) as u16 } else { 0 }
+}
+
 fn establish_connection_with_timeout(
     addr: &str,
     key: &str,
@@ -8577,7 +8588,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // If server's status_lines changed, re-send client-size with the
         // correct content-area height so the server's pane rects match the
         // client's render area exactly.
-        let new_sl = (status_lines as u16).max(1);
+        let new_sl = status_rows_reserved(state.status_visible, state.status_lines);
         if new_sl != last_status_lines {
             last_status_lines = new_sl;
             // Force a client-size re-send on the next iteration
