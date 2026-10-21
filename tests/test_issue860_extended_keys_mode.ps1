@@ -190,6 +190,29 @@ if ($got['C-Space'] -eq $table['C-Space']['2']) { Write-Pass "extended-keys off 
 Kill-Ns
 
 # ---------------------------------------------------------------------------
+# PART A2: a pane that reads console RECORDS keeps its record path
+# ---------------------------------------------------------------------------
+# `extended-keys always` puts every pane in mode 1, PSReadLine and Far
+# included.  Those read INPUT_RECORDs, which cannot carry CSI 27;5;49~, so
+# they keep the #623 win32 record: Ctrl+1 must still arrive as vk 0x31 with
+# LEFT_CTRL_PRESSED, not as the characters of an escape sequence.
+Write-Host "`n[A2] extended-keys always, record reading pane" -ForegroundColor Yellow
+$conf = Conf 'recrd' 'set -g extended-keys always'
+$logR = Join-Path $TMP "recrd.txt"
+& $PSMUX -L $NS -f $conf new-session -d -s recrd -x 100 -y 30 -- $REC rec $logR 2>&1 | Out-Null
+for ($i = 0; $i -lt 40 -and -not ((Get-Content $logR -EA SilentlyContinue) -match 'READY'); $i++) { Start-Sleep -Milliseconds 250 }
+Start-Sleep -Milliseconds 800
+$km = Key-Mode 'recrd'
+if ($km -eq 'Ext 1') { Write-Pass "record reader pane is in Ext 1 under always" } else { Write-Fail "record reader pane_key_mode [$km]" }
+foreach ($k in @('C-1', 'C-Space', 'S-Enter')) { & $PSMUX -L $NS send-keys -t recrd $k 2>&1 | Out-Null; Start-Sleep -Milliseconds 300 }
+Start-Sleep -Milliseconds 600
+$recs = (Get-Content $logR | Where-Object { $_ -match '^REC DOWN' }) -join "`n"
+if ($recs -match 'vk=0x31 \S+ uChar=0x0000 ctrl=0x0008') { Write-Pass "Ctrl+1 reaches the record reader as vk=0x31 LEFT_CTRL (#623 path kept)" } else { Write-Fail "Ctrl+1 record wrong: [$recs]" }
+if ($recs -notmatch 'uChar=0x005B') { Write-Pass "no '[' character record: no escape sequence was typed into the record reader" } else { Write-Fail "an escape sequence reached the record reader as text: [$recs]" }
+& $PSMUX -L $NS kill-session -t recrd 2>&1 | Out-Null
+Kill-Ns
+
+# ---------------------------------------------------------------------------
 # PART B: real key records through a REAL attached client
 # ---------------------------------------------------------------------------
 function Start-Attached($sess, $conf, $pane, $extra = "") {
