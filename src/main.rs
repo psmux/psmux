@@ -2413,10 +2413,15 @@ fn run_main() -> io::Result<()> {
                                         Some(ref wn) => format!(" -n {}", crate::util::quote_arg(wn)),
                                         None => String::new(),
                                     };
+                                    // -E carries the same block inline, last on the line so a
+                                    // standby that predates it ignores the value as a third
+                                    // positional; a current one never opens the -e file (see
+                                    // client_env::own_environment_hex).
+                                    let inline_flag = format!(" -E {}", crate::client_env::own_environment_hex());
                                     let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                        format!("claim-session {} {} -p {}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag, name_flag)
+                                        format!("claim-session {} {} -p {}{}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag, name_flag, inline_flag)
                                     } else {
-                                        format!("claim-session {} -p {}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag, name_flag)
+                                        format!("claim-session {} -p {}{}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag, name_flag, inline_flag)
                                     };
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,

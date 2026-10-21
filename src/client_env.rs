@@ -245,7 +245,12 @@ pub fn adopt_from_file(path: &str) -> EnvPlan {
         Err(_) => return EnvPlan::default(),
     };
     let _ = std::fs::remove_file(path);
-    let incoming = match decode_env_block(&bytes) {
+    adopt_from_bytes(&bytes)
+}
+
+/// Adopt a block that arrived inline on the claim line (`-E`).
+pub fn adopt_from_bytes(bytes: &[u8]) -> EnvPlan {
+    let incoming = match decode_env_block(bytes) {
         Some(e) => e,
         None => return EnvPlan::default(),
     };
@@ -291,7 +296,12 @@ pub fn same_conpty_dir(a: Option<&OsStr>, b: Option<&OsStr>) -> bool {
 /// claim.
 pub fn client_conpty_dir(path: &str) -> Option<Option<OsString>> {
     let bytes = std::fs::read(path).ok()?;
-    let incoming = decode_env_block(&bytes)?;
+    client_conpty_dir_in_block(&bytes)
+}
+
+/// [`client_conpty_dir`] for a block already in hand (the inline `-E` form).
+pub fn client_conpty_dir_in_block(bytes: &[u8]) -> Option<Option<OsString>> {
+    let incoming = decode_env_block(bytes)?;
     if !is_sane(&incoming) {
         return None;
     }
@@ -306,6 +316,39 @@ pub fn write_own_environment(path: &str) -> Option<String> {
         Ok(()) => Some(path.to_string()),
         Err(_) => None,
     }
+}
+
+/// This process's environment block as hex, for the claim line's `-E`.
+///
+/// The `-e` file is still written for a standby that predates `-E`, but a
+/// current standby takes the block from the line and never opens the file:
+/// reading a file another process had just written cost the claim 15 to 16 ms
+/// in every measured run (on-access scanning of a fresh file), on the path
+/// between `psmux` and the prompt of a warm session.
+pub fn own_environment_hex() -> String {
+    let block = encode_env_block(std::env::vars_os());
+    let mut s = String::with_capacity(block.len() * 2);
+    for b in block {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0'));
+    }
+    s
+}
+
+/// The inverse of [`own_environment_hex`]. `None` for anything that is not
+/// an even run of hex digits.
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    if b.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len() / 2);
+    for pair in b.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
 }
 
 /// Path of the handoff file for a warm server, next to its `.port`/`.key`.
@@ -342,3 +385,7 @@ mod test_issue659_claim_environment;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue817_claim_conpty_dir.rs"]
 mod test_issue817_claim_conpty_dir;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_claim_inline_env.rs"]
+mod test_claim_inline_env;

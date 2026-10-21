@@ -3968,7 +3968,8 @@ match cmd {
         if let Some(name) = non_flag.first().cloned() {
             let client_cwd = non_flag.get(1).cloned();
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ClaimSession(name, client_cwd, client_priority, parsed.env_file, parsed.window_name, rtx));
+            let env_bytes = parsed.env_inline.as_deref().and_then(crate::client_env::hex_decode);
+            let _ = tx.send(CtrlReq::ClaimSession(name, client_cwd, client_priority, parsed.env_file, parsed.window_name, env_bytes, rtx));
             if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
                 let _ = write!(write_stream, "{}", resp);
                 let _ = write_stream.flush();

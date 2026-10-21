@@ -2317,6 +2317,12 @@ pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<S
     let _ = write!(s, "AUTH {}\n", key);
     let _ = std::io::Write::write_all(&mut s, cmd);
     let _ = s.flush();
+    // Nothing more is coming from this side: say so, so the server's reader
+    // sees end of input and closes the connection as soon as it has answered.
+    // Without it the reply's EOF waited out the server's 10 ms read timeout on
+    // the next line (measured on the warm claim: OK written at 83 ms, the CLI
+    // saw it end at 98 ms), which is the same half-close `send_control` does.
+    let _ = s.shutdown(std::net::Shutdown::Write);
     let mut br = std::io::BufReader::new(std::io::Read::take(&mut s, MAX_AUTHED_RESPONSE_BYTES));
     let mut auth_line = String::new();
     let _ = std::io::BufRead::read_line(&mut br, &mut auth_line);

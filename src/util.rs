@@ -659,6 +659,12 @@ pub struct ClaimArgs {
     /// nothing can be observed under the standby's pool name and no second
     /// request can fail and leave the name lost.
     pub window_name: Option<String>,
+    /// `-E`: the same environment block as `-e`, inline as hex, so a current
+    /// standby does not have to open a file the client has just written
+    /// (`client_env::own_environment_hex`). `-e` is still sent for a standby
+    /// that predates this flag; it parses `-E` as an unknown flag and its value
+    /// as a third positional, which it ignores.
+    pub env_inline: Option<String>,
 }
 
 /// Split a `claim-session` line into its positionals and its flags.
@@ -685,6 +691,11 @@ pub fn parse_claim_args_full(args: &[&str]) -> ClaimArgs {
         }
         if a == "-n" {
             parsed.window_name = args.get(i + 1).map(|s| (*s).to_string());
+            i += 2;
+            continue;
+        }
+        if a == "-E" {
+            parsed.env_inline = args.get(i + 1).map(|s| (*s).to_string());
             i += 2;
             continue;
         }

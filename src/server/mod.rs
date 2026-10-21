@@ -410,8 +410,12 @@ fn warm_debug(msg: &str) {
 fn conpty_host_mismatch(
     app: &AppState,
     client_env_file: Option<&str>,
+    client_env_bytes: Option<&[u8]>,
 ) -> Option<(Option<std::ffi::OsString>, Option<std::ffi::OsString>)> {
-    let want = crate::client_env::client_conpty_dir(client_env_file?)?;
+    let want = match client_env_bytes {
+        Some(b) => crate::client_env::client_conpty_dir_in_block(b)?,
+        None => crate::client_env::client_conpty_dir(client_env_file?)?,
+    };
     let have = portable_pty::win::conpty_requested_dir().map(|p| p.into_os_string());
     if crate::client_env::same_conpty_dir(have.as_deref(), want.as_deref()) {
         return None;
@@ -426,6 +430,7 @@ fn conpty_host_mismatch(
 fn conpty_host_mismatch(
     _app: &AppState,
     _client_env_file: Option<&str>,
+    _client_env_bytes: Option<&[u8]>,
 ) -> Option<(Option<std::ffi::OsString>, Option<std::ffi::OsString>)> {
     None
 }
@@ -5348,7 +5353,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     hook_event = Some("after-rename-session");
                 }
-                CtrlReq::ClaimSession(name, client_cwd, client_priority, client_env_file, client_window_name, resp) => {
+                CtrlReq::ClaimSession(name, client_cwd, client_priority, client_env_file, client_window_name, client_env_bytes, resp) => {
                     // Guard against clobbering an already-claimed session. Under
                     // rapid `new-session`, a stale __warm__.port (or OS ephemeral
                     // port reuse) can route a claim to a server that has ALREADY
@@ -5361,7 +5366,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if app.session_name != "__warm__" {
                         warm_debug(&format!("CLAIM REFUSED: this server is '{}' (port={:?}), requested name='{}'", app.session_name, app.control_port, name));
                         let _ = resp.send("ERR: not a warm server (already claimed)\n".to_string());
-                    } else if let Some((have, want)) = conpty_host_mismatch(&app, client_env_file.as_deref()) {
+                    } else if let Some((have, want)) = conpty_host_mismatch(&app, client_env_file.as_deref(), client_env_bytes.as_deref()) {
                         // #817: this standby picked its console host (inbox
                         // conhost, or the OpenConsole that PSMUX_CONPTY_DIR
                         // names) from its OWN environment when it opened its
@@ -5505,8 +5510,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // before PSMUX_TARGET_SESSION is re-asserted just below.
                     let mut env_adopted = false;
                     let mut path_changed = false;
-                    if let Some(ref envf) = client_env_file {
-                        let plan = crate::client_env::adopt_from_file(envf);
+                    let env_plan = match (client_env_bytes.as_deref(), client_env_file.as_deref()) {
+                        // The block came inline (`-E`): the file the client also
+                        // wrote for older standbys is not opened at all.
+                        (Some(bytes), _) => Some(crate::client_env::adopt_from_bytes(bytes)),
+                        (None, Some(envf)) => Some(crate::client_env::adopt_from_file(envf)),
+                        (None, None) => None,
+                    };
+                    if let Some(plan) = env_plan {
                         env_adopted = !plan.is_empty();
                         path_changed = plan.touches("PATH");
                         warm_debug(&format!(

@@ -3894,7 +3894,7 @@ pub enum CtrlReq {
     /// cold one. A follow up `rename-window` was observably not equivalent: it
     /// left the session visible under the standby's pool name, and lost the
     /// name entirely whenever that second request did not land.
-    ClaimSession(String, Option<String>, Option<String>, Option<String>, Option<String>, mpsc::Sender<String>),
+    ClaimSession(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<Vec<u8>>, mpsc::Sender<String>),
     SwapPane(String),
     /// swap-pane `-s <src>` `-t <dst>`: swap the two panes named by the RAW
     /// target specs (issues #442 and #689).  `src` of None is tmux's default
