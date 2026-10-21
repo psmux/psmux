@@ -4589,7 +4589,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 "PAGEUP" | "PPAGE" | "PAGEDOWN" | "NPAGE" | "DELETE" | "DC" | "INSERT" | "IC" |
                                 "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
                             ) || key_upper.starts_with("C-") || key_upper.starts_with("M-") || key_upper.starts_with("S-");
-                            
+
+                            // Issue #860: a pane in an extended key mode gets
+                            // tmux's extended form of a modified key
+                            // (input-keys.c input_key) instead of the legacy
+                            // byte or record the arms below write.
+                            if key_upper.starts_with("C-") || key_upper.starts_with("M-") || key_upper.starts_with("S-")
+                                || key_upper == "BTAB" || key_upper == "BACKTAB"
+                            {
+                                if let Some(bytes) = crate::input::active_extended_named_key_bytes(&mut app, key) {
+                                    send_text_to_active(&mut app, &String::from_utf8_lossy(&bytes))?;
+                                    continue;
+                                }
+                            }
+
                             match key_upper.as_str() {
                                 "ENTER" => send_text_to_active(&mut app, "\r")?,
                                 "TAB" => send_text_to_active(&mut app, "\t")?,

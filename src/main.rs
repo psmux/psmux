@@ -27,6 +27,7 @@ mod grid_reader;
 mod mouse_keys;
 mod copy_prompt;
 mod input;
+mod extended_keys;
 mod layout;
 mod window_ops;
 mod util;

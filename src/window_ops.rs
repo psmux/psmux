@@ -4148,10 +4148,14 @@ pub fn clear_active_pane_history(app: &mut AppState) {
         p.leave_copy_snapshot();
         if let Ok(mut parser) = p.term.lock() {
             let host_win32_input = parser.screen().win32_input_requested();
+            let key_mode = parser.screen().extended_keys_mode();
             *parser = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
             // The console host is unchanged, and it asked for win32 input mode
             // only once, at startup (issue #845).
             parser.screen_mut().set_win32_input_requested(host_win32_input);
+            // The application is unchanged too, and so is the key mode it
+            // asked for (issue #860).
+            parser.screen_mut().set_extended_keys_mode(key_mode);
         }
     }
 }

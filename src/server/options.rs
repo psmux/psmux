@@ -1191,6 +1191,9 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
     // a missing entry are fully restored by removal; applying their catalog
     // default would turn an unset option back into an explicit override.
     app.user_options.remove(key);
+    if key == "extended-keys" {
+        vt100::set_extended_keys_option(0);
+    }
     if matches!(
         key,
         "window-style" | "window-active-style" | "pane-border-indicators"
@@ -1202,6 +1205,22 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
     if let Some(default) = crate::server::option_catalog::default_for(key) {
         let _ = apply_set_option(app, key, default, true);
     }
+}
+
+/// The `extended-keys` value as tmux's choice index (options-table.c:102):
+/// off 0, on 1, always 2.  Anything else reads as off.
+pub(crate) fn extended_keys_option_number(value: &str) -> u8 {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "1" => 1,
+        "always" | "2" => 2,
+        _ => 0,
+    }
+}
+
+/// The `extended-keys-format` option as tmux's choice index
+/// (options-table.c:105): csi-u 0, xterm 1, which is the default.
+pub(crate) fn extended_keys_format_is_xterm(app: &AppState) -> bool {
+    get_option_value(app, "extended-keys-format").trim() != "csi-u"
 }
 
 /// Apply a set-option command. If `quiet` is true, unknown options are silently ignored.
@@ -1516,6 +1535,13 @@ pub(crate) fn apply_set_option(
             } else {
                 app.session_group = Some(value.to_string());
             }
+        }
+        "extended-keys" => {
+            // Kept as text for `show`, and handed to the pane parsers, which
+            // consult it when an application asks for a key mode exactly as
+            // tmux's input.c reads `global_options` (issue #860).
+            app.user_options.insert(option.to_string(), value.to_string());
+            vt100::set_extended_keys_option(extended_keys_option_number(value));
         }
         _ => {
             // Handle status-format[N] patterns

@@ -2397,6 +2397,13 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             }
             "0".into()
         }
+        // tmux format.c format_cb_pane_key_mode: the pane's extended key
+        // mode as `VT10x`, `Ext 1` or `Ext 2` (issue #860).
+        "pane_key_mode" => {
+            let mode = target_pane()
+                .and_then(|p| p.live_parser().lock().ok().map(|parser| parser.screen().extended_keys_mode()));
+            mode.map(|m| crate::extended_keys::mode_name(m).to_string()).unwrap_or_default()
+        }
         "alternate_on" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
                 if let Ok(parser) = p.term.lock() {

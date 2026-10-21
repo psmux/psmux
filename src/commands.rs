@@ -3068,6 +3068,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         // Same console host, so the same answer to "does it
                         // parse win32 input records" (issue #845).
                         fresh.screen_mut().set_win32_input_requested(parser.screen().win32_input_requested());
+                        // Same application, same key mode (issue #860).
+                        fresh.screen_mut().set_extended_keys_mode(parser.screen().extended_keys_mode());
                         *parser = fresh;
                     }
                 }

@@ -2710,6 +2710,68 @@ pub(crate) fn write_pane_input(p: &mut crate::types::Pane, bytes: &[u8]) {
     let _ = p.writer.flush();
 }
 
+/// The extended key mode (0, 1 or 2) the application in `p` asked for, read
+/// from the LIVE parser so copy mode's frozen snapshot does not hide it.
+pub(crate) fn pane_extended_keys_mode(p: &crate::types::Pane) -> u8 {
+    p.live_parser()
+        .lock()
+        .map(|parser| parser.screen().extended_keys_mode())
+        .unwrap_or(0)
+}
+
+/// The bytes `code` + `mods` must reach `p` as because the pane is in an
+/// extended key mode, or `None` to keep the legacy bytes (issue #860, tmux
+/// input-keys.c `input_key`).
+///
+/// Only a pane that reads its input as VT bytes takes the extended form.  A
+/// pane that reads console records (PSReadLine, Far) cannot reassemble a
+/// `CSI 27;5;32~` out of the character records conhost hands it, and an
+/// `extended-keys always` server puts every pane in mode 1, so such a pane
+/// keeps the legacy path and its win32 record repairs (#623).
+pub(crate) fn pane_extended_key_bytes(
+    p: &mut crate::types::Pane,
+    xterm: bool,
+    code: KeyCode,
+    mods: KeyModifiers,
+) -> Option<Vec<u8>> {
+    let mode = pane_extended_keys_mode(p);
+    let bytes = crate::extended_keys::encode(mode, xterm, code, mods)?;
+    #[cfg(windows)]
+    if !crate::window_ops::pane_reads_vt_bytes(p) {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// [`pane_extended_key_bytes`] for a key NAME (`C-Space`, `M-a`, `S-Enter`),
+/// the form send-keys and the attached client hand the server.
+pub(crate) fn pane_extended_named_key_bytes(
+    p: &mut crate::types::Pane,
+    xterm: bool,
+    name: &str,
+) -> Option<Vec<u8>> {
+    if pane_extended_keys_mode(p) == 0 {
+        return None;
+    }
+    let (code, mods) = crate::config::parse_key_string(name)?;
+    pane_extended_key_bytes(p, xterm, code, mods)
+}
+
+/// [`pane_extended_named_key_bytes`] for the pane that `send_text_to_active`
+/// writes to (a focused floating pane first, as in
+/// [`mark_win32_input_latched`]).  Used by the `send-keys` token loop.
+pub fn active_extended_named_key_bytes(app: &mut AppState, name: &str) -> Option<Vec<u8>> {
+    let xterm = crate::server::options::extended_keys_format_is_xterm(app);
+    let win = &mut app.windows[app.active_idx];
+    if let Some(fi) = win.floating_focus {
+        if let Some(fp) = win.floating.get_mut(fi) {
+            return pane_extended_named_key_bytes(&mut fp.pane, xterm, name);
+        }
+    }
+    let p = active_pane_mut(&mut win.root, &win.active_path)?;
+    pane_extended_named_key_bytes(p, xterm, name)
+}
+
 /// Record that psmux has just written a win32 input mode sequence to the panes
 /// that `send_text_to_active` routes to, so `write_pane_input` knows their
 /// ConPTYs can no longer take a bare `ESC` (issue #588).
@@ -2966,6 +3028,61 @@ pub fn snap_interactive_to_live(app: &mut AppState) -> bool {
     snapped
 }
 
+/// Deliver `key` in extended form to the receiving pane(s) of
+/// [`forward_key_to_active`] that are in an extended key mode (issue #860).
+/// Returns true when the key was fully delivered here.
+///
+/// With synchronized input every pane gets the key in its OWN mode: an
+/// extended pane its extended bytes, any other pane the legacy bytes of
+/// [`encode_key_event`].  When no receiving pane is extended nothing is
+/// written and the caller's legacy path runs unchanged.
+fn forward_extended_key(app: &mut AppState, key: &KeyEvent) -> bool {
+    if crate::extended_keys::encode(2, true, key.code, key.modifiers).is_none() {
+        // No mode changes this key (an arrow, a function key, plain text).
+        return false;
+    }
+    let xterm = crate::server::options::extended_keys_format_is_xterm(app);
+    let win = &mut app.windows[app.active_idx];
+    if !app.sync_input {
+        let Some(p) = active_pane_mut(&mut win.root, &win.active_path) else { return false };
+        if p.dead {
+            return false;
+        }
+        let Some(bytes) = pane_extended_key_bytes(p, xterm, key.code, key.modifiers) else { return false };
+        write_pane_input(p, &bytes);
+        crate::debug_log::input_log("extended-key",
+            &format!("#860 {:?} {:?} as {:?} pid={:?}", key.code, key.modifiers,
+                String::from_utf8_lossy(&bytes), p.child_pid));
+        return true;
+    }
+    fn any_extended(node: &mut Node, xterm: bool, key: &KeyEvent) -> bool {
+        match node {
+            Node::Leaf(p) if !p.dead && p.accepts_input() =>
+                pane_extended_key_bytes(p, xterm, key.code, key.modifiers).is_some(),
+            Node::Leaf(_) => false,
+            Node::Split { children, .. } => children.iter_mut().any(|c| any_extended(c, xterm, key)),
+        }
+    }
+    fn write_each(node: &mut Node, xterm: bool, key: &KeyEvent, legacy: &[u8]) {
+        match node {
+            Node::Leaf(p) if !p.dead && p.accepts_input() => {
+                match pane_extended_key_bytes(p, xterm, key.code, key.modifiers) {
+                    Some(bytes) => write_pane_input(p, &bytes),
+                    None => write_pane_input(p, legacy),
+                }
+            }
+            Node::Leaf(_) => {}
+            Node::Split { children, .. } => { for c in children { write_each(c, xterm, key, legacy); } }
+        }
+    }
+    if !any_extended(&mut win.root, xterm, key) {
+        return false;
+    }
+    let legacy = encode_key_event(key).unwrap_or_default();
+    write_each(&mut win.root, xterm, key, &legacy);
+    true
+}
+
 pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
     // Record use of the INTERACTIVE input route as read-only route signals:
     // `#{pane_last_text_input}` (printable text) and, for every other key,
@@ -2990,6 +3107,12 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
     // to the TILED active pane, so that is the pane asked.  Checked before the
     // native injections below, which bypass the pane writer entirely.
     if !active_tiled_accepts_input(app) {
+        return Ok(());
+    }
+
+    // Issue #860: a pane whose application asked for extended keys gets
+    // them, ahead of every legacy and native injection path below.
+    if forward_extended_key(app, &key) {
         return Ok(());
     }
 
@@ -4360,7 +4483,15 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
     }
     
     // Write a named key to a single pane (extracted for sync_input support).
-    fn write_named_key_to_pane(p: &mut crate::types::Pane, k: &str) {
+    fn write_named_key_to_pane(p: &mut crate::types::Pane, k: &str, xterm: bool) {
+        // Issue #860: a pane in an extended key mode takes tmux's extended
+        // form of the key (input-keys.c input_key), ahead of every legacy arm.
+        if let Some(bytes) = pane_extended_named_key_bytes(p, xterm, k) {
+            write_pane_input(p, &bytes);
+            crate::debug_log::input_log("extended-key",
+                &format!("#860 {} as {:?} pid={:?}", k, String::from_utf8_lossy(&bytes), p.child_pid));
+            return;
+        }
         use std::io::Write as _;
         match k {
             "enter" => write_key_seq(p, b"\r"),
@@ -4616,6 +4747,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
     if !input_target_accepts_input(app) {
         return Ok(());
     }
+    let xterm = crate::server::options::extended_keys_format_is_xterm(app);
 
     // A focused floating pane (tmux new-pane) receives the key instead of the
     // tiled active pane.
@@ -4623,7 +4755,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
         let win = &mut app.windows[app.active_idx];
         if let Some(fi) = win.floating_focus {
             if let Some(fp) = win.floating.get_mut(fi) {
-                write_named_key_to_pane(&mut fp.pane, k);
+                write_named_key_to_pane(&mut fp.pane, k, xterm);
                 return Ok(());
             }
         }
@@ -4632,20 +4764,20 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
     // Distribute the key to all panes (sync) or just the active pane.
     if app.sync_input {
         let win = &mut app.windows[app.active_idx];
-        fn send_key_all_panes(node: &mut crate::types::Node, k: &str) {
+        fn send_key_all_panes(node: &mut crate::types::Node, k: &str, xterm: bool) {
             match node {
                 crate::types::Node::Leaf(p) if !p.accepts_input() => {}
-                crate::types::Node::Leaf(p) => write_named_key_to_pane(p, k),
+                crate::types::Node::Leaf(p) => write_named_key_to_pane(p, k, xterm),
                 crate::types::Node::Split { children, .. } => {
-                    for c in children { send_key_all_panes(c, k); }
+                    for c in children { send_key_all_panes(c, k, xterm); }
                 }
             }
         }
-        send_key_all_panes(&mut win.root, k);
+        send_key_all_panes(&mut win.root, k, xterm);
     } else {
         let win = &mut app.windows[app.active_idx];
         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-            write_named_key_to_pane(p, k);
+            write_named_key_to_pane(p, k, xterm);
         }
     }
     Ok(())
