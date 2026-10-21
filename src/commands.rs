@@ -2404,7 +2404,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         None if pane.is_some() => crate::server::temp_target::select_window_pos(app, "", pane.as_deref()).ok(),
                         None => parse_window_target(t).and_then(|idx| app.win_pos(idx)),
                     };
-                    if let Some(internal_idx) = resolved {
+                    // Selecting the current window changes nothing, the last
+                    // window included (session_set_current returns early when
+                    // wl is already curw); it used to become the last window.
+                    if let Some(internal_idx) = resolved.filter(|&i| i != app.active_idx) {
                         switch_with_copy_save(app, |app| {
                             app.last_window_idx = app.active_idx;
                             app.active_idx = internal_idx;
