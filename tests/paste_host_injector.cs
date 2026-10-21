@@ -41,6 +41,29 @@
 //   paste_host_injector.exe <pid> dripv <delay_ms> <text>  drip, with the
 //                                    Ctrl+V PRESS delivered first (a host that
 //                                    does not swallow the press).
+//   paste_host_injector.exe <pid> wttr  <delay_ms> <text>  host, with every
+//                                    character written as the records Windows
+//                                    Terminal produced for it on a Turkish Q
+//                                    layout (measured on 26200), hard coded so
+//                                    the result does not depend on the layout
+//                                    of the machine running the test: `i` and
+//                                    `@` are AltGr (right Alt down, the key
+//                                    with LEFT_CTRL | RIGHT_ALT, right Alt
+//                                    up), `İ` is AltGr with Shift set, ASCII
+//                                    capitals come with a Shift key around
+//                                    them.  Supports a-z A-Z space CR : and
+//                                    i İ ı ğ ş @.
+//   paste_host_injector.exe <pid> ctrlalti <delay_ms> <text>  no paste: one
+//                                    Left Ctrl + Left Alt + I chord, built by
+//                                    hand with `i` in uChar (ctrl=0x000A).  A
+//                                    physical chord was measured with uChar 0,
+//                                    which crossterm turns into a letter
+//                                    through the foreground window's layout;
+//                                    with `i` in uChar crossterm reads
+//                                    Char('i') CONTROL|ALT on any layout, so
+//                                    the case does not depend on the runner.
+//                                    text is ignored.
+//   <text> may be @<file> to read the text from a UTF-8 file.
 //   paste_host_injector.exe <pid> type  <delay_ms> <text>  no paste at all: a
 //                                    hand typing, one character per
 //                                    PSMUX_INJECT_GAP_MS (default 120), press
@@ -116,6 +139,62 @@ class PasteHostInjector
         return r;
     }
 
+    static INPUT_RECORD KeyS(bool down, ushort vk, ushort scan, char ch, uint ctrl)
+    {
+        var r = Key(down, vk, ch, ctrl);
+        r.KeyEvent.wVirtualScanCode = scan;
+        return r;
+    }
+
+    // One key with its modifier key around it, as the measured records show.
+    static void Around(List<INPUT_RECORD> l, ushort modVk, ushort modScan, uint modDown, uint modUp,
+        ushort vk, ushort scan, char ch, uint ctrl)
+    {
+        l.Add(KeyS(true, modVk, modScan, '\0', modDown));
+        l.Add(KeyS(true, vk, scan, ch, ctrl));
+        l.Add(KeyS(false, vk, scan, ch, ctrl));
+        l.Add(KeyS(false, modVk, modScan, '\0', modUp));
+    }
+
+    // Windows Terminal on Turkish Q, Windows 11 26200: the records it wrote
+    // into a console for a pasted text, character by character.
+    static List<INPUT_RECORD> WtTurkishQ(string text, List<string> log)
+    {
+        const string letters = "QWERTYUIOPASDFGHJKLZXCVBNM";
+        // Scan codes of the letter keys, in the order of `letters`.
+        ushort[] scans = { 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+                           0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
+                           0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32 };
+        var l = new List<INPUT_RECORD>();
+        foreach (char c in text)
+        {
+            if (c == 'i') { Around(l, 0x12, 0x38, 0x0109, 0x0100, 0x49, 0x17, 'i', 0x0009); continue; }
+            if (c == '@') { Around(l, 0x12, 0x38, 0x0109, 0x0100, 0x51, 0x10, '@', 0x0009); continue; }
+            if (c == 'İ')
+            {
+                Around(l, 0x12, 0x38, 0x0109, 0x0100, 0x49, 0x17, c, 0x0019);
+                continue;
+            }
+            if (c == ':') { Around(l, 0x10, 0x2A, 0x0010, 0x0000, 0xBE, 0x35, ':', 0x0010); continue; }
+            ushort vk = 0, scan = 0;
+            if (c == 'ı') { vk = 0x49; scan = 0x17; }
+            else if (c == 'ğ') { vk = 0xDB; scan = 0x1A; }
+            else if (c == 'ş') { vk = 0xBA; scan = 0x27; }
+            else if (c == ' ') { vk = 0x20; scan = 0x39; }
+            else if (c == '\r') { vk = 0x0D; scan = 0x1C; }
+            else
+            {
+                int at = letters.IndexOf(char.ToUpperInvariant(c));
+                if (at < 0 || c > 'z') { log.Add("  wttr: no measured record for U+" + ((int)c).ToString("X4")); return null; }
+                vk = (ushort)letters[at]; scan = scans[at];
+                if (c >= 'A' && c <= 'Z') { Around(l, 0x10, 0x2A, 0x0010, 0x0000, vk, scan, c, 0x0010); continue; }
+            }
+            l.Add(KeyS(true, vk, scan, c, 0));
+            l.Add(KeyS(false, vk, scan, c, 0));
+        }
+        return l;
+    }
+
     static void Spin(int ms)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -147,6 +226,10 @@ class PasteHostInjector
         int delay;
         if (!int.TryParse(args[2], out delay)) { File.WriteAllText(logFile, "bad delay"); return 97; }
         string text = string.Join(" ", args, 3, args.Length - 3);
+        // `@<file>`: the text is the file's UTF-8 content, for a text holding
+        // a CR or characters a command line would mangle.
+        if (text.StartsWith("@") && File.Exists(text.Substring(1)))
+            text = File.ReadAllText(text.Substring(1), new System.Text.UTF8Encoding(false));
         log.Add("PID=" + pid + " mode=" + mode + " delay=" + delay + " chars=" + text.Length);
 
         FreeConsole();
@@ -190,6 +273,23 @@ class PasteHostInjector
                 ok &= Write(h, new List<INPUT_RECORD> { Key(false, vk, c, mods) }, log, "type up");
                 Thread.Sleep(tgap);
             }
+            File.WriteAllText(logFile, string.Join("\n", log));
+            return ok ? 0 : 3;
+        }
+
+        if (mode == "ctrlalti")
+        {
+            // Not a paste: Left Ctrl + Left Alt + I with `i` in uChar.  Not the
+            // AltGr signature (that is LEFT_CTRL | RIGHT_ALT), so it must stay
+            // C-M-i.
+            ok &= Write(h, new List<INPUT_RECORD> {
+                KeyS(true, 0x11, 0x1D, '\0', LEFT_CTRL_PRESSED),
+                KeyS(true, 0x12, 0x38, '\0', 0x000A),
+                KeyS(true, 0x49, 0x17, 'i', 0x000A),
+                KeyS(false, 0x49, 0x17, 'i', 0x000A),
+                KeyS(false, 0x12, 0x38, '\0', LEFT_CTRL_PRESSED),
+                KeyS(false, 0x11, 0x1D, '\0', 0),
+            }, log, "ctrl+alt+i chord");
             File.WriteAllText(logFile, string.Join("\n", log));
             return ok ? 0 : 3;
         }
@@ -266,6 +366,12 @@ class PasteHostInjector
                 ok &= Write(h, new List<INPUT_RECORD> { Key(true, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v press");
             }
             var chars = new List<INPUT_RECORD>();
+            if (mode == "wttr")
+            {
+                chars = WtTurkishQ(text, log);
+                if (chars == null) { File.WriteAllText(logFile, string.Join("\n", log)); return 96; }
+            }
+            else
             foreach (char c in text)
             {
                 short scan = VkKeyScanW(c);
