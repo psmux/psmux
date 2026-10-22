@@ -147,7 +147,7 @@ fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
 /// binary lives in. `psmux.exe`, `pmux.exe` and `tmux.exe` always sit in the
 /// same directory, so one entry covers every name a child may use.
 #[cfg(windows)]
-fn ensure_psmux_on_path(c: &mut std::process::Command) {
+pub(crate) fn ensure_psmux_on_path(c: &mut std::process::Command) {
     apply_own_dir_to_path(c, &std::env::var("PATH").unwrap_or_default());
 }
 
@@ -180,6 +180,66 @@ fn prepend_if_absent(old: &str, dir: &str) -> Option<String> {
     } else {
         format!("{dir};{old}")
     })
+}
+
+/// Git for Windows' `bin\bash.exe`, which runs a tmux plugin's `.tmux` entry
+/// script the way tmux's `/bin/sh -c` runs it there (cmd-run-shell.c,
+/// job.c:127). Found from `git.exe` on `PATH` or the usual install
+/// directories, never as `bash` on `PATH`: that is often WSL's `bash.exe`
+/// (System32, WindowsApps), whose `tmux` is a Linux tmux, not this server.
+#[cfg(windows)]
+pub(crate) fn git_bash() -> Option<&'static std::path::Path> {
+    static GIT_BASH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    GIT_BASH
+        .get_or_init(|| {
+            let env_dir = |var: &str, sub: &[&str]| {
+                std::env::var_os(var).filter(|v| !v.is_empty()).map(|v| {
+                    let mut p = PathBuf::from(v);
+                    p.extend(sub);
+                    p
+                })
+            };
+            let roots: Vec<PathBuf> = [
+                env_dir("ProgramFiles", &["Git"]),
+                env_dir("ProgramW6432", &["Git"]),
+                env_dir("LOCALAPPDATA", &["Programs", "Git"]),
+                env_dir("USERPROFILE", &["scoop", "apps", "git", "current"]),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            find_git_bash(which::which("git").ok().as_deref(), &roots)
+        })
+        .as_deref()
+}
+
+/// The `bin\bash.exe` of the Git for Windows install that `git_exe` belongs
+/// to (`cmd\git.exe`, `bin\git.exe` or `mingw64\bin\git.exe`), else of the
+/// first of `roots` that holds one. A root counts only with its MSYS
+/// `usr\bin\bash.exe` beside it, so a stray `bin\bash.exe` is not taken.
+#[cfg(windows)]
+fn find_git_bash(git_exe: Option<&std::path::Path>, roots: &[PathBuf]) -> Option<PathBuf> {
+    let from_git = git_exe
+        .into_iter()
+        .flat_map(|exe| exe.ancestors().skip(1).take(3))
+        .map(|dir| dir.to_path_buf());
+    from_git.chain(roots.iter().cloned()).find_map(|root| {
+        let bash = root.join("bin").join("bash.exe");
+        (bash.is_file() && root.join("usr").join("bin").join("bash.exe").is_file()).then_some(bash)
+    })
+}
+
+/// Whether this platform can run a `.tmux` entry script as tmux does. On
+/// Windows that takes Git Bash; elsewhere `sh` runs it by its `#!` line.
+pub(crate) fn can_run_tmux_scripts() -> bool {
+    #[cfg(windows)]
+    {
+        git_bash().is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 /// The flags of a run-shell line that psmux acts on, and the words of its
@@ -461,6 +521,21 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
         };
         if let Some((file_path, rest_args)) = find_file_in_command(trimmed) {
             let lower_path = file_path.to_lowercase();
+
+            // A tmux plugin's .tmux entry script is a bash script: run it with
+            // Git Bash. Its path goes with `/` only, so the script's own
+            // `dirname "${BASH_SOURCE[0]}"` finds its directory.
+            if lower_path.ends_with(".tmux") {
+                if let Some(bash) = git_bash() {
+                    let mut c = std::process::Command::new(bash);
+                    c.arg(file_path.replace('\\', "/"));
+                    if !rest_args.is_empty() {
+                        for a in &parse_command_line(&rest_args) { c.arg(a); }
+                    }
+                    c.hide_window();
+                    return c;
+                }
+            }
 
             // .ps1 scripts: use -File which never splits paths at whitespace
             if lower_path.ends_with(".ps1") {

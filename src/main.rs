@@ -1984,9 +1984,10 @@ fn run_main() -> io::Result<()> {
                 // so `attach-session` works even with no server running. psmux has
                 // no persistent server, so when no session exists yet and the
                 // config requests a new-session, bootstrap it: delegate to our own
-                // `new-session` (which loads the config — the `new-session` line is
-                // a no-op during config load, so there is no recursion — then
-                // creates the session and attaches in this same console). Honour
+                // `new-session` (which loads the config, then creates the session
+                // and attaches in this same console). The child is marked as the
+                // config's session (below), so it does not run the config's
+                // `new-session` line again and there is no recursion. Honour
                 // the config's new-session args (e.g. -s NAME) but drop -d/-D so we
                 // attach rather than leave it detached.
                 if crate::session::list_session_names_ns(l_socket_name.as_deref()).is_empty() {
@@ -1994,6 +1995,11 @@ fn run_main() -> io::Result<()> {
                         let exe = env::current_exe()?;
                         let mut child = std::process::Command::new(exe);
                         if let Some(ref l) = l_socket_name { child.arg("-L").arg(l); }
+                        // This is the config's `new-session`, run for it, so
+                        // the session runs only some of the config's commands
+                        // (config::made_session_runs): its own `new-session`
+                        // line would be a duplicate of this one.
+                        child.env(crate::config::CONFIG_SESSION_ENV, "1");
                         child.arg("new-session");
                         for a in ns_args.iter().filter(|a| a.as_str() != "-d" && a.as_str() != "-D") {
                             child.arg(a);
@@ -2108,6 +2114,11 @@ fn run_main() -> io::Result<()> {
                 // the standby can tell that a kill-server ended it.
                 if let Some(spec) = args.iter().position(|a| a == "--spawner").and_then(|i| args.get(i + 1)) {
                     crate::server::set_warm_spawner(spec);
+                }
+                // A session a config file's `new-session` made; run_server
+                // reads the mark from the environment, as from the CLI's.
+                if args.iter().any(|a| a == crate::config::CONFIG_SESSION_ARG) {
+                    env::set_var(crate::config::CONFIG_SESSION_ENV, "1");
                 }
                 return run_server(name, server_socket_name, initial_cmd, raw_cmd, srv_start_dir, srv_window_name, srv_init_size, srv_group_target, srv_env_vars);
             }
@@ -2334,6 +2345,11 @@ fn run_main() -> io::Result<()> {
                 let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                     || crate::config::is_warm_disabled_by_config();
                 let has_custom_config = f_config_file.is_some() || std::env::var("PSMUX_CONFIG_FILE").is_ok();
+                // A session a config file's `new-session` makes runs only some
+                // of the config's commands, and a claimed standby loads the
+                // config again with all of them (config::CONFIG_SESSION_ENV),
+                // so it starts a server of its own, which inherits the mark.
+                let config_session = env::var_os(crate::config::CONFIG_SESSION_ENV).is_some();
                 // Issue #734: when the namespace's standby is its live EMPTY
                 // server (held by `start-server` + `exit-empty off`, or just
                 // started by the `start-server` this command is queued
@@ -2351,7 +2367,7 @@ fn run_main() -> io::Result<()> {
                         l_socket_name.as_deref(),
                         env::var(crate::session::ROUTE_WARM_ENV).ok().as_deref(),
                     );
-                let claimed_warm = if held_claim || (!warm_disabled && !has_custom_config && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() && init_width.is_none() && init_height.is_none()) {
+                let claimed_warm = if held_claim || (!warm_disabled && !has_custom_config && !config_session && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() && init_width.is_none() && init_height.is_none()) {
                     let warm_base = if let Some(ref l) = l_socket_name {
                         format!("{}____warm__", l)
                     } else {

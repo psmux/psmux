@@ -466,7 +466,9 @@ that later claims them. psmux carries the parts that matter across the claim:
   ([#608](https://github.com/psmux/psmux/issues/608)). See
   [configuration.md](configuration.md#process-priority).
 - **Config.** The claimed server reloads your config file on the claim, so a `set -g` line you
-  added since the standby was spawned is honoured.
+  added since the standby was spawned is honoured. The config's commands (`split-window`,
+  `run-shell` and so on) run on the claim, once, after the session has its name; the standby
+  does not run them when it boots.
 - **Environment.** The claimed server adopts the claiming client's environment, which is what a
   cold started server inherits anyway, so `run-shell` children, hooks, plugin scripts and every
   pane spawned afterwards see the environment of the shell you ran psmux in. Before

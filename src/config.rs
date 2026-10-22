@@ -24,6 +24,19 @@ fn set_current_config_file(path: &str) {
     CURRENT_CONFIG_FILE.with(|f| *f.borrow_mut() = path.to_string());
 }
 
+/// Make `path` the current config file and return the one it replaced, for
+/// a source job's command (CtrlReq::InFile).
+pub(crate) fn swap_current_config_file(path: &str) -> String {
+    CURRENT_CONFIG_FILE.with(|f| std::mem::replace(&mut *f.borrow_mut(), path.to_string()))
+}
+
+/// Put back the file swap_current_config_file replaced, if it replaced one.
+pub(crate) fn restore_current_config_file(saved: &mut Option<String>) {
+    if let Some(prev) = saved.take() {
+        set_current_config_file(&prev);
+    }
+}
+
 fn in_startup_load() -> bool {
     IN_STARTUP_LOAD.with(|c| c.get())
 }
@@ -315,11 +328,53 @@ pub fn list_key_notes(app: &AppState, table: Option<&str>, all: bool, key: Optio
     out
 }
 
+/// The environment variable that marks a server as a session a config
+/// file's `new-session` made (AppState::config_made_session). The connection
+/// dispatcher sets it on the process it starts for a source job's
+/// `new-session`, and the server takes it out of its own environment at once
+/// so its panes and the servers it starts do not inherit it.
+pub const CONFIG_SESSION_ENV: &str = "PSMUX_CONFIG_SESSION";
+
+/// The `psmux server` argument that sets CONFIG_SESSION_ENV for the server,
+/// for the dispatcher's `new-session`, which starts the server itself.
+pub const CONFIG_SESSION_ARG: &str = "--config-session";
+
+/// Whether the startup job of a session a config file's `new-session` made
+/// (AppState::config_made_session) runs this kept command line.
+///
+/// tmux loads its config once per server (server-client.c:2578 to :2581,
+/// cfg.c:89 to :90), and a session the config makes lives in that server, so it
+/// shares what the config made server wide: options and bindings, the paste
+/// buffers (one tree per server, paste.c:35), and what the run-shell scripts
+/// set. psmux runs a server per session, so such a session runs those again:
+/// its config lines apply as they do anywhere, and of its commands it runs
+/// run-shell and the buffer commands. The others acted on the session that
+/// loaded the config, and its `new-session` would start servers without end.
+pub fn made_session_runs(line: &str) -> bool {
+    let name = line.split_whitespace().next().unwrap_or("");
+    matches!(
+        name,
+        "run-shell" | "run" | "set-buffer" | "setb" | "load-buffer" | "loadb" | "delete-buffer" | "deleteb"
+    )
+}
+
+/// Load the startup config. Options and bindings before its first command
+/// apply now, before the server has a window; from that command on, its lines
+/// are kept in `app.startup_source_lines` for a source job, which the server
+/// starts once its loop runs, as a runtime `source-file` keeps its own (issue
+/// #842). tmux runs the whole config before the first client's command
+/// (cfg.c:71 to :92), so its commands, a run-shell without `-b` that the lines
+/// after it wait for included, all run. A warm standby keeps nothing: its one
+/// window belongs to the next session, and the claim loads the config again.
+/// A session a config's `new-session` made keeps its lines too, but its job
+/// runs only some of the commands (made_session_runs).
 pub fn load_config(app: &mut AppState) {
     // Start a fresh warning batch for this load/reload and mark the window so
     // nested `source-file` directives don't emit a runtime status message.
     app.config_warnings.clear();
     app.config_warn_line = None;
+    app.startup_source_lines.clear();
+    app.ppm_declared = false;
     IN_STARTUP_LOAD.with(|c| c.set(true));
     let _startup_guard = StartupLoadGuard;
 
@@ -333,7 +388,7 @@ pub fn load_config(app: &mut AppState) {
         set_current_config_file(&expanded);
         app.startup_config_file = Some(expanded.clone());
         match std::fs::read_to_string(&expanded) {
-            Ok(content) => parse_config_content(app, &content),
+            Ok(content) => parse_startup_config(app, &content),
             // An explicitly requested config file that cannot be read is a
             // mistake worth surfacing — the user named this path on purpose.
             Err(e) => {
@@ -366,10 +421,25 @@ pub fn load_config(app: &mut AppState) {
         if let Ok(content) = std::fs::read_to_string(&path) {
             app.startup_config_file = Some(path.clone());
             set_current_config_file(&path);
-            parse_config_content(app, &content);
+            parse_startup_config(app, &content);
             set_current_config_file("");
             break;
         }
+    }
+}
+
+/// Parse the startup config's text (load_config): from its first command on,
+/// its lines are kept in `app.startup_source_lines` for the source job,
+/// except on a warm standby, which keeps nothing, and in the shared server
+/// (#798), which runs no source job yet: there the config is read as before,
+/// its options applied and its run-shell started in place. The shared server
+/// is the process started with SHARED_SERVER_ARG, as its own gate tells it.
+fn parse_startup_config(app: &mut AppState, content: &str) {
+    let shared_server = std::env::args().any(|a| a == crate::server::shared::SHARED_SERVER_ARG);
+    if app.is_warm_server() || shared_server {
+        parse_config_content(app, content);
+    } else {
+        app.startup_source_lines = parse_keeping_commands(app, |app| parse_config_content(app, content));
     }
 }
 
@@ -1353,7 +1423,7 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     // #842). An unknown command is still reported here and never runs.
     if source_deferring(app) {
         let line = app.config_warn_line;
-        if is_config_directive(l) && !run_shell_waits(l) {
+        if is_config_directive(l) && !run_shell_in_job(l) {
             defer_line(app, line, crate::types::DeferredKind::Directive(l.to_string()));
         } else {
             let cmd = l.split_whitespace().next().unwrap_or("");
@@ -1487,10 +1557,15 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         // command (a known-but-unrouted command like `new-window` stays silent
         // to match prior behavior; a genuine typo like `bnid-key` is surfaced).
         let cmd = l.split_whitespace().next().unwrap_or("");
-        // In a runtime source every command is kept for the source job, which
-        // runs it once the commands before it have finished, as tmux's queue
-        // does (issue #842). That takes in the three cases below too; they
-        // stay for the callers with no source job (menus, confirm prompts).
+        // In a runtime source and in the startup config every command is kept
+        // for the source job, which runs it through the connection dispatcher
+        // once the commands before it have finished, as tmux's queue does
+        // (issue #842). That is the one route a config file's commands take.
+        // Where no job runs, a command is left out: a warm standby's own boot
+        // (the claim loads the config again, with its job) and a runtime
+        // source on a server with no window. A session a config's
+        // `new-session` made has a job, which runs only some of the commands
+        // (made_session_runs).
         if app.source_defer.is_some() && is_known_command(app, cmd) {
             if let Some(d) = app.source_defer.as_mut() {
                 d.triggered = true;
@@ -1498,43 +1573,6 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
             let line = app.config_warn_line;
             defer_line(app, line, crate::types::DeferredKind::Command(l.to_string()));
             return;
-        }
-        // tmux runs a `copy-mode` line in a sourced file like any other
-        // command (cfg.c queues every line), so `source-file` on a file that
-        // says `copy-mode` enters copy mode. It needs a pane, and a startup
-        // load (including the reload a claimed warm server does) is left out
-        // so a config file never opens a new session in copy mode.
-        if cmd == "copy-mode" && !app.windows.is_empty() && !in_startup_load() {
-            let _ = crate::commands::execute_command_string(app, l);
-            return;
-        }
-        // The same for `new-window`: a sourced file's `new-window -t :N` makes
-        // a window, as cfg.c's queue does in tmux. It was silently dropped, so
-        // no index, name or -a/-b/-k form of it ever ran from a file. The
-        // startup load stays out for the reason above: every server, the warm
-        // standby included, loads the config before it has a session window.
-        if matches!(cmd, "new-window" | "neww") && !app.windows.is_empty() && !in_startup_load() {
-            let _ = crate::commands::execute_command_string(app, l);
-            return;
-        }
-        // And for `select-pane -d/-e` / `last-pane -d/-e` (tmux PANE_INPUTOFF):
-        // a sourced file that fences a pane off must fence it, not drop the
-        // line in silence.  Same startup exclusion: there is no pane yet.
-        if !app.windows.is_empty() && !in_startup_load() {
-            let tokens = crate::commands::parse_command_line(l);
-            let args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
-            let toggle = match cmd {
-                "select-pane" | "selectp" => crate::server::connection::select_pane_input_toggle(
-                    &args,
-                    crate::server::connection::select_pane_target_arg(&args),
-                ).is_some(),
-                "last-pane" | "lastp" => crate::server::connection::last_pane_input_toggle(&args).is_some(),
-                _ => false,
-            };
-            if toggle {
-                let _ = crate::commands::execute_command_string(app, l);
-                return;
-            }
         }
         if !cmd.is_empty() && !is_known_command(app, cmd) {
             warn_config(app, format!("unknown command: {}", cmd));
@@ -2413,7 +2451,15 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
                 // as the plugin name and never find the installed directory.
                 let base = value.split('#').next().unwrap_or(value);
                 let plugin_name = base.rsplit('/').next().unwrap_or(base);
-                if plugin_name != "ppm" {
+                if plugin_name == "ppm" {
+                    // ppm runs the entry script of every declared plugin that
+                    // has no plugin.conf (its Initialize-Plugin), as tpm runs
+                    // each plugin in tmux. Those scripts are left to it from
+                    // here on, and those queued already are dropped: psmux
+                    // running them too ran each one twice.
+                    app.ppm_declared = true;
+                    app.pending_plugin_scripts.clear();
+                } else {
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let xdg_config = env::var("XDG_CONFIG_HOME")
                         .unwrap_or_else(|_| format!("{}\\.config", home));
@@ -2430,18 +2476,23 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
                     let mut found = false;
                     for conf in &candidates {
                         if std::path::Path::new(conf).exists() {
-                            let prev_file = current_config_file();
-                            set_current_config_file(conf);
-                            if let Ok(content) = std::fs::read_to_string(conf) {
-                                parse_config_content(app, &content);
+                            // Read as source-file reads a file, on the source
+                            // stack: a plugin.conf that declares its own
+                            // plugin, or two that declare each other, used to
+                            // recurse until the server died at startup. One
+                            // already being read is skipped without a word:
+                            // declaring a plugin twice is not a mistake.
+                            let key = source_key(conf);
+                            if !SOURCE_STACK.with(|s| s.borrow().contains(&key)) {
+                                source_path(app, conf, false);
                             }
-                            set_current_config_file(&prev_file);
                             found = true;
                             break;
                         }
                     }
-                    // If no plugin.conf, try .ps1 entry scripts
-                    if !found {
+                    // If no plugin.conf, try .ps1 entry scripts, unless ppm
+                    // runs them
+                    if !found && !app.ppm_declared {
                         let ps1_candidates = [
                             // Classic paths
                             format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, base.replace('/', "\\"), plugin_name),
@@ -2454,16 +2505,16 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
                         ];
                         for ps1 in &ps1_candidates {
                             if std::path::Path::new(ps1).exists() {
-                                // First try static extraction of set/bind commands
+                                // A script that only sets options and binds
+                                // keys with literal text is applied as config
+                                // lines, here and now.
                                 if let Ok(content) = std::fs::read_to_string(ps1) {
                                     let prev_file = current_config_file();
                                     set_current_config_file(ps1);
                                     let applied = parse_ps1_plugin_script(app, &content);
                                     set_current_config_file(&prev_file);
-                                    // If the script uses PS variables (theme plugins),
-                                    // static extraction yields unresolved $vars.
-                                    // Queue for post-startup execution when the
-                                    // server is listening.
+                                    // Any other script is queued whole, to run
+                                    // once the server is listening.
                                     if !applied {
                                         app.pending_plugin_scripts.push(ps1.clone());
                                     }
@@ -3657,16 +3708,47 @@ pub fn source_runtime(app: &mut AppState, spec: &str) -> crate::types::SourcePar
     begin_source_warnings(app);
     let first_warning = app.config_warnings.len();
     app.config_warn_line = None;
-    let outer = app.source_defer.replace(crate::types::SourceDefer::default());
-    source_file(app, spec);
-    let kept = std::mem::replace(&mut app.source_defer, outer).unwrap_or_default();
+    let lines = parse_keeping_commands(app, |app| source_file(app, spec));
     // This source's warnings only: the list may also hold those of a source
     // job that is still running, which are that job's client's errors.
     let own = app.config_warnings.get(first_warning..).map(<[String]>::to_vec).unwrap_or_default();
-    if kept.lines.is_empty() {
+    if lines.is_empty() {
         summarize_warnings(app, &own);
     }
-    crate::types::SourceParse { lines: kept.lines, errors: own }
+    crate::types::SourceParse { lines, errors: own }
+}
+
+/// A `source-file` a plugin script runs while the server starts, before it
+/// has a window (the plugin drain in run_server). The file's lines from its
+/// first command on join the startup config's (`app.startup_source_lines`),
+/// so the startup job runs them after the config's own, once the window
+/// exists. tmux runs such a file's commands too: a plugin started by the
+/// config's `run-shell -b` sources it once the session exists. A warm
+/// standby keeps nothing, as for its config.
+/// Returns the file's warnings, the errors of the client that sourced it.
+pub fn source_during_startup(app: &mut AppState, spec: &str) -> Vec<String> {
+    app.config_warn_line = None;
+    if app.is_warm_server() {
+        // As before: a plain source, which reports its own warnings.
+        source_file(app, spec);
+        return Vec::new();
+    }
+    let first_warning = app.config_warnings.len();
+    let lines = parse_keeping_commands(app, |app| source_file(app, spec));
+    app.startup_source_lines.extend(lines);
+    app.config_warnings.get(first_warning..).map(<[String]>::to_vec).unwrap_or_default()
+}
+
+/// Run `parse` with lines being kept from the first command on, and return
+/// the kept lines for a source job: a runtime `source-file` (source_runtime)
+/// and the startup config (load_config) both parse this way.
+fn parse_keeping_commands(
+    app: &mut AppState,
+    parse: impl FnOnce(&mut AppState),
+) -> Vec<crate::types::DeferredConfigLine> {
+    let outer = app.source_defer.replace(crate::types::SourceDefer::default());
+    parse(app);
+    std::mem::replace(&mut app.source_defer, outer).unwrap_or_default().lines
 }
 
 /// Parse one config line a source job kept, now that the commands before it
@@ -3867,8 +3949,10 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     let args = crate::commands::parse_command_line(line);
     if args.len() < 2 { return; }
     // `-b` changes nothing here: this route always starts the command without
-    // waiting (see the spawn below). A runtime source hands a run-shell that
-    // waits to its job instead (run_shell_waits).
+    // waiting (see the spawn below). A runtime source and the startup config
+    // hand a run-shell that waits to their job instead (run_shell_waits), and
+    // one with `-b` too once the file's first command has been kept
+    // (run_shell_in_job).
     let parsed = match crate::commands::parse_run_shell_args(&args[1..]) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -3892,17 +3976,22 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // Expand ~ to home directory + XDG fallback for plugin paths
     let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
 
-    // ── Handle .tmux files natively ──────────────────────────────────
-    // .tmux files are bash scripts used by tmux plugins. On Windows they
-    // can't be executed by pwsh. Parse them for `tmux source`, `tmux set`,
-    // etc. and apply the extracted commands as config lines.
-    let trimmed_cmd = shell_cmd.trim().trim_matches('\'').trim_matches('"');
-    if trimmed_cmd.ends_with(".tmux") {
-        let tmux_path = std::path::Path::new(trimmed_cmd);
-        if tmux_path.is_file() {
-            parse_tmux_entry_script(app, tmux_path);
+    // A tmux plugin's `.tmux` entry script is a bash script. With Git Bash
+    // it runs as any run-shell command does (build_run_shell_command); without
+    // it, its plain tmux lines are applied as config lines.
+    if !crate::commands::can_run_tmux_scripts() {
+        if let Some(path) = tmux_entry_script(&shell_cmd) {
+            parse_tmux_entry_script(app, &path);
             return;
         }
+    }
+    // A warm standby's own config load starts no shell. Its claim loads the
+    // config again and runs the shell then, for the session that exists by
+    // that time; starting it here as well ran every config run-shell twice,
+    // where tmux runs a config once. A `.tmux` script applied above is read,
+    // as the config's own options are.
+    if in_startup_load() && app.is_warm_server() {
+        return;
     }
     // Also handle .ps1 files natively when possible: if the command is a
     // bare .ps1 path (no arguments), we can run it directly with pwsh -File
@@ -3933,195 +4022,204 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     }
 }
 
-/// Whether a run-shell line in a runtime source is a command its source job
-/// runs and waits for, as tmux's queue waits for a run-shell without `-b`
-/// (cmd-run-shell.c:123 and :186 to :188), the lines after it included.
+/// How a run-shell line in a runtime source or the startup config runs: None
+/// when parse_run_shell runs it, Some(waits) when it is a command of the
+/// source job, which runs it through the connection dispatcher the way the
+/// CLI's run-shell runs.
 ///
-/// The job runs it through the connection dispatcher on a one-shot
-/// connection, whose thread waits for the shell while the server loop goes
-/// on, so a script that calls back into psmux is answered. parse_run_shell
-/// cannot wait on the server thread for exactly that reason. A plugin's
-/// `.tmux` entry script stays with parse_run_shell, which reads it natively,
-/// and so does a line whose flags do not parse, which it reports.
-fn run_shell_waits(l: &str) -> bool {
+/// A plugin's `.tmux` entry script stays with parse_run_shell when there is
+/// no Git Bash to run it, as it then applies the script's lines itself, and
+/// so does a line whose flags do not parse, which it reports.
+fn run_shell_job_kind(l: &str) -> Option<bool> {
     if !(l.starts_with("run-shell ") || l.starts_with("run ")) {
-        return false;
+        return None;
     }
     let args = crate::commands::parse_command_line(l);
-    let Ok(parsed) = crate::commands::parse_run_shell_args(&args[1..]) else {
-        return false;
-    };
+    let parsed = crate::commands::parse_run_shell_args(&args[1..]).ok()?;
     let command = parsed.command.join(" ");
-    let command = command.trim().trim_matches('\'').trim_matches('"');
-    !parsed.background && !command.ends_with(".tmux") && (!command.is_empty() || parsed.delay.is_some())
+    if command.trim().is_empty() && parsed.delay.is_none() {
+        return None;
+    }
+    if !crate::commands::can_run_tmux_scripts()
+        && tmux_entry_script(&crate::util::expand_run_shell_path(&command)).is_some()
+    {
+        return None;
+    }
+    Some(!parsed.background)
 }
 
-/// Parse a `.tmux` entry script (bash) and extract tmux commands from it.
+/// The `.tmux` entry script a run-shell command is, when the whole command
+/// is that one file (quoted or not), as tpm runs a plugin's script. A
+/// command that only names a `.tmux` file among other words is a command.
+fn tmux_entry_script(shell_cmd: &str) -> Option<std::path::PathBuf> {
+    let t = shell_cmd.trim();
+    let t = ['\'', '"']
+        .iter()
+        .find_map(|&q| t.strip_prefix(q).and_then(|s| s.strip_suffix(q)))
+        .unwrap_or(t);
+    let path = std::path::Path::new(t);
+    (t.ends_with(".tmux") && path.is_file()).then(|| path.to_path_buf())
+}
+
+/// Whether a run-shell line is a command its source job runs and waits for,
+/// as tmux's queue waits for a run-shell without `-b` (cmd-run-shell.c:123
+/// and :186 to :188), the lines after it included. Such a line starts the
+/// kept part of the file.
 ///
-/// .tmux files are the standard entry point for tmux plugins. They are bash
-/// scripts that typically call `tmux source <file>`, `tmux set -g ...`, etc.
-/// On Windows we can't run bash, so we parse the script and translate the
-/// tmux CLI calls into psmux config lines.
+/// The job's one-shot connection has a thread of its own that waits for the
+/// shell while the server loop goes on, so a script that calls back into
+/// psmux is answered. parse_run_shell cannot wait on the server thread for
+/// exactly that reason.
+fn run_shell_waits(l: &str) -> bool {
+    run_shell_job_kind(l) == Some(true)
+}
+
+/// Whether a kept run-shell line goes to the job as a command. With `-b` too:
+/// it starts in file order, as tmux's queue starts it, and nothing waits. A
+/// `-b` line before the first command is not kept: it starts in place, after
+/// every line before it, which is that order already.
+fn run_shell_in_job(l: &str) -> bool {
+    run_shell_job_kind(l).is_some()
+}
+
+/// Apply a plugin's `.ps1` entry script as config lines when all it does is
+/// set options and bind keys with literal text:
 ///
-/// Supported patterns:
-/// Parse a .ps1 plugin entry script and extract psmux set/bind commands.
-///
-/// Plugin .ps1 scripts use patterns like:
+///   $PSMUX = (Get-Command psmux).Source
 ///   & $PSMUX set -g key value 2>&1 | Out-Null
 ///   & $PSMUX bind-key ...
 ///
-/// We extract the psmux command portion and apply it as config.
-/// Returns true if all extracted values are literal (no unresolved PS variables).
-/// Returns false if the script uses PowerShell variables that need runtime eval.
+/// Every line is checked before any is applied. One line the parser cannot
+/// read as the command PowerShell would run (a variable, a pipeline, an `if`,
+/// a command other than set and bind) leaves the whole script to run, so no
+/// line is applied here and then again by the script, and none is lost.
+/// Returns whether the script was applied.
 fn parse_ps1_plugin_script(app: &mut AppState, content: &str) -> bool {
-    let mut has_ps_vars = false;
-    let mut applied_any = false;
-
-    for line in content.lines() {
-        let l = line.trim();
-        if l.is_empty() || l.starts_with('#') { continue; }
-
-        // Match patterns like: & $PSMUX set -g ... 2>&1 | Out-Null
-        // Also: & $PSMUX bind-key ... 2>&1 | Out-Null
-        let cmd_start = if let Some(pos) = l.find("$PSMUX ") {
-            // Ensure it's preceded by "& " (PowerShell call operator)
-            let prefix = &l[..pos];
-            if prefix.trim_end().ends_with('&') {
-                Some(pos + 7) // skip "$PSMUX "
-            } else {
-                None
+    match literal_ps1_plugin_lines(content) {
+        Some(lines) => {
+            for line in &lines {
+                parse_config_line(app, line);
             }
-        } else {
-            None
-        };
-
-        let cmd = match cmd_start {
-            Some(start) => &l[start..],
-            None => continue,
-        };
-
-        // Strip trailing PowerShell noise: 2>&1 | Out-Null, 2>$null
-        let cmd = cmd.split(" 2>&1").next().unwrap_or(cmd);
-        let cmd = cmd.split(" 2>$null").next().unwrap_or(cmd);
-        let cmd = cmd.trim();
-
-        // Check for unresolved PowerShell variables (e.g., $bg1, $fg)
-        // but not $PSMUX or $TMUX which are expected patterns
-        if cmd.contains('$') {
-            // Check if it's a PS variable reference (not env var pattern)
-            let has_var = cmd.split('$').skip(1).any(|part| {
-                let first_word: String = part.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                !first_word.is_empty() && first_word != "PSMUX" && first_word != "TMUX"
-                    && first_word != "env" && first_word != "null"
-            });
-            if has_var { has_ps_vars = true; }
+            true
         }
-
-        if cmd.starts_with("set ") || cmd.starts_with("set-option ")
-            || cmd.starts_with("bind-key ") || cmd.starts_with("bind ")
-            || cmd.starts_with("setw ") || cmd.starts_with("set-window-option ") {
-            if !has_ps_vars {
-                parse_config_line(app, cmd);
-                applied_any = true;
-            }
-        }
+        None => false,
     }
-
-    // Return true if we applied commands and they were all literal
-    applied_any && !has_ps_vars
 }
 
-///   tmux source[-file] "path"       → source-file "path"
-///   tmux set[-option] [-g] key val  → set [-g] key val
-///   tmux setw key val               → setw key val
-///   PLUGIN_DIR=...                  → track for variable expansion
+/// The config lines a `.ps1` plugin script amounts to, or `None` when the
+/// script has to run (see parse_ps1_plugin_script).
+fn literal_ps1_plugin_lines(content: &str) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        // `$PSMUX = ...` finds the binary the calls below use.
+        if let Some(rest) = l.strip_prefix("$PSMUX") {
+            if rest.trim_start().starts_with('=') && !rest.contains(';') {
+                continue;
+            }
+            return None;
+        }
+        let call = l.strip_prefix('&')?.trim_start().strip_prefix("$PSMUX")?;
+        if !call.starts_with(char::is_whitespace) {
+            return None;
+        }
+        // The output is thrown away: `2>&1 | Out-Null`, `2>$null`.
+        let mut cmd = call.trim();
+        loop {
+            let before = cmd;
+            for noise in ["| Out-Null", "2>&1", "2>$null", "*>$null", ">$null"] {
+                if let Some(rest) = cmd.strip_suffix(noise) {
+                    cmd = rest.trim_end();
+                }
+            }
+            if cmd == before {
+                break;
+            }
+        }
+        let name = cmd.split_whitespace().next()?;
+        if !matches!(name, "set" | "set-option" | "setw" | "set-window-option" | "bind" | "bind-key") {
+            return None;
+        }
+        if !ps1_words_are_literal(cmd) {
+            return None;
+        }
+        lines.push(cmd.to_string());
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
+}
+
+/// Whether PowerShell hands the words of `cmd` to psmux as the config parser
+/// reads them. Quoted text holds no variable, escape or doubled quote. Outside
+/// quotes there is no operator, no comma (an array), no backslash (an escape
+/// in a config line, not in PowerShell), and no word that starts with `@` (a
+/// splat) or `#` (a comment).
+fn ps1_words_are_literal(cmd: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut word_start = true;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => {
+                if chars.peek() == Some(&q) {
+                    return false;
+                }
+                quote = None;
+            }
+            Some('"') if matches!(c, '$' | '`' | '\\') => return false,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '$' | '`' | '\\' | '|' | ';' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | ',' => return false,
+                '@' | '#' if word_start => return false,
+                _ => {}
+            },
+        }
+        word_start = quote.is_none() && c.is_whitespace();
+    }
+    quote.is_none()
+}
+
+/// Apply a plugin's `.tmux` entry script (bash) when there is no Git Bash to
+/// run it (parse_run_shell).
+///
+/// Only what bash would surely do the same way is applied: a `tmux` call at
+/// the top level of the script whose words are literal once the script's
+/// simple variables are put in (its directory, a literal value). A call
+/// inside an `if`, a loop or a function, or with any other `$`, is not: run
+/// without its condition or its value it did the wrong thing, and
+/// tmux-sensible's macOS-only `default-command` stopped every pane from
+/// starting. When the script does anything else, one warning says that it
+/// needs Git Bash.
+///
+/// Companion `*_tmux.conf` files in the script's directory are sourced too.
 fn parse_tmux_entry_script(app: &mut AppState, path: &std::path::Path) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return,
     };
-
-    // Determine the directory of the .tmux file for $PLUGIN_DIR / ${PLUGIN_DIR}
-    let plugin_dir = path.parent()
-        .map(|p| p.to_string_lossy().to_string())
+    let dir = path.parent()
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-
-    // Also look for PLUGIN_DIR assignment in the script (may differ)
-    let mut script_plugin_dir = plugin_dir.clone();
-    // Common pattern:  PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    // We can't evaluate bash, so we just use the file's parent directory.
-
-    for line in content.lines() {
-        let l = line.trim();
-        // Skip empty lines, comments, shebang
-        if l.is_empty() || l.starts_with('#') { continue; }
-
-        // Track explicit PLUGIN_DIR assignment (best-effort)
-        if l.starts_with("PLUGIN_DIR=") || l.starts_with("export PLUGIN_DIR=") {
-            // If it's a simple literal path, use it
-            let val = l.splitn(2, '=').nth(1).unwrap_or("").trim_matches('"').trim_matches('\'');
-            if !val.contains('$') && !val.contains('`') && !val.is_empty() {
-                script_plugin_dir = val.to_string();
-            }
-            // Otherwise keep using the .tmux file's parent dir
-            continue;
-        }
-
-        // Skip other bash-isms (variable assignments, if/fi, for, etc.)
-        if l.contains("BASH_SOURCE") || l.starts_with("cd ") || l.starts_with("export ")
-            || l.starts_with("if ") || l == "fi" || l.starts_with("for ")
-            || l.starts_with("done") || l.starts_with("then") || l.starts_with("else")
-            || l.starts_with("local ") || l.starts_with("readonly ") {
-            continue;
-        }
-
-        // Extract tmux commands: look for lines starting with `tmux `
-        let tmux_cmd = if l.starts_with("tmux ") {
-            &l[5..]
-        } else if l.starts_with("\"$TMUX_PROGRAM\" ") || l.starts_with("$TMUX_PROGRAM ") {
-            // Some plugins use $TMUX_PROGRAM variable
-            let start = l.find(' ').unwrap_or(l.len());
-            l[start..].trim()
-        } else {
-            continue;
-        };
-
-        // Expand $PLUGIN_DIR, ${PLUGIN_DIR}, $CURRENT_DIR, ${CURRENT_DIR}
-        let expanded = tmux_cmd
-            .replace("${PLUGIN_DIR}", &script_plugin_dir)
-            .replace("$PLUGIN_DIR", &script_plugin_dir)
-            .replace("${CURRENT_DIR}", &script_plugin_dir)
-            .replace("$CURRENT_DIR", &script_plugin_dir);
-
-        // Now parse the tmux subcommand as a psmux config line
-        let expanded = expanded.trim();
-        if expanded.starts_with("source-file ") || expanded.starts_with("source ") {
-            parse_config_line(app, expanded);
-        } else if expanded.starts_with("set-option ") || expanded.starts_with("set ")
-            || expanded.starts_with("set -g ") {
-            parse_config_line(app, expanded);
-        } else if expanded.starts_with("setw ") || expanded.starts_with("set-window-option ") {
-            parse_config_line(app, expanded);
-        } else if expanded.starts_with("run-shell ") || expanded.starts_with("run ") {
-            parse_config_line(app, expanded);
-        } else if expanded.starts_with("bind-key ") || expanded.starts_with("bind ") {
-            parse_config_line(app, expanded);
-        } else if expanded.starts_with("if-shell ") || expanded.starts_with("if ") {
-            parse_config_line(app, expanded);
-        } else if expanded.starts_with("set-hook ") {
-            parse_config_line(app, expanded);
-        } else {
-            // Try to parse it anyway — it might be a valid config directive
-            parse_config_line(app, expanded);
-        }
+    let (lines, needs_bash) = tmux_entry_script_lines(&content, &dir);
+    for l in &lines {
+        parse_config_line(app, l);
+    }
+    if needs_bash {
+        warn_config(app, format!(
+            "{}: needs Git Bash (Git for Windows) to run; only its plain tmux lines were applied",
+            path.display()
+        ));
     }
 
-    // Fallback: if we didn't find any tmux commands in the script, try to
-    // source .conf files from the same directory (many themes ship both
-    // .tmux entry script and .conf files).
-    // Check if we actually parsed anything by looking at common indicators
-    // (status-left, status-right being changed from defaults).
-    // For now, also auto-source any *_tmux.conf or *.conf files in the dir.
+    // Many themes ship their options as `*_tmux.conf` files beside the
+    // script; source those as well.
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -4130,8 +4228,6 @@ fn parse_tmux_entry_script(app: &mut AppState, path: &std::path::Path) {
                 if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                     if ext == "conf" {
                         let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        // Source companion .conf files (but not the .tmux script itself)
-                        // Prioritize files like plugin_name_options.conf, plugin_name.conf
                         if fname.ends_with("_tmux.conf") || fname.ends_with("_options_tmux.conf") {
                             source_path(app, &p.to_string_lossy(), false);
                         }
@@ -4140,6 +4236,255 @@ fn parse_tmux_entry_script(app: &mut AppState, path: &std::path::Path) {
             }
         }
     }
+}
+
+/// The config lines a `.tmux` entry script's plain tmux calls make (see
+/// parse_tmux_entry_script), and whether the script does anything more that
+/// only bash can do. `dir` is the script's directory, what
+/// `"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"` gives.
+fn tmux_entry_script_lines(content: &str, dir: &str) -> (Vec<String>, bool) {
+    const OPENERS: [&str; 6] = ["if", "for", "while", "until", "case", "select"];
+    const CLOSERS: [&str; 4] = ["fi", "done", "esac", "}"];
+    const DECLARE: [&str; 5] = ["export", "local", "readonly", "declare", "typeset"];
+    let dir = dir.replace('\\', "/");
+    // The script's variables whose value is known: name and value.
+    let mut vars: Vec<(String, String)> = Vec::new();
+    let mut out = Vec::new();
+    let mut needs_bash = false;
+    let mut depth = 0usize;
+    let mut pending = String::new();
+    for raw in content.lines() {
+        // A line ending in `\` goes on in the next one.
+        if let Some(head) = raw.strip_suffix('\\') {
+            pending.push_str(head);
+            continue;
+        }
+        pending.push_str(raw);
+        let line = std::mem::take(&mut pending);
+        let split = split_shell_line(&line);
+        if split.commands.is_empty() {
+            continue;
+        }
+        let words: Vec<Vec<&str>> = split.commands.iter()
+            .map(|c| c.iter().map(|r| &line[r.clone()]).collect())
+            .collect();
+        let at_top = depth == 0;
+        for w in &words {
+            if OPENERS.contains(&w[0]) {
+                depth += 1;
+            } else if CLOSERS.contains(&w[0]) {
+                depth = depth.saturating_sub(1);
+            }
+            if w.len() > 1 && w.last() == Some(&"{") {
+                depth += 1;
+            }
+        }
+        // The body of a block was judged with its first line.
+        if !at_top {
+            continue;
+        }
+        if let [w] = words.as_slice() {
+            // A function's definition does nothing until it is called.
+            if w.last() == Some(&"{")
+                && (w[0].ends_with("()") || w[0] == "function" || w.get(1) == Some(&"()"))
+            {
+                continue;
+            }
+            // `NAME=value ...`, or `export NAME`, which keeps the value.
+            let declare = DECLARE.contains(&w[0]);
+            let assigns = if declare { &w[1..] } else { &w[..] };
+            if !assigns.is_empty()
+                && assigns.iter().all(|a| shell_assignment(a).is_some() || (declare && is_shell_name(a)))
+            {
+                for (name, value) in assigns.iter().filter_map(|a| shell_assignment(a)) {
+                    vars.retain(|(k, _)| k != name);
+                    if value.contains("dirname") && (value.contains("BASH_SOURCE") || value.contains("$0")) {
+                        vars.push((name.to_string(), dir.clone()));
+                    } else if let Some(v) = literal_shell_word(value) {
+                        vars.push((name.to_string(), v));
+                    }
+                }
+                continue;
+            }
+            if split.plain && w.len() > 1
+                && matches!(w[0], "tmux" | "$TMUX_PROGRAM" | "\"$TMUX_PROGRAM\"")
+            {
+                let cmd = &split.commands[0];
+                let args = expand_shell_vars(&line[cmd[1].start..cmd[cmd.len() - 1].end], &vars);
+                if !args.contains('$') && !args.contains('`') {
+                    out.push(args);
+                    continue;
+                }
+            }
+        }
+        needs_bash = true;
+    }
+    (out, needs_bash)
+}
+
+/// One line of a `.tmux` script cut the way bash cuts it, as far as
+/// tmux_entry_script_lines needs: its commands, split at `;`, `&&`, `||`
+/// and `|` outside quotes, as byte ranges of their words. Quotes, `$( )`
+/// and `${ }` stay inside a word, and a `#` that starts a word ends the
+/// line. `plain` is false when bash would do more with the line than run
+/// its words as they read: a pipe, a redirection, `&`, a subshell, a
+/// backquote, or a `\` escape other than `\;`.
+struct ShellLine {
+    commands: Vec<Vec<std::ops::Range<usize>>>,
+    plain: bool,
+}
+
+fn split_shell_line(l: &str) -> ShellLine {
+    let b = l.as_bytes();
+    let mut commands: Vec<Vec<std::ops::Range<usize>>> = vec![Vec::new()];
+    let mut plain = true;
+    let mut start: Option<usize> = None;
+    let mut quote: Option<u8> = None;
+    // Inside `$( )` or `${ }`: the closing byte and how deep.
+    let mut nest: Option<(u8, u8, usize)> = None;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if let Some((open, close, n)) = nest {
+            if c == open {
+                nest = Some((open, close, n + 1));
+            } else if c == close {
+                nest = if n == 1 { None } else { Some((open, close, n - 1)) };
+            }
+            i += 1;
+            continue;
+        }
+        if quote == Some(b'\'') {
+            if c == b'\'' {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'$' && matches!(b.get(i + 1), Some(b'(') | Some(b'{')) {
+            let open = b[i + 1];
+            nest = Some((open, if open == b'(' { b')' } else { b'}' }, 1));
+            start.get_or_insert(i);
+            i += 2;
+            continue;
+        }
+        if c == b'`' {
+            plain = false;
+        }
+        if quote == Some(b'"') {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        let end_word = |start: &mut Option<usize>, commands: &mut Vec<Vec<std::ops::Range<usize>>>| {
+            if let Some(s) = start.take() {
+                commands.last_mut().unwrap().push(s..i);
+            }
+        };
+        match c {
+            b' ' | b'\t' => end_word(&mut start, &mut commands),
+            b';' | b'&' | b'|' => {
+                end_word(&mut start, &mut commands);
+                if c != b';' && b.get(i + 1) == Some(&c) {
+                    i += 1;
+                } else if c != b';' {
+                    plain = false;
+                }
+                commands.push(Vec::new());
+            }
+            b'#' if start.is_none() => break,
+            _ => {
+                match c {
+                    b'\'' | b'"' => quote = Some(c),
+                    b'\\' => {
+                        if b.get(i + 1) != Some(&b';') {
+                            plain = false;
+                        }
+                        start.get_or_insert(i);
+                        i += 2;
+                        continue;
+                    }
+                    b'<' | b'>' | b'(' | b')' => plain = false,
+                    _ => {}
+                }
+                start.get_or_insert(i);
+            }
+        }
+        i += 1;
+    }
+    if let Some(s) = start {
+        commands.last_mut().unwrap().push(s..b.len());
+    }
+    // A quote or a `$( )` left open at the end makes the line bash's to read.
+    if quote.is_some() || nest.is_some() {
+        plain = false;
+    }
+    commands.retain(|c| !c.is_empty());
+    ShellLine { commands, plain }
+}
+
+/// Whether `s` is a shell variable name.
+fn is_shell_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `NAME=value` as its name and value, when `word` is a shell assignment.
+fn shell_assignment(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once('=')?;
+    is_shell_name(name).then_some((name, value))
+}
+
+/// The value of a shell word that bash reads as it is written: bare text
+/// or one quoted string, with no `$`, backquote or `\`.
+fn literal_shell_word(word: &str) -> Option<String> {
+    let inner = ['\'', '"']
+        .iter()
+        .find_map(|&q| word.strip_prefix(q).and_then(|s| s.strip_suffix(q)))
+        .unwrap_or(word);
+    (!inner.contains(['$', '`', '\\', '\'', '"'])).then(|| inner.to_string())
+}
+
+/// `text` with `$NAME` and `${NAME}` replaced for each of `vars`. Any other
+/// `$` is left for the caller to see.
+fn expand_shell_vars(text: &str, vars: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let (name, used) = match after.strip_prefix('{') {
+            Some(b) => match b.find('}') {
+                Some(e) => (&b[..e], e + 2),
+                None => ("", 0),
+            },
+            None => {
+                let e = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                (&after[..e], e)
+            }
+        };
+        match vars.iter().find(|(k, _)| k == name).filter(|_| !name.is_empty()) {
+            Some((_, v)) => {
+                out.push_str(v);
+                rest = &after[used..];
+            }
+            None => {
+                out.push('$');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Execute an if-shell / if command from config.
@@ -4298,6 +4643,10 @@ mod tests_issue157_bind_key_case;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue842_source_file_commands.rs"]
 mod test_issue842_source_file_commands;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue886_startup_config_run.rs"]
+mod test_issue886_startup_config_run;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue145_source_file.rs"]

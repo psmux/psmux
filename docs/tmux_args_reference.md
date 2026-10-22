@@ -567,7 +567,7 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 **run-shell** (`run`)
 - Boolean: `-b` (background: start the command and do not wait for it)
 - Value: `-d` (wait this many seconds, fractions allowed, before starting the command; with no command it only waits; anything but a number is `invalid delay time`)
-- Without `-b` the command is waited for, and so are the commands after it: from the CLI, from a key binding, and in a file read by `source-file` on a running server, where the lines after it run once it has finished. A config file loaded when the server starts does not wait: the command is started and the next line runs.
+- Without `-b` the command is waited for, and so are the commands after it: from the CLI, from a key binding, in a file read by `source-file`, and in the config file loaded when the server starts, where the lines after it run once it has finished.
 - The flags end at the first word that is not one of these, so a word like `-C` starts the shell command. Everything after that is the shell command. `-C`, `-s`, `-c` and `-t` are **not** parsed, so passing them sends them straight to the shell.
 
 **if-shell** (`if`)

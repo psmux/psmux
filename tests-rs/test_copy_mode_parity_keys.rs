@@ -315,11 +315,16 @@ fn a_clustered_hu_root_binding_is_skipped_like_plain_u() {
 // ══════════════ 6. copy-mode from a sourced file ══════════════
 
 #[test]
-fn source_file_runs_a_copy_mode_line() {
+fn source_file_hands_a_copy_mode_line_to_its_job() {
+    // The source job (issue #842) runs the line through the dispatcher, which
+    // enters copy mode; tests/test_copy_mode_parity.ps1 checks that end to end.
     let mut app = plain_app("emacs", Captured::default());
     let path = std::env::temp_dir().join(format!("psmux_cpparity_{}.conf", std::process::id()));
     std::fs::write(&path, "copy-mode\n").unwrap();
-    crate::config::source_file(&mut app, path.to_str().unwrap());
+    let lines = crate::config::source_runtime(&mut app, path.to_str().unwrap()).lines;
     let _ = std::fs::remove_file(&path);
-    assert!(matches!(app.mode, Mode::CopyMode), "source-file on a `copy-mode` line must enter copy mode");
+    assert!(
+        matches!(lines.as_slice(), [l] if matches!(&l.kind, crate::types::DeferredKind::Command(c) if c == "copy-mode")),
+        "source-file must keep a `copy-mode` line for its job"
+    );
 }

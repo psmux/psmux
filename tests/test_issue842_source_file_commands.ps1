@@ -183,7 +183,10 @@ try {
     $env:PSMUX_CONFIG_FILE = $saved
     Start-Sleep -Milliseconds 1500
     $w = Windows
-    Check ($w -match '^0=[^ ]*:1$') "one window of one pane (tmux: 0=...:1)" "windows read [$w]"
+    # tmux has no session while it runs the startup config and fails both
+    # (0=...:1). A psmux session is a server that loads the config, so they
+    # run, in order, on that session (tests/test_issue886_startup_config_run.ps1).
+    Check ($w -match '^0=[^ ]*:1 1=startw:2$') "new-window then split-window, in order: 0=...:1 1=startw:2" "windows read [$w]"
 
     # ── H. a hook's source-file runs the file once ──
     Write-Head "H. source-file from a hook"

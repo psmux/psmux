@@ -26,8 +26,9 @@ use crate::types::{CtrlReq, DeferredConfigLine, DeferredKind, SourceOutcome, Sou
 /// stand-in in tests.
 pub(crate) trait SourceJobIo {
     /// Run one command line through the dispatcher and return its whole reply
-    /// once the command has finished.
-    fn run_command(&mut self, line: &str) -> std::io::Result<String>;
+    /// once the command has finished. `file` is the file the line was read
+    /// from, which #{current_file} names while it runs.
+    fn run_command(&mut self, file: &str, line: &str) -> std::io::Result<String>;
     /// Parse one deferred config line on the server loop. None when the loop
     /// did not answer, which ends the job.
     fn replay(&mut self, item: DeferredConfigLine) -> Option<SourceReplayResult>;
@@ -38,11 +39,51 @@ struct ServerIo {
     port: u16,
     key: String,
     tx: mpsc::Sender<CtrlReq>,
+    kind: SourceJobKind,
 }
 
+/// The source a job runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceJobKind {
+    /// A runtime `source-file` (SOURCE_JOB_LINE).
+    Source,
+    /// The startup config (STARTUP_JOB_LINE).
+    Startup,
+    /// The startup config of a session a config file's `new-session` made,
+    /// which runs only the commands config::made_session_runs names.
+    MadeSessionStartup,
+}
+
+/// The line a source job's connection sends before its command, so the
+/// dispatcher knows a `new-session` came from a config file
+/// (config::CONFIG_SESSION_ENV).
+pub(crate) const SOURCE_JOB_LINE: &str = "SOURCE-JOB";
+
+/// SOURCE_JOB_LINE for the startup config's job. Its `new-session` switches
+/// no client: tmux loads the config with no client, and new-session with no
+/// client is detached (cmd-new-session.c:164 to :167).
+pub(crate) const STARTUP_JOB_LINE: &str = "SOURCE-JOB STARTUP";
+
+/// The line after the job line that names the file a command was read from.
+/// In tmux every command parsed from a file carries the file as
+/// #{current_file} (cfg.c:139 and :191), so a `run-shell` after the file's
+/// first command still finds `#{d:current_file}`.
+pub(crate) const CURRENT_FILE_PREFIX: &str = "CURRENT-FILE ";
+
 impl SourceJobIo for ServerIo {
-    fn run_command(&mut self, line: &str) -> std::io::Result<String> {
-        crate::session::exchange_on_port(self.port, &self.key, None, &format!("{}\n", line), None)
+    fn run_command(&mut self, file: &str, line: &str) -> std::io::Result<String> {
+        if self.kind == SourceJobKind::MadeSessionStartup && !crate::config::made_session_runs(line) {
+            // Left out in such a session, without a word: it acted on the
+            // session that loaded the config.
+            return Ok(String::new());
+        }
+        let first = if self.kind == SourceJobKind::Source { SOURCE_JOB_LINE } else { STARTUP_JOB_LINE };
+        let request = if file.is_empty() {
+            format!("{}\n{}\n", first, line)
+        } else {
+            format!("{}\n{}{}\n{}\n", first, CURRENT_FILE_PREFIX, file, line)
+        };
+        crate::session::exchange_on_port(self.port, &self.key, None, &request, None)
     }
 
     fn replay(&mut self, item: DeferredConfigLine) -> Option<SourceReplayResult> {
@@ -99,7 +140,7 @@ pub(crate) fn run_source_job(
     let mut outcome = SourceOutcome { output: String::new(), errors };
     while let Some(item) = queue.pop_front() {
         match &item.kind {
-            DeferredKind::Command(line) => match io.run_command(line) {
+            DeferredKind::Command(line) => match io.run_command(&item.file, line) {
                 Ok(reply) => classify_reply(&item, &reply, &mut warnings, &mut outcome),
                 Err(e) => {
                     // The server is gone (a `kill-server` line) or cannot be
@@ -132,7 +173,8 @@ pub(crate) fn run_source_job(
 /// client that ran `source-file` (if it waits). If the loop is gone, the
 /// waiter is dropped with the message, which unblocks that client too.
 /// Returns whether the thread started, so the loop counts only a job that
-/// will report.
+/// will report. `kind` says which source it runs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_source_job(
     port: u16,
     key: String,
@@ -141,13 +183,14 @@ pub(crate) fn spawn_source_job(
     warnings: Vec<String>,
     errors: Vec<String>,
     waiter: Option<mpsc::Sender<SourceOutcome>>,
+    kind: SourceJobKind,
 ) -> bool {
     let done_tx = tx.clone();
     let new_from = warnings.len();
     std::thread::Builder::new()
         .name("source-job".into())
         .spawn(move || {
-            let mut io = ServerIo { port, key, tx };
+            let mut io = ServerIo { port, key, tx, kind };
             let (warnings, outcome) = run_source_job_reporting(&mut io, lines, warnings, errors);
             let _ = done_tx.send(CtrlReq::SourceJobDone { warnings, new_from, outcome, waiter });
         })
