@@ -68,7 +68,24 @@ $da = D $a; $db = D $b
 Check ((Val $da 'mode') -eq 1 -and (Val $da 'sp') -eq (Val $inA 'sp') -and (Val $da 'sp') -gt 0 -and (Val $da 'cx') -eq (Val $inA 'cx') -and (Val $da 'cy') -eq (Val $inA 'cy')) "parked $a keeps its own values [$da]" "parked ${a}, before [$inA] after [$da]"
 Check ((Val $db 'mode') -eq 0 -and (Val $db 'sp') -eq 0 -and (Val $db 'cx') -eq 0 -and (Val $db 'cy') -eq 0) "active $b outside copy mode reads [$db]" "active $b outside copy mode reads [$db]"
 
-Write-Head "3. from another window"
+Write-Head "3. selection, search and word formats belong to the target pane"
+$SelectionFormat = 'sel=#{selection_present} active=#{selection_active} sx=#{selection_start_x} sy=#{selection_start_y} ex=#{selection_end_x} ey=#{selection_end_y} search=#{search_present} word=#{copy_cursor_word}'
+$NoSelection = 'sel=0 active=0 sx=0 sy=0 ex=0 ey=0 search=0 word='
+function Selection($t) { return [string](P display-message -t $t -p $SelectionFormat) }
+P select-pane -t $a | Out-Null
+P send-keys -t $a -X search-backward line | Out-Null
+P send-keys -t $a -X begin-selection | Out-Null
+P send-keys -t $a -X cursor-right | Out-Null
+$selected = Selection $a
+Check ((Val $selected 'sel') -eq 1 -and (Val $selected 'active') -eq 1 -and (Val $selected 'search') -eq 1 -and (Val $selected 'sx') -eq 0 -and (Val $selected 'ex') -eq 1 -and $selected.EndsWith('word=line')) "active selection has distinct endpoints, a search and its word [$selected]" "active selection precondition failed [$selected]"
+P select-pane -t $b | Out-Null
+$parked = Selection $a; $plain = Selection $b
+Check ($parked -eq $selected) "parked selection retains its own values [$parked]" "parked selection changed: before [$selected], after [$parked]"
+Check ($plain -eq $NoSelection) "pane outside copy mode has no selection, search or word" "state leaked into the plain pane [$plain]"
+$selections = @(P list-panes -t $SESS -F "#{pane_id} $SelectionFormat")
+Check (($selections -contains "$a $selected") -and ($selections -contains "$b $NoSelection")) "list-panes resolves each pane's selection, search and word" "list-panes returned [$($selections -join ' | ')]"
+
+Write-Head "4. from another window"
 P new-window -t $SESS | Out-Null
 Start-Sleep -Seconds 2
 $da = D "${SESS}:0.0"; $db = D "${SESS}:0.1"
@@ -76,6 +93,12 @@ Check ((Val $da 'hist') -ge 150 -and (Val $da 'mode') -eq 1 -and (Val $da 'sp') 
 Check ((Val $db 'hist') -lt 50 -and (Val $db 'sp') -eq 0 -and (Val $db 'cx') -eq 0) "${SESS}:0.1 gives [$db]" "${SESS}:0.1 gives [$db]"
 $cur = [string](P display-message -p $F)
 Check ((Val $cur 'hist') -lt 50 -and (Val $cur 'sp') -eq 0 -and (Val $cur 'mode') -eq 0) "the new window's pane gives [$cur]" "the new window's pane gives [$cur]"
+
+$parked = Selection "${SESS}:0.0"; $plain = Selection "${SESS}:0.1"
+Check ($parked -eq $selected) "cross-window target retains its selection, search and word" "cross-window selection changed: before [$selected], after [$parked]"
+Check ($plain -eq $NoSelection) "cross-window plain target has no copy state" "state leaked into the cross-window plain target [$plain]"
+$current = [string](P display-message -p $SelectionFormat)
+Check ($current -eq $NoSelection) "new window has no copy state" "state leaked into the new window [$current]"
 
 Cleanup
 Write-Host ""

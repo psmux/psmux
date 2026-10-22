@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 const ROWS: u16 = 10;
 const COLS: u16 = 40;
 const COPY: &str = "#{copy_cursor_x},#{copy_cursor_y},#{scroll_position}";
+const SELECTION: &str = "#{selection_present},#{selection_active},#{selection_start_x},#{selection_start_y},#{selection_end_x},#{selection_end_y},#{search_present}";
 
 fn make_pane(id: usize) -> crate::types::Pane {
     let (master, writer) = crate::util::stub_pane_pty(portable_pty::PtySize {
@@ -249,5 +250,217 @@ fn pane_copy_formats_resolve_floating_target_and_live_history() {
     assert_eq!(
         expand_format("#{history_size}", &app),
         expected_history.to_string()
+    );
+}
+
+fn selection_rig() -> AppState {
+    let mut app = rig();
+    app.copy_anchor = Some((6, 7));
+    app.copy_search_query = "live query".into();
+    let win = &mut app.windows[0];
+    let first = crate::tree::active_pane_mut(&mut win.root, &vec![0]).unwrap();
+    first.copy_state.as_mut().unwrap().anchor = Some((1, 2));
+    first.copy_state.as_mut().unwrap().search_query.clear();
+    let second = crate::tree::active_pane_mut(&mut win.root, &vec![1]).unwrap();
+    second.copy_state.as_mut().unwrap().anchor = Some((3, 4));
+    app
+}
+
+#[test]
+fn pane_copy_formats_selection_uses_live_owner_and_parked_target() {
+    let app = selection_rig();
+    assert_eq!(app.copy_anchor, Some((6, 7)));
+    assert_eq!(
+        pane(&app, 1).copy_state.as_ref().unwrap().anchor,
+        Some((1, 2))
+    );
+    assert_eq!(
+        pane(&app, 2).copy_state.as_ref().unwrap().anchor,
+        Some((3, 4))
+    );
+    assert!(!app.copy_search_query.is_empty());
+    assert!(pane(&app, 2)
+        .copy_state
+        .as_ref()
+        .unwrap()
+        .search_query
+        .is_empty());
+    assert_eq!(expand_format(SELECTION, &app), "1,1,7,6,8,6,1");
+    assert_eq!(
+        expand_format_for_pane_by_id(SELECTION, &app, 2),
+        "1,1,4,3,5,4,0"
+    );
+    assert_eq!(
+        format_list_panes(&app, SELECTION, 0),
+        "1,1,7,6,8,6,1\n1,1,4,3,5,4,0"
+    );
+    assert_eq!(expand_format(SELECTION, &app), "1,1,7,6,8,6,1");
+}
+
+#[test]
+fn pane_copy_formats_selection_ignores_stale_state_outside_copy_mode() {
+    let mut app = selection_rig();
+    crate::tree::active_pane_mut(&mut app.windows[0].root, &vec![1])
+        .unwrap()
+        .copy_state = None;
+    assert!(app.mode.in_copy());
+    assert!(pane(&app, 2).copy_state.is_none());
+    assert_eq!(
+        expand_format_for_pane_by_id(SELECTION, &app, 2),
+        "0,0,0,0,0,0,0"
+    );
+    assert_eq!(
+        expand_format_for_pane_by_id("#{copy_cursor_word}", &app, 2),
+        ""
+    );
+    app.mode = Mode::Passthrough;
+    assert!(app.copy_anchor.is_some());
+    assert!(!app.copy_search_query.is_empty());
+    assert!(pane(&app, 1).copy_state.is_some());
+    assert_eq!(expand_format(SELECTION, &app), "0,0,0,0,0,0,0");
+    assert_eq!(expand_format("#{copy_cursor_word}", &app), "");
+
+    for mode in [
+        Mode::CopyMode,
+        Mode::CopySearch {
+            input: String::new(),
+            forward: true,
+        },
+    ] {
+        app.mode = mode;
+        app.copy_anchor = None;
+        app.copy_search_query.clear();
+        assert!(app.mode.in_copy());
+        assert!(app.copy_pos.is_some());
+        assert_eq!(expand_format(SELECTION, &app), "0,0,0,0,8,6,0");
+    }
+}
+
+#[test]
+fn pane_copy_formats_selection_from_another_window_and_floating_pane() {
+    let mut app = selection_rig();
+    let Node::Split { children, .. } = &mut app.windows[0].root else {
+        panic!("two panes")
+    };
+    let second = children.pop().unwrap();
+    let mut other = mock_window("other");
+    other.id = 1;
+    other.root = second;
+    app.windows.push(other);
+    assert_eq!(app.active_idx, 0);
+    assert_eq!(crate::copy_mode::active_pane_id(&app), Some(1));
+    assert_eq!(
+        expand_format_for_pane_by_id(SELECTION, &app, 2),
+        "1,1,4,3,5,4,0"
+    );
+    assert_eq!(format_list_panes(&app, SELECTION, 1), "1,1,4,3,5,4,0");
+
+    let Node::Leaf(second) = app.windows.pop().unwrap().root else {
+        panic!("second pane")
+    };
+    app.windows[0].floating.push(FloatingPane {
+        pane: second,
+        id: 2,
+        x: 1,
+        y: 1,
+        w: 42,
+        h: 12,
+        border: "single".into(),
+        title: String::new(),
+        position: None,
+        styles: Default::default(),
+    });
+    assert_eq!(
+        expand_format_for_pane_by_id(SELECTION, &app, 2),
+        "1,1,4,3,5,4,0"
+    );
+    assert_eq!(expand_format(SELECTION, &app), "1,1,7,6,8,6,1");
+}
+
+#[test]
+fn pane_copy_formats_word_uses_target_cursor_snapshot_and_scroll_without_changing_view() {
+    let mut app = rig();
+    app.copy_pos = Some((0, 2));
+    app.copy_scroll_offset = 3;
+    let second = crate::tree::active_pane_mut(&mut app.windows[0].root, &vec![1]).unwrap();
+    let parked = second.copy_state.as_mut().unwrap();
+    parked.pos = Some((1, 2));
+    parked.scroll_offset = 5;
+    for (id, prefix) in [(1, "live"), (2, "park")] {
+        let p = pane(&app, id);
+        assert!(
+            p.live_term.is_some(),
+            "copy snapshot must differ from the live parser"
+        );
+        let mut parser = p.term.lock().unwrap();
+        *parser = vt100::Parser::new(ROWS, COLS, 200);
+        for row in 0..20 {
+            parser.process(format!("{prefix}{row}\r\n").as_bytes());
+        }
+        assert_eq!(parser.screen().scrollback_filled(), 11);
+        parser.screen_mut().set_scrollback(1);
+    }
+    assert_eq!(expand_format("#{copy_cursor_word}", &app), "live8");
+    assert_eq!(
+        expand_format_for_pane_by_id("#{copy_cursor_word}", &app, 2),
+        "park7"
+    );
+    assert_eq!(
+        format_list_panes(&app, "#{copy_cursor_word}", 0),
+        "live8\npark7"
+    );
+    for id in [1, 2] {
+        assert_eq!(pane(&app, id).term.lock().unwrap().screen().scrollback(), 1);
+    }
+
+    app.copy_pos = None;
+    assert_eq!(expand_format("#{copy_cursor_word}", &app), "");
+    assert_eq!(
+        expand_format_for_pane_by_id("#{copy_cursor_word}", &app, 2),
+        "park7"
+    );
+
+    let Node::Split { children, .. } = &mut app.windows[0].root else {
+        panic!("two panes")
+    };
+    let mut other = mock_window("other");
+    other.id = 1;
+    other.root = children.pop().unwrap();
+    app.windows.push(other);
+    assert_eq!(
+        expand_format_for_pane_by_id("#{copy_cursor_word}", &app, 2),
+        "park7"
+    );
+    assert_eq!(format_list_panes(&app, "#{copy_cursor_word}", 1), "park7");
+    assert_eq!(expand_format("#{copy_cursor_word}", &app), "");
+
+    let Node::Leaf(second) = app.windows.pop().unwrap().root else {
+        panic!("second pane")
+    };
+    app.windows[0].floating.push(FloatingPane {
+        pane: second,
+        id: 2,
+        x: 1,
+        y: 1,
+        w: 42,
+        h: 12,
+        border: "single".into(),
+        title: String::new(),
+        position: None,
+        styles: Default::default(),
+    });
+    assert_eq!(
+        expand_format_for_pane_by_id("#{copy_cursor_word}", &app, 2),
+        "park7"
+    );
+    assert_eq!(
+        app.windows[0].floating[0]
+            .pane
+            .term
+            .lock()
+            .unwrap()
+            .screen()
+            .scrollback(),
+        1
     );
 }

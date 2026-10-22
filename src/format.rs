@@ -1600,6 +1600,19 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             None => crate::tree::get_nth_pane(&win.root, fmt_pane_pos),
         }
     };
+    let target_copy_state = || {
+        let p = target_pane()?;
+        if Some(p.id) == crate::copy_mode::active_pane_id(app) {
+            app.mode.in_copy().then_some((
+                app.copy_pos, app.copy_anchor, app.copy_scroll_offset,
+                app.copy_search_query.as_str(),
+            ))
+        } else {
+            p.copy_state.as_ref().map(|s| (
+                s.pos, s.anchor, s.scroll_offset, s.search_query.as_str(),
+            ))
+        }
+    };
     // A floating pane's content rect (x, y, w, h) inside the window. The PTY
     // is the float's outer size minus its border, and the border is drawn
     // around it, so the content starts one cell in. `border none` is drawn
@@ -2233,19 +2246,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
 
         // ── Copy mode ──
         "copy_cursor_x" | "copy_cursor_y" | "scroll_position" => {
-            let (pos, scroll) = match target_pane() {
-                Some(p) if Some(p.id) == crate::copy_mode::active_pane_id(app) => {
-                    if app.mode.in_copy() {
-                        (app.copy_pos, app.copy_scroll_offset)
-                    } else {
-                        (None, 0)
-                    }
-                }
-                Some(p) => p.copy_state.as_ref()
-                    .map(|s| (s.pos, s.scroll_offset))
-                    .unwrap_or((None, 0)),
-                None => (None, 0),
-            };
+            let (pos, _, scroll, _) = target_copy_state().unwrap_or((None, None, 0, ""));
             match var {
                 "copy_cursor_x" => pos.map(|(_, c)| c).unwrap_or(0).to_string(),
                 "copy_cursor_y" => pos.map(|(r, _)| r).unwrap_or(0).to_string(),
@@ -2253,11 +2254,13 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             }
         }
         "copy_cursor_word" => {
-            if let (Some((r, c)), Some(w)) = (app.copy_pos, app.windows.get(win_idx)) {
-                if let Some(p) = active_pane(&w.root, &w.active_path) {
-                    if let Ok(mut parser) = p.term.lock() {
-                        return grid_word(&mut parser, r, c, &app.word_separators);
-                    }
+            if let (Some(p), Some((Some((r, c)), _, scroll, _))) = (target_pane(), target_copy_state()) {
+                if let Ok(mut parser) = p.term.lock() {
+                    let previous = parser.screen().scrollback();
+                    parser.screen_mut().set_scrollback(scroll);
+                    let word = grid_word(&mut parser, r, c, &app.word_separators);
+                    parser.screen_mut().set_scrollback(previous);
+                    return word;
                 }
             }
             String::new()
@@ -2282,12 +2285,18 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             }
             String::new()
         }
-        "selection_present" | "selection_active" => if app.copy_anchor.is_some() { "1".into() } else { "0".into() },
-        "selection_start_x" => app.copy_anchor.map(|(_, c)| c.to_string()).unwrap_or("0".into()),
-        "selection_start_y" => app.copy_anchor.map(|(r, _)| r.to_string()).unwrap_or("0".into()),
-        "selection_end_x" => app.copy_pos.map(|(_, c)| c.to_string()).unwrap_or("0".into()),
-        "selection_end_y" => app.copy_pos.map(|(r, _)| r.to_string()).unwrap_or("0".into()),
-        "search_present" => if !app.copy_search_query.is_empty() { "1".into() } else { "0".into() },
+        "selection_present" | "selection_active" | "selection_start_x" | "selection_start_y"
+        | "selection_end_x" | "selection_end_y" | "search_present" => {
+            let (pos, anchor, _, query) = target_copy_state().unwrap_or((None, None, 0, ""));
+            match var {
+                "selection_present" | "selection_active" => if anchor.is_some() { "1".into() } else { "0".into() },
+                "selection_start_x" => anchor.map(|(_, c)| c).unwrap_or(0).to_string(),
+                "selection_start_y" => anchor.map(|(r, _)| r).unwrap_or(0).to_string(),
+                "selection_end_x" => pos.map(|(_, c)| c).unwrap_or(0).to_string(),
+                "selection_end_y" => pos.map(|(r, _)| r).unwrap_or(0).to_string(),
+                _ => if !query.is_empty() { "1".into() } else { "0".into() },
+            }
+        }
         "search_match" => {
             if !app.copy_search_matches.is_empty() {
                 app.copy_search_matches.get(app.copy_search_idx)
