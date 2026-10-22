@@ -179,11 +179,20 @@ fn a_run_shell_without_b_waits() {
 }
 
 #[test]
-fn a_background_run_shell_a_plugin_script_or_a_bad_flag_does_not() {
+fn a_background_run_shell_or_a_bad_flag_does_not() {
     assert!(!run_shell_waits("run-shell -b 'echo hi'"));
-    assert!(!run_shell_waits("run '~/.psmux/plugins/tmux-sensible/sensible.tmux'"));
     assert!(!run_shell_waits("run-shell -d soon 'echo hi'"));
     assert!(!run_shell_waits("set -g @a on"));
+}
+
+#[test]
+fn a_background_run_shell_goes_to_the_job_but_a_bad_flag_does_not() {
+    assert!(run_shell_in_job("run-shell -b 'echo hi'"));
+    assert!(run_shell_in_job("run -b -d 2"));
+    assert!(run_shell_in_job("run 'echo hi'"));
+    assert!(!run_shell_in_job("run-shell -d soon 'echo hi'"));
+    assert!(!run_shell_in_job("run-shell -b"), "the usage error stays with parse_run_shell");
+    assert!(!run_shell_in_job("set -g @a on"));
 }
 
 // ── a runtime source ────────────────────────────────────────────────────────
@@ -209,11 +218,24 @@ fn a_run_shell_after_a_command_is_a_command_too() {
 }
 
 #[test]
-fn a_background_run_shell_after_a_command_stays_a_config_line() {
+fn a_background_run_shell_after_a_command_is_a_command_too() {
+    // It starts in file order through the dispatcher, as tmux's queue starts
+    // it, and nothing waits for it.
     let f = TempConf::new("bg", "display-message -p x\nrun-shell -b 'echo hi'\n");
     let mut app = app_with_window();
     let lines = source_runtime(&mut app, &f.path()).lines;
-    assert_eq!(kinds(&lines), vec![command("display-message -p x"), directive("run-shell -b 'echo hi'")]);
+    assert_eq!(kinds(&lines), vec![command("display-message -p x"), command("run-shell -b 'echo hi'")]);
+}
+
+#[test]
+fn a_background_run_shell_before_the_first_command_starts_in_place() {
+    // Every line before it has applied already, which is tmux's order, and
+    // the lines after it do not wait.
+    let f = TempConf::new("bgfirst", "run-shell -b -d 5\nset -g @after on\n");
+    let mut app = app_with_window();
+    let lines = source_runtime(&mut app, &f.path()).lines;
+    assert!(lines.is_empty(), "{:?}", kinds(&lines));
+    assert_eq!(app.user_options.get("@after").map(String::as_str), Some("on"));
 }
 
 #[test]

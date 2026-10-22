@@ -549,15 +549,22 @@ fn last_pane_d_and_e_toggle_the_last_pane_without_selecting_it() {
 }
 
 #[test]
-fn a_sourced_file_runs_the_toggle() {
-    // parse_config_line dropped every select-pane line in silence.
+fn a_sourced_file_hands_the_toggle_to_its_job() {
+    // parse_config_line dropped every select-pane line in silence. A sourced
+    // file's lines now go to its source job (issue #842), which runs them
+    // through the dispatcher, as the CLI runs them (tests above).
     let mut f = fixture();
-    crate::config::parse_config_line(&mut f.app, "select-pane -d -t %2");
-    assert!(f.input_off(2));
-    assert_eq!(f.focus(), (0, 1, vec![0]));
-    f.app.last_pane_path = vec![2];
-    crate::config::parse_config_line(&mut f.app, "last-pane -d");
-    assert!(f.input_off(3));
-    crate::config::parse_config_line(&mut f.app, "selectp -e -t %2");
-    assert!(!f.input_off(2));
+    let path = std::env::temp_dir().join(format!("psmux_spinoff_{}.conf", std::process::id()));
+    std::fs::write(&path, "select-pane -d -t %2\nlast-pane -d\nselectp -e -t %2\n").unwrap();
+    let lines = crate::config::source_runtime(&mut f.app, path.to_str().unwrap()).lines;
+    let _ = std::fs::remove_file(&path);
+    let kept: Vec<String> = lines
+        .iter()
+        .map(|l| match &l.kind {
+            crate::types::DeferredKind::Command(c) => c.clone(),
+            other => format!("{:?}", other),
+        })
+        .collect();
+    assert_eq!(kept, vec!["select-pane -d -t %2", "last-pane -d", "selectp -e -t %2"]);
+    assert!(!f.input_off(2), "nothing runs in place");
 }

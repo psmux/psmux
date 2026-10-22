@@ -24,13 +24,16 @@ fn dir(s: &str) -> DeferredKind {
 #[derive(Default)]
 struct FakeServer {
     log: Vec<String>,
+    /// The file each command was sent with, in order.
+    files: Vec<String>,
     replies: HashMap<String, std::io::Result<String>>,
     replays: HashMap<String, Option<SourceReplayResult>>,
 }
 
 impl SourceJobIo for FakeServer {
-    fn run_command(&mut self, line: &str) -> std::io::Result<String> {
+    fn run_command(&mut self, file: &str, line: &str) -> std::io::Result<String> {
         self.log.push(format!("run {}", line));
+        self.files.push(file.to_string());
         match self.replies.remove(line) {
             Some(r) => r,
             None => Ok(String::new()),
@@ -250,7 +253,7 @@ fn a_replayed_lines_warnings_are_errors_for_the_client() {
 struct PanickingServer;
 
 impl SourceJobIo for PanickingServer {
-    fn run_command(&mut self, _line: &str) -> std::io::Result<String> {
+    fn run_command(&mut self, _file: &str, _line: &str) -> std::io::Result<String> {
         panic!("a bug in the job");
     }
 
@@ -282,4 +285,24 @@ fn a_job_that_does_not_panic_reports_as_before() {
     let (w2, o2) = run_source_job(&mut io, lines, Vec::new(), Vec::new());
     assert_eq!(w1, w2);
     assert_eq!(o1.errors, o2.errors);
+}
+
+#[test]
+fn each_command_goes_with_the_file_it_was_read_from() {
+    // Issue #886: in tmux each command parsed from a file carries the file as
+    // #{current_file} (cfg.c:139 and :191), so a run-shell after the first
+    // command still finds #{d:current_file}. A nested file's commands go with
+    // their own file, and the parent's after them with the parent's again.
+    let mut io = FakeServer::default();
+    io.replays.insert(
+        "source-file child".to_string(),
+        Some(SourceReplayResult { warnings: Vec::new(), deferred: vec![line("child", 1, cmd("run-shell nested"))] }),
+    );
+    let lines = vec![
+        line("parent", 1, cmd("run-shell first")),
+        line("parent", 2, dir("source-file child")),
+        line("parent", 3, cmd("run-shell last")),
+    ];
+    run_source_job(&mut io, lines, Vec::new(), Vec::new());
+    assert_eq!(io.files, vec!["parent", "child", "parent"]);
 }

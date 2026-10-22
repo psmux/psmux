@@ -8,7 +8,7 @@ psmux plugins are ports of the most popular tmux plugins, reimplemented in Power
 - Plugins live in `~/.psmux/plugins/<name>/` (or `$XDG_CONFIG_HOME/psmux/plugins/` as a fallback).
 - Entry point: `<name>/<name>.ps1` (PowerShell) or `<name>/plugin.conf` (pure tmux option lines).
 - psmux reads `@plugin` declarations itself during config parsing and sources the plugin's `plugin.conf` synchronously, so themes apply before the first frame (no flash).
-- tmux `.tmux` entry scripts are translated statically when referenced from a config `run` line; full bash plugins can also be executed through Git Bash.
+- A tmux plugin's `.tmux` entry script on a `run` line runs with Git Bash when Git for Windows is installed; without it, only the script's plain `tmux` lines are applied.
 - Browse plugins: [psmux-plugins](https://github.com/psmux/psmux-plugins). Install with a TUI: [Tmux Plugin Panel](https://github.com/psmux/Tmux-Plugin-Panel).
 
 Related: [Configuration](configuration.md) · [Key Bindings](keybindings.md) · [Scripting](scripting.md) · [Dev environment layouts](tutorials/dev-environment-layouts.md)
@@ -85,9 +85,9 @@ The pieces of psmux that a plugin relies on, and where each lives in the source:
 
 | Mechanism | What psmux does | Source |
 |-----------|-----------------|--------|
-| `set -g @plugin 'owner/name'` | The config parser stores the value as a user option, then looks for `~/.psmux/plugins/<name>/plugin.conf` and sources it on the spot. If there is no `plugin.conf` it looks for `<name>/<name>.ps1`, extracts literal `set`/`bind` lines from it, and queues the script for execution at server start if it uses PowerShell variables. XDG paths under `$XDG_CONFIG_HOME/psmux/plugins/` are tried as well. | `src/config.rs` (`@plugin` branch in the `set` handler, `parse_ps1_plugin_script`) |
-| `run '~/.psmux/plugins/ppm/ppm.ps1'` in the config | A config `run`/`run-shell` line spawns the command without blocking. `~` expands to your profile, and a `~/.psmux/plugins/` path is redirected to the XDG directory when only that one exists. The child gets `PSMUX_TARGET_SESSION` so its `psmux` calls reach the server that is starting up. | `src/config.rs` (`parse_run_shell`), `src/util.rs` (`expand_run_shell_path`) |
-| Queued `.ps1` plugin scripts | After the config is loaded the server runs each queued script with `pwsh -NoProfile -ExecutionPolicy Bypass -File <script>` (falls back to `powershell.exe` when pwsh is missing) and services the scripts' `set`/`show-options` requests for up to 5 seconds before the UI starts. | `src/server/mod.rs` (`pending_plugin_scripts`) |
+| `set -g @plugin 'owner/name'` | The config parser stores the value as a user option, then looks for `~/.psmux/plugins/<name>/plugin.conf` and sources it on the spot. If there is no `plugin.conf` it looks for `<name>/<name>.ps1`. A script that only sets options and binds keys with literal text is applied as config lines; any other script is queued to run whole. With ppm declared (`set -g @plugin 'psmux-plugins/ppm'`) psmux does neither and leaves the script to ppm, as tpm alone loads plugins in tmux. XDG paths under `$XDG_CONFIG_HOME/psmux/plugins/` are tried as well. | `src/config.rs` (`@plugin` branch in the `set` handler, `parse_ps1_plugin_script`) |
+| `run '~/.psmux/plugins/ppm/ppm.ps1'` in the config | A config `run`/`run-shell` line without `-b` runs the command once the session's window exists and holds the lines after it until the command ends, as tmux does; the command's own `psmux` calls are answered while it runs. With `-b` it is started and the next line runs. `~` expands to your profile, and a `~/.psmux/plugins/` path is redirected to the XDG directory when only that one exists. The child gets `PSMUX_TARGET_SESSION` so its `psmux` calls reach the server that is starting up. | `src/config.rs` (`run_shell_job_kind`, `parse_run_shell`), `src/server/connection.rs` (the `run-shell` arm), `src/util.rs` (`expand_run_shell_path`) |
+| Queued `.ps1` plugin scripts | After the config is loaded the server runs each queued script with `pwsh -NoProfile -ExecutionPolicy Bypass -File <script>` (falls back to `powershell.exe` when pwsh is missing) and services the scripts' `set`/`show-options` requests for up to 5 seconds before the UI starts. Until the session's window exists, only option, key binding and `source-file` calls are answered: any other call (`set-buffer`, `display-message -p`) does nothing or reads empty. A warm standby runs none; the session that claims it starts them once it has answered the client, without waiting. A script gets `TMUX` and `PSMUX_TARGET_SESSION` for its session and psmux's directory on `PATH`, as a `run-shell` does. A `source-file` a script runs then applies the file's options at once; its commands run once the session's window exists, after the config's own. A `@plugin` line parsed later, after the config's first command or by a runtime `source-file`, starts its script at once, without waiting for it. | `src/server/mod.rs` (`pending_plugin_scripts`) |
 | `run-shell` from a key binding, hook, or the CLI | The command is format expanded (`#{pane_current_path}` and friends) first. A `.ps1` path runs as `pwsh -NoProfile -ExecutionPolicy Bypass -File <path>`, which is what makes paths with spaces safe. A `pwsh`, `powershell`, or `cmd` prefix is honoured as written. Anything else is wrapped in `pwsh -NoProfile -Command` (or `powershell.exe`, then `cmd /c`, whichever exists). Without `-b` the output is shown in a popup; with `-b` the command is fire and forget, and a spawn failure is reported in the status line instead of being swallowed. | `src/commands.rs` (`build_run_shell_command`, `resolve_run_shell`, the `run-shell` arm) |
 | `set -g @name value` and `show -gv @name` | Any option whose name starts with `@` is a user option. Plugins use them for configuration (`@resurrect-dir`) and for output (`@cpu_display`). | `src/config.rs`, `src/format.rs` |
 | `#{@name}` in a format | User options expand inside status line formats, so a plugin can publish a value with `set -g @cpu_display '42%'` and a theme can place it with `#{@cpu_display}`. | `src/format.rs` |
@@ -99,7 +99,7 @@ The pieces of psmux that a plugin relies on, and where each lives in the source:
 Two things in that table are worth repeating because they differ from tmux in a helpful way:
 
 1. **Themes apply synchronously.** tmux's tpm sources plugins asynchronously, so a themed status line can appear a moment after the default one. psmux sources a plugin's `plugin.conf` while it parses the line that declares it, so the first frame is already themed.
-2. **Every plugin process is told which server to talk to.** `run-shell`, hooks, and queued plugin scripts all receive `PSMUX_TARGET_SESSION`, so a plugin running under `-L` namespaces or a preview server never configures the wrong instance.
+2. **Every plugin process is told which server to talk to.** `run-shell`, hooks, and queued plugin scripts all receive `TMUX` and `PSMUX_TARGET_SESSION`, so a plugin running under `-L` namespaces or a preview server never configures the wrong instance.
 
 ## Where do plugins live and how does ppm load them?
 
@@ -128,7 +128,7 @@ What `ppm.ps1` does when the config's `run` line executes it:
 1. Creates `~/.psmux/plugins` if it is missing.
 2. Binds `Prefix + I`, `Prefix + U`, `Prefix + M` to its install, update and clean scripts (`run-shell 'pwsh -NoProfile -File "...install_plugins.ps1"'`).
 3. Reads the declared plugins with `psmux show-options -g` (every `@plugin` value) and, as a fallback, by scanning `~/.psmux.conf`, `~/.psmuxrc`, `~/.tmux.conf`, or `~/.config/psmux/psmux.conf` for `set -g @plugin` lines.
-4. For every declared plugin that is installed, runs its entry point: `<name>.ps1`, then `<name without psmux- prefix>.ps1`, then `plugin.ps1`, then `init.ps1`. A plugin that ships a `plugin.conf` is skipped here because psmux already sourced it at parse time, which keeps your own settings placed after the `@plugin` line from being overridden.
+4. For every declared plugin that is installed, runs its entry point: `<name>.ps1`, then `<name without psmux- prefix>.ps1`, then `plugin.ps1`, then `init.ps1`. A plugin that ships a `plugin.conf` is skipped here because psmux already sourced it at parse time, which keeps your own settings placed after the `@plugin` line from being overridden. psmux runs no entry script itself when ppm is declared, so each runs once.
 
 `Prefix + I` resolves each `@plugin` spec and clones it:
 
@@ -192,24 +192,18 @@ For plugin authors, the [Plugin Developer Guide](https://github.com/psmux/psmux-
 
 ## Can I run an unmodified tmux plugin under psmux?
 
-Two paths exist, and both were verified on psmux 3.3.8.
-
-**1. Static translation of a `.tmux` entry script (no bash required).** When a config line runs a file that ends in `.tmux`, psmux does not execute it. It reads the script, skips bash control flow, and applies every `tmux set ...`, `tmux bind-key ...`, `tmux source-file ...`, `tmux run-shell ...`, `tmux if-shell ...` and `tmux set-hook ...` line as a config line, expanding `$CURRENT_DIR` and `$PLUGIN_DIR` to the script's folder. Companion `*_tmux.conf` files in the same folder are sourced too. This is enough for themes and for plugins whose entry script only declares options and bindings.
+Name the plugin's `.tmux` entry script on a `run` line, as tpm runs it:
 
 ```tmux
 # ~/.psmux.conf
-run '~/.tmux/plugins/some-theme/some-theme.tmux'
+run '~/.tmux/plugins/tmux-sensible/sensible.tmux'
 ```
 
-Verified: a `.tmux` file containing `tmux set -g @loaded "yes"` and `tmux bind-key -n M-b display-message "bash plugin key"` produced `show -gv @loaded` = `yes` and the binding in `list-keys` after `psmux -f that.conf new-session -d`. The translation only happens on the config path; `psmux run-shell 'x.tmux'` from the CLI or a key binding hands the path to PowerShell, which cannot run it, and nothing is applied.
+**With Git for Windows**, psmux runs the script with Git Bash, as tmux runs it with `/bin/sh`. Git Bash is the `bin\bash.exe` of the Git install that `git.exe` on `PATH` belongs to, else of `%ProgramFiles%\Git`, `%LOCALAPPDATA%\Programs\Git` or scoop's `git`. A `bash` that is only on `PATH` is not used: on Windows that is often WSL's, whose `tmux` is a Linux tmux. The script's `tmux ...` calls reach this session, because psmux's `tmux.exe` is first on the script's `PATH` and `TMUX` names the session. As in tmux, a `run` line without `-b` holds the lines after it until the script exits. `run-shell '~/.tmux/plugins/x/x.tmux'` from the CLI or a key binding runs the script the same way.
 
-**2. Execute the bash plugin with Git Bash.** If Git for Windows is installed, run the entry script through its bash. The script's `tmux ...` calls resolve to psmux because psmux installs a `tmux.exe` alias on `PATH`, and `PSMUX_TARGET_SESSION` steers them to the right server.
+Verified with tmux-sensible, tmux-yank, tmux-prefix-highlight, tmux-resurrect, catppuccin, nord and dracula: sensible's options and keys apply and its macOS-only `default-command` does not, yank copies with `clip.exe`, and the themes apply. Whether the rest of a plugin works depends on what its helper scripts call. `sed`, `awk`, `grep`, `date` and `cut` exist in Git Bash; `xclip`, `pbcopy`, `acpi`, `/proc` and `sysfs` do not. A plugin that only shells out to `tmux` and coreutils runs; a plugin that reads Linux system files needs the PowerShell port.
 
-```tmux
-run "& 'C:/Program Files/Git/bin/bash.exe' '~/.tmux/plugins/some-plugin/some-plugin.tmux'"
-```
-
-Verified with the same test script: `@loaded` became `yes` and `M-b` was bound by the bash process. Whether the rest of the plugin works depends on what its helper scripts call. `sed`, `awk`, `grep`, `date` and `cut` exist in Git Bash; `xclip`, `pbcopy`, `acpi`, `/proc` and `sysfs` do not. A plugin that only shells out to `tmux` and coreutils runs; a plugin that reads Linux system files needs the PowerShell port.
+**Without Git for Windows**, psmux reads the script and applies only what bash would surely do the same way: a `tmux ...` line at the top level of the script whose words are literal once the script's directory (`"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`) and its literal assignments are put in. A line inside a function, an `if` or a loop, or with any other `$`, is not applied, because applied without its condition or its value it does the wrong thing. When a script has such lines, a config warning says that it needs Git Bash. Companion `*_tmux.conf` files in the script's folder are sourced too. A theme whose script only sources its own files, such as catppuccin's, is applied; most other plugins do nothing but warn. The script is read in place, so the lines after it do not wait.
 
 ## Do tmux themes work without changes?
 
@@ -286,7 +280,7 @@ The [Plugin Developer Guide](https://github.com/psmux/psmux-plugins/blob/main/PL
 
 ## Troubleshooting
 
-**A plugin script does nothing and there is no error.** The config is missing the `run` line that loads ppm (or the plugin's own `run` line). `@plugin` alone only sources a `plugin.conf` or a purely literal `.ps1`; a script that uses PowerShell variables needs the `run` line or a ppm load.
+**A plugin script does nothing and there is no error.** With ppm declared, psmux leaves every plugin without a `plugin.conf` to ppm, and the config is missing the `run` line that loads ppm. Without ppm, psmux runs the plugin's `<name>.ps1` itself, so check that the script is at `~/.psmux/plugins/<name>/<name>.ps1`.
 
 **`set-option: empty value for '...'` when a plugin sets an `@option`.** Unquoted `@name` in PowerShell (see the rules above). Quote it.
 

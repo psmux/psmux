@@ -27,8 +27,9 @@ fn clear_inherit(_s: &TcpStream) {}
 /// Run `psmux [-L <this server's namespace>] new-session <args>` and return
 /// what it printed, with a failure turned into an `ERROR:` line (#734 follow
 /// up). The routing variables this server carries are removed so the child
-/// decides everything from the namespace alone.
-fn run_cli_new_session(args: &[&str]) -> String {
+/// decides everything from the namespace alone. `config_session` marks the
+/// session as one a config file made (config::CONFIG_SESSION_ENV).
+fn run_cli_new_session(args: &[&str], config_session: bool) -> String {
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
     let mut cmd = std::process::Command::new(&exe);
     if let Some(ns) = crate::server::server_namespace() {
@@ -37,6 +38,9 @@ fn run_cli_new_session(args: &[&str]) -> String {
     cmd.arg("new-session").args(args);
     for var in ["PSMUX_TARGET_SESSION", "PSMUX_TARGET_FULL", crate::session::ROUTE_WARM_ENV] {
         cmd.env_remove(var);
+    }
+    if config_session {
+        cmd.env(crate::config::CONFIG_SESSION_ENV, "1");
     }
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -370,21 +374,39 @@ fn expand_shell_command(tx: &TargetedSender, cmd: String) -> String {
 /// Deliberately not `Deref` to the raw sender: a handler cannot reach the
 /// server except through `send`, so no request of a targeted command can
 /// silently go out untargeted.
+///
+/// A command a source job runs also has its file, and every request goes out
+/// as `CtrlReq::InFile(file, request)` around that, for #{current_file}.
 pub(crate) struct TargetedSender<'a> {
     inner: &'a mpsc::Sender<CtrlReq>,
     target: Option<crate::types::TempTarget>,
+    file: Option<String>,
 }
 
 impl<'a> TargetedSender<'a> {
     pub(crate) fn new(inner: &'a mpsc::Sender<CtrlReq>, target: Option<crate::types::TempTarget>) -> Self {
-        TargetedSender { inner, target }
+        TargetedSender { inner, target, file: None }
+    }
+
+    /// The same sender for a command read from `file` (a source job's).
+    pub(crate) fn in_file(mut self, file: Option<String>) -> Self {
+        self.file = file;
+        self
+    }
+
+    fn wrap_file(&self, req: CtrlReq) -> CtrlReq {
+        match &self.file {
+            Some(f) => CtrlReq::InFile(f.clone(), Box::new(req)),
+            None => req,
+        }
     }
 
     pub(crate) fn send(&self, req: CtrlReq) -> Result<(), mpsc::SendError<CtrlReq>> {
-        match &self.target {
-            Some(t) => self.inner.send(CtrlReq::Targeted(t.clone(), Box::new(req))),
-            None => self.inner.send(req),
-        }
+        let req = match &self.target {
+            Some(t) => CtrlReq::Targeted(t.clone(), Box::new(req)),
+            None => req,
+        };
+        self.inner.send(self.wrap_file(req))
     }
 
     /// The validated target this sender wraps requests in, for a request that
@@ -397,7 +419,7 @@ impl<'a> TargetedSender<'a> {
     /// that already carries `target()` inside it.  A send fails only when the
     /// server loop is gone, and the caller's reply wait then returns at once.
     pub(crate) fn send_unwrapped(&self, req: CtrlReq) {
-        let _ = self.inner.send(req);
+        let _ = self.inner.send(self.wrap_file(req));
     }
 }
 
@@ -2793,6 +2815,33 @@ if control_echo || control_quiet || control_noecho {
     return;
 }
 
+// A source job's connection (src/server/source_job.rs) says so first. A
+// `new-session` it runs makes a session that runs only some of its own
+// config's commands (config::CONFIG_SESSION_ENV): tmux runs its config once, and a
+// config with `new-session -d` would otherwise start servers without end.
+// The startup config's job also switches no client to that session.
+let mut from_source_job = false;
+let mut from_startup_config = false;
+// The file the job's command was read from, for #{current_file}.
+let mut source_job_file: Option<String> = None;
+if line.trim() == crate::server::source_job::SOURCE_JOB_LINE
+    || line.trim() == crate::server::source_job::STARTUP_JOB_LINE
+{
+    from_source_job = true;
+    from_startup_config = line.trim() == crate::server::source_job::STARTUP_JOB_LINE;
+    line.clear();
+    if r.read_line(&mut line).is_err() {
+        return;
+    }
+    if let Some(file) = line.trim_end_matches(['\r', '\n']).strip_prefix(crate::server::source_job::CURRENT_FILE_PREFIX) {
+        source_job_file = Some(file.to_string());
+        line.clear();
+        if r.read_line(&mut line).is_err() {
+            return;
+        }
+    }
+}
+
 // Check if this line is a TARGET specification
 // Save raw target for relative pane specifiers like :.+ and :.-
 let mut global_raw_target: Option<String> = None;
@@ -3272,7 +3321,7 @@ if is_focus_cmd {
         }
     }
 }
-let targeted_tx = TargetedSender::new(&tx, command_target);
+let targeted_tx = TargetedSender::new(&tx, command_target).in_file(source_job_file.clone());
 {
 let tx = &targeted_tx;
 match cmd {
@@ -6325,7 +6374,7 @@ match cmd {
                 // stops only at one that fails (cmd-queue.c cmdq_next and
                 // cmdq_remove_group); a failure here is an `ERROR:` reply,
                 // which clears the list at the top of the loop.
-                let out = run_cli_new_session(&args);
+                let out = run_cli_new_session(&args, from_source_job);
                 let out = one_shot_new_session_reply(out, in_command_list);
                 if !out.is_empty() {
                     let _ = write!(write_stream, "{}", out);
@@ -6393,6 +6442,9 @@ match cmd {
                     server_args.push("-L".into());
                     server_args.push(n.clone());
                 }
+                if from_source_job {
+                    server_args.push(crate::config::CONFIG_SESSION_ARG.into());
+                }
 
                 if let Some(ref dir) = start_dir {
                     server_args.push("-d".into());
@@ -6440,7 +6492,7 @@ match cmd {
                 }
 
                 if std::path::Path::new(&port_path).exists() {
-                    if !detached {
+                    if !detached && !from_startup_config {
                         // In-process follow-up to a new-session: nobody is waiting
                         // on a switch result here, the reply for this command has
                         // already been decided below.
@@ -6866,7 +6918,7 @@ fn dispatch_control_command(
                     ns_args.push(t);
                 }
             }
-            let out = run_cli_new_session(&ns_args);
+            let out = run_cli_new_session(&ns_args, false);
             let reply = match out.lines().find_map(|l| l.strip_prefix("ERROR: ")) {
                 Some(err) => format!("\u{0001}ERR\u{0001}{}", err),
                 None if out == "OK\n" => String::new(),

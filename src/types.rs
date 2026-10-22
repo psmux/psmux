@@ -2003,11 +2003,21 @@ pub struct AppState {
     /// `file:line: message` (file comes from config::current_config_file()).
     /// None when parsing a single runtime command.
     pub config_warn_line: Option<usize>,
-    /// Set while a runtime source-file is parsed (config::source_runtime): from
-    /// the file's first command on, its lines are kept here in order for the
-    /// source job instead of being applied or dropped (issue #842). None for
-    /// every other parse, the startup config included.
+    /// Set while a runtime source-file or the startup config is parsed
+    /// (config::source_runtime, config::load_config): from the file's first
+    /// command on, its lines are kept here in order for the source job instead
+    /// of being applied or dropped (issue #842). None for every other parse.
     pub source_defer: Option<SourceDefer>,
+    /// The lines the startup config kept for its source job: load_config
+    /// fills it, and the server starts the job once its loop can answer the
+    /// job's requests (start_startup_config_job).
+    pub startup_source_lines: Vec<DeferredConfigLine>,
+    /// This server is a session that a config file's `new-session` made
+    /// (CONFIG_SESSION_ENV). tmux runs its config once, in the server that
+    /// session shares, so its startup job runs only the commands whose effect
+    /// is server wide there (config::made_session_runs). Without it a config
+    /// with `new-session -d` would start servers without end.
+    pub config_made_session: bool,
     /// set-clipboard: "on", "off", "external" (default "external", as tmux)
     pub set_clipboard: String,
     /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
@@ -2078,7 +2088,15 @@ pub struct AppState {
     pub warm_refill_rx: Option<std::sync::mpsc::Receiver<Option<WarmPane>>>,
     /// Plugin .ps1 scripts queued during config loading for post-startup execution.
     /// These need the server to be running (TCP listener) before they can apply.
+    /// run_server starts them after the startup load, and a warm claim after
+    /// its reply; a config line the server parses later (a source job's
+    /// replay, a runtime source) starts those it queues at once
+    /// (server::spawn_plugin_scripts).
     pub pending_plugin_scripts: Vec<String>,
+    /// The config declared ppm (`set -g @plugin '.../ppm'`). ppm runs the
+    /// entry script of each declared plugin that has no plugin.conf, so psmux
+    /// then leaves those scripts to it. Cleared by each load_config.
+    pub ppm_declared: bool,
     /// Connected control mode clients (keyed by client_id).
     pub control_clients: HashMap<u64, ControlClient>,
     /// Clients that set `refresh-client -f ignore-size` (tmux
@@ -3303,6 +3321,8 @@ impl AppState {
             source_jobs_running: 0,
             config_warn_line: None,
             source_defer: None,
+            startup_source_lines: Vec::new(),
+            config_made_session: false,
             set_clipboard: "external".to_string(),
             clipboard_osc52: None,
             bell_forward: false,
@@ -3322,6 +3342,7 @@ impl AppState {
             warm_refill_tx: None,
             warm_refill_rx: None,
             pending_plugin_scripts: Vec::new(),
+            ppm_declared: false,
             control_clients: HashMap::new(),
             ignore_size_clients: HashSet::new(),
             control_windows_seen: None,
@@ -3693,6 +3714,12 @@ pub enum CtrlReq {
     /// target when the command fires (cmd-queue.c cmdq_fire_command, via
     /// cmd_find_target) and carries it in the command's own state.
     Targeted(TempTarget, Box<CtrlReq>),
+    /// A request of a command a source job runs, with the file the command
+    /// was read from. #{current_file} names that file while the server loop
+    /// runs `inner`, and only then, as each command tmux parses from a file
+    /// carries it (cfg.c:139 and :191). Wraps a `Targeted` when the command
+    /// has a -t target.
+    InFile(String, Box<CtrlReq>),
     SessionInfo(mpsc::Sender<String>),
     /// `list-sessions -F <fmt>` — render the session row using a tmux format
     /// string. Drop-in compat with iTerm2 and other CC clients that always

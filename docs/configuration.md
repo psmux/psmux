@@ -21,6 +21,34 @@ psmux -f NUL
 
 This sets the `PSMUX_CONFIG_FILE` environment variable internally, which the server checks before searching the default locations.
 
+### Commands in the config file
+
+The config file may hold any command, not only options and bindings, and its lines run in order, as
+`source-file` runs a file (see [Reloading Configuration at Runtime](#reloading-configuration-at-runtime)).
+The options and bindings before the file's first command apply before the session's first window is
+made. From that command on, the lines run one after another once the window exists: a `run-shell`
+without `-b` holds the lines after it until the shell command ends, as in tmux, and a `run-shell` that
+calls back into psmux is answered while it runs.
+
+Each psmux session is a server of its own, and each loads the config when it starts. That makes three
+differences from tmux, which runs the config once, before any session exists:
+
+- A command that acts on a session, such as `split-window`, `rename-window` or `send-keys`, acts on
+  the session that is starting. tmux has no session at that point and fails it.
+- A `new-session` in the config makes that session, detached. Of the config's commands, the session
+  it makes runs only `run-shell` and the buffer commands (`set-buffer`, `load-buffer`,
+  `delete-buffer`): in tmux it would share one server with the session that ran the config, and with
+  it the buffers and whatever the shell commands set. Its options and bindings apply as in any
+  session. Every session that starts runs the line, so with `new-session -d -s work` the sessions
+  after the first report `duplicate session: work`.
+- An option set after the first command, such as `default-shell`, applies to the windows and panes
+  made after it, not to the session's first pane. Put options that the first pane needs before the
+  first command.
+
+`psmux new-session -d` returns once the session exists, which may be before the config's commands have
+run. A command that fails is reported in `config-warnings.log` and on the status line, at its file and
+line.
+
 ## Basic Config Example
 
 Create `~/.psmux.conf`:

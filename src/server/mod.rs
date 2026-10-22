@@ -285,6 +285,64 @@ fn boot_hold_watch_panes(app: &mut AppState) {
     app.boot_hold = Some(hold);
 }
 
+/// Start the source job for the commands the startup config kept
+/// (config::load_config), as a runtime `source-file` starts its own (issue
+/// #842). The job sends each command to this server and replays each config
+/// line on the loop, so it starts only once the server has its window and
+/// the loop is about to run. Its warnings join `config_warnings` when it ends;
+/// the client has read those of the parse already, so the status line shows
+/// the job's own only. A session a config file's `new-session` made runs only
+/// some of the commands (config::made_session_runs).
+fn start_startup_config_job(app: &mut AppState) {
+    let lines = std::mem::take(&mut app.startup_source_lines);
+    if lines.is_empty() {
+        return;
+    }
+    let kind = if app.config_made_session {
+        source_job::SourceJobKind::MadeSessionStartup
+    } else {
+        source_job::SourceJobKind::Startup
+    };
+    if let (Some(port), Some(tx)) = (app.control_port, app.control_tx.clone()) {
+        if source_job::spawn_source_job(port, app.session_key.clone(), tx, lines, Vec::new(), Vec::new(), None, kind) {
+            app.source_jobs_running += 1;
+        }
+    }
+}
+
+/// Start the plugin `.ps1` scripts the config queued (a `set -g @plugin`
+/// whose entry script config.rs could not apply as config lines), each with
+/// this server as its target. They get a job's environment, `TMUX` and psmux
+/// on PATH, as a run-shell does: without `TMUX` their `psmux` calls went to
+/// the most recent session, not to this one. Nothing waits for them here: the
+/// server answers the calls they make back into psmux, and the startup drain
+/// in run_server waits on the children it gets back.
+fn spawn_plugin_scripts(app: &mut AppState) -> Vec<std::process::Child> {
+    let scripts = std::mem::take(&mut app.pending_plugin_scripts);
+    let target_session = app.port_file_base();
+    let mut children = Vec::new();
+    for ps1 in &scripts {
+        // Resolve shell: pwsh (PS7) preferred, fall back to powershell.exe (Windows PS)
+        let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
+        let mut cmd = std::process::Command::new(shell);
+        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1]);
+        if !target_session.is_empty() {
+            cmd.env("PSMUX_TARGET_SESSION", &target_session);
+        }
+        #[cfg(windows)]
+        crate::commands::ensure_psmux_on_path(&mut cmd);
+        crate::commands::apply_job_env(&mut cmd);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }
+        if let Ok(child) = cmd.spawn() {
+            children.push(child);
+        }
+    }
+    children
+}
+
 fn should_spawn_warm_server(app: &AppState) -> bool {
     app.warm_enabled && app.session_name != "__warm__" && !app.destroy_unattached
 }
@@ -963,7 +1021,7 @@ fn drain_plugin_req(
                 }
             }
         }
-        CtrlReq::SourceFile(path, _done) => {
+        CtrlReq::SourceFile(path, done) => {
             // Same rule as the run_server arm: only the startup config is a
             // reload that starts from the defaults.
             if crate::config::is_startup_config(app, &path) {
@@ -971,7 +1029,12 @@ fn drain_plugin_req(
                 app.key_tables.clear();
                 crate::config::populate_default_bindings(app);
             }
-            crate::config::source_file(app, &path);
+            // The file's commands run on the startup job once the window
+            // exists; the plugin hears of the file's warnings now.
+            let errors = crate::config::source_during_startup(app, &path);
+            if let Some(done) = done {
+                let _ = done.send(crate::types::SourceOutcome { output: String::new(), errors });
+            }
             // A runtime source-file can record warnings (e.g. an unreadable
             // path); flush them like the startup load does or they never
             // reach config-warnings.log and the attach-time summary.
@@ -2184,7 +2247,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     let pty_system = native_pty_system();
 
+    // A session a config file's `new-session` made runs only some of its own
+    // config's commands (AppState::config_made_session). The mark is taken
+    // out of the environment before anything copies it: a pane, a warm
+    // spare or a server started from here must not carry it.
+    let config_made_session = env::var_os(crate::config::CONFIG_SESSION_ENV).is_some();
+    env::remove_var(crate::config::CONFIG_SESSION_ENV);
+
     let mut app = AppState::new(session_name);
+    app.config_made_session = config_made_session;
     crate::startup_trace::mark("srv.appstate");
     // Adopt the palette the last attached client reported in this data root, so
     // the spares this server is about to pre spawn are born holding it.
@@ -2467,26 +2538,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // them async and then drain the CtrlReq channel in a mini-loop so
     // show-options / set requests from the scripts are handled before
     // the main UI starts.
-    if !app.pending_plugin_scripts.is_empty() {
-        let scripts: Vec<String> = app.pending_plugin_scripts.drain(..).collect();
-        let target_session = app.port_file_base();
-        let mut children: Vec<std::process::Child> = Vec::new();
-        for ps1 in &scripts {
-            // Resolve shell: pwsh (PS7) preferred, fall back to powershell.exe (Windows PS)
-            let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
-            let mut cmd = std::process::Command::new(shell);
-            cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1]);
-            if !target_session.is_empty() {
-                cmd.env("PSMUX_TARGET_SESSION", &target_session);
-            }
-            cmd.stdin(std::process::Stdio::null());
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
-            { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }
-            if let Ok(child) = cmd.spawn() {
-                children.push(child);
-            }
-        }
+    //
+    // A warm standby runs none: a `TMUX` that names a standby is never
+    // followed (session.rs session_base_owning_tmux_port), so their calls
+    // would set up some other session, and the claim reloads the config and
+    // starts them for the session it becomes.
+    if app.is_warm_server() {
+        app.pending_plugin_scripts.clear();
+    } else if !app.pending_plugin_scripts.is_empty() {
+        let mut children = spawn_plugin_scripts(&mut app);
 
         // Drain CtrlReq messages until all scripts finish (max 5s).
         if !children.is_empty() {
@@ -2513,6 +2573,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.control_rx = Some(rx);
             }
         }
+        // A file one of them sourced can declare a plugin of its own. Its
+        // script starts now and the loop answers its calls.
+        drop(spawn_plugin_scripts(&mut app));
     }
 
     // Reconcile the early warm pane (born with all defaults, before
@@ -2636,6 +2699,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             None => spawn_warm_server(&app),
         }
     }
+    // The startup config's commands run now that the window exists and the
+    // loop below will answer them.
+    start_startup_config_job(&mut app);
     crate::startup_trace::mark("srv.loop");
     let mut state_dirty = true;
     let mut cached_dump_state = String::new();
@@ -2704,6 +2770,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // CtrlReq::Targeted request runs with its target focused; Some only
     // inside that one request's iteration (see server::temp_target).
     let mut temp_focus_restore: Option<temp_target::SavedFocus> = None;
+    // The file #{current_file} named before a CtrlReq::InFile request set
+    // it; Some only inside that one request's iteration.
+    let mut current_file_restore: Option<String> = None;
 
     // ── Background spare shell spawner ──────────────────────────────────────
     //
@@ -3135,6 +3204,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // switched (one whose arm skipped the restore at the end
                     // of its iteration) is put back before this one runs.
                     temp_target::restore_temp_focus(&mut app, &mut temp_focus_restore);
+                    crate::config::restore_current_config_file(&mut current_file_restore);
+                    // A source job's command runs with its file as
+                    // #{current_file} (source_job::CURRENT_FILE_PREFIX).
+                    let req = match req {
+                        CtrlReq::InFile(file, inner) => {
+                            current_file_restore = Some(crate::config::swap_current_config_file(&file));
+                            *inner
+                        }
+                        other => other,
+                    };
                     // #828: does this request name a window or pane of its
                     // own?  A send-keys that does is input for that pane,
                     // never for an overlay the client has open.
@@ -3700,7 +3779,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 // Unwrapped at the top of this loop; TargetedSender never
                 // nests one inside another.
-                CtrlReq::Targeted(..) => {}
+                CtrlReq::Targeted(..) | CtrlReq::InFile(..) => {}
                 CtrlReq::SessionInfo(resp) => {
                     let num_attached = app.client_registry.len();
                     let attached = if num_attached > 0 { " (attached)" } else { "" };
@@ -5619,6 +5698,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }),
                         );
                     }
+                    // The config the claim loaded runs its commands now, on
+                    // the session's window, after the reply: the claim's
+                    // client waits only 500 ms for it. Its plugin scripts
+                    // start first, as a cold start runs them before its job,
+                    // but nothing waits for them.
+                    drop(spawn_plugin_scripts(&mut app));
+                    start_startup_config_job(&mut app);
                     hook_event = Some("after-rename-session");
                     }
                 }
@@ -6472,6 +6558,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // which runs them one after another as tmux's queue does
                     // (issue #842). The -F form and globs are handled there.
                     let parsed = crate::config::source_runtime(&mut app, &path);
+                    // A plugin the file declares before its first command
+                    // starts its script now, as one declared after it does
+                    // when the job replays the line.
+                    drop(spawn_plugin_scripts(&mut app));
                     // A sourced file can set command-alias, which the
                     // connection dispatcher reads from its own copy.
                     if let Ok(mut map) = shared_aliases_main.write() {
@@ -6502,6 +6592,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 parsed.errors.clone(),
                                 parsed.errors,
                                 done,
+                                source_job::SourceJobKind::Source,
                             ) {
                                 app.source_jobs_running += 1;
                             }
@@ -6522,6 +6613,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // A config line a source job kept, now that the commands
                     // before it have run (issue #842).
                     let result = crate::config::replay_deferred_line(&mut app, &item);
+                    // A `set -g @plugin` after the file's first command is
+                    // replayed here, once the startup drain has run: its
+                    // script starts now, in file order, as a `run-shell -b`
+                    // would. It used to stay queued and never run.
+                    drop(spawn_plugin_scripts(&mut app));
                     if let Ok(mut map) = shared_aliases_main.write() {
                         *map = app.command_aliases.clone();
                     }
@@ -8684,6 +8780,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // The request that carried a -t target is done: put the real
             // focus back (by pane id, see restore_temp_focus).
             temp_target::restore_temp_focus(&mut app, &mut temp_focus_restore);
+            crate::config::restore_current_config_file(&mut current_file_restore);
             // What the request did to the window list, now that the real
             // focus is back.
             control::sync_window_changes(&mut app);
@@ -8704,6 +8801,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // The server's own work below (status, hooks, renames) is not a
         // client's command: it formats against the real state.
         crate::format::set_sessionless(false);
+        crate::config::restore_current_config_file(&mut current_file_restore);
         // Drain async run-shell results (non-blocking).
         if let Some(rx) = app.run_shell_rx.as_ref() {
             while let Ok((title, text)) = rx.try_recv() {

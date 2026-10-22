@@ -256,7 +256,7 @@ fn a_warm_standby_keeps_nothing() {
 
 #[test]
 fn a_plain_source_file_has_no_queue() {
-    // load_config, menus and the other callers of source_file keep their
+    // Menus and the other callers of source_file keep their
     // behaviour: no context, nothing kept.
     let f = TempConf::new("plain", "split-window\nset -g status-left PLAIN\n");
     let mut app = app_with_window();

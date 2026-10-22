@@ -1549,6 +1549,9 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 "version" => VERSION.to_string(),
                 "host" | "hostname" => hostname_cached(),
                 "host_short" => { let h = hostname_cached(); h.split('.').next().unwrap_or(&h).to_string() }
+                // The file being sourced, which the startup config reads
+                // before the first window exists (tmux cfg.c:139).
+                "current_file" => crate::config::current_config_file(),
                 _ => {
                     // Not "unknown": with no window we simply cannot resolve a
                     // window/pane variable. Reporting UNKNOWN_VAR here would

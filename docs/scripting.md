@@ -493,7 +493,7 @@ client attached, the identity variables (`client_name`, `client_pid`, `client_re
 | `#{mouse_all_flag}` | `1` if the pane enabled any event tracking, DECSET 1003 |
 | `#{mouse_utf8_flag}` | `1` if the pane enabled UTF-8 mouse reporting, DECSET 1005 |
 | `#{mouse_sgr_flag}` | `1` if the pane enabled SGR mouse reporting, DECSET 1006 |
-| `#{current_file}` | Config file being parsed, during config parsing |
+| `#{current_file}` | Config file being parsed, during config parsing and while a command read from it runs |
 
 ### Options as format variables
 

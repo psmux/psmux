@@ -487,3 +487,59 @@ fn run_shell_child_path_is_untouched_when_psmux_is_already_on_it() {
     );
 }
 
+
+// ─── a plugin's .tmux entry script runs with Git Bash ──────────────────────
+
+/// A Git for Windows install under `root`: its `bin\bash.exe`, the MSYS
+/// `usr\bin\bash.exe` beside it and `cmd\git.exe`.
+#[cfg(windows)]
+fn fake_git_install(root: &std::path::Path) {
+    for dir in ["bin", "usr\\bin", "cmd"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for file in ["bin\\bash.exe", "usr\\bin\\bash.exe", "cmd\\git.exe"] {
+        std::fs::write(root.join(file), b"").unwrap();
+    }
+}
+
+/// Git Bash is the `bin\bash.exe` of the install `git.exe` belongs to, else
+/// of an install directory, and only with its MSYS bash beside it.
+#[test]
+#[cfg(windows)]
+fn git_bash_is_found_from_git_or_an_install_directory() {
+    let tmp = std::env::temp_dir().join(format!("psmux_test_git_bash_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (installed, other, stray) = (tmp.join("Git"), tmp.join("Other"), tmp.join("Stray"));
+    fake_git_install(&installed);
+    fake_git_install(&other);
+    std::fs::create_dir_all(stray.join("bin")).unwrap();
+    std::fs::write(stray.join("bin").join("bash.exe"), b"").unwrap();
+
+    let git = installed.join("cmd").join("git.exe");
+    assert_eq!(find_git_bash(Some(&git), &[other.clone()]), Some(installed.join("bin").join("bash.exe")));
+    assert_eq!(find_git_bash(None, &[stray.clone(), other.clone()]), Some(other.join("bin").join("bash.exe")));
+    assert_eq!(find_git_bash(Some(&stray.join("bin").join("git.exe")), &[stray.clone()]), None);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A run-shell command that is one `.tmux` file runs it with Git Bash, its
+/// path written with `/` so the script's `dirname "${BASH_SOURCE[0]}"`
+/// finds its directory.
+#[test]
+#[cfg(windows)]
+fn a_tmux_script_runs_with_git_bash() {
+    let Some(bash) = git_bash() else { return };
+    let tmp = std::env::temp_dir().join(format!("psmux_test_tmux_script_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let script = tmp.join("p.tmux");
+    std::fs::write(&script, "tmux set -g @p on\n").unwrap();
+
+    let cmd = build_run_shell_command(&format!("'{}'", script.display()));
+    assert_eq!(std::path::Path::new(cmd.get_program()), bash);
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert_eq!(args, vec![script.to_string_lossy().replace('\\', "/")]);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
