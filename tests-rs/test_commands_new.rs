@@ -659,35 +659,28 @@ fn toggle_sync_flips_state_correctly() {
 //  13. choose-tree: verify tree data contains correct window info
 // ════════════════════════════════════════════════════════════════════════════
 
+/// The chooser directives `run` sends to the client the server last heard
+/// from. The choosers are drawn by the client, so a choose-tree run inside
+/// the server asks that client to open one. Each call registers its own
+/// client id, and only CHOOSE- lines are kept, since other tests may
+/// broadcast to every client at the same time.
+fn chooser_directives(app: &mut AppState, run: impl FnOnce(&mut AppState)) -> Vec<String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x00c4_0000_0000);
+    let cid = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let rx = crate::types::register_directive_channel(cid);
+    app.latest_client_id = Some(cid);
+    run(app);
+    crate::types::remove_directive_channel(cid);
+    rx.try_iter().filter(|d| d.starts_with("CHOOSE-")).collect()
+}
+
 #[test]
-fn choose_tree_enters_window_chooser_mode() {
+fn choose_tree_asks_the_client_for_its_tree() {
     let mut app = mock_app_with_windows(&["editor", "server"]);
-    app.session_name = "dev".to_string();
-    app.active_idx = 0;
-    execute_command_string(&mut app, "choose-tree").unwrap();
-    match &app.mode {
-        Mode::WindowChooser { tree, selected } => {
-            // Tree is built from filesystem (.psmux dir); in tests it may be empty.
-            // Verify selected is valid (0 for empty tree, or within bounds).
-            if !tree.is_empty() {
-                assert!(*selected < tree.len(), "selected index should be in range");
-                // If our session exists in the tree, verify window entries match
-                let current: Vec<_> = tree.iter().filter(|e| e.is_current_session).collect();
-                for entry in &current {
-                    assert_eq!(entry.session_name, "dev", "session name mismatch in tree entry");
-                }
-                let win_entries: Vec<_> = tree.iter()
-                    .filter(|e| e.is_current_session && !e.is_session_header)
-                    .collect();
-                if !win_entries.is_empty() {
-                    let win_names: Vec<&str> = win_entries.iter().map(|e| e.window_name.as_str()).collect();
-                    assert!(win_names.contains(&"editor"), "tree should contain 'editor' window");
-                    assert!(win_names.contains(&"server"), "tree should contain 'server' window");
-                }
-            }
-        }
-        other => panic!("expected WindowChooser, got {:?}", std::mem::discriminant(other)),
-    }
+    let sent = chooser_directives(&mut app, |app| execute_command_string(app, "choose-tree").unwrap());
+    assert_eq!(sent, vec!["CHOOSE-TREE"]);
+    // The server keeps no chooser of its own: none was ever drawn.
+    assert!(!matches!(app.mode, Mode::WindowChooser { .. }));
 }
 
 #[test]
@@ -727,12 +720,36 @@ fn choose_tree_builds_correct_tree_from_list_all_sessions() {
 }
 
 #[test]
-fn choose_window_and_choose_session_all_enter_window_chooser() {
-    // All three commands should enter WindowChooser mode
-    for cmd in &["choose-tree", "choose-window", "choose-session"] {
+fn choose_tree_s_opens_the_session_list_and_w_the_tree() {
+    // tmux's default aliases: choose-window is `choose-tree -w`, and
+    // choose-session is `choose-tree -s`. `-s` wins over `-w`
+    // (window-tree.c), so `choose-window -s` lists the sessions.
+    for (cmd, want) in [
+        ("choose-tree", "CHOOSE-TREE"),
+        ("choose-tree -w", "CHOOSE-TREE"),
+        ("choose-tree -Zw", "CHOOSE-TREE"),
+        ("choose-tree -s", "CHOOSE-SESSION"),
+        ("choose-tree -Zs", "CHOOSE-SESSION"),
+        ("choose-tree -w -s", "CHOOSE-SESSION"),
+        ("choose-tree -F '#{session_name}'", "CHOOSE-TREE"),
+        ("choose-window", "CHOOSE-TREE"),
+        ("choose-window -s", "CHOOSE-SESSION"),
+        ("choose-session", "CHOOSE-SESSION"),
+        ("choose-session -w", "CHOOSE-SESSION"),
+    ] {
         let mut app = mock_app_with_windows(&["a", "b"]);
-        execute_command_string(&mut app, cmd).unwrap();
-        assert!(matches!(app.mode, Mode::WindowChooser { .. }), "{} should enter WindowChooser", cmd);
+        let sent = chooser_directives(&mut app, |app| execute_command_string(app, cmd).unwrap());
+        assert_eq!(sent, vec![want], "{}", cmd);
+    }
+}
+
+#[test]
+fn chooser_actions_ask_the_client() {
+    // A copy mode table binding runs its action through execute_action.
+    for (action, want) in [(Action::WindowChooser, "CHOOSE-TREE"), (Action::SessionChooser, "CHOOSE-SESSION")] {
+        let mut app = mock_app_with_windows(&["a"]);
+        let sent = chooser_directives(&mut app, |app| { execute_action(app, &action).unwrap(); });
+        assert_eq!(sent, vec![want]);
     }
 }
 
@@ -1233,8 +1250,8 @@ fn prompt_delegates_set_buffer_then_list_shows_it() {
 #[test]
 fn prompt_delegates_choose_tree() {
     let mut app = mock_app_with_window();
-    run_via_prompt(&mut app, "choose-tree");
-    assert!(matches!(app.mode, Mode::WindowChooser { .. }));
+    let sent = chooser_directives(&mut app, |app| run_via_prompt(app, "choose-tree -s"));
+    assert_eq!(sent, vec!["CHOOSE-SESSION"]);
 }
 
 #[test]
@@ -1287,6 +1304,12 @@ fn parse_action_direct_commands() {
     assert!(matches!(parse_command_to_action("choose-tree"), Some(Action::WindowChooser)));
     assert!(matches!(parse_command_to_action("choose-window"), Some(Action::WindowChooser)));
     assert!(matches!(parse_command_to_action("choose-session"), Some(Action::SessionChooser)));
+    // tmux's default prefix+s and prefix+w: `choose-tree -Zs` and `-Zw`.
+    assert!(matches!(parse_command_to_action("choose-tree -Zs"), Some(Action::SessionChooser)));
+    assert!(matches!(parse_command_to_action("choose-tree -sZ"), Some(Action::SessionChooser)));
+    assert!(matches!(parse_command_to_action("choose-tree -Zw"), Some(Action::WindowChooser)));
+    assert!(matches!(parse_command_to_action("choose-window -s"), Some(Action::SessionChooser)));
+    assert!(matches!(parse_command_to_action("choose-tree -F '#{s}'"), Some(Action::WindowChooser)));
     assert!(matches!(parse_command_to_action("zoom-pane"), Some(Action::ZoomPane)));
     assert!(matches!(parse_command_to_action("resize-pane -Z"), Some(Action::ZoomPane)));
 }
