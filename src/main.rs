@@ -766,6 +766,16 @@ fn query_every_session(ns: Option<&str>, line: &str) -> Vec<(String, String)> {
 
 /// The session (port file base name) whose server has the client `spec`
 /// attached, by name or tty as tmux's cmd_find_client accepts them.
+/// The tty a client `-t` names, if it names a client: a tty path as given, or
+/// `%N` for `/dev/pts/N`. Anything else is not a client spec.
+fn client_target_tty(target: &str) -> Option<String> {
+    match target.strip_prefix('%') {
+        Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => Some(format!("/dev/pts/{}", n)),
+        _ if target.starts_with('/') => Some(target.to_string()),
+        _ => None,
+    }
+}
+
 fn session_holding_client(ns: Option<&str>, spec: &str) -> Option<String> {
     let line = format!("list-clients -F {}\n", crate::util::quote_arg("#{client_name}"));
     query_every_session(ns, &line)
@@ -1430,11 +1440,11 @@ fn run_main() -> io::Result<()> {
             // fail with "no session" (issue #565). Route it like switch-client:
             // fall through to -s / $TMUX resolution.
             let is_detach_client = args.iter().any(|a| a == "detach-client" || a == "detach")
-                // A command-prompt -t that is a client name (a tty, or %N)
-                // routes the same way; its arm finds that client's session.
-                || (command_index.is_some_and(|i| args[i] == "command-prompt")
-                    && (target.starts_with('/')
-                        || target.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))));
+                // A command-prompt or show-messages -t that is a client name
+                // (a tty, or %N) routes the same way; its arm finds that
+                // client's session.
+                || (command_index.is_some_and(|i| matches!(args[i].as_str(), "command-prompt" | "show-messages" | "showmsgs"))
+                    && client_target_tty(&target).is_some());
             // A bare `-t` of a window or pane command (`rename-window -t w2`,
             // `kill-pane -t 1`) is a window or pane of the current session
             // before it is a session name (cmd-find.c:1093 to :1110). Unless
@@ -5735,11 +5745,7 @@ fn run_main() -> io::Result<()> {
                 // routes to the session that client is attached to, as
                 // detach-client's does; anything else was routed as a session.
                 if let Some(t) = spec.target.as_deref() {
-                    let wanted = match t.strip_prefix('%') {
-                        Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => format!("/dev/pts/{}", n),
-                        _ => t.to_string(),
-                    };
-                    if wanted.starts_with('/') {
+                    if let Some(wanted) = client_target_tty(t) {
                         match session_holding_client(l_socket_name.as_deref(), &wanted) {
                             Some(sess) => env::set_var("PSMUX_TARGET_SESSION", &sess),
                             None => {
@@ -5807,8 +5813,22 @@ fn run_main() -> io::Result<()> {
                 print!("{}", resp);
                 return Ok(());
             }
-            // server-info - Show server information
-            "server-info" | "info" => {
+            // server-info - Show server information. show-messages prints the
+            // same: tmux's info and server-info are aliases for
+            // `show-messages -JT`, and psmux has no message log to show.
+            "server-info" | "info" | "show-messages" | "showmsgs" => {
+                // show-messages -t names a client and may name none
+                // (CMD_CLIENT_CANFAIL, cmd-show-messages.c): a client found
+                // picks the session it is on, anything else routes as usual.
+                if cmd.starts_with("show") {
+                    let client = env::var("PSMUX_TARGET_FULL").ok().and_then(|t| client_target_tty(&t));
+                    if let Some(tty) = client {
+                        env::remove_var("PSMUX_TARGET_FULL");
+                        if let Some(sess) = session_holding_client(l_socket_name.as_deref(), &tty) {
+                            env::set_var("PSMUX_TARGET_SESSION", &sess);
+                        }
+                    }
+                }
                 let resp = send_control_with_response("server-info\n".to_string())?;
                 print!("{}", resp);
                 return Ok(());
@@ -5932,14 +5952,6 @@ fn run_main() -> io::Result<()> {
             // send-prefix - Send the prefix key to the active pane
             "send-prefix" => {
                 send_control("send-prefix\n".to_string())?;
-                return Ok(());
-            }
-            // show-messages - Show message log
-            "show-messages" | "showmsgs" => {
-                let resp = send_control_with_response("show-messages\n".to_string())?;
-                if !resp.trim().is_empty() {
-                    print!("{}", resp);
-                }
                 return Ok(());
             }
             // suspend-client - Suspend client (no-op on Windows)

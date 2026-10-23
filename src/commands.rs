@@ -630,6 +630,23 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
     }
 }
 
+/// What server-info prints, and show-messages with it. tmux's default command
+/// aliases make info and server-info `show-messages -JT` (options-table.c),
+/// so the two give the same text here. psmux keeps no message log and has no
+/// terminfo or job table to list, so show-messages prints this summary of the
+/// server whatever its -J, -T and -t say.
+pub fn server_info_text(app: &AppState) -> String {
+    format!(
+        "psmux {} (Windows)\npid: {}\nsession: {}\nwindows: {}\nuptime: {}s\nsocket: {}",
+        crate::types::VERSION,
+        std::process::id(),
+        app.session_name,
+        app.windows.len(),
+        (chrono::Local::now() - app.created_at).num_seconds(),
+        crate::paths::port_file(&app.port_file_base())
+    )
+}
+
 /// Show text output in a popup overlay (used by list-* commands inside a session).
 fn show_output_popup(app: &mut AppState, title: &str, output: String) {
     let lines: Vec<&str> = output.lines().collect();
@@ -3308,11 +3325,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "show-messages" | "showmsgs" => {
-            if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else {
-                show_output_popup(app, "show-messages", "(no messages)\n".to_string());
-            }
+            let text = server_info_text(app);
+            show_output_popup(app, "show-messages", text);
         }
         "set-environment" | "setenv" => {
             if let Some(port) = app.control_port {
@@ -3775,13 +3789,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Already running
         }
         "server-info" | "info" => {
-            if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, "server-info\n", &app.session_key);
-            } else {
-                let output = format!("psmux {}\nSession: {}\nWindows: {}\nActive: {}\n",
-                    crate::types::VERSION, app.session_name, app.windows.len(), app.active_idx);
-                show_output_popup(app, "server-info", output);
-            }
+            let text = server_info_text(app);
+            show_output_popup(app, "server-info", text);
         }
         "new-session" | "new" => {
             // Issue #200: create a new session from inside a running session.

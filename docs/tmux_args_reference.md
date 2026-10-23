@@ -113,7 +113,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `show-buffer` | `showb` | `b:` | CLI, SRV, CFG, CTL |
 | `show-environment` | `showenv` | `gsht:` | CLI, SRV, CFG, CTL |
 | `show-hooks` | *(none)* | `g` | CLI, SRV, CFG, CTL |
-| `show-messages` | `showmsgs` | none | CLI, SRV, CFG |
+| `show-messages` | `showmsgs` | none | CLI, SRV, CFG, CTL |
 | `show-options` | `show`, `show-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-prompt-history` | `showphist` | none | SRV |
 | `show-window-options` | `showw`, `show-window-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
@@ -198,7 +198,7 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 - Commands queued after it (`start-server ; set-option -g exit-empty off`) run against that server, in order, stopping at the first error, as in tmux. With `exit-empty off` the empty server answers untargeted commands (`display-message -p '#{pid}'`, `show-options`, `list-sessions`) before any session exists, and the next `new-session` lands in it (issue #734).
 
 **server-info** (`info`)
-- No flags.
+- No flags. Prints the psmux version, the server's pid, the session, its window count, the uptime and the session's port file. show-messages prints the same.
 
 **list-clients** (`lsc`)
 - Value: `-F` (format), honored on the server and control mode layers. The CLI front end forwards a bare `list-clients`, so `psmux list-clients -F ...` silently drops the format.
@@ -557,7 +557,8 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - No flags. These open client side overlays. While an overlay is open its keys are handled before any key table, so a bound key does not reach the tables until the overlay closes.
 
 **show-messages** (`showmsgs`)
-- No flags.
+- Prints what server-info prints. tmux's default command aliases make info and server-info `show-messages -JT`, and psmux keeps no message log and has no terminfo or job table to list, so the two give the same text.
+- Accepted but ignored: `-J`, `-T` and `-t`. On the CLI a `-t` that names an attached client (a tty, or `%N`) picks the session that client is on, and one that names no client is not an error, as in tmux (`CMD_CLIENT_CANFAIL`).
 
 **clear-prompt-history** (`clearphist`) and **show-prompt-history** (`showphist`)
 - No flags. Server layer only, so reach them from a key binding or a raw socket connection rather than from `psmux <command>`.
