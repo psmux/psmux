@@ -3979,8 +3979,10 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // A tmux plugin's `.tmux` entry script is a bash script. With Git Bash
     // it runs as any run-shell command does (build_run_shell_command); without
     // it, its plain tmux lines are applied as config lines.
-    if !crate::commands::can_run_tmux_scripts() {
-        if let Some(path) = tmux_entry_script(&shell_cmd) {
+    // The file check first: finding Git Bash scans PATH, which only a
+    // `.tmux` script needs.
+    if let Some(path) = tmux_entry_script(&shell_cmd) {
+        if !crate::commands::can_run_tmux_scripts() {
             parse_tmux_entry_script(app, &path);
             return;
         }
@@ -4040,8 +4042,8 @@ fn run_shell_job_kind(l: &str) -> Option<bool> {
     if command.trim().is_empty() && parsed.delay.is_none() {
         return None;
     }
-    if !crate::commands::can_run_tmux_scripts()
-        && tmux_entry_script(&crate::util::expand_run_shell_path(&command)).is_some()
+    if tmux_entry_script(&crate::util::expand_run_shell_path(&command)).is_some()
+        && !crate::commands::can_run_tmux_scripts()
     {
         return None;
     }
