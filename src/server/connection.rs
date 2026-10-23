@@ -5998,16 +5998,16 @@ match cmd {
         }
     }
     "choose-tree" | "choose-window" | "choose-session" => {
-        // These are interactive choosers — send a dump that client handles
-        // For now, map to listing which the client renders as a chooser
-        let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::ListTree(rtx));
-        if let Ok(text) = rrx.recv() {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("choose-tree".to_string(), text));
-            } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
-            }
+        // The choosers are the client's, the ones prefix+w and prefix+s open.
+        // A command prompt or a root table binding came in on the client's
+        // own connection, so that client opens it. A CLI caller has no
+        // client of its own: the server picks one, as switch-client does.
+        // `-s` opens the session list and wins over `-w` (window-tree.c).
+        let kind = crate::choose_tree::chooser_kind(cmd, &args);
+        if persistent {
+            let _ = crate::types::send_directive_to_client(client_id, kind.directive());
+        } else {
+            let _ = tx.send(CtrlReq::OpenChooser(kind));
         }
         if !persistent && pending_chain.is_empty() { break; }
     }

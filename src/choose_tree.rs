@@ -110,6 +110,78 @@ pub fn parent_of(kinds: &[RowKind], idx: usize) -> Option<usize> {
     (0..idx).rev().find(|&i| depth(kinds[i]) == want)
 }
 
+/// Which of the two client choosers a choose-tree command opens: the tree
+/// prefix+w opens, or the session list prefix+s opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChooserKind {
+    Tree,
+    Session,
+}
+
+impl ChooserKind {
+    /// The directive the server sends to open this chooser on a client.
+    pub fn directive(self) -> &'static str {
+        match self {
+            ChooserKind::Tree => "CHOOSE-TREE",
+            ChooserKind::Session => "CHOOSE-SESSION",
+        }
+    }
+
+    /// The chooser a directive line names, if it names one.
+    pub fn from_directive(line: &str) -> Option<ChooserKind> {
+        match line {
+            "CHOOSE-TREE" => Some(ChooserKind::Tree),
+            "CHOOSE-SESSION" => Some(ChooserKind::Session),
+            _ => None,
+        }
+    }
+}
+
+/// The chooser `name args...` opens. tmux's window_tree_init (window-tree.c)
+/// lets `-s` win over `-w`:
+///
+/// ```text
+/// if (args_has(args, 's'))
+///         data->type = WINDOW_TREE_SESSION;
+/// else if (args_has(args, 'w'))
+///         data->type = WINDOW_TREE_WINDOW;
+/// ```
+///
+/// choose-window and choose-session are tmux's default command aliases for
+/// `choose-tree -w` and `choose-tree -s`, and an alias appends the caller's
+/// words, so `choose-window -s` is `choose-tree -w -s` and opens the sessions.
+/// The flags are split as `args_parse` splits them, so `-Zs` and `-sZ` both
+/// carry `-s` and the value of `-F '#{s}'` is not read as a flag.
+pub fn chooser_kind<S: AsRef<str>>(name: &str, args: &[S]) -> ChooserKind {
+    if name == "choose-session" {
+        return ChooserKind::Session;
+    }
+    let flags = crate::cli::expand_flag_clusters("choose-tree", args);
+    let mut i = 0;
+    while i < flags.len() {
+        let f = flags[i].as_str();
+        if f == "--" {
+            break;
+        }
+        let mut chars = f.chars();
+        if chars.next() != Some('-') {
+            break;
+        }
+        let Some(c) = chars.next() else { break };
+        if chars.next().is_some() {
+            break;
+        }
+        if c == 's' {
+            return ChooserKind::Session;
+        }
+        if crate::cli::flag_takes_value("choose-tree", c) {
+            i += 1;
+        }
+        i += 1;
+    }
+    ChooserKind::Tree
+}
+
 /// tmux `window_tree_build_window` under `choose-tree -w`: every window row
 /// starts collapsed, so panes are hidden until the user expands the window.
 /// Session rows stay expanded, which is what makes the visible line numbers
@@ -357,3 +429,7 @@ mod tests_issue625_choose_tree_lines;
 #[cfg(test)]
 #[path = "../tests-rs/test_disc776_chooser_parity.rs"]
 mod tests_disc776_chooser_parity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_choose_tree_kind.rs"]
+mod tests_choose_tree_kind;

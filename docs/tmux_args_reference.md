@@ -21,7 +21,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 
 **`-t` is global at the CLI.** psmux scans the whole command line for `-t <target>` before the command name is even dispatched, so `psmux -t work:1 kill-pane` and `psmux kill-pane -t work:1` both work even for commands whose own parser ignores `-t`.
 
-**Combined short flags** are expanded for `new-session` (`-As main` is `-A -s main`), for `set-option` and `show-options` (`-ga`, `-gu`, `-gq`), for `set-hook` (`-ga`, `-ug`), for `set-buffer` (`-ab NAME`, `-bNAME`, `-nNEW`) and for the config file forms of `if-shell` (`-bF`, `-Fb`). Elsewhere flags must be given separately.
+**Combined short flags** are expanded for `new-session` (`-As main` is `-A -s main`), for `set-option` and `show-options` (`-ga`, `-gu`, `-gq`), for `set-hook` (`-ga`, `-ug`), for `set-buffer` (`-ab NAME`, `-bNAME`, `-nNEW`), for `choose-tree` (`-Zs`) and for the config file forms of `if-shell` (`-bF`, `-Fb`). Elsewhere flags must be given separately.
 
 ## Complete command table
 
@@ -34,8 +34,8 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `choose-buffer` | `chooseb` | none | CLI, SRV, CFG |
 | `choose-client` | *(none)* | none | CLI, SRV, CFG |
 | `choose-session` | *(none)* | none | CLI, SRV, CFG |
-| `choose-tree` | *(none)* | none | CLI, SRV, CFG |
-| `choose-window` | *(none)* | none | CLI, SRV, CFG |
+| `choose-tree` | *(none)* | `sw` | CLI, SRV, CFG |
+| `choose-window` | *(none)* | `s` | CLI, SRV, CFG |
 | `clear-history` | `clearhist` | `Ht:` | CLI, SRV, CFG |
 | `clear-prompt-history` | `clearphist` | none | SRV |
 | `clock-mode` | *(none)* | none | CLI, SRV, CFG |
@@ -553,8 +553,17 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - One token may carry several flags, as tmux writes its own `/` binding: `-kpkey` is `-k` followed by `-p key`. A flag that takes no value falls through to the next letter in the token, and the first one that does takes whatever is left of it.
 - With no `-p`, the prompt is headed with the name of the command the template will run, in brackets: `command-prompt "move-window -t '%%'"` opens a prompt headed `(move-window)`.
 
-**choose-tree**, **choose-window**, **choose-session**, **choose-client**, **choose-buffer**, **customize-mode**, **clock-mode**
-- No flags. These open client side overlays. While an overlay is open its keys are handled before any key table, so a bound key does not reach the tables until the overlay closes.
+**choose-tree**, **choose-window**, **choose-session**
+- `-s` opens the session list, the chooser prefix+s opens. Without it the window tree opens, the chooser prefix+w opens, with every window collapsed. `-w` asks for that tree, and `-s` wins when both are given, as in tmux (`window-tree.c`). choose-window and choose-session are tmux's default aliases for `choose-tree -w` and `choose-tree -s`, so `choose-window -s` lists the sessions and choose-session always does.
+- One token may carry several flags: `-Zs` is `-Z -s`, as tmux's own prefix+s binding writes it. The value of `-F`, `-f`, `-K`, `-O` or `-t` is never read as a flag.
+- The choosers are drawn by the client. Run from the command prompt or a root table binding, the chooser opens on that client. Run from a hook, a menu, a copy mode binding or `psmux choose-tree` in a pane, it opens on the client the server last heard from, the one switch-client would move.
+- Accepted but ignored: `-G`, `-N`, `-r`, `-y`, `-Z`, `-F`, `-f`, `-K`, `-O`, `-t` and the template. Without `-s` or `-w`, tmux opens the tree with every window expanded to its panes; psmux opens it as `-w` does.
+- Not on the shared server's one-shot CLI, and not in control mode.
+
+**choose-client**, **choose-buffer**, **customize-mode**, **clock-mode**
+- No flags. These open client side overlays.
+
+While any of these overlays is open its keys are handled before any key table, so a bound key does not reach the tables until the overlay closes.
 
 **show-messages** (`showmsgs`)
 - No flags.

@@ -955,14 +955,11 @@ to spawn is reported on the status bar and is likewise never recorded.
 ## Interactive Choosers
 
 ```powershell
-# Interactive session/window/pane tree browser
-psmux choose-tree
-
-# Show only sessions
-psmux choose-tree -s
-
-# Show only windows
+# Window tree of every session, the chooser prefix+w opens
 psmux choose-tree -w
+
+# Session list, the chooser prefix+s opens
+psmux choose-tree -s
 
 # Interactive buffer picker (enter=paste, d=delete)
 psmux choose-buffer

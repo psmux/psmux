@@ -4225,6 +4225,217 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // which is where every client starts and what an unset `cursor-blink`
     // leaves it at.
     let mut last_blink_mode: Option<bool> = None;
+    // Open prefix+w's tree chooser and prefix+s's session list. A key
+    // binding opens them, and so does the server's CHOOSE-TREE or
+    // CHOOSE-SESSION directive, sent when choose-tree runs on the server (the
+    // command prompt, a root table binding, a hook, a menu, the CLI).
+    macro_rules! open_tree_chooser {
+        () => {{
+            tree_chooser = true;
+            tree_entries.clear();
+            tree_all.clear();
+            tree_collapsed.clear();
+            tree_vis_map.clear();
+            tree_selected = 0;
+            tree_scroll = 0;
+            popup_offset = (0, 0);
+            popup_dragging = false;
+            popup_rect_last = None;
+            if choose_tree_preview_default { preview_enabled = true; }
+            // Query ALL sessions (like tmux choose-tree)
+            let dir = crate::paths::psmux_dir();
+            // A -L socket is a separate server in tmux; a client never
+            // sees another socket's sessions. Same rule `ls` applies
+            // and the same predicate the session picker uses (ed52715).
+            let tree_ns = crate::session::session_namespace(&current_session);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                let mut sessions: Vec<(String, Vec<(usize, String, bool, Vec<(usize, String)>, usize)>)> = Vec::new();
+                for e in entries.flatten() {
+                    if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
+                        if let Some((base, ext)) = fname.rsplit_once('.') {
+                            if ext == "port" {
+                                if crate::session::is_warm_session(base) { continue; }
+                                if !crate::session::session_visible_from(base, tree_ns) { continue; }
+                                if let Ok(port_str) = std::fs::read_to_string(e.path()) {
+                                    if let Ok(p) = port_str.trim().parse::<u16>() {
+                                        let sess_addr = format!("127.0.0.1:{}", p);
+                                        let sess_key = read_session_key(base).unwrap_or_default();
+                                        // Centralized AUTH+command helper handles the OK ack race
+                                        // (issue #250) and bounds the response size.
+                                        if let Some(tree_line) = crate::session::fetch_authed_response_multi(
+                                            &sess_addr,
+                                            &sess_key,
+                                            b"list-tree\n",
+                                            Duration::from_millis(50),
+                                            Duration::from_millis(100),
+                                        ) {
+                                            if let Ok(wins) = serde_json::from_str::<Vec<WinTree>>(tree_line.trim()) {
+                                                let mut win_data = Vec::new();
+                                                for w in &wins {
+                                                    let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
+                                                    win_data.push((w.id, w.name.clone(), w.active, panes, w.idx));
+                                                }
+                                                sessions.push((base.to_string(), win_data));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                sessions.sort_by(|a, b| {
+                    if a.0 == current_session { std::cmp::Ordering::Less }
+                    else if b.0 == current_session { std::cmp::Ordering::Greater }
+                    else { a.0.cmp(&b.0) }
+                });
+                // Row index of the current session's active window, so the
+                // chooser opens its cursor on it (issue #373) instead of the
+                // hardcoded top row. The active window is also marked with `*`,
+                // glyph-adjacent, matching list_windows_tmux and real tmux.
+                let mut active_tree_row: Option<usize> = None;
+                for (sess_name, wins) in &sessions {
+                    let is_current = sess_name == &current_session;
+                    let nw = wins.len();
+                    // The row keeps the base to switch to and to
+                    // kill; the label shows the session's name.
+                    tree_all.push((true, usize::MAX, 0,
+                        tree_session_header(tree_ns, sess_name, nw, is_current),
+                        sess_name.clone()));
+                    // Every session's windows carry their panes, as
+                    // tmux's window_tree_build_window builds pane items
+                    // for every window of every session. Only the
+                    // current session's rows used to get them, so
+                    // another session's windows had nothing to expand
+                    // (discussion #776, note 3).
+                    for (wid, wname, active, panes, disp) in wins.iter() {
+                        let marker = if *active { "*" } else { "" };
+                        if *active && is_current { active_tree_row = Some(tree_all.len()); }
+                        tree_all.push((true, *wid, 0,
+                            format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
+                            sess_name.clone()));
+                        for (pid, ptitle) in panes {
+                            tree_all.push((false, *wid, *pid,
+                                format!("    {}", ptitle),
+                                sess_name.clone()));
+                        }
+                    }
+                }
+                if let Some(r) = active_tree_row { tree_selected = r; }
+            }
+            if tree_all.is_empty() {
+                for wi in &last_tree {
+                    let marker = if wi.active { "*" } else { "" };
+                    if wi.active { tree_selected = tree_all.len(); }
+                    tree_all.push((true, wi.id, 0, format!("{}{}", wi.name, marker), current_session.clone()));
+                    for pi in &wi.panes {
+                        tree_all.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
+                    }
+                }
+            }
+            // tmux `window_tree_build_window` under `choose-tree -w`:
+            // every window row opens collapsed, so the visible lines are
+            // the session headers and their windows and nothing else.
+            // That is what makes the jump digit line up with the window
+            // number in the status bar however many panes a window holds.
+            let kinds = tree_row_kinds(&tree_all);
+            tree_collapsed = crate::choose_tree::default_collapsed(&kinds);
+            let model_cursor = tree_selected;
+            let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+            tree_entries = rows;
+            tree_vis_map = map;
+            tree_selected = tree_vis_map
+                .iter()
+                .position(|&i| i == model_cursor)
+                .unwrap_or(0);
+        }};
+    }
+    macro_rules! open_session_chooser {
+        () => {{
+            session_chooser = true;
+            session_entries.clear();
+            session_selected = 0;
+            session_scroll = 0;
+            session_num_buffer.clear();
+            session_filter_active = false;
+            session_filter.clear();
+            popup_offset = (0, 0);
+            popup_dragging = false;
+            popup_rect_last = None;
+            if choose_tree_preview_default { preview_enabled = true; }
+            let dir = crate::paths::psmux_dir();
+            // Collect (label, addr, key) for every port file, then run ONE
+            // bounded liveness probe per session in parallel. This both lists
+            // and prunes: total wall time is ~one probe window regardless of
+            // how many sessions exist, so the picker stays responsive (no
+            // sequential O(N * timeout) cleanup pass).
+            let mut targets: Vec<(String, String, String)> = Vec::new();
+            // A -L socket is a separate server in tmux; a client never
+            // sees another socket's sessions. Same rule `ls` applies.
+            let picker_ns = crate::session::session_namespace(&current_session);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for e in entries.flatten() {
+                    if let Some(fname) = e.file_name().to_str() {
+                        if let Some((base, ext)) = fname.rsplit_once('.') {
+                            if ext == "port" {
+                                if crate::session::is_warm_session(base) { continue; }
+                                if !crate::session::session_visible_from(base, picker_ns) { continue; }
+                                if let Ok(port_str) = std::fs::read_to_string(e.path()) {
+                                    if let Ok(p) = port_str.trim().parse::<u16>() {
+                                        let sess_addr = format!("127.0.0.1:{}", p);
+                                        let sess_key = read_session_key(base).unwrap_or_default();
+                                        targets.push((base.to_string(), sess_addr, sess_key));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Issue #259 (batch D): sort by label so the picker's order is
+            // deterministic, matching the tree_chooser's established
+            // convention (session.rs::list_all_sessions_tree sorts by name)
+            // and the g/G Home/End contract. Without this, order followed
+            // raw directory-enumeration order, which the Win32 API
+            // explicitly does not guarantee to be stable or alphabetical.
+            targets.sort_by(|a, b| a.0.cmp(&b.0));
+            let verdicts = crate::session::classify_sessions_parallel(
+                targets,
+                Duration::from_millis(50),
+                Duration::from_millis(250),
+            );
+            for (label, liveness) in verdicts {
+                match liveness {
+                    crate::session::SessionLiveness::Alive(info) => {
+                        session_entries.push((label, info));
+                    }
+                    crate::session::SessionLiveness::Dead => {
+                        // Server gone (crashed, killed by a reboot, or its
+                        // port reused by another server). Reap it so it never
+                        // shows as a "(not responding)" zombie. A live-but-slow
+                        // server self-heals on its next 5s registry tick.
+                        if crate::debug_log::session_log_enabled() {
+                            crate::debug_log::session_log("picker",
+                                &format!("reaping dead session '{}' from chooser", label));
+                        }
+                        crate::session::remove_session_registry(&label);
+                    }
+                    crate::session::SessionLiveness::Unreachable => {
+                        // Could not connect (transient, non-refused). Keep it
+                        // and show the honest "(not responding)" rather than
+                        // deleting on an ambiguous failure.
+                        session_entries.push((label.clone(), format!("{}: (not responding)", label)));
+                    }
+                }
+            }
+            if session_entries.is_empty() {
+                session_entries.push((current_session.clone(), format!("{}: (current)", current_session)));
+            }
+            for (i, (sname, _)) in session_entries.iter().enumerate() {
+                if sname == &current_session { session_selected = i; break; }
+            }
+        }};
+    }
     // Trap Ctrl+Break (and stray Ctrl+C) console signals so they interrupt the
     // pane's foreground program instead of terminating this client and
     // detaching the still-running session (issue #454).  The signal is drained
@@ -4281,6 +4492,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         let mut got_frame = false;
         let mut _nc_count = 0u32;
         let mut drained_oneshots = crate::frame_oneshot::OneShots::default();
+        let mut pending_chooser: Option<crate::choose_tree::ChooserKind> = None;
         loop {
             match frame_rx.try_recv() {
                 Ok(line) => {
@@ -4334,6 +4546,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // parent shell on exit (tmux -P parity, issue #275).
                         kill_parent_on_exit = true;
                         quit = true;
+                    } else if let Some(kind) = crate::choose_tree::ChooserKind::from_directive(line.trim()) {
+                        // choose-tree ran on the server (the command prompt,
+                        // a root table binding, a hook, a menu, the CLI).
+                        // Opened after the drain, as a key binding opens it.
+                        pending_chooser = Some(kind);
                     } else {
                         if client_log_enabled() {
                             client_log("frame", &format!("received {} bytes", line.len()));
@@ -4361,6 +4578,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     break;
                 }
             }
+        }
+        // One chooser at a time, as a pane holds one mode in tmux.
+        match pending_chooser {
+            Some(crate::choose_tree::ChooserKind::Tree) => {
+                session_chooser = false;
+                buffer_chooser = false;
+                open_tree_chooser!();
+            }
+            Some(crate::choose_tree::ChooserKind::Session) => {
+                tree_chooser = false;
+                buffer_chooser = false;
+                open_session_chooser!();
+            }
+            None => {}
         }
         // ── OSC 52 and bell from the server, once each, now ─────────────
         // Not tied to drawing a frame: the frame they came in may be
@@ -5562,207 +5793,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // Dispatch pending flags for complex client-side UI commands.
                             // These are shared between synced_bindings dispatch and pre-sync fallback.
                             if do_choose_tree {
-                                tree_chooser = true;
-                                tree_entries.clear();
-                                tree_all.clear();
-                                tree_collapsed.clear();
-                                tree_vis_map.clear();
-                                tree_selected = 0;
-                                tree_scroll = 0;
-                                popup_offset = (0, 0);
-                                popup_dragging = false;
-                                popup_rect_last = None;
-                                if choose_tree_preview_default { preview_enabled = true; }
-                                // Query ALL sessions (like tmux choose-tree)
-                                let dir = crate::paths::psmux_dir();
-                                // A -L socket is a separate server in tmux; a client never
-                                // sees another socket's sessions. Same rule `ls` applies
-                                // and the same predicate the session picker uses (ed52715).
-                                let tree_ns = crate::session::session_namespace(&current_session);
-                                if let Ok(entries) = std::fs::read_dir(&dir) {
-                                    let mut sessions: Vec<(String, Vec<(usize, String, bool, Vec<(usize, String)>, usize)>)> = Vec::new();
-                                    for e in entries.flatten() {
-                                        if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
-                                            if let Some((base, ext)) = fname.rsplit_once('.') {
-                                                if ext == "port" {
-                                                    if crate::session::is_warm_session(base) { continue; }
-                                                    if !crate::session::session_visible_from(base, tree_ns) { continue; }
-                                                    if let Ok(port_str) = std::fs::read_to_string(e.path()) {
-                                                        if let Ok(p) = port_str.trim().parse::<u16>() {
-                                                            let sess_addr = format!("127.0.0.1:{}", p);
-                                                            let sess_key = read_session_key(base).unwrap_or_default();
-                                                            // Centralized AUTH+command helper handles the OK ack race
-                                                            // (issue #250) and bounds the response size.
-                                                            if let Some(tree_line) = crate::session::fetch_authed_response_multi(
-                                                                &sess_addr,
-                                                                &sess_key,
-                                                                b"list-tree\n",
-                                                                Duration::from_millis(50),
-                                                                Duration::from_millis(100),
-                                                            ) {
-                                                                if let Ok(wins) = serde_json::from_str::<Vec<WinTree>>(tree_line.trim()) {
-                                                                    let mut win_data = Vec::new();
-                                                                    for w in &wins {
-                                                                        let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
-                                                                        win_data.push((w.id, w.name.clone(), w.active, panes, w.idx));
-                                                                    }
-                                                                    sessions.push((base.to_string(), win_data));
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    sessions.sort_by(|a, b| {
-                                        if a.0 == current_session { std::cmp::Ordering::Less }
-                                        else if b.0 == current_session { std::cmp::Ordering::Greater }
-                                        else { a.0.cmp(&b.0) }
-                                    });
-                                    // Row index of the current session's active window, so the
-                                    // chooser opens its cursor on it (issue #373) instead of the
-                                    // hardcoded top row. The active window is also marked with `*`,
-                                    // glyph-adjacent, matching list_windows_tmux and real tmux.
-                                    let mut active_tree_row: Option<usize> = None;
-                                    for (sess_name, wins) in &sessions {
-                                        let is_current = sess_name == &current_session;
-                                        let nw = wins.len();
-                                        // The row keeps the base to switch to and to
-                                        // kill; the label shows the session's name.
-                                        tree_all.push((true, usize::MAX, 0,
-                                            tree_session_header(tree_ns, sess_name, nw, is_current),
-                                            sess_name.clone()));
-                                        // Every session's windows carry their panes, as
-                                        // tmux's window_tree_build_window builds pane items
-                                        // for every window of every session. Only the
-                                        // current session's rows used to get them, so
-                                        // another session's windows had nothing to expand
-                                        // (discussion #776, note 3).
-                                        for (wid, wname, active, panes, disp) in wins.iter() {
-                                            let marker = if *active { "*" } else { "" };
-                                            if *active && is_current { active_tree_row = Some(tree_all.len()); }
-                                            tree_all.push((true, *wid, 0,
-                                                format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
-                                                sess_name.clone()));
-                                            for (pid, ptitle) in panes {
-                                                tree_all.push((false, *wid, *pid,
-                                                    format!("    {}", ptitle),
-                                                    sess_name.clone()));
-                                            }
-                                        }
-                                    }
-                                    if let Some(r) = active_tree_row { tree_selected = r; }
-                                }
-                                if tree_all.is_empty() {
-                                    for wi in &last_tree {
-                                        let marker = if wi.active { "*" } else { "" };
-                                        if wi.active { tree_selected = tree_all.len(); }
-                                        tree_all.push((true, wi.id, 0, format!("{}{}", wi.name, marker), current_session.clone()));
-                                        for pi in &wi.panes {
-                                            tree_all.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
-                                        }
-                                    }
-                                }
-                                // tmux `window_tree_build_window` under `choose-tree -w`:
-                                // every window row opens collapsed, so the visible lines are
-                                // the session headers and their windows and nothing else.
-                                // That is what makes the jump digit line up with the window
-                                // number in the status bar however many panes a window holds.
-                                let kinds = tree_row_kinds(&tree_all);
-                                tree_collapsed = crate::choose_tree::default_collapsed(&kinds);
-                                let model_cursor = tree_selected;
-                                let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
-                                tree_entries = rows;
-                                tree_vis_map = map;
-                                tree_selected = tree_vis_map
-                                    .iter()
-                                    .position(|&i| i == model_cursor)
-                                    .unwrap_or(0);
+                                open_tree_chooser!();
                             }
                             if do_choose_session {
-                                session_chooser = true;
-                                session_entries.clear();
-                                session_selected = 0;
-                                session_scroll = 0;
-                                session_num_buffer.clear();
-                                session_filter_active = false;
-                                session_filter.clear();
-                                popup_offset = (0, 0);
-                                popup_dragging = false;
-                                popup_rect_last = None;
-                                if choose_tree_preview_default { preview_enabled = true; }
-                                let dir = crate::paths::psmux_dir();
-                                // Collect (label, addr, key) for every port file, then run ONE
-                                // bounded liveness probe per session in parallel. This both lists
-                                // and prunes: total wall time is ~one probe window regardless of
-                                // how many sessions exist, so the picker stays responsive (no
-                                // sequential O(N * timeout) cleanup pass).
-                                let mut targets: Vec<(String, String, String)> = Vec::new();
-                                // A -L socket is a separate server in tmux; a client never
-                                // sees another socket's sessions. Same rule `ls` applies.
-                                let picker_ns = crate::session::session_namespace(&current_session);
-                                if let Ok(entries) = std::fs::read_dir(&dir) {
-                                    for e in entries.flatten() {
-                                        if let Some(fname) = e.file_name().to_str() {
-                                            if let Some((base, ext)) = fname.rsplit_once('.') {
-                                                if ext == "port" {
-                                                    if crate::session::is_warm_session(base) { continue; }
-                                                    if !crate::session::session_visible_from(base, picker_ns) { continue; }
-                                                    if let Ok(port_str) = std::fs::read_to_string(e.path()) {
-                                                        if let Ok(p) = port_str.trim().parse::<u16>() {
-                                                            let sess_addr = format!("127.0.0.1:{}", p);
-                                                            let sess_key = read_session_key(base).unwrap_or_default();
-                                                            targets.push((base.to_string(), sess_addr, sess_key));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                // Issue #259 (batch D): sort by label so the picker's order is
-                                // deterministic, matching the tree_chooser's established
-                                // convention (session.rs::list_all_sessions_tree sorts by name)
-                                // and the g/G Home/End contract. Without this, order followed
-                                // raw directory-enumeration order, which the Win32 API
-                                // explicitly does not guarantee to be stable or alphabetical.
-                                targets.sort_by(|a, b| a.0.cmp(&b.0));
-                                let verdicts = crate::session::classify_sessions_parallel(
-                                    targets,
-                                    Duration::from_millis(50),
-                                    Duration::from_millis(250),
-                                );
-                                for (label, liveness) in verdicts {
-                                    match liveness {
-                                        crate::session::SessionLiveness::Alive(info) => {
-                                            session_entries.push((label, info));
-                                        }
-                                        crate::session::SessionLiveness::Dead => {
-                                            // Server gone (crashed, killed by a reboot, or its
-                                            // port reused by another server). Reap it so it never
-                                            // shows as a "(not responding)" zombie. A live-but-slow
-                                            // server self-heals on its next 5s registry tick.
-                                            if crate::debug_log::session_log_enabled() {
-                                                crate::debug_log::session_log("picker",
-                                                    &format!("reaping dead session '{}' from chooser", label));
-                                            }
-                                            crate::session::remove_session_registry(&label);
-                                        }
-                                        crate::session::SessionLiveness::Unreachable => {
-                                            // Could not connect (transient, non-refused). Keep it
-                                            // and show the honest "(not responding)" rather than
-                                            // deleting on an ambiguous failure.
-                                            session_entries.push((label.clone(), format!("{}: (not responding)", label)));
-                                        }
-                                    }
-                                }
-                                if session_entries.is_empty() {
-                                    session_entries.push((current_session.clone(), format!("{}: (current)", current_session)));
-                                }
-                                for (i, (sname, _)) in session_entries.iter().enumerate() {
-                                    if sname == &current_session { session_selected = i; break; }
-                                }
+                                open_session_chooser!();
                             }
                             if do_choose_buffer {
                                 open_buffer_chooser!();

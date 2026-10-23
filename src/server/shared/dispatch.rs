@@ -2665,6 +2665,10 @@ pub(crate) fn dispatch(
                     };
                     state_dirty = true;
                 }
+                // the same as server/mod.rs run_server
+                CtrlReq::OpenChooser(kind) => {
+                    crate::commands::open_client_chooser(&app, kind);
+                }
                 // copied from server/mod.rs run_server (line 4340 at 86a78100)
                 CtrlReq::MouseDown(cid,x,y) => { if app.mouse_enabled { let previous = crate::program_status::focused_identity(&app); app.latest_client_id = Some(cid); remote_mouse_down(&mut app, x, y); if crate::program_status::focused_identity(&app) != previous { crate::program_status::acknowledge_focused(&app); } state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 // copied from server/mod.rs run_server (line 4341 at 86a78100)
