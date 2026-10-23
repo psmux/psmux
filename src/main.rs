@@ -5697,11 +5697,15 @@ fn run_main() -> io::Result<()> {
                 send_control("previous-layout\n".to_string())?;
                 return Ok(());
             }
-            // choose-tree / choose-window / choose-session — interactive TUI choosers.
-            // From the CLI just forward to the server so the attached client
-            // (if any) can display the chooser.  Return exit 0.
+            // choose-tree / choose-window / choose-session open a chooser on
+            // an attached client. The flags go to the server as given, since
+            // `-s` picks the session list over the tree.
             "choose-tree" | "choose-window" | "choose-session" => {
-                send_control(format!("{}\n", cmd))?;
+                let line = std::iter::once(cmd.to_string())
+                    .chain(cmd_args[1..].iter().map(|a| crate::util::quote_arg_if_needed(a)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                send_control(format!("{}\n", line))?;
                 return Ok(());
             }
             // command-prompt - Open interactive command prompt

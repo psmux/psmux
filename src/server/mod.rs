@@ -8400,6 +8400,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     state_dirty = true;
                 }
+                CtrlReq::OpenChooser(kind) => {
+                    crate::commands::open_client_chooser(&app, kind);
+                }
                 CtrlReq::StatusMessage(msg) => {
                     app.status_message = Some((msg, std::time::Instant::now(), None));
                     state_dirty = true;

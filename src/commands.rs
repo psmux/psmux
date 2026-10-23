@@ -1060,8 +1060,13 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "detach-client" | "detach" => Some(Action::Detach),
         "rename-window" | "renamew" if parts.len() > 1 => Some(Action::Command(cmd.to_string())),
         "rename-window" | "renamew" => Some(Action::RenameWindow),
-        "choose-window" | "choose-tree" => Some(Action::WindowChooser),
-        "choose-session" => Some(Action::SessionChooser),
+        "choose-window" | "choose-tree" | "choose-session" => {
+            let words = parse_command_line(cmd);
+            match crate::choose_tree::chooser_kind(parts[0], words.get(1..).unwrap_or(&[])) {
+                crate::choose_tree::ChooserKind::Session => Some(Action::SessionChooser),
+                crate::choose_tree::ChooserKind::Tree => Some(Action::WindowChooser),
+            }
+        }
         "resize-pane" | "resizep" if parts.iter().any(|p| *p == "-Z") && !parts.contains(&"-t") => Some(Action::ZoomPane),
         "zoom-pane" => Some(Action::ZoomPane),
         "select-pane" | "selectp" => {
@@ -1204,6 +1209,21 @@ pub fn format_action(action: &Action) -> String {
         Action::CommandChain(cmds) => cmds.join(" \\; "),
         Action::SwitchTable(table) => format!("switch-client -T {}", table),
     }
+}
+
+/// Open a chooser on a client, the one prefix+w or prefix+s opens. The
+/// choosers are drawn by the client, so a choose-tree run inside the server
+/// (a hook, a menu item, a copy mode binding) asks the client to open one, as
+/// switch-client asks it to switch. The client that last sent input gets it,
+/// as with switch-client; with none known, every attached client does.
+pub fn open_client_chooser(app: &AppState, kind: crate::choose_tree::ChooserKind) {
+    let directive = kind.directive();
+    if let Some(cid) = app.latest_client_id {
+        if crate::types::send_directive_to_client(cid, directive) {
+            return;
+        }
+    }
+    crate::types::send_directive_to_all_clients(directive);
 }
 
 /// Parse a command line string, respecting quoted arguments
@@ -1563,11 +1583,8 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
         Action::RenameWindow => {
             app.mode = Mode::RenamePrompt { input: String::new() };
         }
-        Action::WindowChooser | Action::SessionChooser => {
-            let tree = build_choose_tree(app);
-            let selected = tree.iter().position(|e| e.is_current_session && e.is_active_window && !e.is_session_header).unwrap_or(0);
-            app.mode = Mode::WindowChooser { selected, tree };
-        }
+        Action::WindowChooser => open_client_chooser(app, crate::choose_tree::ChooserKind::Tree),
+        Action::SessionChooser => open_client_chooser(app, crate::choose_tree::ChooserKind::Session),
         Action::ZoomPane => {
             toggle_zoom(app);
         }
@@ -2994,9 +3011,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "choose-tree" | "choose-window" | "choose-session" => {
-            let tree = build_choose_tree(app);
-            let selected = tree.iter().position(|e| e.is_current_session && e.is_active_window && !e.is_session_header).unwrap_or(0);
-            app.mode = Mode::WindowChooser { selected, tree };
+            let kind = crate::choose_tree::chooser_kind(parts[0], &parts[1..]);
+            open_client_chooser(app, kind);
         }
         "command-prompt" if app.mode.in_copy() => {
             // A copy mode key table binding (tmux's own `:`, `/`, `f`, ... are
