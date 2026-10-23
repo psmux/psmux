@@ -229,11 +229,20 @@ impl ConsoleTap {
         // records carry) and a lowercase ASCII letter in uChar is text. Every
         // other Ctrl+Alt shape, left Ctrl + left Alt above all, stays a chord.
         if altgr_ascii_letter(&rec) {
-            if !rec.key_down {
-                return Verdict::Consumed(None);
+            // The key up goes on as the plain letter's release, not dropped:
+            // the paste head rule (PasteHeadEvidence::head_released) reads a
+            // host written pair by its release, so a paste opening on `i`
+            // would otherwise go out as typing.
+            let kind = if rec.key_down { KeyEventKind::Press } else { KeyEventKind::Release };
+            if rec.key_down {
+                self.high = None;
             }
-            self.high = None;
-            return Verdict::Consumed(Some(press(KeyCode::Char(u as u8 as char), KeyModifiers::empty())));
+            return Verdict::Consumed(Some(Event::Key(KeyEvent {
+                code: KeyCode::Char(u as u8 as char),
+                modifiers: KeyModifiers::empty(),
+                kind,
+                state: KeyEventState::empty(),
+            })));
         }
 
         // Anything else is crossterm's. A character key arriving between two

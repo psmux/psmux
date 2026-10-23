@@ -41,6 +41,7 @@ fn run(tap: &mut ConsoleTap, recs: &[Option<KeyRec>]) -> (Vec<Event>, Vec<Option
     for r in recs {
         match tap.classify(*r) {
             Verdict::NotOurs => left.push(*r),
+            Verdict::Consumed(Some(Event::Key(k))) if k.kind == KeyEventKind::Release => {}
             Verdict::Consumed(Some(e)) => out.push(e),
             Verdict::Consumed(None) => {}
         }
@@ -61,6 +62,7 @@ fn trace(tap: &mut ConsoleTap, recs: &[Option<KeyRec>]) -> Vec<Step> {
     for r in recs {
         match tap.classify(*r) {
             Verdict::NotOurs => out.push(Step::Crossterm(*r)),
+            Verdict::Consumed(Some(Event::Key(k))) if k.kind == KeyEventKind::Release => {}
             Verdict::Consumed(Some(e)) => out.push(Step::Text(e)),
             Verdict::Consumed(None) => {}
         }
@@ -252,4 +254,20 @@ fn a_pending_surrogate_half_is_broken_by_the_letter() {
     let lo = keyed(true, 0, 0xDE0A, 0);
     let (ev, _) = run(&mut tap, &[hi, keyed(true, 0x49, 0x69, 0x0009), lo]);
     assert_eq!(ev, vec![ch('i')]);
+}
+
+#[test]
+fn the_key_up_goes_on_as_the_plain_letters_release() {
+    // The paste head rule reads a host written pair by its release, so the
+    // AltGr letter's key up is handed on as a release of the plain letter.
+    let mut tap = ConsoleTap::new();
+    let up = tap.classify(keyed(false, 0x49, 0x0069, 0x0009));
+    match up {
+        Verdict::Consumed(Some(Event::Key(k))) => {
+            assert_eq!(k.code, KeyCode::Char('i'));
+            assert_eq!(k.modifiers, KeyModifiers::empty());
+            assert_eq!(k.kind, KeyEventKind::Release);
+        }
+        _ => panic!("the key up must be a release of the plain letter"),
+    }
 }
