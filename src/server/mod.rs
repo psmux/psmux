@@ -343,6 +343,37 @@ fn spawn_plugin_scripts(app: &mut AppState) -> Vec<std::process::Child> {
     children
 }
 
+/// What a spare shell in the pool was spawned with, of the options a config
+/// file can change: warm_pane_sync::for_option_change respawns the pool for
+/// each of them.
+fn pool_spawn_inputs(app: &AppState) -> (String, bool, bool, bool) {
+    (
+        app.default_shell.clone(),
+        app.allow_predictions,
+        app.claude_code_fix_tty,
+        app.claude_code_force_interactive,
+    )
+}
+
+/// Respawn the spare pool when a sourced file (a runtime `source-file`, or a
+/// line its job or the startup config's job replays) changed what a spare is
+/// spawned with. `set` from the CLI goes through for_option_change; a file's
+/// `set` did not, so after `set -g default-shell` in a sourced file the next
+/// new-window still opened the old shell from the pool.
+fn reconcile_pool_after_source(
+    app: &mut AppState,
+    pty_system: &dyn portable_pty::PtySystem,
+    before: &(String, bool, bool, bool),
+) {
+    if pool_spawn_inputs(app) != *before {
+        crate::warm_pane_sync::apply(
+            app,
+            pty_system,
+            crate::warm_pane_sync::WarmPaneSync::Respawn("sourced file changed a spawn option"),
+        );
+    }
+}
+
 fn should_spawn_warm_server(app: &AppState) -> bool {
     app.warm_enabled && app.session_name != "__warm__" && !app.destroy_unattached
 }
@@ -6638,7 +6669,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // of them, come back in file order for the source job,
                     // which runs them one after another as tmux's queue does
                     // (issue #842). The -F form and globs are handled there.
+                    let spawn_inputs = pool_spawn_inputs(&app);
                     let parsed = crate::config::source_runtime(&mut app, &path);
+                    reconcile_pool_after_source(&mut app, &*pty_system, &spawn_inputs);
                     // A plugin the file declares before its first command
                     // starts its script now, as one declared after it does
                     // when the job replays the line.
@@ -6693,7 +6726,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SourceReplay(item, resp) => {
                     // A config line a source job kept, now that the commands
                     // before it have run (issue #842).
+                    let spawn_inputs = pool_spawn_inputs(&app);
                     let result = crate::config::replay_deferred_line(&mut app, &item);
+                    reconcile_pool_after_source(&mut app, &*pty_system, &spawn_inputs);
                     // A `set -g @plugin` after the file's first command is
                     // replayed here, once the startup drain has run: its
                     // script starts now, in file order, as a `run-shell -b`
