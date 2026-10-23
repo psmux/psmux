@@ -676,6 +676,16 @@ pub(crate) fn modified_key_name(base: &str, mods: KeyModifiers) -> String {
     }
 }
 
+/// The wire line that forwards one key by name: `send-key <name>\n`.
+///
+/// The server tokenizes the line with the quote aware command parser, so a
+/// name holding a quote is quoted here (issue #888): raw, `send-key M-'`
+/// opened a single quote and the server read the key as `M-`, and wrote
+/// nothing to the pane.  Names that need no quoting go out unchanged.
+pub(crate) fn send_key_line(name: &str) -> String {
+    format!("send-key {}\n", crate::util::quote_arg_if_needed(name))
+}
+
 /// The `send-key` name for an Escape key event (issue #766).
 ///
 /// A front end that writes `ESC ESC` in one write reaches the client, on the
@@ -6739,10 +6749,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     }
                                 }
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::ALT) => {
-                                    cmd_batch.push(format!("send-key C-M-{}\n", c.to_ascii_lowercase()));
+                                    cmd_batch.push(send_key_line(&format!("C-M-{}", c.to_ascii_lowercase())));
                                 }
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
-                                    cmd_batch.push(format!("send-key M-{}\n", c));
+                                    cmd_batch.push(send_key_line(&format!("M-{}", c)));
                                 }
                                 // pwsh-mouse-selection: Ctrl+Shift+C / Ctrl+Shift+V
                                 // explicit copy/paste regardless of selection state.
@@ -6861,9 +6871,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         // onto it) goes by name instead.
                                         cmd_batch.push("send-key C-Space\n".to_string());
                                     } else if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                        cmd_batch.push(format!("send-key C-S-{}\n", c.to_ascii_lowercase()));
+                                        cmd_batch.push(send_key_line(&format!("C-S-{}", c.to_ascii_lowercase())));
                                     } else {
-                                        cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
+                                        cmd_batch.push(send_key_line(&format!("C-{}", c.to_ascii_lowercase())));
                                     }
                                 }
                                 KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
@@ -11242,6 +11252,10 @@ mod test_issue766_paste_then_key;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue858_ctrlv_press.rs"]
 mod test_issue858_ctrlv_press;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue888_send_key_wire_quoting.rs"]
+mod test_issue888_send_key_wire_quoting;
 
 /// How long the client keeps polling console input at 1ms after sending a key,
 /// waiting for that key's echo to come back and be drawn.
