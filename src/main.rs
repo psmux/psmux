@@ -40,6 +40,7 @@ mod ssh_input;
 mod console_tap;
 mod debug_log;
 mod control;
+mod passthrough;
 mod control_ring;
 mod resize_window;
 mod proxy_pane;
@@ -1254,6 +1255,8 @@ fn run_main() -> io::Result<()> {
     let mut f_config_file: Option<String> = None;
     let mut precommand_target: Option<String> = None;
     let mut control_mode: u8 = 0; // 0=off, 1=-C (echo), 2=-CC (no echo)
+    // `-f passthrough` on attach-session or new-session (crate::passthrough).
+    let mut passthrough = false;
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
@@ -2072,11 +2075,13 @@ fn run_main() -> io::Result<()> {
                 // `attach -r` / `attach -f read-only` (issue #724). The flag was
                 // parsed and dropped, so a read only client could type and no
                 // tool could tell it apart from a writable one.
-                if crate::cli::attach_wants_readonly(sub_args.iter().map(|s| s.as_str())) {
+                let flags = crate::cli::attach_client_flags(sub_args.iter().map(|s| s.as_str()));
+                if flags.read_only {
                     env::set_var("PSMUX_CLIENT_READONLY", "1");
                 } else {
                     env::remove_var("PSMUX_CLIENT_READONLY");
                 }
+                passthrough = flags.passthrough;
             }
             "server" => {
                 // #798: every server process starts here; only per-session goes on.
@@ -2145,6 +2150,7 @@ fn run_main() -> io::Result<()> {
                 let mut window_name: Option<String> = None;
                 let mut start_dir: Option<String> = None;
                 let mut attach_if_exists = false;
+                let mut client_flags = crate::cli::ClientFlags::default();
                 let mut init_width: Option<u16> = None;
                 let mut init_height: Option<u16> = None;
                 let mut group_target: Option<String> = None;
@@ -2218,7 +2224,7 @@ fn run_main() -> io::Result<()> {
                                 }
                                 break;
                             }
-                            'f' => { let _ = consume_value!(); break; /* skip value */ }
+                            'f' => { let (v, _) = consume_value!(); client_flags.apply(&v); break; }
                             't' => { let (v, _) = consume_value!(); group_target = Some(v); break; }
                             // Boolean flags
                             'd' => { detached = true; }
@@ -2246,6 +2252,10 @@ fn run_main() -> io::Result<()> {
                 {
                     eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
                     return Ok(());
+                }
+                passthrough = client_flags.passthrough;
+                if client_flags.read_only {
+                    env::set_var("PSMUX_CLIENT_READONLY", "1");
                 }
 
                 let name = session_name.unwrap_or_else(|| {
@@ -6313,6 +6323,11 @@ fn run_main() -> io::Result<()> {
     if control_mode > 0 {
         return run_control_mode(control_mode);
     }
+    // Passthrough: the host terminal gets the active pane's own output bytes
+    // instead of frames, so its scrollback works (crate::passthrough).
+    if passthrough {
+        return crate::passthrough::run();
+    }
 
     // Raw VT pipe detection: under mintty (Git Bash/MSYS2, issue #474) and
     // under `ssh -T` (the Win10 SSH mouse workaround), stdin/stdout are pipes,
@@ -6566,8 +6581,6 @@ fn cc_debug_line_kind(line: &[u8]) -> &str {
 /// protocol.  To bypass ConPTY, the SSH client must disable PTY allocation
 /// so that stdin/stdout are raw pipes: `ssh -T user@host tmux -CC`.
 fn run_control_mode(mode: u8) -> io::Result<()> {
-    use std::net::TcpStream;
-
     // The diagnostics log is opt in (PSMUX_CC_DEBUG=1). It records event
     // kinds, byte counts, timings and errors only: never what was read from
     // stdin, never what the server sent, never environment values.
@@ -6650,89 +6663,19 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     // `ssh -t`. Some clients (e.g. iTerm2's tmux integration) close stdin
     // on the SSH session shortly after seeing the DCS opener when no PTY
     // is allocated, so supporting `ssh -t` is required for them.
-    // Whether stdin is a console whose own echo is switched off below.
-    #[allow(unused_mut)]
-    let mut stdin_console = false;
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetStdHandle(n: u32) -> *mut std::ffi::c_void;
-            fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
-            fn SetConsoleMode(h: *mut std::ffi::c_void, m: u32) -> i32;
-        }
-        const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
-        const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
-        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
-        const ENABLE_LINE_INPUT: u32 = 0x0002;
-        const ENABLE_ECHO_INPUT: u32 = 0x0004;
-        const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
-        const ENABLE_VIRTUAL_TERMINAL_PROCESSING_OUT: u32 = 0x0004;
-        const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
-        unsafe {
-            let h_in = GetStdHandle(STD_INPUT_HANDLE);
-            let h_out = GetStdHandle(STD_OUTPUT_HANDLE);
-            let mut mode_in: u32 = 0;
-            let mut mode_out: u32 = 0;
-            if GetConsoleMode(h_in, &mut mode_in) != 0 {
-                stdin_console = true;
-                let new_in = (mode_in & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
-                    | ENABLE_VIRTUAL_TERMINAL_INPUT;
-                let r = SetConsoleMode(h_in, new_in);
-                cclog!("ConPTY stdin: mode 0x{:x} -> 0x{:x} (set ok={})", mode_in, new_in, r);
-            }
-            if GetConsoleMode(h_out, &mut mode_out) != 0 {
-                let new_out = mode_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING_OUT | DISABLE_NEWLINE_AUTO_RETURN;
-                let r = SetConsoleMode(h_out, new_out);
-                cclog!("ConPTY stdout: mode 0x{:x} -> 0x{:x} (set ok={})", mode_out, new_out, r);
-            }
-        }
+    // The guard puts the console modes back when control mode ends.
+    let console = crate::platform::RawVtConsole::enable();
+    if let Some(c) = console.stdin {
+        cclog!("ConPTY stdin: mode 0x{:x} -> 0x{:x} (set ok={})", c.before, c.after, c.set_ok as i32);
     }
+    if let Some(c) = console.stdout {
+        cclog!("ConPTY stdout: mode 0x{:x} -> 0x{:x} (set ok={})", c.before, c.after, c.set_ok as i32);
+    }
+    // Whether stdin is a console whose own echo is switched off above.
+    let stdin_console = console.stdin.is_some();
 
     let session_name = env::var("PSMUX_SESSION_NAME")
         .unwrap_or_else(|_| "default".to_string());
-
-    // Read port and key
-    let port_path = crate::paths::port_file(&session_name);
-    let key_path = crate::paths::key_file(&session_name);
-    cclog!("port_path exists: {}", std::path::Path::new(&port_path).exists());
-    cclog!("key_path exists: {}", std::path::Path::new(&key_path).exists());
-
-    let port_str = match std::fs::read_to_string(&port_path) {
-        Ok(s) => s,
-        Err(e) => { cclog!("FATAL: cannot read port file: {}", e); return Err(io::Error::new(io::ErrorKind::NotFound, format!("session '{}' not found (no port file)", session_name))); }
-    };
-    let port: u16 = match port_str.trim().parse() {
-        Ok(p) => { cclog!("port: {}", p); p }
-        Err(e) => { cclog!("FATAL: corrupted port file: {}", e); return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupted port file")); }
-    };
-    let key = match std::fs::read_to_string(&key_path) {
-        Ok(k) => { cclog!("key: (read {} bytes)", k.trim().len()); k.trim().to_string() }
-        Err(e) => { cclog!("FATAL: cannot read key file: {}", e); return Err(io::Error::new(io::ErrorKind::NotFound, "session key file not found")); }
-    };
-
-    // Connect
-    cclog!("connecting to 127.0.0.1:{}", port);
-    let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
-        Ok(s) => { cclog!("connected OK"); s }
-        Err(e) => { cclog!("FATAL: connect failed: {}", e); return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!("cannot connect to session: {}", e))); }
-    };
-    let _ = stream.set_nodelay(true);
-
-    // Auth
-    write!(stream, "AUTH {}\n", key)?;
-    stream.flush()?;
-    cclog!("AUTH sent");
-
-    // Read OK response
-    let mut reader = io::BufReader::new(stream.try_clone()?);
-    let mut ok_line = String::new();
-    reader.read_line(&mut ok_line)?;
-    cclog!("auth response ok: {}", ok_line.trim().starts_with("OK"));
-    if !ok_line.trim().starts_with("OK") {
-        cclog!("FATAL: auth failed");
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth failed: {}", ok_line.trim())));
-    }
 
     // Send CONTROL, CONTROL_QUIET or CONTROL_NOECHO.
     //
@@ -6746,9 +6689,10 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         (1, false) => "CONTROL_QUIET",
         _ => "CONTROL_NOECHO",
     };
-    let mut write_stream = reader.get_ref().try_clone()?;
-    write!(write_stream, "{}\n", mode_str)?;
-    write_stream.flush()?;
+    let (reader, mut write_stream) = match crate::session::open_control_connection(&session_name, mode_str) {
+        Ok(conn) => conn,
+        Err(e) => { cclog!("FATAL: {}", e); return Err(e); }
+    };
     cclog!("{} sent, starting I/O threads", mode_str);
 
     // Spawn a thread to read server responses/notifications and print to stdout

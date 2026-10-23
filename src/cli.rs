@@ -2142,15 +2142,15 @@ pub fn client_spec_matches(tty: &str, spec: &str) -> bool {
     !t.is_empty() && (tty == t || tty.strip_prefix("/dev/") == Some(t))
 }
 
-/// Does this `attach-session` argument list ask for a read only client?
+/// The client flags an `attach-session` argument list asks for.
 ///
-/// tmux spells it `-r` (cmd-attach-session.c, "c:dEf:rt:x", which sets
+/// tmux spells read only `-r` (cmd-attach-session.c, "c:dEf:rt:x", which sets
 /// CLIENT_READONLY) or `-f read-only` (a comma list where a leading `!` turns a
 /// flag off). Boolean flags cluster, so `-dr` counts; `-c`, `-f` and `-t` take
 /// a value, which is skipped so a session or directory named `r` is not read
 /// as the flag (issue #724).
-pub fn attach_wants_readonly<'a>(args: impl IntoIterator<Item = &'a str>) -> bool {
-    let mut readonly = false;
+pub fn attach_client_flags<'a>(args: impl IntoIterator<Item = &'a str>) -> ClientFlags {
+    let mut flags = ClientFlags::default();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         if a == "--" { break; }
@@ -2158,18 +2158,12 @@ pub fn attach_wants_readonly<'a>(args: impl IntoIterator<Item = &'a str>) -> boo
         let body = &a[1..];
         for (i, c) in body.char_indices() {
             match c {
-                'r' => readonly = true,
+                'r' => flags.read_only = true,
                 'c' | 'f' | 't' => {
                     let rest = &body[i + c.len_utf8()..];
                     let value = if rest.is_empty() { it.next().unwrap_or("") } else { rest };
                     if c == 'f' {
-                        for flag in value.split(',') {
-                            match flag {
-                                "read-only" => readonly = true,
-                                "!read-only" => readonly = false,
-                                _ => {}
-                            }
-                        }
+                        flags.apply(value);
                     }
                     break;
                 }
@@ -2177,7 +2171,38 @@ pub fn attach_wants_readonly<'a>(args: impl IntoIterator<Item = &'a str>) -> boo
             }
         }
     }
-    readonly
+    flags
+}
+
+/// The client flags psmux acts on, from `-r` and the `-f` list of
+/// `attach-session` and `new-session`.
+///
+/// `passthrough` is psmux's own: the client hands the host terminal the
+/// active pane's output bytes instead of drawing frames, so the terminal's
+/// own scrollback fills as it would in a plain shell session (see
+/// `crate::passthrough`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ClientFlags {
+    pub read_only: bool,
+    pub passthrough: bool,
+}
+
+impl ClientFlags {
+    /// Apply one `-f` value: a comma separated list in which `!name` clears
+    /// a flag. Flags psmux does not act on are ignored, as before.
+    pub fn apply(&mut self, value: &str) {
+        for flag in value.split(',') {
+            let (name, on) = match flag.strip_prefix('!') {
+                Some(name) => (name, false),
+                None => (flag, true),
+            };
+            match name {
+                "read-only" => self.read_only = on,
+                "passthrough" => self.passthrough = on,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Extract a flag value from args, supporting tmux short-flag CLI forms:

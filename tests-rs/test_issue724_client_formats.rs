@@ -177,18 +177,18 @@ fn client_times_are_epoch_seconds() {
 
 #[test]
 fn attach_dash_r_asks_for_read_only() {
-    use crate::cli::attach_wants_readonly;
-    assert!(attach_wants_readonly(["-r", "-t", "work"]));
-    assert!(attach_wants_readonly(["-t", "work", "-r"]));
-    assert!(attach_wants_readonly(["-dr"]));
-    assert!(attach_wants_readonly(["-f", "read-only"]));
-    assert!(attach_wants_readonly(["-f", "ignore-size,read-only"]));
-    assert!(attach_wants_readonly(["-fread-only"]));
-    assert!(!attach_wants_readonly(["-t", "work"]));
-    assert!(!attach_wants_readonly(["-t", "-r"]), "a session called -r is a value, not the flag");
-    assert!(!attach_wants_readonly(["-c", "r"]));
-    assert!(!attach_wants_readonly(["-r", "-f", "!read-only"]));
-    assert!(!attach_wants_readonly(["--", "-r"]));
+    let attach_wants_readonly = |args: &[&str]| crate::cli::attach_client_flags(args.iter().copied()).read_only;
+    assert!(attach_wants_readonly(&["-r", "-t", "work"]));
+    assert!(attach_wants_readonly(&["-t", "work", "-r"]));
+    assert!(attach_wants_readonly(&["-dr"]));
+    assert!(attach_wants_readonly(&["-f", "read-only"]));
+    assert!(attach_wants_readonly(&["-f", "ignore-size,read-only"]));
+    assert!(attach_wants_readonly(&["-fread-only"]));
+    assert!(!attach_wants_readonly(&["-t", "work"]));
+    assert!(!attach_wants_readonly(&["-t", "-r"]), "a session called -r is a value, not the flag");
+    assert!(!attach_wants_readonly(&["-c", "r"]));
+    assert!(!attach_wants_readonly(&["-r", "-f", "!read-only"]));
+    assert!(!attach_wants_readonly(&["--", "-r"]));
 }
 
 #[test]
