@@ -24,6 +24,27 @@ fn clear_inherit(s: &TcpStream) {
 #[cfg(not(windows))]
 fn clear_inherit(_s: &TcpStream) {}
 
+/// Whether a live session other than this server's own is in its namespace.
+/// The standby (`__warm__`) is not a session. A registry entry without a pid
+/// anchor is probed on its port.
+fn namespace_has_other_live_session() -> bool {
+    let own = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+    let ns = crate::server::server_namespace();
+    crate::session::list_session_names_ns(ns.as_deref())
+        .into_iter()
+        .filter(|base| !base.eq_ignore_ascii_case(&own))
+        .any(|base| match crate::session::registry_pid_anchor_alive(&base) {
+            Some(alive) => alive,
+            None => std::fs::read_to_string(crate::paths::port_file(&base))
+                .ok()
+                .and_then(|p| p.trim().parse::<u16>().ok())
+                .is_some_and(|port| {
+                    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100)).is_ok()
+                }),
+        })
+}
+
 /// Run `psmux [-L <this server's namespace>] new-session <args>` and return
 /// what it printed, with a failure turned into an `ERROR:` line (#734 follow
 /// up). The routing variables this server carries are removed so the child
@@ -6303,6 +6324,14 @@ match cmd {
         // new-session -t target: set session group on this server
         if let Some(target) = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string()) {
             let _ = tx.send(CtrlReq::SetSessionGroup(target));
+        } else if from_startup_config && namespace_has_other_live_session() {
+            // tmux runs its config once, when the server starts, so a config
+            // `new-session` makes its session once (cfg.c:71 to :92). Each
+            // psmux session is a server that loads the config: only the first
+            // session of a namespace runs the line, as tmux's first server
+            // does. Every later one made another session each time, so a
+            // tmux config with a bare `new-session` doubled the session list.
+            if !persistent && pending_chain.is_empty() { break; }
         } else {
             // Issue #200: spawn a new session from inside a running session.
             // Parse flags
