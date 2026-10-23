@@ -1017,6 +1017,104 @@ pub fn disable_vti_on_stdin() {
     // No-op on non-Windows platforms
 }
 
+/// One console handle's mode before and after `RawVtConsole::enable`.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsoleModeChange {
+    pub before: u32,
+    pub after: u32,
+    pub set_ok: bool,
+}
+
+/// The console set up for a client that moves VT bytes in both directions
+/// itself (control mode, passthrough): stdin without line input, echo and
+/// Ctrl+C processing and with VT input, so keys arrive as the bytes a
+/// terminal sends; stdout with VT processing and without the carriage return
+/// conhost adds to a line feed. A handle that is not a console is left
+/// alone. `restore` (also run on drop) puts the modes back.
+pub struct RawVtConsole {
+    pub stdin: Option<ConsoleModeChange>,
+    pub stdout: Option<ConsoleModeChange>,
+    restored: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(windows)]
+mod raw_vt_console {
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetStdHandle(n: u32) -> *mut std::ffi::c_void;
+        pub fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
+        pub fn SetConsoleMode(h: *mut std::ffi::c_void, m: u32) -> i32;
+    }
+    pub const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    pub const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+    pub const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    pub const ENABLE_LINE_INPUT: u32 = 0x0002;
+    pub const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    pub const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    pub const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
+
+    pub fn switch(std_handle: u32, mode: impl Fn(u32) -> u32) -> Option<super::ConsoleModeChange> {
+        unsafe {
+            let h = GetStdHandle(std_handle);
+            let mut before: u32 = 0;
+            if GetConsoleMode(h, &mut before) == 0 {
+                return None;
+            }
+            let after = mode(before);
+            let set_ok = SetConsoleMode(h, after) != 0;
+            Some(super::ConsoleModeChange { before, after, set_ok })
+        }
+    }
+
+    pub fn put_back(std_handle: u32, change: &Option<super::ConsoleModeChange>) {
+        if let Some(c) = change {
+            unsafe {
+                SetConsoleMode(GetStdHandle(std_handle), c.before);
+            }
+        }
+    }
+}
+
+impl RawVtConsole {
+    #[cfg(windows)]
+    pub fn enable() -> Self {
+        use raw_vt_console::*;
+        let stdin = switch(STD_INPUT_HANDLE, |m| {
+            (m & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+                | ENABLE_VIRTUAL_TERMINAL_INPUT
+        });
+        let stdout = switch(STD_OUTPUT_HANDLE, |m| {
+            m | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN
+        });
+        RawVtConsole { stdin, stdout, restored: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    #[cfg(not(windows))]
+    pub fn enable() -> Self {
+        RawVtConsole { stdin: None, stdout: None, restored: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// Put the console modes back. Only the first call does anything.
+    pub fn restore(&self) {
+        if self.restored.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            use raw_vt_console::*;
+            put_back(STD_INPUT_HANDLE, &self.stdin);
+            put_back(STD_OUTPUT_HANDLE, &self.stdout);
+        }
+    }
+}
+
+impl Drop for RawVtConsole {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
 /// Drop an "ignore Ctrl+C" state inherited from whatever launched psmux
 /// (issue #668).
 ///

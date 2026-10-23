@@ -2279,6 +2279,42 @@ pub fn validate_auth_key(key: &str) -> Option<&str> {
     Some(k)
 }
 
+/// Open a control protocol connection to the server of `session_name` (a
+/// registry base name): read its port and key files, connect, authenticate
+/// and announce `mode` (`CONTROL`, `CONTROL_QUIET` or `CONTROL_NOECHO`).
+/// Returns a buffered reader and a writer on the same socket. The error says
+/// which step failed.
+pub fn open_control_connection(
+    session_name: &str,
+    mode: &str,
+) -> io::Result<(std::io::BufReader<std::net::TcpStream>, std::net::TcpStream)> {
+    use std::io::BufRead as _;
+    let port_str = std::fs::read_to_string(crate::paths::port_file(session_name)).map_err(|_| {
+        io::Error::new(io::ErrorKind::NotFound, format!("session '{}' not found (no port file)", session_name))
+    })?;
+    let port: u16 = port_str.trim().parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "corrupted port file"))?;
+    let key_raw = std::fs::read_to_string(crate::paths::key_file(session_name))
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "session key file not found"))?;
+    let key = validate_auth_key(&key_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid session key"))?;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| {
+        io::Error::new(io::ErrorKind::ConnectionRefused, format!("cannot connect to session: {}", e))
+    })?;
+    let _ = stream.set_nodelay(true);
+    write!(stream, "AUTH {}\n", key)?;
+    stream.flush()?;
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    let mut ok_line = String::new();
+    reader.read_line(&mut ok_line)?;
+    if !ok_line.trim().starts_with("OK") {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth failed: {}", ok_line.trim())));
+    }
+    write!(stream, "{}\n", mode)?;
+    stream.flush()?;
+    Ok((reader, stream))
+}
+
 /// Send an authenticated command to a server (fire-and-forget).
 ///
 /// Validates the key against CRLF/NUL injection. Silently no-ops on a
