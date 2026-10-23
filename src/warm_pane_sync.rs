@@ -389,6 +389,31 @@ pub fn reconcile_consumed_parser(parser: &mut vt100::Parser, app: &AppState) {
             s.set_allow_alternate_screen(app.allow_alternate_screen);
         }
     }
+    let mode = parser.screen().extended_keys_mode();
+    let want = consumed_extended_keys_mode(mode, vt100::extended_keys_option());
+    if want != mode {
+        parser.screen_mut().set_extended_keys_mode(want);
+    }
+}
+
+/// The extended key mode a pane adopted now should have, given the mode its
+/// parser holds (`current`) and the `extended-keys` option (`ek`: 0 off,
+/// 1 on, 2 always).  Issue #860: tmux puts a screen into mode 1 when it is
+/// CREATED under `always` (screen.c screen_reinit, screen-write.c
+/// screen_write_reset), but a spare, a warm claimed pane and the early boot
+/// pane were all created before the config (or a later `set`) chose the
+/// option, so their parsers took the mode of an older value.  Adopting the
+/// pane is the moment tmux would have created it:
+///   * under `always` a pane still in the standard mode goes to mode 1;
+///   * under `off` no request could have counted (input.c INPUT_CSI_MODSET
+///     ignores it), so any mode left over from an earlier value is dropped;
+///   * under `on` the mode is whatever the application asked for, kept.
+pub fn consumed_extended_keys_mode(current: u8, ek: u8) -> u8 {
+    match ek {
+        2 if current == 0 => 1,
+        0 => 0,
+        _ => current,
+    }
 }
 
 /// Spares whose shell exists but which the server does not own yet (#686).
@@ -573,6 +598,10 @@ pub fn reap_inflight_spares() -> usize {
 #[cfg(test)]
 #[path = "../tests-rs/test_warm_pane_sync.rs"]
 mod test_warm_pane_sync;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue860_adopted_key_mode.rs"]
+mod test_issue860_adopted_key_mode;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue686_pool_reap.rs"]
