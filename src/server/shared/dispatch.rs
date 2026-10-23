@@ -2644,6 +2644,11 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
+                // shared: server-info, info and show-messages from an attached
+                // client, the text run_server sends
+                CtrlReq::ServerInfo(resp) => {
+                    let _ = resp.send(crate::commands::server_info_text(&app));
+                }
                 // copied from server/mod.rs run_server (line 8279 at 86a78100)
                 CtrlReq::ShowTextPopup(title, content) => {
                     let lines: Vec<&str> = content.lines().collect();

@@ -19,7 +19,7 @@ use ratatui::prelude::Rect;
 
 #[cfg(test)]
 use crate::types::LayoutKind;
-use crate::types::{AppState, CtrlReq, Mode, FocusDir, PipePaneState, VERSION,
+use crate::types::{AppState, CtrlReq, Mode, FocusDir, PipePaneState,
     WaitChannel, WaitForOp, Node, Action, Bind};
 use crate::platform::install_console_ctrl_handler;
 use crate::pane::{create_window, create_window_with_env, create_window_raw, kill_active_pane, kill_pane_by_id};
@@ -8267,18 +8267,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(app.paste_listing(true));
                 }
                 CtrlReq::ServerInfo(resp) => {
-                    let info = format!(
-                        "psmux {} (Windows)\npid: {}\nsession: {}\nwindows: {}\nuptime: {}s\nsocket: {}",
-                        VERSION,
-                        std::process::id(),
-                        app.session_name,
-                        app.windows.len(),
-                        (chrono::Local::now() - app.created_at).num_seconds(),
-                        {
-                            crate::paths::port_file(&app.port_file_base())
-                        }
-                    );
-                    let _ = resp.send(info);
+                    let _ = resp.send(crate::commands::server_info_text(&app));
                 }
                 CtrlReq::SendPrefix => {
                     // Send the prefix key to the active pane as if typed
@@ -8354,10 +8343,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::PromptDone(id) => {
                     app.finish_prompt_request(id);
                     state_dirty = true;
-                }
-                CtrlReq::ShowMessages(resp) => {
-                    // Return message log (tmux stores recent log messages)
-                    let _ = resp.send(String::new());
                 }
                 CtrlReq::ConfigWarnings(resp) => {
                     let _ = resp.send(config_warnings_reply(&app.config_warnings));

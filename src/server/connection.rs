@@ -6063,18 +6063,6 @@ match cmd {
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
-    "show-messages" | "showmsgs" => {
-        let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::ShowMessages(rtx));
-        if let Ok(text) = rrx.recv() {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("show-messages".to_string(), text));
-            } else {
-                let _ = write!(write_stream, "{}", text); let _ = write_stream.flush();
-            }
-        }
-        if !persistent && pending_chain.is_empty() { break; }
-    }
     "command-prompt" => {
         // Opened on an attached client (#789 follow up). Without -b the
         // command line waits until the prompt closes, as tmux's does
@@ -6556,12 +6544,16 @@ match cmd {
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
-    "server-info" | "info" => {
+    // tmux's default aliases make info and server-info `show-messages -JT`.
+    // psmux has no message log, terminfo or job table, so show-messages
+    // prints the same summary whatever its -J, -T and -t say.
+    "server-info" | "info" | "show-messages" | "showmsgs" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ServerInfo(rtx));
         if let Ok(text) = rrx.recv() {
             if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("server-info".to_string(), text));
+                let title = if cmd.starts_with("show") { "show-messages" } else { "server-info" };
+                let _ = tx.send(CtrlReq::ShowTextPopup(title.to_string(), text));
             } else {
                 let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
             }
@@ -7943,7 +7935,7 @@ fn dispatch_control_command(
             }
             true
         }
-        "server-info" | "info" => {
+        "server-info" | "info" | "show-messages" | "showmsgs" => {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ServerInfo(rtx));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {

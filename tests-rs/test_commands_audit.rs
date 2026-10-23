@@ -532,9 +532,15 @@ fn server_info_shows_popup_with_version_and_session() {
     execute_command_string(&mut app, "server-info").unwrap();
     let (cmd, out) = extract_popup(&app);
     assert_eq!(cmd, "server-info");
-    assert!(out.contains("psmux"), "should contain 'psmux'");
-    assert!(out.contains("my_sess"), "should contain session name");
-    assert!(out.contains("Windows:"), "should contain window count");
+    // The same six lines the server sends the CLI and control mode.
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 6, "{:?}", lines);
+    assert_eq!(lines[0], format!("psmux {} (Windows)", crate::types::VERSION));
+    assert_eq!(lines[1], format!("pid: {}", std::process::id()));
+    assert_eq!(lines[2], "session: my_sess");
+    assert_eq!(lines[3], format!("windows: {}", app.windows.len()));
+    assert!(lines[4].starts_with("uptime: ") && lines[4].ends_with('s'), "{}", lines[4]);
+    assert!(lines[5].starts_with("socket: "), "{}", lines[5]);
 }
 
 #[test]
@@ -546,16 +552,22 @@ fn info_alias_works() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  show-messages: shows popup
+//  show-messages: the server-info text, whatever -J, -T and -t say
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn show_messages_shows_popup() {
-    let mut app = mock_app_with_window();
-    execute_command_string(&mut app, "show-messages").unwrap();
-    let (cmd, out) = extract_popup(&app);
-    assert_eq!(cmd, "show-messages");
-    assert!(out.contains("no messages"), "empty messages log should show feedback");
+fn show_messages_shows_the_server_info_text() {
+    // tmux's default aliases make info and server-info `show-messages -JT`.
+    // psmux has no message log, so every form prints what info prints.
+    for line in ["show-messages", "show-messages -J", "show-messages -T", "show-messages -JT", "show-messages -t /dev/pts/0"] {
+        let mut app = mock_app_with_window();
+        app.session_name = "my_sess".to_string();
+        execute_command_string(&mut app, line).unwrap();
+        let (cmd, out) = extract_popup(&app);
+        assert_eq!(cmd, "show-messages", "{}", line);
+        assert_eq!(out.lines().next(), Some(format!("psmux {} (Windows)", crate::types::VERSION).as_str()), "{}", line);
+        assert!(out.contains("\nsession: my_sess\n"), "{}: {}", line, out);
+    }
 }
 
 #[test]
