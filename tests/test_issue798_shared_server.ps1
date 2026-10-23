@@ -247,6 +247,45 @@ try {
     Check ($rp.Code -eq $rs.Code) "CLI: a list naming an unknown command exits the same in both modes ($($rp.Code) / $($rs.Code))" "$($rp.Out) / $($rs.Out)"
     Check ((Capture $ctx 'A:0') -ne $null) "the server still answers after the refusals"
 
+    Head "Part 5b: save-buffer and show-buffer answer as a per session server does (#896)"
+    # The CLI's save-buffer sends show-buffer and writes the reply into the
+    # file, so a refused show-buffer used to land in the user's file at exit 0.
+    # P (per session) and D (shared) are compared byte for byte.
+    $keepHex = [BitConverter]::ToString([Text.Encoding]::ASCII.GetBytes('KEEP'))
+    function Save-Buffer($c, $session, $tag, [string[]]$flags) {
+        $f = Join-Path $c.Dir "save-$tag.txt"
+        [IO.File]::WriteAllText($f, 'KEEP')
+        $r = S $c (@('save-buffer', '-t', $session) + $flags + @($f))
+        return @{ Code = $r.Code; Out = $r.Out; Hex = [BitConverter]::ToString([IO.File]::ReadAllBytes($f)) }
+    }
+    $cases = @(@{ Tag = 'plain'; Flags = @() }, @{ Tag = 'nosuch'; Flags = @('-b', 'nosuch') }, @{ Tag = 'append'; Flags = @('-a') })
+    foreach ($k in $cases) {
+        $p = Save-Buffer $pctx 'P' "empty-$($k.Tag)" $k.Flags
+        $s = Save-Buffer $ctx 'D' "empty-$($k.Tag)" $k.Flags
+        Check ($p.Code -eq $s.Code -and $p.Hex -ceq $s.Hex -and $p.Out -ceq $s.Out) "no buffer, save-buffer $($k.Tag): the same exit, file bytes and output ($($p.Code))" "per-session [$($p.Code) $($p.Hex) $($p.Out)] shared [$($s.Code) $($s.Hex) $($s.Out)]"
+    }
+    $s = Save-Buffer $ctx 'D' 'empty-nosuch-again' @('-b', 'nosuch')
+    Check ($s.Code -eq 1 -and $s.Hex -ceq $keepHex -and $s.Out -match 'no buffer nosuch') "shared: a missing -b name keeps the file and exits 1" "[$($s.Code) $($s.Hex) $($s.Out)]"
+    foreach ($pair in @(@($pctx, 'P'), @($ctx, 'D'))) {
+        $c = $pair[0]; $sess = $pair[1]
+        S $c @('send-keys', '-t', "${sess}:0", "Write-Output BUF896-$sess", 'Enter') | Out-Null
+        Check (Wait-Until { (Capture $c "${sess}:0") -match "(?m)^BUF896-$sess" } 10000) "$sess shows its marker"
+        Check ((S $c @('capture-pane', '-t', "${sess}:0")).Code -eq 0) "capture-pane -t $sess fills a buffer"
+        $plain = Save-Buffer $c $sess 'full-plain' @()
+        $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $c.Dir 'save-full-plain.txt')))
+        Check ($plain.Code -eq 0 -and $text -match "(?m)^BUF896-$sess") "$sess save-buffer writes the buffer (exit $($plain.Code))" $text
+        $named = Save-Buffer $c $sess 'full-named' @('-b', 'buffer0')
+        Check ($named.Code -eq 0 -and $named.Hex -ceq $plain.Hex) "$sess save-buffer -b buffer0 writes the same bytes" "[$($named.Code)]"
+        $append = Save-Buffer $c $sess 'full-append' @('-a')
+        Check ($append.Code -eq 0 -and $append.Hex -ceq "$keepHex-$($plain.Hex)") "$sess save-buffer -a appends the buffer to KEEP" "[$($append.Code)]"
+        $missing = Save-Buffer $c $sess 'full-nosuch' @('-b', 'nosuch')
+        Check ($missing.Code -eq 1 -and $missing.Hex -ceq $keepHex) "$sess save-buffer -b nosuch still keeps the file and exits 1" "[$($missing.Code) $($missing.Hex)]"
+        $shown = S $c @('show-buffer', '-t', $sess)
+        Check ($shown.Code -eq 0 -and $shown.Out -match "(?m)^BUF896-$sess" -and $shown.Out -notmatch 'unknown command') "$sess show-buffer prints the buffer" "[$($shown.Code)] $($shown.Out)"
+    }
+    $other = Save-Buffer $ctx 'C' 'other-session' @()
+    Check ($other.Code -eq 0 -and $other.Hex -ceq '') "shared: C does not see D's buffer (an empty file, as a per session server writes)" "[$($other.Code) $($other.Hex)]"
+
     Head "Part 6: a real attached client on each session"
     foreach ($s in 'A', 'C') {
         $env:PSMUX_DATA_DIR = $ctx.Dir

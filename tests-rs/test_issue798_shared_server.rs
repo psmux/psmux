@@ -129,6 +129,16 @@ fn supported_and_unsupported_commands() {
     assert_eq!(router::first_unsupported("neww \\; join-pane -s 1"), Some("join-pane".into()));
 }
 
+// #896: the CLI's save-buffer sends show-buffer and writes the reply into the
+// user's file, so the shared server must run show-buffer, not refuse it.
+#[test]
+fn show_buffer_is_supported() {
+    assert!(router::is_supported("show-buffer"));
+    assert!(router::is_supported("showb"));
+    assert_eq!(router::first_unsupported("show-buffer"), None);
+    assert_eq!(router::first_unsupported("show-buffer -b buffer0"), None);
+}
+
 #[test]
 fn server_wide_writes() {
     for g in ["set -g status-left x", "set-option -gq @a 1", "set -s escape-time 0", "setw -g mode-keys vi",
