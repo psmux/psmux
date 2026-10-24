@@ -6398,7 +6398,13 @@ fn run_main() -> io::Result<()> {
     // sends no such thing: `tty_start_tty` (tty.c) sends `cnorm`, which is
     // visibility, and the blink rides along with the shape in DECSCUSR when a
     // shape is asked for at all.
-    execute!(stdout, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(stdout, EnableMouseCapture)?;
+    if crate::ssh_input::host_bracketed_paste(
+        use_vt_input || pipe_vt,
+        crate::ssh_input::is_conemu_host(),
+    ) {
+        execute!(stdout, EnableBracketedPaste)?;
+    }
     apply_cursor_style(&mut stdout)?;
 
     let input = if pipe_vt {
