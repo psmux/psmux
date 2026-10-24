@@ -442,6 +442,82 @@ try {
     }
     $r = Run $k '<unset>' @('kill-server')
     Check ($r.Code -eq 0 -and (Wait-Until { @(Server-Procs $k.Ns).Count -eq 0 } 5000)) "kill-server ends that shared server"
+
+    Head "Part 11: job-environ answers with the session's own identity (#895)"
+    $j = New-Ns "j"
+    foreach ($s in 'A', 'B') { Run $j 'shared' @('new-session', '-d', '-s', $s, '-x', '120', '-y', '30') | Out-Null }
+    Check (@(Shared-Procs $j.Ns).Count -eq 1) "A and B in one shared server"
+    $jPort = @{}
+    foreach ($s in 'A', 'B') { $jPort[$s] = (Get-Content (Join-Path $j.Dir "$($j.Ns)__$s.port")).Trim() }
+
+    function Job-Environ($c, $session) {
+        $port = [int](Get-Content (Join-Path $c.Dir "$($c.Ns)__$session.port")).Trim()
+        $key = (Get-Content (Join-Path $c.Dir "$($c.Ns)__$session.key")).Trim()
+        $t = New-Object Net.Sockets.TcpClient; $t.Connect('127.0.0.1', $port)
+        $st = $t.GetStream(); $st.ReadTimeout = 4000
+        $b = [Text.Encoding]::UTF8.GetBytes("AUTH $key`njob-environ`n"); $st.Write($b, 0, $b.Length); $st.Flush()
+        $ms = New-Object IO.MemoryStream; $buf = New-Object byte[] 4096
+        $eof = $false; $err = ''
+        try { while (($n = $st.Read($buf, 0, $buf.Length)) -gt 0) { $ms.Write($buf, 0, $n) }; $eof = $true } catch { $err = $_.Exception.Message }
+        $t.Close()
+        return @{ Text = [Text.Encoding]::UTF8.GetString($ms.ToArray()); Eof = $eof; Err = $err }
+    }
+    function Env-Entries($b64) {
+        try { $bytes = [Convert]::FromBase64String($b64) } catch { return @() }
+        @([Text.Encoding]::Unicode.GetString($bytes) -split "`0" | Where-Object { $_ })
+    }
+    function Env-Values($entries, $name) {
+        @($entries | Where-Object { $_ -match ('^(?i)' + [regex]::Escape($name) + '=') } | ForEach-Object { $_.Substring($name.Length + 1) })
+    }
+
+    foreach ($pair in @(('B', 'A'), ('A', 'B'))) {
+        $s = $pair[0]; $other = $pair[1]
+        S $j @('display-message', '-p', '-t', $other, 'x') | Out-Null
+        $reply = Job-Environ $j $s
+        Check $reply.Eof "raw job-environ to $s ends at EOF, not a read timeout" $reply.Err
+        $lines = $reply.Text -split "`n"
+        Check ($lines.Count -eq 3 -and $lines[0] -ceq 'OK' -and $lines[1] -match '^[A-Za-z0-9+/]+=*$' -and $lines[2] -eq '') "the reply to $s is OK and one base64 line" (($reply.Text -replace "`n", '\n') -replace '^(.{120}).*$', '$1...')
+        $entries = @(Env-Entries $lines[1])
+        $tmux = @(Env-Values $entries 'TMUX')
+        $target = @(Env-Values $entries 'PSMUX_TARGET_SESSION')
+        $excl = @(Env-Values $entries 'MSYS2_ENV_CONV_EXCL')
+        Check ($tmux.Count -eq 1 -and $tmux[0] -match (',' + $jPort[$s] + ',0$')) "its TMUX is there once and names $s's port $($jPort[$s])" ($tmux -join ' | ')
+        Check ($target.Count -eq 1 -and $target[0] -ceq "$($j.Ns)__$s") "its PSMUX_TARGET_SESSION is there once and names $s" ($target -join ' | ')
+        Check ($excl.Count -eq 1 -and $excl[0] -ceq 'TMUX') "its MSYS2_ENV_CONV_EXCL is there once" ($excl -join ' | ')
+        Check ($entries.Count -gt 0 -and @(Env-Values $entries 'PSMUX_SOCKET_PATH').Count -eq 0) "it has no PSMUX_SOCKET_PATH" "($($entries.Count) entries)"
+    }
+
+    $jobOut = Join-Path $ROOT "job895.txt"; $condOut = Join-Path $ROOT "cond895.txt"
+    $jobCmd = Join-Path $ROOT "job895.cmd"; $condCmd = Join-Path $ROOT "cond895.cmd"
+    $plainCmd = Join-Path $ROOT "plain895.cmd"; $runner = Join-Path $ROOT "fromA895.cmd"
+    Set-Content -Encoding ASCII $jobCmd @(
+        "@echo off",
+        ">`"$jobOut`" echo TMUX=%TMUX%",
+        ">>`"$jobOut`" echo TS=%PSMUX_TARGET_SESSION%",
+        "`"$PSMUX`" -L $($j.Ns) new-window -d -n FROMJOB")
+    Set-Content -Encoding ASCII $condCmd @("@echo off", ">`"$condOut`" echo TMUX=%TMUX%", "exit /b 0")
+    Set-Content -Encoding ASCII $plainCmd @("@`"$PSMUX`" -L $($j.Ns) new-window -d -n NOTARGET")
+    Set-Content -Encoding ASCII $runner @(
+        "@`"$PSMUX`" -L $($j.Ns) run-shell -t B `"$jobCmd`"",
+        "@`"$PSMUX`" -L $($j.Ns) if-shell -t B `"$condCmd`" `"set -t B @if895 yes`"",
+        "@`"$PSMUX`" -L $($j.Ns) run-shell `"$plainCmd`"",
+        "@echo DONE895")
+    S $j @('send-keys', '-t', 'A:0', "& '$runner'", 'Enter') | Out-Null
+    $done = Wait-Until { (Capture $j 'A:0') -match '(?m)^DONE895' } 30000
+    Check $done "the jobs started from a pane of A finished"
+    $names = { param($sess) @((S $j @('list-windows', '-t', $sess, '-F', '#{window_name}')).Out -split "`n" | Where-Object { $_ }) }
+    $winsA = @(& $names 'A'); $winsB = @(& $names 'B')
+    Check (@($winsB | Where-Object { $_ -eq 'FROMJOB' }).Count -eq 1 -and $winsB.Count -eq 2) "run-shell -t B from A: the job's untargeted new-window is made in B" ($winsB -join ',')
+    Check (@($winsA | Where-Object { $_ -eq 'FROMJOB' }).Count -eq 0) "and not in A" ($winsA -join ',')
+    Check (@($winsA | Where-Object { $_ -eq 'NOTARGET' }).Count -eq 1 -and $winsA.Count -eq 2) "run-shell without -t from A still makes it in A" ($winsA -join ',')
+    $jobLines = @(Get-Content $jobOut -EA SilentlyContinue)
+    Check (($jobLines | Where-Object { $_ -match (',' + $jPort['B'] + ',0\s*$') -and $_ -match '^TMUX=' }).Count -eq 1) "the job saw B's TMUX" ($jobLines -join ' | ')
+    Check (($jobLines | Where-Object { $_ -match ('^TS=' + [regex]::Escape("$($j.Ns)__B") + '\s*$') }).Count -eq 1) "the job saw B's PSMUX_TARGET_SESSION" ($jobLines -join ' | ')
+    $condLines = @(Get-Content $condOut -EA SilentlyContinue)
+    Check (($condLines | Where-Object { $_ -match (',' + $jPort['B'] + ',0\s*$') -and $_ -match '^TMUX=' }).Count -eq 1) "if-shell -t B: the condition saw B's TMUX" ($condLines -join ' | ')
+    Check ((S $j @('show', '-v', '-t', 'B', '@if895')).Out -eq 'yes') "and its branch ran"
+    $r = Run $j '<unset>' @('kill-server')
+    Check ($r.Code -eq 0 -and (Wait-Until { @(Server-Procs $j.Ns).Count -eq 0 } 5000)) "kill-server ends that shared server"
 } finally {
     Remove-Item Env:PSMUX_SERVER_MODE -EA SilentlyContinue
     foreach ($p in $script:Windows) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -EA SilentlyContinue } }

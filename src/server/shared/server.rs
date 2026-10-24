@@ -757,6 +757,7 @@ fn create_session(
     }
     let aliases: Aliases = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
+    let identity: Arc<Vec<(String, String)>> = Arc::new(job_identity(port, ns, &base));
     {
         let stop = stop.clone();
         let tx = tx.clone();
@@ -774,8 +775,9 @@ fn create_session(
                 let key = key.clone();
                 let aliases = aliases.clone();
                 let globals = globals.clone();
+                let identity = identity.clone();
                 thread::spawn(move || {
-                    serve_session_connection(stream, tx, &key, aliases, sid, &globals)
+                    serve_session_connection(stream, tx, &key, aliases, sid, &globals, &identity)
                 });
             }
         });
@@ -903,6 +905,7 @@ fn serve_session_connection(
     aliases: Aliases,
     sid: usize,
     globals: &Globals,
+    identity: &[(String, String)],
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
     let mut buf = vec![0u8; 16 * 1024];
@@ -925,6 +928,13 @@ fn serve_session_connection(
         std::thread::sleep(Duration::from_millis(1));
     }
     let refusal = match router::parse_opening(&buf[..n]) {
+        router::Opening::Command {
+            key: opening_key,
+            line,
+            lines,
+        } if opening_key == key && line == "job-environ" => {
+            Some((Outcome::Done(job_environ_reply(identity)), lines))
+        }
         router::Opening::Command { key: k, line, lines } if k == key => {
             let refused = router::first_unsupported(&line).map(|name| (Outcome::Unsupported(name), lines));
             if refused.is_none() {
@@ -941,6 +951,39 @@ fn serve_session_connection(
         Some((outcome, lines)) => refuse(stream, &outcome, lines),
         None => connection::handle_connection(stream, tx, key, aliases),
     }
+}
+
+fn job_identity(port: u16, ns: &Option<String>, base: &str) -> Vec<(String, String)> {
+    let mut vars = crate::commands::job_env_vars(Some(port), ns.as_deref());
+    vars.push(("PSMUX_TARGET_SESSION".to_string(), base.to_string()));
+    vars
+}
+
+fn with_session_identity(
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    identity: &[(String, String)],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut out: Vec<(std::ffi::OsString, std::ffi::OsString)> = env
+        .into_iter()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            !identity
+                .iter()
+                .any(|(owned, _)| owned.eq_ignore_ascii_case(&name))
+        })
+        .collect();
+    out.extend(
+        identity
+            .iter()
+            .map(|(name, value)| (name.into(), value.into())),
+    );
+    out
+}
+
+fn job_environ_reply(identity: &[(String, String)]) -> String {
+    use base64::Engine;
+    let env = with_session_identity(crate::commands::job_environment(), identity);
+    base64::engine::general_purpose::STANDARD.encode(crate::client_env::encode_env_block(env))
 }
 
 /// A server wide write (`router::is_global_write`) arriving on one session's
