@@ -85,3 +85,140 @@ fn an_io_error_keeps_the_session() {
     });
     assert_eq!(flow, Flow::Continue);
 }
+
+use std::ffi::OsString;
+
+fn os_pairs(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+    pairs
+        .iter()
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect()
+}
+
+fn values_of(env: &[(OsString, OsString)], name: &str) -> Vec<OsString> {
+    env.iter()
+        .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+fn identity_b() -> Vec<(String, String)> {
+    job_identity(4242, &Some("t798".to_string()), "t798__B")
+}
+
+#[test]
+fn job_identity_names_the_session_and_its_port() {
+    let identity = identity_b();
+    let get = |name: &str| {
+        identity
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        get("TMUX"),
+        Some(crate::pane::tmux_env_value(Some(4242), Some("t798")))
+    );
+    assert_eq!(get("MSYS2_ENV_CONV_EXCL"), Some("TMUX".to_string()));
+    assert_eq!(get("PSMUX_TARGET_SESSION"), Some("t798__B".to_string()));
+    assert_eq!(identity.len(), 3);
+}
+
+#[test]
+fn identity_replaces_names_of_any_case_once_each() {
+    let env = os_pairs(&[
+        ("tmux", "/tmp/psmux-1/t798,1111,0"),
+        ("TMUX", "/tmp/psmux-2/t798,2222,0"),
+        ("Psmux_Target_Session", "t798__A"),
+        ("msys2_env_conv_excl", "OTHER"),
+        ("PATH", "C:\\bin"),
+    ]);
+    let out = with_session_identity(env, &identity_b());
+    for (name, value) in identity_b() {
+        assert_eq!(
+            values_of(&out, &name),
+            vec![OsString::from(value)],
+            "{name}"
+        );
+    }
+    assert_eq!(values_of(&out, "PATH"), vec![OsString::from("C:\\bin")]);
+    assert_eq!(out.len(), 4);
+}
+
+#[test]
+fn identity_is_added_when_the_environment_lacks_it() {
+    let out = with_session_identity(os_pairs(&[("PATH", "C:\\bin")]), &identity_b());
+    for (name, value) in identity_b() {
+        assert_eq!(
+            values_of(&out, &name),
+            vec![OsString::from(value)],
+            "{name}"
+        );
+    }
+    assert_eq!(out.len(), 4);
+}
+
+#[cfg(windows)]
+#[test]
+fn values_outside_the_identity_are_kept_byte_for_byte() {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let odd = OsString::from_wide(&[0x0041, 0xD800, 0x0042]);
+    let env = vec![
+        (OsString::from("ODD895"), odd.clone()),
+        (OsString::from("TMUX"), OsString::from("x")),
+    ];
+    let out = with_session_identity(env, &identity_b());
+    let kept = values_of(&out, "ODD895");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        kept[0].encode_wide().collect::<Vec<u16>>(),
+        odd.encode_wide().collect::<Vec<u16>>()
+    );
+}
+
+struct VarBack(&'static str, Option<OsString>);
+impl Drop for VarBack {
+    fn drop(&mut self) {
+        match self.1.take() {
+            Some(value) => std::env::set_var(self.0, value),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+#[test]
+fn the_reply_carries_the_identity_and_never_the_socket_path() {
+    use base64::Engine;
+    let _lock = crate::util::lock_test_env();
+    let _socket = VarBack(
+        crate::socket_path::SOCKET_PATH_ENV,
+        std::env::var_os(crate::socket_path::SOCKET_PATH_ENV),
+    );
+    let _target = VarBack(
+        "PSMUX_TARGET_SESSION",
+        std::env::var_os("PSMUX_TARGET_SESSION"),
+    );
+    std::env::set_var(crate::socket_path::SOCKET_PATH_ENV, "C:\\t798\\sock");
+    let ns = Some("t798".to_string());
+    let mut ids = ServerIds::new();
+    let mut session_a = session("A");
+    session_a.app.control_port = Some(1111);
+    let reply = std::cell::RefCell::new(String::new());
+    run_request(&mut session_a, &mut ids, &ns, |_app, _lp| {
+        *reply.borrow_mut() = job_environ_reply(&identity_b());
+        Ok(Flow::Continue)
+    });
+    let reply = reply.into_inner();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(reply.as_bytes())
+        .expect("base64");
+    let env = crate::client_env::decode_env_block(&bytes).expect("env block");
+    for (name, value) in identity_b() {
+        assert_eq!(
+            values_of(&env, &name),
+            vec![OsString::from(value)],
+            "{name}"
+        );
+    }
+    assert!(values_of(&env, crate::socket_path::SOCKET_PATH_ENV).is_empty());
+}
