@@ -377,6 +377,38 @@ pub(crate) fn vt_input_forced(value: Option<&str>) -> bool {
     )
 }
 
+/// Returns `true` when the client runs in a ConEmu console. ConEmu sets
+/// `ConEmuPID` (the PID of the ConEmu GUI) for every process it starts
+/// (conemu.github.io/en/ConEmuEnvironment.html); Cmder is ConEmu too.
+pub fn is_conemu_host() -> bool {
+    std::env::var_os("ConEmuPID").is_some()
+}
+
+/// Whether the client asks the host terminal for bracketed paste
+/// (`ESC[?2004h`).
+///
+/// tmux always asks (`tty_start_tty`, tty.c:367-368 in 3.7c), because its
+/// input reader always decodes the markers (`ESC[200~` and `ESC[201~` in the
+/// key table, tty-keys.c:212-213). psmux decodes them only on the VT input
+/// route and the pipe route. On the console route that is fine under ConPTY,
+/// where conhost strips the markers before the client reads its input (see
+/// `vt_input_forced`), but ConEmu has no ConPTY: it writes the paste into the
+/// real console with `WriteConsoleInput`, markers included, as plain key
+/// records. The client forwarded them as keys, so a paste of `Hello` reached
+/// the pane as ESC, `[200~Hello`, ESC, `[201~`, and PowerShell showed
+/// `200~Hello201~` (#902). Measured in ConEmu 230724.
+///
+/// Putting ConEmu on the VT input route would decode them, but there the real
+/// console re-encodes each key record as legacy VT, so Ctrl+Enter becomes
+/// 0x0a (C-j, a C-j prefix), Ctrl+Backspace becomes 0x1f (C-_) and
+/// Shift+Enter becomes a plain CR, all of which the console route keeps
+/// apart. So ConEmu stays on the console route and is not asked for the
+/// markers: the paste arrives as typed keys, which the client's paste
+/// detection already sends to the pane as one paste.
+pub(crate) fn host_bracketed_paste(decodes_markers: bool, conemu: bool) -> bool {
+    decodes_markers || !conemu
+}
+
 /// Returns the Windows build number (e.g. 19045 for Win10 22H2, 22631 for
 /// Win11 23H2).  Returns `None` on non-Windows or if the query fails.
 #[cfg(windows)]
@@ -3104,6 +3136,10 @@ mod tests_pr468_wezterm_vt_input;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue787_alacritty_vt_input.rs"]
 mod tests_issue787_alacritty_vt_input;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue902_conemu_bracketed_paste.rs"]
+mod tests_issue902_conemu_bracketed_paste;
 
 #[cfg(test)]
 #[cfg(windows)]
