@@ -2975,6 +2975,15 @@ pub(crate) fn dispatch(
                 CtrlReq::SetBuffer(content) => {
                     app.paste_add(content);
                 }
+                // copied from server/mod.rs run_server (line 5950 at 5068b6fc)
+                CtrlReq::ShowBuffer(resp) => {
+                    let content = app.paste_top().unwrap_or_default().to_string();
+                    let _ = resp.send(content);
+                }
+                // copied from server/mod.rs run_server (line 5954 at 5068b6fc)
+                CtrlReq::ShowNamedBuffer(resp, name) => {
+                    let _ = resp.send(app.paste_get(&name).map(str::to_string));
+                }
                 // shared: everything step 2 does not handle (see the module
                 // comment). Its reply channel, if any, closes here.
                 _ => {}

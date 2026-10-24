@@ -73,6 +73,49 @@ fn a_request_runs_with_its_own_session_entered() {
     }
 }
 
+/// Run one show-buffer request of `s` through the shared dispatch.
+fn show(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, name: Option<&str>) -> Result<Option<String>, std::sync::mpsc::TryRecvError> {
+    let pty_system = portable_pty::native_pty_system();
+    match name {
+        None => {
+            let (rtx, rrx) = std::sync::mpsc::channel::<String>();
+            run_request(s, ids, ns, |app, lp| {
+                crate::server::shared::dispatch::dispatch(app, lp, CtrlReq::ShowBuffer(rtx), &*pty_system)
+            });
+            rrx.try_recv().map(Some)
+        }
+        Some(name) => {
+            let (rtx, rrx) = std::sync::mpsc::channel::<Option<String>>();
+            run_request(s, ids, ns, |app, lp| {
+                crate::server::shared::dispatch::dispatch(app, lp, CtrlReq::ShowNamedBuffer(rtx, name.to_string()), &*pty_system)
+            });
+            rrx.try_recv()
+        }
+    }
+}
+
+// #896: show-buffer answers from the requesting session's own buffers, as a
+// per session server does (server/mod.rs ShowBuffer and ShowNamedBuffer).
+#[test]
+fn show_buffer_reads_the_requesting_sessions_buffers() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("t798".to_string());
+    let mut ids = ServerIds::new();
+    let mut a = session("A");
+    let mut b = session("B");
+    a.app.paste_add("hello".to_string());
+    a.app.paste_set("kept", "named data".to_string());
+    assert_eq!(show(&mut a, &mut ids, &ns, None), Ok(Some("hello".to_string())));
+    assert_eq!(show(&mut a, &mut ids, &ns, Some("buffer0")), Ok(Some("hello".to_string())));
+    assert_eq!(show(&mut a, &mut ids, &ns, Some("kept")), Ok(Some("named data".to_string())));
+    assert_eq!(show(&mut a, &mut ids, &ns, Some("nosuch")), Ok(None));
+    // B holds no buffer: A's are not visible from it.
+    assert_eq!(show(&mut b, &mut ids, &ns, None), Ok(Some(String::new())));
+    assert_eq!(show(&mut b, &mut ids, &ns, Some("buffer0")), Ok(None));
+    assert_eq!(show(&mut b, &mut ids, &ns, Some("kept")), Ok(None));
+}
+
 #[test]
 fn an_io_error_keeps_the_session() {
     let _lock = crate::util::lock_test_env();

@@ -31,6 +31,7 @@ pub const SUPPORTED: &[&str] = &[
     "send-text", "send-key", "send-paste",
     "capture-pane", "capturep",
     "display-message", "display",
+    "show-buffer", "showb",
     // listings
     "list-windows", "lsw",
     "list-panes", "lsp",
