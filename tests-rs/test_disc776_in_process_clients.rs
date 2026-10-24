@@ -16,6 +16,7 @@ fn client(id: u64, pid: u32) -> ClientInfo {
         last_activity: std::time::Instant::now(),
         tty_name: crate::types::client_tty_name(id, Some(pid)),
         is_control: false,
+        termfeatures: crate::terminal_features::TerminalFeatures::from_bits(0xf),
         last_session: None,
         pid,
         readonly: false,

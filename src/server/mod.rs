@@ -3994,11 +3994,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let text = crate::format::with_sessionless(true, || crate::format::expand_format_untimed(&fmt, &app));
                     let _ = resp.send(text);
                 }
-                CtrlReq::ClientAttach(cid, pid) => {
+                CtrlReq::ClientAttach(cid, pid, features) => {
                     // Registration and the attached counter are one idempotent
                     // operation. A duplicate attach for the same connection
                     // must not leave the session permanently ghost-attached.
                     if app.register_client_with_pid(cid, false, pid) {
+                        if let Some(features) = features {
+                            app.client_registry.get_mut(&cid).unwrap().termfeatures = features;
+                        }
                         // A client that attaches here has just changed the
                         // session it is looking at, which is exactly when tmux
                         // fires it: server-client.c:448

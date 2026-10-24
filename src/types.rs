@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use portable_pty::MasterPty;
 use ratatui::prelude::Rect;
 use chrono::Local;
+use crate::terminal_features::TerminalFeatures;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -125,6 +126,8 @@ pub struct ClientInfo {
     pub tty_name: String,
     /// True for CONTROL/CONTROL_NOECHO clients
     pub is_control: bool,
+    /// Terminal capabilities reported at attach, including unknown bits.
+    pub termfeatures: TerminalFeatures,
     /// The session THIS client was in before it switched here, if any.
     ///
     /// psmux runs one server per session, so a switch tears the client off one
@@ -2551,6 +2554,10 @@ impl AppState {
             last_activity: std::time::Instant::now(),
             tty_name: tty,
             is_control,
+            termfeatures: TerminalFeatures::from_bits(
+                TerminalFeatures::COLOR_256.bits() | TerminalFeatures::RGB.bits()
+                    | TerminalFeatures::HYPERLINKS.bits() | TerminalFeatures::TITLE.bits(),
+            ),
             last_session: None,
             pid: pid.unwrap_or(0),
             readonly: false,
@@ -3792,9 +3799,8 @@ pub enum CtrlReq {
         styled: bool,
         opts: crate::copy_mode::CaptureOpts,
     },
-    /// (client id, process id of the attaching client when the server could
-    /// read it from the connection, issue #724).
-    ClientAttach(u64, Option<u32>),
+    /// Client id, peer process id when known, and optional terminal feature report.
+    ClientAttach(u64, Option<u32>, Option<TerminalFeatures>),
     ClientDetach(u64),
     DumpLayout(mpsc::Sender<String>),
     DumpState(mpsc::Sender<String>, bool, u64),  // (resp, allow_nc, client_id)

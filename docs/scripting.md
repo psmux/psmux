@@ -472,6 +472,18 @@ client attached, the identity variables (`client_name`, `client_pid`, `client_re
 | `#{client_activity}` / `#{client_created}` | Timestamps for the client |
 | `#{client_activity_string}` / `#{client_created_string}` | The same, already formatted |
 | `#{client_termname}` / `#{client_termtype}` | Terminal type reported by the client |
+| `#{client_termfeatures}` | Comma-separated terminal features reported at attach for the selected client; empty with no client |
+
+Clients advertise `256,RGB,hyperlinks,title`. Clients that send no valid feature report receive
+the same default. This reports psmux's fixed feature set, not detected host capabilities.
+Host detection, `terminal-features` configuration, and feature-based output gating are not implemented;
+OSC 8 forwarding is unchanged.
+
+The optional attach argument is `features=0x<hex digits>`, an unsigned 64-bit mask. Leading zeroes
+are optional. Bits 0, 1, 2, and 3 represent `256`, `RGB`, `hyperlinks`, and `title`, respectively.
+Unknown bits are retained, but only known feature names appear in `client_termfeatures`.
+Malformed or overflowing reports are ignored without rejecting the attachment; a zero mask is valid
+and produces an empty feature list.
 
 ### Server, host and misc variables
 
@@ -532,7 +544,6 @@ rather than live state. They exist for tmux format compatibility. Do not build l
 | `#{pane_start_path}` / `#{pane_tabs}` | empty |
 | `#{cursor_flag}` | `0` |
 | `#{scroll_region_upper}` | `0` |
-| `#{client_termfeatures}` | a fixed string |
 | `#{client_utf8}` | `1` |
 | `#{client_cell_width}` / `#{client_cell_height}` | a fixed value |
 | `#{client_written}` / `#{client_discarded}` | `0` |

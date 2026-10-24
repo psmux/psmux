@@ -512,7 +512,7 @@ in a tool that keys on them. Do not build on these:
 `session_stack`, `window_bigger`, `window_offset_x`, `window_offset_y`, `window_stack_index`,
 `window_cell_width`, `window_cell_height`, `window_linked_sessions_list`, `pane_dead_signal`,
 `pane_dead_status`, `pane_dead_time`, `pane_start_path`, `pane_tabs`, `cursor_flag`,
-`scroll_region_upper`, `client_termfeatures`, `client_utf8`, `client_cell_width`, `client_cell_height`,
+`scroll_region_upper`, `client_utf8`, `client_cell_width`, `client_cell_height`,
 `client_written`, `client_discarded`, `alternate_saved_x`, `alternate_saved_y`, `origin_flag`,
 `insert_flag`, `keypad_cursor_flag`, `keypad_flag`, `wrap_flag`, `line`, `command`,
 `command_list_name`, `command_list_alias`, `command_list_usage`, `config_files`.

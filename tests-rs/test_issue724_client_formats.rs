@@ -19,6 +19,7 @@ fn client(id: u64, pid: u32, readonly: bool, control: bool) -> ClientInfo {
         last_activity: std::time::Instant::now(),
         tty_name: crate::types::client_tty_name(id, Some(pid)),
         is_control: control,
+        termfeatures: crate::terminal_features::TerminalFeatures::from_bits(0xf),
         last_session: None,
         pid,
         readonly,
@@ -63,7 +64,7 @@ fn list_clients_format_is_expanded_for_each_client() {
 }
 
 #[test]
-fn client_termfeatures_include_hyperlinks() {
+fn client_termfeatures_default() {
     let app = app_with_two_clients();
     assert_eq!(expand_format("#{client_termfeatures}", &app), "256,RGB,hyperlinks,title");
     assert_eq!(

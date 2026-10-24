@@ -4681,7 +4681,10 @@ match cmd {
             if let Some(env) = client_environ.clone() {
                 let _ = tx.send(CtrlReq::ClientEnviron(env));
             }
-            let _ = tx.send(CtrlReq::ClientAttach(client_id, connection_peer_pid(r.get_ref())));
+            // Keep optional feature metadata on the existing attach command.
+            let features = args.iter().find_map(|a| a.strip_prefix("features="))
+                .and_then(crate::terminal_features::TerminalFeatures::from_hex);
+            let _ = tx.send(CtrlReq::ClientAttach(client_id, connection_peer_pid(r.get_ref()), features));
             attached_sent = true;
         }
         if !persistent { let _ = write!(write_stream, "ok\n"); }
@@ -5973,7 +5976,7 @@ match cmd {
             if let Some(env) = client_environ.clone() {
                 let _ = tx.send(CtrlReq::ClientEnviron(env));
             }
-            let _ = tx.send(CtrlReq::ClientAttach(client_id, connection_peer_pid(r.get_ref())));
+            let _ = tx.send(CtrlReq::ClientAttach(client_id, connection_peer_pid(r.get_ref()), None));
             attached_sent = true;
         }
     }
@@ -8503,6 +8506,10 @@ mod tests_send_keys_literal_byte;
 #[cfg(test)]
 #[path = "../../tests-rs/test_refresh_client_flags.rs"]
 mod tests_refresh_client_flags;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue763_attach_report.rs"]
+mod tests_issue763_attach_report;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_pr740_run_shell_reader.rs"]

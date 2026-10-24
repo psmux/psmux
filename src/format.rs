@@ -1484,7 +1484,7 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
             }
         },
         "client_termname" | "client_termtype" => env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()),
-        "client_termfeatures" => "256,RGB,hyperlinks,title".into(),
+        "client_termfeatures" => format_client(app).map(|ci| ci.termfeatures.to_string()).unwrap_or_default(),
         "client_utf8" => "1".into(),
         "client_cell_width" => "8".into(),
         "client_cell_height" => "16".into(),
@@ -2728,6 +2728,10 @@ mod tests_format_modifier_chain_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue724_client_formats.rs"]
 mod tests_issue724_client_formats;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue763_client_termfeatures.rs"]
+mod tests_issue763_client_termfeatures;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue767_floating_panes.rs"]

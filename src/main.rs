@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 mod types;
+mod terminal_features;
 mod platform;
 mod cli;
 mod session;

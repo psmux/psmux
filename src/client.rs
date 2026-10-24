@@ -2835,6 +2835,14 @@ pub(crate) fn status_rows_reserved(status_visible: bool, status_lines: usize) ->
     if status_visible { status_lines.max(1).min(u16::MAX as usize) as u16 } else { 0 }
 }
 
+fn reported_terminal_features() -> crate::terminal_features::TerminalFeatures {
+    use crate::terminal_features::TerminalFeatures;
+    TerminalFeatures::from_bits(
+        TerminalFeatures::COLOR_256.bits() | TerminalFeatures::RGB.bits()
+            | TerminalFeatures::HYPERLINKS.bits() | TerminalFeatures::TITLE.bits(),
+    )
+}
+
 fn establish_connection_with_timeout(
     addr: &str,
     key: &str,
@@ -2887,7 +2895,8 @@ fn establish_connection_with_timeout(
         let line = format!("client-environ {}\n", base64::engine::general_purpose::STANDARD.encode(&block));
         let _ = writer.write_all(line.as_bytes());
     }
-    let attach_res = writer.write_all(b"client-attach\n");
+    let attach = format!("client-attach features={:#x}\n", reported_terminal_features().bits());
+    let attach_res = writer.write_all(attach.as_bytes());
     if (persistent_res.is_err() || attach_res.is_err()) && crate::debug_log::reconnect_log_enabled() {
         crate::debug_log::reconnect_log(&format!(
             "handshake write FAILED: persistent={:?} client-attach={:?}",
@@ -11406,6 +11415,10 @@ mod test_issue507_popup_cursor;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue605_stale_port_attach.rs"]
 mod test_issue605_stale_port_attach;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue763_client_report.rs"]
+mod tests_issue763_client_report;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_window_content_styles.rs"]
