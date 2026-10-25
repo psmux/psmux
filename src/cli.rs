@@ -125,9 +125,6 @@ const ARGS_TEMPLATES: &[(&str, &str, &str)] = &[
     // psmux-only commands.  tmux has no cmd_entry for these, so the templates
     // come from psmux's own handlers (docs/tmux_args_reference.md is the
     // per-command flag list psmux actually parses).
-    ("choose-session",        "",           "F:f:K:kNO:rt:yZ"),
-    ("choose-window",         "",           "F:f:K:kNO:rt:yZ"),
-    ("server-info",           "info",       ""),
     ("send-paste",            "",           "t:"),
 ];
 
@@ -146,8 +143,6 @@ const PSMUX_EXTRA_FLAGS: &[(&str, &str)] = &[
 /// Aliases psmux accepts that tmux does not define, mapped to the canonical
 /// command whose template they share (docs/tmux_args_reference.md).
 const EXTRA_ALIASES: &[(&str, &str)] = &[
-    ("split-pane", "split-window"),
-    ("splitp", "split-window"),
     ("kill-ses", "kill-session"),
     ("a", "attach-session"),
     ("at", "attach-session"),
@@ -1038,7 +1033,7 @@ pub fn spawns_pane_with_client_path(cmd: &str) -> bool {
     matches!(
         cmd,
         "new-window" | "neww"
-            | "split-window" | "splitw" | "split-pane" | "splitp"
+            | "split-window" | "splitw"
             | "new-pane" | "newp"
             | "respawn-pane" | "respawnp" | "resp"
             | "respawn-window" | "respawnw"
@@ -1282,7 +1277,8 @@ SESSION COMMANDS:
         -s <session>        Detach all clients of a specific session
         -a                  Detach all other clients (or all from CLI)
         -P                  Also kill the parent shell on detach
-    server-info, info       Show server information
+    show-messages, showmsgs Show server information (info and server-info
+                            are its default aliases)
 
 WINDOW COMMANDS:
     new-window, neww        Create a new window in current session

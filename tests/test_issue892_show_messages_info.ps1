@@ -118,7 +118,8 @@ try {
 
     Write-Host "`n--- an attached client ---" -ForegroundColor Cyan
     Check-Popup ":show-messages" "^b{SLEEP:500}:{SLEEP:600}show-messages{ENTER}{SLEEP:1500}" "show-messages"
-    Check-Popup ":info" "^b{SLEEP:500}:{SLEEP:600}info{ENTER}{SLEEP:1500}" "server-info"
+    # info is a default command-alias, so the command that runs is show-messages.
+    Check-Popup ":info" "^b{SLEEP:500}:{SLEEP:600}info{ENTER}{SLEEP:1500}" "show-messages"
     Check-Popup "a prefix binding to 'show-messages -JT'" "^b{SLEEP:500}M{SLEEP:1500}" "show-messages"
     Check-Popup "an after-new-window hook running show-messages" { param($c) P set-hook -t $S after-new-window "show-messages" | Out-Null; P new-window -d -t $S | Out-Null } "show-messages"
     P set-hook -u -t $S after-new-window | Out-Null

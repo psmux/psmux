@@ -1107,11 +1107,11 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
                 Some(Action::NewWindow)
             }
         }
-        "split-window" | "splitw" | "split-pane" | "splitp" => {
+        "split-window" | "splitw" => {
             // If extra flags like -c, -d, -p, -F, or a shell command are present,
             // store as Command to preserve the full argument string.
             let has_extra = parts.iter().any(|p| matches!(*p, "-c" | "-d" | "-p" | "-l" | "-F" | "-P" | "-b" | "-f" | "-I" | "-Z" | "-e"))
-                || parts.iter().any(|p| !p.starts_with('-') && *p != "split-window" && *p != "splitw" && *p != "split-pane" && *p != "splitp");
+                || parts[1..].iter().any(|p| !p.starts_with('-'));
             if has_extra {
                 Some(Action::Command(cmd.to_string()))
             } else if parts.iter().any(|p| *p == "-h") {
@@ -1152,9 +1152,9 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "detach-client" | "detach" => Some(Action::Detach),
         "rename-window" | "renamew" if parts.len() > 1 => Some(Action::Command(cmd.to_string())),
         "rename-window" | "renamew" => Some(Action::RenameWindow),
-        "choose-window" | "choose-tree" | "choose-session" => {
+        "choose-tree" => {
             let words = parse_command_line(cmd);
-            match crate::choose_tree::chooser_kind(parts[0], words.get(1..).unwrap_or(&[])) {
+            match crate::choose_tree::chooser_kind(words.get(1..).unwrap_or(&[])) {
                 crate::choose_tree::ChooserKind::Session => Some(Action::SessionChooser),
                 crate::choose_tree::ChooserKind::Tree => Some(Action::WindowChooser),
             }
@@ -1248,7 +1248,6 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "unbind-key" | "unbind" => Some(Action::Command(cmd.to_string())),
         "attach-session" | "attach" | "a" | "at" => Some(Action::Command(cmd.to_string())),
         "new-session" | "new" => Some(Action::Command(cmd.to_string())),
-        "server-info" | "info" => Some(Action::Command(cmd.to_string())),
         "start-server" | "start" => Some(Action::Command(cmd.to_string())),
         "lock-client" | "lockc" => Some(Action::Command(cmd.to_string())),
         "lock-server" | "lock" => Some(Action::Command(cmd.to_string())),
@@ -1285,8 +1284,8 @@ pub fn format_action(action: &Action) -> String {
         Action::Paste => "paste-buffer".to_string(),
         Action::Detach => "detach-client".to_string(),
         Action::RenameWindow => "rename-window".to_string(),
-        Action::WindowChooser => "choose-window".to_string(),
-        Action::SessionChooser => "choose-session".to_string(),
+        Action::WindowChooser => "choose-tree".to_string(),
+        Action::SessionChooser => "choose-tree -s".to_string(),
         Action::ZoomPane => "resize-pane -Z".to_string(),
         Action::MoveFocus(dir) => {
             let flag = match dir {
@@ -1710,6 +1709,10 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
 
     let parts: Vec<&str> = cmdline.split_whitespace().collect();
     if parts.is_empty() { return Ok(()); }
+    // A `command-alias` runs what it stands for, which the arms below know.
+    if crate::command_alias::read(&app.command_aliases).contains_key(parts[0]) {
+        return execute_command_string(app, &cmdline);
+    }
     match parts[0] {
         // Commands that need local (embedded-mode) handling.
         // In server mode the client sends these via TCP directly, so
@@ -1718,7 +1721,7 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
             let pty_system = portable_pty::native_pty_system();
             create_window(&*pty_system, app, None, None, false)?;
         }
-        "split-window" | "splitw" | "split-pane" | "splitp" => {
+        "split-window" | "splitw" => {
             let kind = if parts.iter().any(|p| *p == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
             let zoom_after_split = parts.iter().any(|p| *p == "-Z");
             if zoom_after_split {
@@ -1805,7 +1808,7 @@ pub(crate) fn in_server_target_kind(cmd: &str) -> Option<InServerTarget> {
         "kill-pane" | "killp" | "respawn-pane" | "respawnp" | "resize-pane" | "resizep"
         | "capture-pane" | "capturep" | "clear-history" | "clearhist" | "pipe-pane" | "pipep"
         | "send-keys" | "send" | "display-message" | "display" | "select-layout" | "selectl"
-        | "paste-buffer" | "pasteb" | "split-window" | "splitw" | "split-pane" | "splitp" => Some(InServerTarget::Pane),
+        | "paste-buffer" | "pasteb" | "split-window" | "splitw" => Some(InServerTarget::Pane),
         _ => None,
     }
 }
@@ -2348,6 +2351,21 @@ fn requote(args: &[&str]) -> String {
 }
 
 fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()> {
+    // `command-alias` is expanded ahead of the arms below, as tmux expands an
+    // alias before it looks the command up. Only a name no arm knew reached
+    // the server's expansion before, with its words split on whitespace. The
+    // alias's own commands are not expanded again (tmux CMD_PARSE_NOALIAS).
+    let expanded = crate::command_alias::read(&app.command_aliases).expand(&parse_command_line(cmd));
+    if let Some(commands) = expanded {
+        for words in commands {
+            execute_unaliased_command(app, &crate::command_alias::command_line(&words))?;
+        }
+        return Ok(());
+    }
+    execute_unaliased_command(app, cmd)
+}
+
+fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // Quotes group and are removed here, as tmux's command parser does and as
     // the server's own command line handler (connection.rs) already does. A
     // whitespace split kept them: a copy mode prompt's `rename-window '%%'`
@@ -2425,7 +2443,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             }
         }
-        "split-window" | "splitw" | "split-pane" | "splitp" => {
+        "split-window" | "splitw" => {
             if let Some(port) = app.control_port {
                 // Forward the full command string to preserve -c, -d, -p etc. flags
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
@@ -3108,8 +3126,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             }
         }
-        "choose-tree" | "choose-window" | "choose-session" => {
-            let kind = crate::choose_tree::chooser_kind(parts[0], &parts[1..]);
+        "choose-tree" => {
+            let kind = crate::choose_tree::chooser_kind(&parts[1..]);
             open_client_chooser(app, kind);
         }
         "command-prompt" if app.mode.in_copy() => {
@@ -3812,10 +3830,6 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "start-server" | "start" => {
             // Already running
-        }
-        "server-info" | "info" => {
-            let text = server_info_text(app);
-            show_output_popup(app, "server-info", text);
         }
         "new-session" | "new" => {
             // Issue #200: create a new session from inside a running session.

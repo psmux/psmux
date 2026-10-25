@@ -85,7 +85,7 @@ See [keybindings.md](keybindings.md) for the full copy mode key reference.
 - `if-shell` and `run-shell` for conditional config logic
 - **30 event hooks** : `after-new-window`, `after-split-window`, `client-attached`, `pane-died`, `pane-focus-in`, `window-linked`, and more. Note that `set-hook` accepts any name without validating it, so a typo silently never fires
 - **Config file conditionals** : `%if`, `%elif`, `%else`, `%endif` blocks (they nest), plus `%hidden NAME=value`. The condition is a format string, so `%if "#{==:#{@theme},dark}"` works. See [configuration.md](configuration.md)
-- **User defined command aliases** : `set -g command-alias 'bigsplit=split-window -p 70'` creates your own command name. It resolves from key bindings and config lines. See [configuration.md](configuration.md)
+- **User defined command aliases** : `set -s command-alias[100] 'bigsplit=split-window -p 70'` creates your own command name, in tmux's array form. It resolves from the CLI, key bindings, the command prompt, hooks and control mode. See [configuration.md](configuration.md)
 - **Positional pane targets** : `select-pane -t '{top-right}'`, plus `{top-left}`, `{bottom-left}`, `{bottom-right}`, `{top}`, `{bottom}`, `{left}`, `{right}`. See [scripting.md](scripting.md)
 - **Prompt history** : `show-prompt-history` (`showphist`) and `clear-prompt-history` (`clearphist`) inspect and reset what the command prompt remembers. See [scripting.md](scripting.md)
 - **Session groups** : `set -g session-group <name>` or `psmux server -g <name>` links sessions, surfaced by `#{session_group}`, `#{session_group_size}`, and `#{session_grouped}`. See [scripting.md](scripting.md)

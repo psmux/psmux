@@ -184,7 +184,7 @@ fn the_reported_twelve_commands_all_reject_a_dangling_t() {
 #[test]
 fn alias_forms_reject_a_dangling_t() {
     for alias in [
-        "killw", "neww", "splitw", "splitp", "split-pane", "lsp", "lsw",
+        "killw", "neww", "splitw", "lsp", "lsw",
         "selectp", "selectw", "renamew", "send", "display", "capturep",
         "resizep", "killp", "swapw", "movew", "linkw", "breakp", "joinp",
         "clearhist", "respawnp", "respawnw", "lastp", "last", "next", "prev",
@@ -349,9 +349,12 @@ fn templates_resolve_through_names_aliases_and_psmux_extras() {
     assert_eq!(args_template("killw"), Some("af:t:"));
     assert_eq!(args_template("kill-session"), Some("aCgf:t:"));
     // psmux-only aliases share the canonical command's template.
-    assert_eq!(args_template("split-pane"), args_template("split-window"));
-    assert_eq!(args_template("splitp"), args_template("split-window"));
     assert_eq!(args_template("kill-ses"), args_template("kill-session"));
+    // tmux's default command aliases are no commands: the CLI leaves them to
+    // the server's alias table, and the command they run is checked there.
+    for alias in ["split-pane", "splitp", "info", "server-info", "choose-window", "choose-session"] {
+        assert_eq!(args_template(alias), None, "{}", alias);
+    }
     assert_eq!(args_template("nope"), None);
 }
 
@@ -382,8 +385,6 @@ fn psmux_only_aliases_resolve_to_their_canonical_command() {
         ("show-window-option", "show-window-options"),
         ("warmup", "start-server"),
         ("kill-ses", "kill-session"),
-        ("splitp", "split-window"),
-        ("split-pane", "split-window"),
     ] {
         assert_eq!(args_template(alias), args_template(canonical), "{}", alias);
     }
@@ -411,7 +412,7 @@ fn psmux_only_value_flags_are_covered_too() {
     assert_eq!(err("send-paste", &["-t"]), "-t expects an argument");
     assert_eq!(err("new-pane", &["-t"]), "-t expects an argument");
     assert_eq!(err("newp", &["-c"]), "-c expects an argument");
-    assert_eq!(err("choose-session", &["-F"]), "-F expects an argument");
+    assert_eq!(err("choose-tree", &["-F"]), "-F expects an argument");
 }
 
 #[test]

@@ -33,9 +33,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `capture-pane` | `capturep` | `eJpb:E:S:t:` | CLI, SRV, CFG, CTL |
 | `choose-buffer` | `chooseb` | none | CLI, SRV, CFG |
 | `choose-client` | *(none)* | none | CLI, SRV, CFG |
-| `choose-session` | *(none)* | none | CLI, SRV, CFG |
 | `choose-tree` | *(none)* | `sw` | CLI, SRV, CFG |
-| `choose-window` | *(none)* | `s` | CLI, SRV, CFG |
 | `clear-history` | `clearhist` | `Ht:` | CLI, SRV, CFG |
 | `clear-prompt-history` | `clearphist` | none | SRV |
 | `clock-mode` | *(none)* | none | CLI, SRV, CFG |
@@ -103,7 +101,6 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `send-paste` | *(none)* | `t:` plus one base64 positional payload | CLI, SRV |
 | `send-prefix` | *(none)* | none | CLI, SRV, CFG |
 | `send-text` | *(none)* | none, takes the text as positional arguments | SRV |
-| `server-info` | `info` | none | CLI, SRV, CFG, CTL |
 | `set-buffer` | `setb` | `ab:t:n:w` | CLI, SRV, CFG, CTL |
 | `set-environment` | `setenv` | `grhut:` | CLI, SRV, CFG, CTL |
 | `set-hook` | *(none)* | `gua` | CLI, SRV, CFG, CTL |
@@ -118,7 +115,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `show-prompt-history` | `showphist` | none | SRV |
 | `show-window-options` | `showw`, `show-window-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `source-file` | `source` | `t:Fnqv` | CLI, SRV, CFG, CTL |
-| `split-window` | `splitw`, `split-pane`, `splitp` | `hvdPZc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
+| `split-window` | `splitw` | `hvdPZc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
 | `start-server` | `start`, `warmup` | none | CLI, SRV, CFG |
 | `suspend-client` | `suspendc` | none | CLI, SRV, CFG |
 | `swap-pane` | `swapp` | `UDds:t:` | CLI, SRV, CFG, CTL |
@@ -196,9 +193,6 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 **start-server** (`start`, `warmup`)
 - No flags. Starts the namespace's server (a warm standby, so the next `new-session` is also instant).
 - Commands queued after it (`start-server ; set-option -g exit-empty off`) run against that server, in order, stopping at the first error, as in tmux. With `exit-empty off` the empty server answers untargeted commands (`display-message -p '#{pid}'`, `show-options`, `list-sessions`) before any session exists, and the next `new-session` lands in it (issue #734).
-
-**server-info** (`info`)
-- No flags. Prints the psmux version, the server's pid, the session, its window count, the uptime and the session's port file. show-messages prints the same.
 
 **list-clients** (`lsc`)
 - Value: `-F` (format), honored on the server and control mode layers. The CLI front end forwards a bare `list-clients`, so `psmux list-clients -F ...` silently drops the format.
@@ -288,7 +282,7 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 
 ### Pane commands
 
-**split-window** (`splitw`, `split-pane`, `splitp`)
+**split-window** (`splitw`; `split-pane` and `splitp` are default command aliases)
 - Boolean: `-h` (horizontal), `-v` (vertical), `-d` (do not switch), `-P` (print the new pane info)
 - Boolean, since PR #572: `-Z` (zoom the new pane once the split is made)
 - Value: `-p` (percentage size), `-l` (size in cells or a percentage), `-c` (start directory), `-T` (pane title), `-F` (format), `-e` (environment `KEY=VALUE`), `-t` (target, value consumed)
@@ -553,7 +547,7 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - One token may carry several flags, as tmux writes its own `/` binding: `-kpkey` is `-k` followed by `-p key`. A flag that takes no value falls through to the next letter in the token, and the first one that does takes whatever is left of it.
 - With no `-p`, the prompt is headed with the name of the command the template will run, in brackets: `command-prompt "move-window -t '%%'"` opens a prompt headed `(move-window)`.
 
-**choose-tree**, **choose-window**, **choose-session**
+**choose-tree** (`choose-window` and `choose-session` are default command aliases)
 - `-s` opens the session list, the chooser prefix+s opens. Without it the window tree opens, the chooser prefix+w opens, with every window collapsed. `-w` asks for that tree, and `-s` wins when both are given, as in tmux (`window-tree.c`). choose-window and choose-session are tmux's default aliases for `choose-tree -w` and `choose-tree -s`, so `choose-window -s` lists the sessions and choose-session always does.
 - One token may carry several flags: `-Zs` is `-Z -s`, as tmux's own prefix+s binding writes it. The value of `-F`, `-f`, `-K`, `-O` or `-t` is never read as a flag.
 - The choosers are drawn by the client. Run from the command prompt or a root table binding, the chooser opens on that client. Run from a hook, a menu, a copy mode binding or `psmux choose-tree` in a pane, it opens on the client the server last heard from, the one switch-client would move.
@@ -566,7 +560,7 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 While any of these overlays is open its keys are handled before any key table, so a bound key does not reach the tables until the overlay closes.
 
 **show-messages** (`showmsgs`)
-- Prints what server-info prints. tmux's default command aliases make info and server-info `show-messages -JT`, and psmux keeps no message log and has no terminfo or job table to list, so the two give the same text.
+- Prints the psmux version, the server's pid, the session, its window count, the uptime and the session's port file. tmux's default command aliases make info and server-info `show-messages -JT`; psmux keeps no message log and has no terminfo or job table to list, so every form prints this text.
 - Accepted but ignored: `-J`, `-T` and `-t`. On the CLI a `-t` that names an attached client (a tty, or `%N`) picks the session that client is on, and one that names no client is not an error, as in tmux (`CMD_CLIENT_CANFAIL`).
 
 **clear-prompt-history** (`clearphist`) and **show-prompt-history** (`showphist`)
@@ -617,4 +611,6 @@ When a command carries no `-t` at all, psmux picks the session the way tmux's `c
 
 ## User defined command aliases
 
-`set -g command-alias '<alias>=<expansion>'` defines your own command names. There is one asymmetry worth knowing: aliases resolve from key bindings and config lines, and are consulted by the config file unknown command warning, but the **CLI front end does not resolve them**. `psmux <alias>` fails with "unknown command" while the same alias in a key binding or a config line works.
+The server starts with tmux's six default aliases, which are not commands of their own: `split-pane` and `splitp` (`split-window`), `server-info` and `info` (`show-messages -JT`), `choose-window` (`choose-tree -w`) and `choose-session` (`choose-tree -s`). `show -s command-alias` lists them, and replacing the whole array or unsetting an element removes them, as in tmux; `set -su command-alias` puts them back.
+
+`set -s command-alias[N] '<alias>=<expansion>'` defines your own command names, in tmux's array form; without `[N]` the value replaces the whole array, split on `,`, and `-a` adds at the lowest free index. Aliases resolve from the CLI, key bindings, the command prompt, hooks, sourced files and control mode. The CLI front end asks the server only for a name that is not a psmux command, so an alias that shadows a real command name applies everywhere except `psmux <name>`.

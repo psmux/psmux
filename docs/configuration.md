@@ -237,7 +237,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `main-pane-width` | String | `80` | Main pane width in the main-vertical layout, in cells or a percentage such as `30%` |
 | `main-pane-height` | String | `24` | Main pane height in the main-horizontal layout, in cells or a percentage such as `30%` |
 | `session-group` | Str | | Name of the session group this session joins. `none` or an empty value clears it. See [Session Groups](#session-groups) |
-| `command-alias` | Str | | Define your own command alias as `alias=expansion`. See [Command Aliases](#command-aliases) |
+| `command-alias` | Array | | Define your own command alias as `alias=expansion`, one per element (`command-alias[N]`). See [Command Aliases](#command-aliases) |
 
 ### Style Options
 
@@ -718,16 +718,25 @@ psmux display-message -p '#{session_group} #{session_grouped} #{session_group_si
 
 ### Command Aliases
 
-`command-alias` defines your own short name for a command:
+`command-alias` defines your own short name for a command. As in tmux it is an array option, one alias per element:
 
 ```tmux
 # "dev" now means "split-window -h"
-set -g command-alias 'dev=split-window -h'
+set -s command-alias[100] 'dev=split-window -h'
 
 bind-key D dev
 ```
 
-> **Note:** the alias is resolved by the server, so it works from a key binding, a config line, a hook, `run-shell` and the command prompt. It is **not** resolved by the command line front end, so `psmux dev` typed at a shell still fails with "unknown command". Wrap the CLI form in the real command name instead.
+The words after an alias go on the end of its command, so `dev -d` runs `split-window -h -d`. The command is parsed like any other command line, so quotes and `;` work: `set -s command-alias[101] 'two=split-window ; select-layout tiled'`. An alias is expanded once; an alias named inside another alias's command is not expanded again.
+
+An alias resolves from the command line (`psmux dev`), a key binding, the command prompt, a hook, `source-file`, `run-shell` and control mode.
+
+- `set -s command-alias 'dev=...'` without an index replaces the whole array, as in tmux: the value is split on `,` and the pieces become elements 0, 1 and so on. Two plain `set` lines therefore keep only the second; give each alias an index, or add it with `-a`.
+- `-a` without an index adds an element at the lowest free index. `-a` on `command-alias[N]` adds text to the end of that element.
+- `-u command-alias[N]` removes one element and the others keep their indexes; `-u command-alias` puts the default array back, as tmux does for a global option. `set -s command-alias ''` empties it.
+- `show -s command-alias` lists them as `command-alias[N] value`, and `#{command-alias}` is every element joined with a space.
+
+> **Note:** the command line asks the server for an alias only when the name is not a psmux command, so an alias named after a real command (`ls`) works from a key binding or the prompt but not as `psmux ls`. A server starts with tmux's default aliases as elements 0 to 5: `split-pane=split-window`, `splitp=split-window`, `server-info=show-messages -JT`, `info=show-messages -JT`, `choose-window=choose-tree -w` and `choose-session=choose-tree -s`. A plain `set` replaces them along with the rest, so add your own aliases at an index of their own or with `-a`; `set -su command-alias` puts the defaults back.
 
 ### Command Chaining
 

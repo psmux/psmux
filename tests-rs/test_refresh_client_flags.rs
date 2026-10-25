@@ -17,7 +17,6 @@ use super::*;
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -31,7 +30,7 @@ fn spawn_handler(listener: TcpListener, tx: mpsc::Sender<CtrlReq>) -> JoinHandle
             stream,
             tx,
             TEST_KEY,
-            Arc::new(RwLock::new(std::collections::HashMap::new())),
+            Default::default(),
         );
     })
 }

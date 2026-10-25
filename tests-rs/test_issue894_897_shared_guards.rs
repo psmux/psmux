@@ -10,9 +10,10 @@ fn session(name: &str, id: usize) -> Session {
     let mut app = AppState::new(name.to_string());
     app.socket_name = Some("t894".to_string());
     app.session_id = id;
+    let aliases = app.command_aliases.clone();
     Session {
         app,
-        lp: SessionLoop::new(Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()))),
+        lp: SessionLoop::new(aliases),
         cwd: None,
         port: 0,
         stop: Arc::new(AtomicBool::new(false)),
@@ -141,6 +142,13 @@ fn an_alias_cannot_carry_a_refused_command_in() {
     assert_eq!(router::first_unsupported_aliased("list-tree", lookup), Some("resize-pane".into()));
     assert_eq!(router::first_unsupported_aliased("lw", lookup), None);
     assert_eq!(router::first_unsupported_aliased("send-keys x ; list-tree", lookup), Some("resize-pane".into()));
+    // An alias runs every command of its value, so each one is checked.
+    map.insert("two".to_string(), "list-windows -a ; resize-pane -Z".to_string());
+    let lookup = |n: &str| map.get(n).cloned();
+    assert_eq!(router::first_unsupported_aliased("two", lookup), Some("resize-pane".into()));
+    map.insert("none".to_string(), String::new());
+    let lookup = |n: &str| map.get(n).cloned();
+    assert_eq!(router::first_unsupported_aliased("none", lookup), None, "an alias with no command runs nothing");
     // No alias: the plain check, unchanged.
     assert_eq!(router::first_unsupported("list-tree"), None);
     assert_eq!(router::first_unsupported("resize-pane -Z"), Some("resize-pane".into()));

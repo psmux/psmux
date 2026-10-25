@@ -137,7 +137,7 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("?",       "list-keys"),
     ("i",       "display-message"),
     ("t",       "clock-mode"),
-    ("s",       "choose-session"),
+    ("s",       "choose-tree -Zs"),
     ("(",       "switch-client -p"),
     (")",       "switch-client -n"),
     // tmux: bind -N 'Switch to the last client' L { switch-client -l }
@@ -580,7 +580,6 @@ const CLI_COMMANDS: &[(&str, &str, &str)] = &[
     ("display-message",   "display",  "Display a message / pane info"),
     ("display-popup",     "popup",    "Display a popup window"),
     ("list-commands",     "lscm",     "List available commands"),
-    ("server-info",       "info",     "Show server information"),
     // Misc
     ("confirm-before",    "confirm",  "Confirm before running command"),
     ("if-shell",          "if",       "Conditional command execution"),

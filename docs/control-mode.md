@@ -203,8 +203,7 @@ bind-key M-x display-message "pressed!"            # Bind a key
 
 ```
 list-commands      # List all available commands
-server-info        # Server information
-show-messages      # The same text as server-info
+show-messages      # Server information (info and server-info are default aliases)
 kill-server        # Shut down the server
 ```
 

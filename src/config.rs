@@ -842,6 +842,22 @@ pub fn bind_command_list(command: &str) -> Vec<String> {
     }
 }
 
+/// [`bind_command_list`] with each command's `command-alias` expanded. tmux
+/// parses the bound list at bind time (cmd-bind-key.c, cmd_parse_from_arguments)
+/// and expands aliases there (cmd-parse.y cmd_parse_expand_alias), so
+/// `bind x split-pane -h` binds `split-window -h` and list-keys shows that.
+pub fn bind_commands(aliases: &crate::command_alias::SharedAliases, command: &str) -> Vec<String> {
+    let aliases = crate::command_alias::read(aliases);
+    let mut commands = Vec::new();
+    for sub in bind_command_list(command) {
+        match aliases.expand_lines(&crate::commands::parse_command_line(&sub)) {
+            Some(lines) => commands.extend(lines),
+            None => commands.push(sub),
+        }
+    }
+    commands
+}
+
 /// Join the lines of a statement whose brace block spans several lines, as
 /// tmux's grammar does (`bind x {`, statements on their own lines, `}`),
 /// into one line: a newline between two statements becomes ` ; `, one after
@@ -1335,7 +1351,7 @@ fn defer_line(app: &mut AppState, line: Option<usize>, kind: crate::types::Defer
 /// Used so the unknown-command warning does not fire on valid commands that
 /// the config parser itself does not route (e.g. `new-window`, `display-message`).
 pub(crate) fn is_known_command(app: &AppState, name: &str) -> bool {
-    if app.command_aliases.contains_key(name) {
+    if crate::command_alias::read(&app.command_aliases).contains_key(name) {
         return true;
     }
     crate::server::helpers::TMUX_COMMANDS.iter().any(|entry| {
@@ -1990,6 +2006,14 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
             warn_config(app, error);
             return;
         }
+        // An ARRAY element of its own, not text glued onto the joined value.
+        if crate::command_alias::is_alias_option(key) {
+            let set = crate::command_alias::write(&app.command_aliases).set(key, &value, true);
+            if let Err(error) = set {
+                warn_config(app, error);
+            }
+            return;
+        }
     }
 
     // Handle -a (append to current value)
@@ -2378,11 +2402,12 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "codepoint-widths" => {
             crate::server::options::set_codepoint_widths(app, value);
         }
-        "command-alias" => {
-            if let Some(pos) = value.find('=') {
-                let alias = value[..pos].trim().to_string();
-                let expansion = value[pos+1..].trim().to_string();
-                app.command_aliases.insert(alias, expansion);
+        // `command-alias[N]`, tmux's own spelling, as well as the bare name.
+        name if crate::command_alias::is_alias_option(name) => {
+            let set = crate::command_alias::write(&app.command_aliases).set(name, value, false);
+            if let Err(error) = set {
+                warn_config(app, error);
+                return false;
             }
         }
         _ => {
@@ -2780,8 +2805,9 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
     let command = line[pos..].split_whitespace().collect::<Vec<_>>().join(" ");
     if command.is_empty() { return; }
     
-    // The command list: `a \; b`, `'a; b'` and tmux's block form `{ a; b }`.
-    let sub_commands: Vec<String> = bind_command_list(&command);
+    // The command list: `a \; b`, `'a; b'` and tmux's block form `{ a; b }`,
+    // aliases expanded.
+    let sub_commands: Vec<String> = bind_commands(&app.command_aliases, &command);
 
     // Issue #635: tmux parses the bound command list at BIND time
     // (cmd-bind-key.c -> cmd_parse_from_arguments), so a dangling

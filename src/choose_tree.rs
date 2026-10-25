@@ -147,15 +147,13 @@ impl ChooserKind {
 ///         data->type = WINDOW_TREE_WINDOW;
 /// ```
 ///
-/// choose-window and choose-session are tmux's default command aliases for
-/// `choose-tree -w` and `choose-tree -s`, and an alias appends the caller's
-/// words, so `choose-window -s` is `choose-tree -w -s` and opens the sessions.
-/// The flags are split as `args_parse` splits them, so `-Zs` and `-sZ` both
-/// carry `-s` and the value of `-F '#{s}'` is not read as a flag.
-pub fn chooser_kind<S: AsRef<str>>(name: &str, args: &[S]) -> ChooserKind {
-    if name == "choose-session" {
-        return ChooserKind::Session;
-    }
+/// `args` are choose-tree's own. choose-window and choose-session reach it
+/// through tmux's default command aliases (`choose-tree -w`, `choose-tree -s`),
+/// which append the caller's words, so `choose-window -s` is
+/// `choose-tree -w -s` and opens the sessions. The flags are split as
+/// `args_parse` splits them, so `-Zs` and `-sZ` both carry `-s` and the value
+/// of `-F '#{s}'` is not read as a flag.
+pub fn chooser_kind<S: AsRef<str>>(args: &[S]) -> ChooserKind {
     let flags = crate::cli::expand_flag_clusters("choose-tree", args);
     let mut i = 0;
     while i < flags.len() {
