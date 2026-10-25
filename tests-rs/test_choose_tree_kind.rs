@@ -16,8 +16,15 @@
 
 use super::*;
 
+/// The chooser `name args...` opens. choose-window and choose-session reach
+/// choose-tree through the default command aliases, as on every route.
 fn kind(name: &str, args: &[&str]) -> ChooserKind {
-    chooser_kind(name, args)
+    let mut words: Vec<String> = std::iter::once(name).chain(args.iter().copied()).map(String::from).collect();
+    if let Some(mut commands) = crate::command_alias::CommandAliases::with_defaults().expand(&words) {
+        words = commands.remove(0);
+    }
+    assert_eq!(words[0], "choose-tree");
+    chooser_kind(&words[1..])
 }
 
 #[test]

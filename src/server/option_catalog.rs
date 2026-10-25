@@ -244,6 +244,9 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "copy-command", scope: Server, option_type: OptionType::String, default: "", description: "External copy command (pipe selection)" },
     OptionDef { name: "codepoint-widths", scope: Server, option_type: OptionType::String, default: "", description: "Array of override widths for Unicode codepoints, e.g. U+2500-U+257F=2 (comma separated; widths 0, 1 or 2)" },
     OptionDef { name: "terminal-overrides", scope: Server, option_type: OptionType::String, default: "", description: "Array of pattern:cap overrides matched against the client TERM; smcup@/rmcup@ keep the attached client off the host's alternate screen (#700)" },
+    // The default array (option_array::ARRAY_OPTIONS) as `#{command-alias}`
+    // reads it, the elements joined with a space.
+    OptionDef { name: "command-alias", scope: Server, option_type: OptionType::String, default: "split-pane=split-window splitp=split-window server-info=show-messages -JT info=show-messages -JT choose-window=choose-tree -w choose-session=choose-tree -s", description: "Array of command aliases, each name=command; set one element with command-alias[N]" },
     OptionDef { name: "exit-empty", scope: Server, option_type: Boolean, default: "on", description: "Exit server when no sessions remain" },
     OptionDef { name: "priority", scope: Server, option_type: Choice(Priority), default: "above-normal", description: "Scheduling class for psmux's own server and client processes (normal/above-normal/high). Pane children are never raised" },
     // tmux options-table.c:402 and :411, server scope, defaults `off` and

@@ -1089,7 +1089,7 @@ fn config_file_terminal_overrides_accepted() {
 fn config_file_command_alias() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g command-alias split-pane=split-window\n");
-    assert_eq!(app.command_aliases.get("split-pane").unwrap(), "split-window");
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("split-pane").as_deref(), Some("split-window"));
 }
 
 #[test]
@@ -1591,7 +1591,7 @@ fn cli_set_allow_passthrough() {
 fn cli_set_command_alias() {
     let mut app = mock_app();
     execute_command_string(&mut app, "set-option -g command-alias sp=split-window").unwrap();
-    assert_eq!(app.command_aliases.get("sp").unwrap(), "split-window");
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("sp").as_deref(), Some("split-window"));
 }
 
 #[test]
@@ -2387,10 +2387,17 @@ fn config_status_format_0_and_1() {
 
 #[test]
 fn config_multiple_command_aliases() {
+    // command-alias is an array: a plain `set` replaces it, as in tmux, so
+    // several aliases take `-a` or an index each.
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g command-alias sp=split-window\nset -g command-alias nw=new-window\n");
-    assert_eq!(app.command_aliases["sp"], "split-window");
-    assert_eq!(app.command_aliases["nw"], "new-window");
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("sp"), None);
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("nw").as_deref(), Some("new-window"));
+    let mut app = mock_app();
+    parse_config_content(&mut app, "set -g command-alias sp=split-window\nset -ga command-alias nw=new-window\nset -g command-alias[9] kp=kill-pane\n");
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("sp").as_deref(), Some("split-window"));
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("nw").as_deref(), Some("new-window"));
+    assert_eq!(crate::command_alias::read(&app.command_aliases).get("kp").as_deref(), Some("kill-pane"));
 }
 
 // ============================================================

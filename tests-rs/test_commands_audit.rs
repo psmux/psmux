@@ -528,10 +528,12 @@ fn refresh_alias_works() {
 #[test]
 fn server_info_shows_popup_with_version_and_session() {
     let mut app = mock_app_with_window();
+    // tmux's default alias makes `server-info` run `show-messages -JT`
+    // (command_alias_defaults_expand_info below).
     app.session_name = "my_sess".to_string();
     execute_command_string(&mut app, "server-info").unwrap();
     let (cmd, out) = extract_popup(&app);
-    assert_eq!(cmd, "server-info");
+    assert_eq!(cmd, "show-messages");
     // The same six lines the server sends the CLI and control mode.
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 6, "{:?}", lines);
@@ -548,7 +550,29 @@ fn info_alias_works() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "info").unwrap();
     let (cmd, _) = extract_popup(&app);
-    assert_eq!(cmd, "server-info");
+    assert_eq!(cmd, "show-messages");
+    // info is an alias, no command of its own: with the array emptied, as a
+    // tmux config can, it runs nothing.
+    let mut app = mock_app_with_window();
+    crate::command_alias::write(&app.command_aliases).set("command-alias", "", false).unwrap();
+    execute_command_string(&mut app, "info").unwrap();
+    assert!(!matches!(app.mode, Mode::PopupMode { .. }));
+}
+
+#[test]
+fn command_alias_defaults_expand_info() {
+    // tmux's default command-alias (options-table.c:301-306): info and
+    // server-info are `show-messages -JT`.
+    let app = mock_app_with_window();
+    let aliases = crate::command_alias::read(&app.command_aliases);
+    for name in ["info", "server-info"] {
+        assert_eq!(
+            aliases.expand(&[name.to_string()]),
+            Some(vec![vec!["show-messages".to_string(), "-JT".to_string()]]),
+            "{}",
+            name
+        );
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

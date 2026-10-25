@@ -38,6 +38,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "default-terminal" => "screen-256color",
         "copy-command" => "clip.exe",
         "terminal-overrides" => "xterm*:smcup@:rmcup@",
+        "command-alias" => "sp=split-window",
         "exit-empty" => "off",
         "prefix" => "C-a",
         "prefix2" => "C-q",

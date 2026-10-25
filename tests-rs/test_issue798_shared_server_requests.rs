@@ -8,9 +8,10 @@ use super::*;
 fn session(name: &str) -> Session {
     let mut app = AppState::new(name.to_string());
     app.socket_name = Some("t798".to_string());
+    let aliases = app.command_aliases.clone();
     Session {
         app,
-        lp: SessionLoop::new(Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()))),
+        lp: SessionLoop::new(aliases),
         cwd: None,
         port: 0,
         stop: Arc::new(AtomicBool::new(false)),

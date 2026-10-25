@@ -975,7 +975,6 @@ fn parse_popup_dim(spec: &str, term_dim: u16, default: u16) -> u16 {
 fn drain_plugin_req(
     app: &mut AppState,
     req: CtrlReq,
-    shared_aliases: &std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 ) {
     // #803: a `-g` write to an option the session overrides lands on the
     // global it shadows (see the main request loop).
@@ -984,11 +983,6 @@ fn drain_plugin_req(
         CtrlReq::SetOption(option, value) => {
             if apply_set_option(app, &option, &value, false).is_ok() {
                 app.user_set_options.insert(option.clone());
-                if option == "command-alias" {
-                    if let Ok(mut map) = shared_aliases.write() {
-                        *map = app.command_aliases.clone();
-                    }
-                }
                 // pane-border-status changes the effective content height (#288)
                 if option == "pane-border-status" {
                     resize_all_panes(app);
@@ -1001,11 +995,6 @@ fn drain_plugin_req(
         CtrlReq::SetOptionQuiet(option, value, quiet) => {
             if apply_set_option(app, &option, &value, quiet).is_ok() {
                 app.user_set_options.insert(option.clone());
-                if option == "command-alias" {
-                    if let Ok(mut map) = shared_aliases.write() {
-                        *map = app.command_aliases.clone();
-                    }
-                }
                 if option == "pane-border-status" {
                     resize_all_panes(app);
                 }
@@ -1023,6 +1012,9 @@ fn drain_plugin_req(
                     // An ARRAY option appends an ITEM, not characters: tmux's
                     // `-a` on codepoint-widths adds to the array rather than
                     // string-concatenating onto the last entry.
+                    name if crate::command_alias::is_alias_option(name) => {
+                        let _ = crate::command_alias::write(&app.command_aliases).set(name, &value, true);
+                    }
                     "codepoint-widths" => {
                         crate::server::options::append_codepoint_widths(app, &value);
                     }
@@ -1078,11 +1070,6 @@ fn drain_plugin_req(
             } else {
                 if apply_set_option(app, &option, &value, false).is_ok() {
                     app.user_set_options.insert(option.clone());
-                    if option == "command-alias" {
-                        if let Ok(mut map) = shared_aliases.write() {
-                            *map = app.command_aliases.clone();
-                        }
-                    }
                     if let Some(r) = resp {
                         let _ = r.send(String::new());
                     }
@@ -1134,7 +1121,7 @@ fn drain_plugin_req(
         CtrlReq::BindKey(table_name, key, command, repeat, note) => {
             if let Some(kc) = parse_key_string(&key) {
                 let kc = normalize_key_for_binding(kc);
-                let sub_cmds = crate::config::bind_command_list(&command);
+                let sub_cmds = crate::config::bind_commands(&app.command_aliases, &command);
                 let action = if sub_cmds.len() > 1 {
                     Some(Action::CommandChain(sub_cmds))
                 } else {
@@ -2616,10 +2603,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // (e.g. PPM plugin manager) spawned during config parsing can connect
     // to the server.  Without this, run-shell scripts fail silently because
     // there is no TCP listener accepting connections yet.
-    // Initialize shared aliases empty — will be populated after load_config.
-    let shared_aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
-        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-    let shared_aliases_main = shared_aliases.clone();
+    // The connection threads read the same alias table the main loop writes,
+    // so an alias set by the config, a CLI `set` or a sourced file is seen
+    // at once on every route.
+    let shared_aliases = app.command_aliases.clone();
 
     thread::spawn(move || {
         for conn in listener.incoming() {
@@ -2702,12 +2689,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if all_done || remaining.is_zero() {
                         while let Ok(req) = rx.try_recv() {
-                            drain_plugin_req(&mut app, req, &shared_aliases_main);
+                            drain_plugin_req(&mut app, req);
                         }
                         break;
                     }
                     match rx.recv_timeout(Duration::from_millis(50).min(remaining)) {
-                        Ok(req) => drain_plugin_req(&mut app, req, &shared_aliases_main),
+                        Ok(req) => drain_plugin_req(&mut app, req),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(_) => break,
                     }
@@ -2771,10 +2758,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         app.warm_pane.target = 0;
     }
 
-    // Update shared aliases now that config has been loaded
-    if let Ok(mut w) = shared_aliases_main.write() {
-        *w = app.command_aliases.clone();
-    }
 
     // TEST-ONLY fault injection — compiled out of release builds entirely.
     // Widens the new-session readiness race deterministically: the .port file
@@ -5729,10 +5712,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     // Config may set pane-border-status (#288)
                     resize_all_panes(&mut app);
-                    // Update shared aliases after config reload
-                    if let Ok(mut w) = shared_aliases_main.write() {
-                        *w = app.command_aliases.clone();
-                    }
                     // Adopt the claiming client's scheduling class (#608).
                     //
                     // MUST be after load_config above, not before: that reload
@@ -6282,7 +6261,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
                         // Support `\;` chaining in server-side bind-key
-                        let sub_cmds = crate::config::bind_command_list(&command);
+                        let sub_cmds = crate::config::bind_commands(&app.command_aliases, &command);
                         let action = if sub_cmds.len() > 1 {
                             Some(Action::CommandChain(sub_cmds))
                         } else {
@@ -6339,12 +6318,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // route through this single module, see #271.
                         let sync = crate::warm_pane_sync::for_option_change(&option, &app);
                         crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                        // Update shared aliases if command-alias changed
-                        if option == "command-alias" {
-                            if let Ok(mut map) = shared_aliases_main.write() {
-                                *map = app.command_aliases.clone();
-                            }
-                        }
                         // pane-border-status changes the effective content height (#288)
                         if option == "pane-border-status" {
                             resize_all_panes(&mut app);
@@ -6377,12 +6350,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // default-terminal, and claude-code-* options.
                         let sync = crate::warm_pane_sync::for_option_change(&option, &app);
                         crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                        // Update shared aliases if command-alias changed
-                        if option == "command-alias" {
-                            if let Ok(mut map) = shared_aliases_main.write() {
-                                *map = app.command_aliases.clone();
-                            }
-                        }
                         // pane-border-status changes the effective content height (#288)
                         if option == "pane-border-status" {
                             resize_all_panes(&mut app);
@@ -6413,11 +6380,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // claude-code-* options all matter here).
                     let sync = crate::warm_pane_sync::for_option_change(&option, &app);
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                    if option == "command-alias" {
-                        if let Ok(mut map) = shared_aliases_main.write() {
-                            *map = app.command_aliases.clone();
-                        }
-                    }
                     meta_dirty = true;
                     state_dirty = true;
                 }
@@ -6430,6 +6392,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         match option.as_str() {
                             // ARRAY option: `-a` appends an item (see the
                             // sibling arm in the main request loop).
+                            name if crate::command_alias::is_alias_option(name) => {
+                                let _ = crate::command_alias::write(&app.command_aliases).set(name, &value, true);
+                            }
                             "codepoint-widths" => {
                                 crate::server::options::append_codepoint_widths(&mut app, &value);
                             }
@@ -6489,11 +6454,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         if apply_set_option(&mut app, &option, &value, false).is_ok() {
                             app.user_set_options.insert(option.clone());
-                            if option == "command-alias" {
-                                if let Ok(mut map) = shared_aliases_main.write() {
-                                    *map = app.command_aliases.clone();
-                                }
-                            }
                             meta_dirty = true;
                             state_dirty = true;
                             if let Some(r) = resp {
@@ -6644,8 +6604,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(ref group) = app.session_group {
                         output.push_str(&format!("session-group \"{}\"\n", group));
                     }
-                    for (alias, expansion) in &app.command_aliases {
-                        output.push_str(&format!("command-alias \"{}={}\"\n", alias, expansion));
+                    let aliases = crate::command_alias::read(&app.command_aliases);
+                    if !aliases.is_empty() {
+                        output.push_str(&aliases.show_lines(false));
                     }
                     let _ = resp.send(output);
                 }
@@ -6679,11 +6640,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // starts its script now, as one declared after it does
                     // when the job replays the line.
                     drop(spawn_plugin_scripts(&mut app));
-                    // A sourced file can set command-alias, which the
-                    // connection dispatcher reads from its own copy.
-                    if let Ok(mut map) = shared_aliases_main.write() {
-                        *map = app.command_aliases.clone();
-                    }
                     // A runtime source-file can record warnings (e.g. an
                     // unreadable path); flush them like the startup load does
                     // or they never reach config-warnings.log.
@@ -6737,9 +6693,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // script starts now, in file order, as a `run-shell -b`
                     // would. It used to stay queued and never run.
                     drop(spawn_plugin_scripts(&mut app));
-                    if let Ok(mut map) = shared_aliases_main.write() {
-                        *map = app.command_aliases.clone();
-                    }
                     resize_all_panes(&mut app);
                     state_dirty = true;
                     meta_dirty = true;
@@ -8966,11 +8919,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         for option in std::mem::take(&mut app.in_process_option_writes) {
             let sync = crate::warm_pane_sync::for_option_change(&option, &app);
             crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-            if option == "command-alias" {
-                if let Ok(mut map) = shared_aliases_main.write() {
-                    *map = app.command_aliases.clone();
-                }
-            }
             if option == "pane-border-status" {
                 resize_all_panes(&mut app);
             }

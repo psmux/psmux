@@ -873,11 +873,8 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "other-pane-width" | "other-pane-height" => app.user_options.get(name).cloned().unwrap_or_else(|| "0".to_string()),
         "codepoint-widths" => app.codepoint_widths.join(","),
         "terminal-overrides" => app.terminal_overrides.join(","),
-        "command-alias" => {
-            app.command_aliases.iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(",")
+        n if crate::command_alias::is_alias_option(n) => {
+            crate::command_alias::read(&app.command_aliases).value(n)
         }
         "warm" => if app.warm_enabled { "on".into() } else { "off".into() },
         "warm-pool-size" => app.warm_pane.target.to_string(),
@@ -1197,6 +1194,13 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
         return;
     }
 
+    // An ARRAY element, which is removed, or the whole array, which gets its
+    // default back (options.c options_remove_or_default).
+    if crate::command_alias::is_alias_option(key) {
+        let _ = crate::command_alias::write(&app.command_aliases).unset(key);
+        return;
+    }
+
     // Drop any stored override first. Options whose default is represented by
     // a missing entry are fully restored by removal; applying their catalog
     // default would turn an unset option back into an explicit override.
@@ -1488,13 +1492,10 @@ pub(crate) fn apply_set_option(
         "allow-passthrough" => { app.allow_passthrough = value.to_string(); }
         "copy-command" => { app.copy_command = value.to_string(); }
         "set-clipboard" => { app.set_clipboard = value.to_string(); }
-        "command-alias" => {
-            // Format: "alias=expansion" e.g. "splitp=split-window"
-            if let Some(pos) = value.find('=') {
-                let alias = value[..pos].trim().to_string();
-                let expansion = value[pos+1..].trim().to_string();
-                app.command_aliases.insert(alias, expansion);
-            }
+        // `command-alias[N]` too: it fell to the catch all below and was kept
+        // as text, so a tmux config's aliases never existed.
+        name if crate::command_alias::is_alias_option(name) => {
+            crate::command_alias::write(&app.command_aliases).set(name, value, false)?;
         }
         "warm-pool-size" => {
             set_warm_pool_size(app, value);

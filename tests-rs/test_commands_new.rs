@@ -1302,13 +1302,10 @@ fn parse_action_direct_commands() {
     assert!(matches!(parse_command_to_action("rename-window"), Some(Action::RenameWindow)));
     assert!(matches!(parse_command_to_action("renamew"), Some(Action::RenameWindow)));
     assert!(matches!(parse_command_to_action("choose-tree"), Some(Action::WindowChooser)));
-    assert!(matches!(parse_command_to_action("choose-window"), Some(Action::WindowChooser)));
-    assert!(matches!(parse_command_to_action("choose-session"), Some(Action::SessionChooser)));
     // tmux's default prefix+s and prefix+w: `choose-tree -Zs` and `-Zw`.
     assert!(matches!(parse_command_to_action("choose-tree -Zs"), Some(Action::SessionChooser)));
     assert!(matches!(parse_command_to_action("choose-tree -sZ"), Some(Action::SessionChooser)));
     assert!(matches!(parse_command_to_action("choose-tree -Zw"), Some(Action::WindowChooser)));
-    assert!(matches!(parse_command_to_action("choose-window -s"), Some(Action::SessionChooser)));
     assert!(matches!(parse_command_to_action("choose-tree -F '#{s}'"), Some(Action::WindowChooser)));
     assert!(matches!(parse_command_to_action("zoom-pane"), Some(Action::ZoomPane)));
     assert!(matches!(parse_command_to_action("resize-pane -Z"), Some(Action::ZoomPane)));
@@ -1409,7 +1406,8 @@ fn format_action_roundtrips() {
         (Action::Paste, "paste-buffer"),
         (Action::Detach, "detach-client"),
         (Action::RenameWindow, "rename-window"),
-        (Action::WindowChooser, "choose-window"),
+        (Action::WindowChooser, "choose-tree"),
+        (Action::SessionChooser, "choose-tree -s"),
         (Action::ZoomPane, "resize-pane -Z"),
         (Action::MoveFocus(FocusDir::Up), "select-pane -U"),
         (Action::MoveFocus(FocusDir::Down), "select-pane -D"),

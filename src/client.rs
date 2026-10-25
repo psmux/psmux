@@ -311,6 +311,22 @@ impl KeyTableSync {
 /// Extract the actual command from a confirm-before argument string.
 /// Handles: `confirm-before -p 'prompt text' kill-pane`
 /// Returns the command to execute after confirmation (e.g. "kill-pane").
+/// The chooser a binding opens on this client without asking the server: a
+/// `choose-tree` with no flag but `-Z`, `-s` and `-w`, as the default
+/// prefix+w and prefix+s are (`choose-tree -Zw`, `choose-tree -Zs`). Anything
+/// else goes to the server, which sends the chooser back as a directive.
+pub(crate) fn local_chooser(cmd: &str) -> Option<crate::choose_tree::ChooserKind> {
+    let words = crate::commands::parse_command_line(cmd);
+    let (name, args) = words.split_first()?;
+    if name != "choose-tree" {
+        return None;
+    }
+    let plain = args
+        .iter()
+        .all(|a| a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| matches!(c, 'Z' | 's' | 'w')));
+    plain.then(|| crate::choose_tree::chooser_kind(args))
+}
+
 fn extract_confirm_command(args: &str) -> String {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let mut i = 0;
@@ -5637,12 +5653,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     // as the default `'` binding.
                                     let spec = parse_command_prompt_args(help::WINDOW_INDEX_PROMPT_ARGS);
                                     open_command_prompt!(spec.prompts(), spec.template, spec.key, spec.single, spec.numeric, spec.search);
-                                } else if cmd == "choose-tree" || cmd == "choose-window" {
-                                    do_choose_tree = true;
+                                } else if let Some(kind) = local_chooser(cmd) {
+                                    match kind {
+                                        crate::choose_tree::ChooserKind::Tree => do_choose_tree = true,
+                                        crate::choose_tree::ChooserKind::Session => do_choose_session = true,
+                                    }
                                 } else if cmd == "choose-buffer" || cmd == "chooseb" {
                                     do_choose_buffer = true;
-                                } else if cmd == "choose-session" {
-                                    do_choose_session = true;
                                 } else {
                                     // Generic: the binding is a command list,
                                     // split on \; for chaining (issue #192).

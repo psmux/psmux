@@ -1431,30 +1431,28 @@ psmux server -g backend -s api
 
 ## User Defined Command Aliases
 
-`command-alias` maps a short name to a command line:
+`command-alias` maps a short name to a command line. As in tmux it is an array option:
 
 ```tmux
-set -g command-alias 'sph=split-window -h'
-set -g command-alias 'bigger=resize-pane -R 20'
+set -s command-alias[10] 'sph=split-window -h'
+set -s command-alias[11] 'bigger=resize-pane -R 20'
 ```
 
 ```powershell
-psmux show-options | Select-String command-alias
-# command-alias "sph=split-window -h"
+psmux show-options -s command-alias
+# command-alias[0] split-pane=split-window
+# ...                                        (tmux's six defaults, 0 to 5)
+# command-alias[10] "sph=split-window -h"
+# command-alias[11] "bigger=resize-pane -R 20"
+
+psmux sph -d    # runs split-window -h -d
 ```
 
-Aliases are resolved by the server's command dispatcher, which is the path a key binding takes.
-They are **not** resolved by the psmux CLI front end:
-
-```powershell
-psmux sph
-# psmux: unknown command: sph
-```
-
-The same asymmetry applies to the config file and hook execution path and to the control mode
-dispatcher, which also report `unknown command` for an alias. Treat `command-alias` as a
-key binding convenience rather than as a way to add a new CLI verb, and use a PowerShell function
-or an alias in your profile if you want a short name on the command line.
+An alias resolves on every route: the CLI, key bindings, the command prompt, hooks, `source-file`
+and control mode. The CLI asks the server for its aliases only when the name is not a psmux
+command, so an alias that reuses a command's name (`ls`) does not apply to `psmux ls`. See
+[configuration.md, "Command Aliases"](configuration.md#command-aliases) for `-a`, `-u` and the
+form without an index.
 
 ## Prompt History
 

@@ -213,6 +213,21 @@ pub(crate) fn is_error_reply(text: &str) -> bool {
     text.starts_with("ERROR")
 }
 
+/// `show-options` text for an array option (#700). `command-alias` comes from
+/// the alias table, which keeps each element's own index (`command-alias[100]`);
+/// the others from their joined value.
+fn show_array_text(
+    name: &str,
+    joined: &str,
+    values_only: bool,
+    aliases: &crate::command_alias::SharedAliases,
+) -> Option<String> {
+    if name == crate::command_alias::OPTION {
+        return Some(crate::command_alias::read(aliases).show_lines(values_only));
+    }
+    crate::terminal_overrides::show_array_lines(name, joined, values_only)
+}
+
 /// Whether `name` is a tmux command or alias in the [`TMUX_COMMANDS`] catalog.
 pub(crate) fn is_catalog_command(name: &str) -> bool {
     TMUX_COMMANDS.iter().any(|entry| match entry.split_once(" (") {
@@ -226,7 +241,7 @@ pub(crate) fn is_catalog_command(name: &str) -> bool {
 /// and a prefix of a catalog name, which tmux resolves to the one command it
 /// abbreviates (cmd.c cmd_find_entry) and the dispatcher answers on its own.
 pub(crate) fn is_control_extension_command(name: &str) -> bool {
-    matches!(name, "dump" | "dump-state" | "new-pane" | "newp" | "split-pane" | "splitp"
+    matches!(name, "dump" | "dump-state" | "new-pane" | "newp"
         | "zoom-pane" | "phony-command" | "run-command" | "runcmd")
         || (!name.is_empty() && TMUX_COMMANDS.iter().any(|entry| entry.starts_with(name)))
 }
@@ -1874,7 +1889,7 @@ pub(crate) fn readonly_client_may_run(cmd: &str) -> bool {
         | "list-buffers" | "lsb" | "list-keys" | "lsk" | "list-commands" | "lscm"
         | "has-session" | "show-buffer" | "showb" | "show-environment" | "showenv"
         | "show-hooks" | "show-messages" | "showmsgs" | "show-options" | "show"
-        | "show-window-options" | "showw" | "server-info" | "info"
+        | "show-window-options" | "showw"
     )
 }
 
@@ -1925,7 +1940,7 @@ pub(crate) fn handle_connection(
     stream: TcpStream,
     tx: mpsc::Sender<CtrlReq>,
     session_key: &str,
-    aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+    aliases: crate::command_alias::SharedAliases,
 ) {
 let client_id = crate::types::next_client_id();
 // Enable TCP_NODELAY for low-latency responses
@@ -2365,7 +2380,7 @@ if control_echo || control_quiet || control_noecho {
                 let name = parse_command_line(part).into_iter().next()?;
                 let known = is_catalog_command(&name)
                     || is_control_extension_command(&name)
-                    || aliases_ctrl.read().map(|m| m.contains_key(&name)).unwrap_or(false);
+                    || crate::command_alias::read(&aliases_ctrl).contains_key(&name);
                 (!known).then_some(name)
             });
             if let Some(name) = unknown {
@@ -2420,8 +2435,27 @@ if control_echo || control_quiet || control_noecho {
         // Dispatch the command (before acquiring write lock)
         // tmux's escapes inside double quotes: a control client escapes text
         // the tmux way, `"L1\nL2"` is two lines (issue #823).
-        let parsed = crate::cli::normalize_flag_equals(
+        // A command an alias produced is not expanded again (see the one-shot
+        // route below).
+        let (trimmed, alias_output) = match trimmed.strip_prefix(crate::command_alias::EXPANDED_MARK) {
+            Some(rest) => (rest, true),
+            None => (trimmed, false),
+        };
+        let mut parsed = crate::cli::normalize_flag_equals(
             crate::commands::parse_command_line_tmux(trimmed));
+        // `command-alias`: the alias's first command answers this block, the
+        // rest are queued next, each with its own block.
+        if !alias_output {
+            if let Some(commands) = crate::command_alias::read(&aliases_ctrl).expand(&parsed) {
+                let mut commands = commands.into_iter();
+                let first = commands.next().unwrap_or_default();
+                let rest: Vec<Vec<String>> = commands.collect();
+                for words in rest.iter().rev() {
+                    pending.push_front(crate::command_alias::queued_line(words));
+                }
+                parsed = crate::cli::normalize_flag_equals(first);
+            }
+        }
         let raw_cmd = parsed.first().map(|s| s.as_str()).unwrap_or("");
 
         if raw_cmd.is_empty() {
@@ -2440,19 +2474,8 @@ if control_echo || control_quiet || control_noecho {
             continue;
         }
 
-        // Check aliases
-        let alias_expanded = if let Ok(map) = aliases_ctrl.read() {
-            map.get(raw_cmd).cloned()
-        } else { None };
-
-        let (cmd_name, cmd_args): (&str, Vec<&str>) = if let Some(ref expanded) = alias_expanded {
-            let parts: Vec<&str> = expanded.split_whitespace().collect();
-            let mut all: Vec<&str> = parts[1..].to_vec();
-            all.extend(parsed.iter().skip(1).map(|s| s.as_str()));
-            (parts.first().copied().unwrap_or(raw_cmd), all)
-        } else {
-            (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect())
-        };
+        let (cmd_name, cmd_args): (&str, Vec<&str>) =
+            (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect());
         // Clustered select-pane / last-pane flags, as in the one-shot route.
         let ctrl_cluster_split: Vec<String>;
         let cmd_args: Vec<&str> = if matches!(cmd_name, "select-pane" | "selectp" | "last-pane" | "lastp") {
@@ -2749,7 +2772,7 @@ if control_echo || control_quiet || control_noecho {
             let dispatched = dispatch_control_command(
                 cmd_name, &filtered_args, &targeted_tx, resp_s,
                 ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
-                ctrl_client_id, ctrl_target_failed,
+                ctrl_client_id, ctrl_target_failed, &aliases_ctrl,
             );
             // Collect the response BEFORE acquiring the write lock, so the
             // notification thread can still write while we wait.
@@ -2997,11 +3020,17 @@ loop {
         }
     }
     
+    // A command an alias produced is not expanded again (tmux builds an
+    // alias's commands with CMD_PARSE_NOALIAS).
+    let alias_output = line.trim_start().starts_with(crate::command_alias::EXPANDED_MARK);
+    if alias_output {
+        line = line.trim_start().trim_start_matches(crate::command_alias::EXPANDED_MARK).to_string();
+    }
     // Use quote-aware parser to preserve arguments with spaces
     // Handle command chaining (\; or ;) by splitting into sub-commands
     let sub_cmds = crate::config::split_chained_commands_pub(line.trim());
     // This command is one of a list (`a ; b`), whose rest stops if it fails.
-    let in_command_list = from_list || sub_cmds.len() > 1;
+    let mut in_command_list = from_list || sub_cmds.len() > 1;
     let effective_line: String;
     if sub_cmds.len() > 1 {
         effective_line = sub_cmds[0].clone();
@@ -3014,21 +3043,28 @@ loop {
     } else {
         effective_line = line.trim().to_string();
     }
-    let parsed = crate::cli::normalize_flag_equals(parse_command_line(&effective_line));
+    let mut parsed = crate::cli::normalize_flag_equals(parse_command_line(&effective_line));
+    // `command-alias` (tmux cmd_parse_expand_alias): the alias's first command
+    // runs here and the rest go ahead of whatever is already queued. The old
+    // whitespace split kept quotes in words (`rename-window "Q Q"` named the
+    // window `"Q`) and panicked on an alias with no command.
+    if !alias_output {
+        if let Some(commands) = crate::command_alias::read(&aliases).expand(&parsed) {
+            let mut commands = commands.into_iter();
+            let Some(first) = commands.next() else {
+                // An alias with no command runs nothing, successfully.
+                if !persistent && pending_chain.is_empty() { break; }
+                line.clear();
+                continue;
+            };
+            let rest: Vec<String> = commands.map(|words| crate::command_alias::queued_line(&words)).collect();
+            in_command_list |= !rest.is_empty();
+            pending_chain.splice(0..0, rest);
+            parsed = crate::cli::normalize_flag_equals(first);
+        }
+    }
     let raw_cmd = parsed.get(0).map(|s| s.as_str()).unwrap_or("");
-    // Check command aliases before normal dispatch
-    let alias_expanded = if let Ok(map) = aliases.read() {
-        map.get(raw_cmd).cloned()
-    } else { None };
-    let (cmd, args): (&str, Vec<&str>) = if let Some(ref expanded) = alias_expanded {
-        // Alias expansion: replace command name, keep original args
-        let expanded_parts: Vec<&str> = expanded.split_whitespace().collect();
-        let mut all_args: Vec<&str> = expanded_parts[1..].to_vec();
-        all_args.extend(parsed.iter().skip(1).map(|s| s.as_str()));
-        (expanded_parts.first().copied().unwrap_or(raw_cmd), all_args)
-    } else {
-        (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect())
-    };
+    let (cmd, args): (&str, Vec<&str>) = (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect());
     // select-pane / last-pane read flags by exact token below (the -t scan,
     // the -l/-m/-T arms), so a clustered `-dt %2` lost its target and fenced
     // the ACTIVE pane.  Split clusters the way tmux's getopt reads them.
@@ -3428,7 +3464,7 @@ match cmd {
             }
         }
     }
-    "split-window" | "splitw" | "split-pane" | "splitp" => {
+    "split-window" | "splitw" => {
         let kind = if args.iter().any(|a| *a == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
         let detached = args.iter().any(|a| *a == "-d");
         let zoom_after_split = args.iter().any(|a| *a == "-Z");
@@ -4750,7 +4786,7 @@ match cmd {
             // (cmd-bind-key.c), so a dangling value-taking flag refuses the
             // binding rather than arming a key that silently acts on the
             // default target when it is pressed.
-            let flag_error = crate::config::bind_command_list(&command)
+            let flag_error = crate::config::bind_commands(&aliases, &command)
                 .iter()
                 .find_map(|sub| {
                     let tokens = crate::commands::parse_command_line(sub);
@@ -5120,7 +5156,7 @@ match cmd {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
                 if let Ok(v) = rrx.recv_timeout(Duration::from_millis(2000)) {
-                    if let Some(text) = crate::terminal_overrides::show_array_lines(name, &v, values_only) {
+                    if let Some(text) = show_array_text(name, &v, values_only, &aliases) {
                         out.push_str(&text);
                     } else if values_only {
                         out.push_str(&format!("{}\n", v));
@@ -5328,7 +5364,7 @@ match cmd {
                         let array_text = if window_scope {
                             None
                         } else {
-                            crate::terminal_overrides::show_array_lines(name, &resolved, has_v)
+                            show_array_text(name, &resolved, has_v, &aliases)
                         };
                         let output = if let Some(text) = array_text {
                             text
@@ -5997,13 +6033,13 @@ match cmd {
             std::thread::sleep(crate::warm_pane_sync::KILL_SERVER_HOLD);
         }
     }
-    "choose-tree" | "choose-window" | "choose-session" => {
+    "choose-tree" => {
         // The choosers are the client's, the ones prefix+w and prefix+s open.
         // A command prompt or a root table binding came in on the client's
         // own connection, so that client opens it. A CLI caller has no
         // client of its own: the server picks one, as switch-client does.
         // `-s` opens the session list and wins over `-w` (window-tree.c).
-        let kind = crate::choose_tree::chooser_kind(cmd, &args);
+        let kind = crate::choose_tree::chooser_kind(&args);
         if persistent {
             let _ = crate::types::send_directive_to_client(client_id, kind.directive());
         } else {
@@ -6573,13 +6609,12 @@ match cmd {
     // tmux's default aliases make info and server-info `show-messages -JT`.
     // psmux has no message log, terminfo or job table, so show-messages
     // prints the same summary whatever its -J, -T and -t say.
-    "server-info" | "info" | "show-messages" | "showmsgs" => {
+    "show-messages" | "showmsgs" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ServerInfo(rtx));
         if let Ok(text) = rrx.recv() {
             if persistent {
-                let title = if cmd.starts_with("show") { "show-messages" } else { "server-info" };
-                let _ = tx.send(CtrlReq::ShowTextPopup(title.to_string(), text));
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-messages".to_string(), text));
             } else {
                 let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
             }
@@ -6827,6 +6862,7 @@ fn dispatch_control_command(
     raw_target: Option<&str>,
     client_id: u64,
     target_failed: bool,
+    aliases: &crate::command_alias::SharedAliases,
 ) -> bool {
     match cmd {
         "list-windows" | "lsw" => {
@@ -7031,7 +7067,7 @@ fn dispatch_control_command(
                 true
             }
         }
-        "split-window" | "splitw" | "split-pane" | "splitp" => {
+        "split-window" | "splitw" => {
             let kind = if crate::cli::has_short_flag(&args, 'h') {
                 LayoutKind::Horizontal
             } else {
@@ -7519,7 +7555,7 @@ fn dispatch_control_command(
                     let (srtx, srrx) = mpsc::channel::<String>();
                     let _ = tx.send(CtrlReq::ShowOptionValue(srtx, name.to_string()));
                     if let Ok(v) = srrx.recv_timeout(Duration::from_millis(2000)) {
-                        if let Some(t) = crate::terminal_overrides::show_array_lines(name, &v, value_only) {
+                        if let Some(t) = show_array_text(name, &v, value_only, aliases) {
                             text.push_str(&t);
                         } else if value_only {
                             text.push_str(&format!("{}\n", v));
@@ -7532,7 +7568,9 @@ fn dispatch_control_command(
                 return true;
             }
             // Array options print one `name[i] value` line per element (#700).
-            let array_name = opt_name.clone().filter(|n| !window_scope2 && n == "terminal-overrides");
+            let array_name = opt_name.clone().filter(|n| {
+                !window_scope2 && (n == "terminal-overrides" || n == crate::command_alias::OPTION)
+            });
             if let Some(name) = opt_name {
                 // #648: `-wv <name>` used to fall into the plain
                 // ShowOptionValue arm because `value_only` was tested first,
@@ -7588,7 +7626,7 @@ fn dispatch_control_command(
                     let _ = resp_tx.send(values_only);
                 } else if let Some(t) = array_name
                     .as_deref()
-                    .and_then(|n| crate::terminal_overrides::show_array_lines(n, &text, value_only))
+                    .and_then(|n| show_array_text(n, &text, value_only, aliases))
                 {
                     let _ = resp_tx.send(t.trim_end_matches('\n').to_string());
                 } else {
@@ -7961,7 +7999,7 @@ fn dispatch_control_command(
             }
             true
         }
-        "server-info" | "info" | "show-messages" | "showmsgs" => {
+        "show-messages" | "showmsgs" => {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ServerInfo(rtx));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
@@ -8287,8 +8325,17 @@ fn dispatch_control_command(
             // runs through this dispatcher, its output collected in order; the
             // first error ends the branch and becomes the block's %error.
             let mut body = String::new();
+            // A `command-alias` in the branch runs what it stands for, as
+            // anywhere else (cmd_parse_expand_alias), and is not expanded again.
+            let mut branch: Vec<Vec<String>> = Vec::new();
             for sub in crate::config::split_chained_commands_pub(chosen) {
                 let toks = parse_command_line(&sub);
+                match crate::command_alias::read(aliases).expand(&toks) {
+                    Some(commands) => branch.extend(commands),
+                    None => branch.push(toks),
+                }
+            }
+            for toks in branch {
                 let Some(name) = toks.first().map(|s| s.as_str()) else { continue };
                 let sub_args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
                 let sub_raw = sub_args.windows(2).find(|w| w[0] == "-t").map(|w| w[1]);
@@ -8317,7 +8364,7 @@ fn dispatch_control_command(
                 let sub_tx = TargetedSender::new(tx.inner, sub_target);
                 let (stx, srx) = mpsc::channel::<String>();
                 let answered = dispatch_control_command(
-                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, sub_failed,
+                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, sub_failed, aliases,
                 );
                 if !answered { continue; }
                 let text = srx.recv_timeout(Duration::from_secs(15)).unwrap_or_default();

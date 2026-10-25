@@ -56,6 +56,8 @@ mod pty_trace;
 mod startup_trace;
 mod wsl_path;
 mod terminal_overrides;
+mod command_alias;
+mod option_array;
 mod socket_path;
 mod environ;
 mod program_status;
@@ -917,6 +919,58 @@ fn run_list_command_alone(list: &CommandList, command: &[String]) -> i32 {
     }
 }
 
+/// Set on the run of this binary that carries an alias's commands, so a name
+/// still unknown there is not looked up again (tmux expands an alias once).
+/// [`run_main`] takes it out of the environment before anything is spawned.
+const ALIAS_EXPANDED_ENV: &str = "PSMUX_ALIAS_EXPANDED";
+
+/// `psmux <alias> ...` for a `command-alias`. The client keeps no alias table,
+/// so it asks the server, as tmux's client leaves a name it cannot parse to
+/// the server's parser. The alias's commands run as this binary run again
+/// with the same global flags, so each takes its own client side arm
+/// (`display -p`, `attach`, a command list). The exit status, or None when
+/// `args[index]` is no alias or no server answers.
+fn run_cli_alias(args: &[String], index: usize) -> Option<i32> {
+    // The table is the server's, not the command's target's: the -t is for
+    // the alias's command to resolve in the run below. Scoped to it, a pane
+    // the routed session does not hold made the query fail and the alias an
+    // unknown command; a session that does not exist leaves the routing too.
+    let saved_full = env::var("PSMUX_TARGET_FULL").ok();
+    env::remove_var("PSMUX_TARGET_FULL");
+    let query = || send_control_with_response("show-options -s command-alias\n".to_string());
+    let reply = query().or_else(|_| {
+        let saved_session = env::var("PSMUX_TARGET_SESSION").ok();
+        env::remove_var("PSMUX_TARGET_SESSION");
+        let reply = query();
+        if let Some(v) = saved_session { env::set_var("PSMUX_TARGET_SESSION", v); }
+        reply
+    });
+    if let Some(v) = saved_full { env::set_var("PSMUX_TARGET_FULL", v); }
+    let reply = reply.ok()?;
+    let commands = crate::command_alias::from_show_output(&reply).expand(&args[index..])?;
+    let mut argv: Vec<String> = Vec::new();
+    for words in &commands {
+        if !argv.is_empty() {
+            argv.push(";".to_string());
+        }
+        argv.extend(words.iter().cloned());
+    }
+    if argv.is_empty() {
+        return Some(0);
+    }
+    let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
+    let mut child = std::process::Command::new(exe);
+    child.args(&args[1..index]).args(&argv).env(ALIAS_EXPANDED_ENV, "1");
+    let _ = io::stdout().flush();
+    Some(match child.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("psmux: {}", e);
+            1
+        }
+    })
+}
+
 fn main() {
     crate::startup_trace::mark("cli.entry");
     if let Err(e) = run_main() {
@@ -1199,6 +1253,10 @@ fn write_shell_output(mut stream: impl Write, _std_handle: i32, bytes: &[u8]) ->
 }
 
 fn run_main() -> io::Result<()> {
+    // Read once and dropped, so a server or pane this run starts never
+    // inherits it and stops expanding aliases.
+    let alias_expanded = env::var_os(ALIAS_EXPANDED_ENV).is_some();
+    env::remove_var(ALIAS_EXPANDED_ENV);
     // `-L=foo` first (flag_equals), then `-Lfoo` (attached globals), then
     // command-level `-tname` (attached target): running attached passes
     // first would mis-split `-L=foo` into `-L` + `=foo`.
@@ -1565,7 +1623,7 @@ fn run_main() -> io::Result<()> {
         // pane ("ERROR: can't find pane: %N" from the wrong session) and
         // select-layout silently re-laid-out the other session's active
         // window at exit 0.
-        | "split-window" | "splitw" | "split-pane" | "splitp"
+        | "split-window" | "splitw"
         | "select-layout" | "selectl" | "next-layout" | "nextl"
         | "previous-layout" | "prevl"
         // Issue #793 follow up: these four go to the server fire and forget,
@@ -2961,11 +3019,10 @@ fn run_main() -> io::Result<()> {
                 }
                 return Ok(());
             }
-            "split-window" | "splitw" | "split-pane" | "splitp" => {
-                // split-pane / splitp are tmux's default command-aliases for
-                // split-window (options-table.c). psmux handles them as arm
-                // synonyms, matching how info/server-info and choose-window/
-                // choose-session are already aliased. See issue #426.
+            "split-window" | "splitw" => {
+                // split-pane and splitp are tmux's default command aliases for
+                // split-window (options-table.c, issue #426): they reach this
+                // arm through the server's alias table (run_cli_alias).
                 // Strict getopt-style parsing for split-window flags.
                 // tmux template: "bc:de:F:fhIl:p:Pt:vZ"
                 let mut flag = "-v";
@@ -5755,10 +5812,10 @@ fn run_main() -> io::Result<()> {
                 send_control("previous-layout\n".to_string())?;
                 return Ok(());
             }
-            // choose-tree / choose-window / choose-session open a chooser on
-            // an attached client. The flags go to the server as given, since
-            // `-s` picks the session list over the tree.
-            "choose-tree" | "choose-window" | "choose-session" => {
+            // choose-tree opens a chooser on an attached client. The flags go
+            // to the server as given, since `-s` picks the session list over
+            // the tree. choose-window and choose-session are default aliases.
+            "choose-tree" => {
                 let line = std::iter::once(cmd.to_string())
                     .chain(cmd_args[1..].iter().map(|a| crate::util::quote_arg_if_needed(a)))
                     .collect::<Vec<_>>()
@@ -5849,23 +5906,21 @@ fn run_main() -> io::Result<()> {
                 print!("{}", resp);
                 return Ok(());
             }
-            // server-info - Show server information. show-messages prints the
-            // same: tmux's info and server-info are aliases for
-            // `show-messages -JT`, and psmux has no message log to show.
-            "server-info" | "info" | "show-messages" | "showmsgs" => {
+            // show-messages prints the server information: tmux's default
+            // aliases make info and server-info `show-messages -JT`, and psmux
+            // has no message log to show.
+            "show-messages" | "showmsgs" => {
                 // show-messages -t names a client and may name none
                 // (CMD_CLIENT_CANFAIL, cmd-show-messages.c): a client found
                 // picks the session it is on, anything else routes as usual.
-                if cmd.starts_with("show") {
-                    let client = env::var("PSMUX_TARGET_FULL").ok().and_then(|t| client_target_tty(&t));
-                    if let Some(tty) = client {
-                        env::remove_var("PSMUX_TARGET_FULL");
-                        if let Some(sess) = session_holding_client(l_socket_name.as_deref(), &tty) {
-                            env::set_var("PSMUX_TARGET_SESSION", &sess);
-                        }
+                let client = env::var("PSMUX_TARGET_FULL").ok().and_then(|t| client_target_tty(&t));
+                if let Some(tty) = client {
+                    env::remove_var("PSMUX_TARGET_FULL");
+                    if let Some(sess) = session_holding_client(l_socket_name.as_deref(), &tty) {
+                        env::set_var("PSMUX_TARGET_SESSION", &sess);
                     }
                 }
-                let resp = send_control_with_response("server-info\n".to_string())?;
+                let resp = send_control_with_response("show-messages\n".to_string())?;
                 print!("{}", resp);
                 return Ok(());
             }
@@ -6096,6 +6151,12 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             _ => {
+                // A `command-alias` of the server's, or an unknown command.
+                if let Some(index) = command_index.filter(|_| !cmd.is_empty() && !alias_expanded) {
+                    if let Some(code) = run_cli_alias(&args, index) {
+                        std::process::exit(code);
+                    }
+                }
                 // Unknown command - print error and exit
                 if !cmd.is_empty() {
                     eprintln!("psmux: unknown command: {}", cmd);

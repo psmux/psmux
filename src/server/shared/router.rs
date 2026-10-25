@@ -14,7 +14,7 @@
 pub const SUPPORTED: &[&str] = &[
     // windows and panes
     "new-window", "neww",
-    "split-window", "splitw", "split-pane", "splitp",
+    "split-window", "splitw",
     "kill-pane", "killp",
     "kill-window", "killw",
     "select-window", "selectw",
@@ -75,18 +75,23 @@ pub fn first_unsupported(line: &str) -> Option<String> {
 
 /// `first_unsupported` with the session's command aliases applied first
 /// (#897 B), the way the protocol handler applies them (connection.rs: an
-/// alias replaces the command name by the first word of its value), so
+/// alias runs every command of its value, which is parsed like any command
+/// line and not expanded again, tmux cmd_parse_expand_alias), so
 /// `command-alias 'list-tree=resize-pane -Z'` cannot carry a refused command
-/// in under a supported name. `alias` maps a command name to its alias value.
+/// in under a supported name, nor can `'lw=list-windows ; resize-pane -Z'`
+/// after a supported one. `alias` maps a command name to its alias value.
 pub fn first_unsupported_aliased(line: &str, alias: impl Fn(&str) -> Option<String>) -> Option<String> {
     for part in crate::config::split_chained_commands_pub(line.trim()) {
         let words = crate::commands::parse_command_line(&part);
         let Some(name) = words.into_iter().next() else { continue };
-        let name = match alias(&name) {
-            Some(value) => value.split_whitespace().next().map(str::to_string).unwrap_or(name),
-            None => name,
+        let names: Vec<String> = match alias(&name) {
+            Some(value) => crate::config::split_chained_commands_pub(&value)
+                .iter()
+                .filter_map(|command| crate::commands::parse_command_line(command).into_iter().next())
+                .collect(),
+            None => vec![name],
         };
-        if !is_supported(&name) {
+        if let Some(name) = names.into_iter().find(|name| !is_supported(name)) {
             return Some(name);
         }
     }

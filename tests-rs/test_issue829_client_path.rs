@@ -11,7 +11,9 @@ fn s(v: &[&str]) -> Vec<String> {
 
 #[test]
 fn spawning_commands_carry_the_caller_path() {
-    for cmd in ["new-window", "neww", "split-window", "splitw", "split-pane", "splitp",
+    // split-pane and splitp are default command aliases: the CLI runs them
+    // again as split-window.
+    for cmd in ["new-window", "neww", "split-window", "splitw",
                 "new-pane", "newp", "respawn-pane", "respawnp", "respawn-window", "respawnw"] {
         assert_eq!(
             client_path_env_value(&s(&[cmd, "-t", "x:"]), Some(OsStr::new("C:\\a;C:\\b"))),

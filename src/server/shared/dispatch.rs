@@ -33,7 +33,6 @@ pub(crate) fn dispatch(
     let mut meta_dirty = lp.meta_dirty;
     let mut echo_pending_until = lp.echo_pending_until;
     let mut temp_focus_restore = lp.temp_focus_restore.take();
-    let shared_aliases_main = lp.aliases.clone();
     #[allow(clippy::never_loop)]
     for req in std::iter::once(req) {
         temp_target::restore_temp_focus(app, &mut temp_focus_restore);
@@ -1662,12 +1661,6 @@ pub(crate) fn dispatch(
                         // route through this single module, see #271.
                         let sync = crate::warm_pane_sync::for_option_change(&option, &app);
                         crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                        // Update shared aliases if command-alias changed
-                        if option == "command-alias" {
-                            if let Ok(mut map) = shared_aliases_main.write() {
-                                *map = app.command_aliases.clone();
-                            }
-                        }
                         // pane-border-status changes the effective content height (#288)
                         if option == "pane-border-status" {
                             resize_all_panes(&mut app);
@@ -1689,6 +1682,9 @@ pub(crate) fn dispatch(
                         match option.as_str() {
                             // ARRAY option: `-a` appends an item (see the
                             // sibling arm in the main request loop).
+                            name if crate::command_alias::is_alias_option(name) => {
+                                let _ = crate::command_alias::write(&app.command_aliases).set(name, &value, true);
+                            }
                             "codepoint-widths" => {
                                 crate::server::options::append_codepoint_widths(&mut app, &value);
                             }
@@ -1737,11 +1733,6 @@ pub(crate) fn dispatch(
                     } else {
                         if apply_set_option(&mut app, &option, &value, false).is_ok() {
                             app.user_set_options.insert(option.clone());
-                            if option == "command-alias" {
-                                if let Ok(mut map) = shared_aliases_main.write() {
-                                    *map = app.command_aliases.clone();
-                                }
-                            }
                             meta_dirty = true;
                             state_dirty = true;
                             if let Some(r) = resp {
@@ -1761,12 +1752,6 @@ pub(crate) fn dispatch(
                         // default-terminal, and claude-code-* options.
                         let sync = crate::warm_pane_sync::for_option_change(&option, &app);
                         crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                        // Update shared aliases if command-alias changed
-                        if option == "command-alias" {
-                            if let Ok(mut map) = shared_aliases_main.write() {
-                                *map = app.command_aliases.clone();
-                            }
-                        }
                         // pane-border-status changes the effective content height (#288)
                         if option == "pane-border-status" {
                             resize_all_panes(&mut app);
@@ -1811,11 +1796,6 @@ pub(crate) fn dispatch(
                     // claude-code-* options all matter here).
                     let sync = crate::warm_pane_sync::for_option_change(&option, &app);
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                    if option == "command-alias" {
-                        if let Ok(mut map) = shared_aliases_main.write() {
-                            *map = app.command_aliases.clone();
-                        }
-                    }
                     meta_dirty = true;
                     state_dirty = true;
                 }
@@ -2017,8 +1997,9 @@ pub(crate) fn dispatch(
                     if let Some(ref group) = app.session_group {
                         output.push_str(&format!("session-group \"{}\"\n", group));
                     }
-                    for (alias, expansion) in &app.command_aliases {
-                        output.push_str(&format!("command-alias \"{}={}\"\n", alias, expansion));
+                    let aliases = crate::command_alias::read(&app.command_aliases);
+                    if !aliases.is_empty() {
+                        output.push_str(&aliases.show_lines(false));
                     }
                     let _ = resp.send(output);
                 }
@@ -2118,7 +2099,7 @@ pub(crate) fn dispatch(
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
                         // Support `\;` chaining in server-side bind-key
-                        let sub_cmds = crate::config::bind_command_list(&command);
+                        let sub_cmds = crate::config::bind_commands(&app.command_aliases, &command);
                         let action = if sub_cmds.len() > 1 {
                             Some(Action::CommandChain(sub_cmds))
                         } else {

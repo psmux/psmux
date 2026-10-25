@@ -69,15 +69,15 @@ pub(crate) struct SessionLoop {
     /// its pushed frames.
     pub clients: HashSet<u64>,
     pub last_push: Instant,
-    /// The session's command aliases, shared with its connection threads
-    /// (run_server's `shared_aliases_main`).
+    /// The session's command aliases: the same table as `app.command_aliases`,
+    /// which its connection threads read (run_server's `shared_aliases`).
     pub aliases: Aliases,
     last_alert_check: Instant,
     last_reap: Instant,
     last_registry_check: Instant,
 }
 
-type Aliases = Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>;
+type Aliases = crate::command_alias::SharedAliases;
 
 
 impl SessionLoop {
@@ -589,11 +589,6 @@ fn upkeep(app: &mut AppState, lp: &mut SessionLoop, pty_system: &dyn portable_pt
     for option in std::mem::take(&mut app.in_process_option_writes) {
         let sync = crate::warm_pane_sync::for_option_change(&option, app);
         crate::warm_pane_sync::apply(app, pty_system, sync);
-        if option == "command-alias" {
-            if let Ok(mut map) = lp.aliases.write() {
-                *map = app.command_aliases.clone();
-            }
-        }
         if option == "pane-border-status" {
             resize_all_panes(app);
         }
@@ -823,7 +818,8 @@ fn create_session(
     app.control_port = Some(port);
     let session_key = random_key();
     app.session_key = session_key.clone();
-    let aliases: Aliases = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    // The connection threads read the alias table the session writes.
+    let aliases: Aliases = app.command_aliases.clone();
     let stop = Arc::new(AtomicBool::new(false));
 
     // From here on the session holds things a failure must give back (its
@@ -952,9 +948,6 @@ fn set_up_session(
     // its listener like any other delivery, before the CLI gets its reply.
     // No spare panes in step 2 (the refill channel is never set).
     app.warm_pane.target = 0;
-    if let Ok(mut w) = aliases.write() {
-        *w = app.command_aliases.clone();
-    }
     resize_all_panes(app);
     let created = if let Some(ref raw) = args.raw {
         create_window_raw(pty_system, app, raw)
@@ -1207,7 +1200,7 @@ fn job_environ_reply(identity: &[(String, String)]) -> String {
 
 /// The value of command alias `name` in a session's alias table.
 fn alias_of(aliases: &Aliases, name: &str) -> Option<String> {
-    aliases.read().ok().and_then(|m| m.get(name).cloned())
+    crate::command_alias::read(aliases).get(name)
 }
 
 /// A connected loopback pair: (the end the protocol handler serves, the end

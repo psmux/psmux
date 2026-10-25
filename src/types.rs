@@ -2033,8 +2033,10 @@ pub struct AppState {
     pub allow_passthrough: String,
     /// copy-command: command to pipe yanked text to (default empty)
     pub copy_command: String,
-    /// command-alias: map of alias name to expansion
-    pub command_aliases: std::collections::HashMap<String, String>,
+    /// command-alias: the server ARRAY option, shared with the connection
+    /// threads, which expand aliases without a round trip to the main loop.
+    /// Written in place, never replaced, so every holder sees the change.
+    pub command_aliases: crate::command_alias::SharedAliases,
     /// codepoint-widths: server-scope ARRAY of Unicode width overrides, one
     /// entry per element in tmux order (later entries win). Stored as the raw
     /// entry strings so `show-options` can echo them back verbatim; the parsed
@@ -3373,7 +3375,9 @@ impl AppState {
             manual_window_sizes: std::collections::HashMap::new(),
             allow_passthrough: "off".to_string(),
             copy_command: String::new(),
-            command_aliases: std::collections::HashMap::new(),
+            command_aliases: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::command_alias::CommandAliases::with_defaults(),
+            )),
             codepoint_widths: Vec::new(),
             terminal_overrides: Vec::new(),
             config_warnings: Vec::new(),

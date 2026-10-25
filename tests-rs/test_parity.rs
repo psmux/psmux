@@ -645,9 +645,12 @@ fn user_options_initially_empty() {
 }
 
 #[test]
-fn command_aliases_initially_empty() {
+fn command_aliases_initially_hold_tmux_defaults() {
     let app = mock_app();
-    assert!(app.command_aliases.is_empty());
+    assert_eq!(
+        *crate::command_alias::read(&app.command_aliases),
+        crate::command_alias::CommandAliases::with_defaults()
+    );
 }
 
 #[test]

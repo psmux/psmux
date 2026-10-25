@@ -839,11 +839,10 @@ If `list-sessions -F`, `list-windows -F`, or `list-panes -F` returns garbled or 
 
 ### "unknown command" for a `command-alias`
 
-`set -g command-alias 'x=split-window -h'` is accepted and shows up in `show-options`, but the
-alias is only resolved by the server's command dispatcher, which is the path a key binding takes.
-`psmux x` fails with `psmux: unknown command: x`, and so does the same alias on a config line, in
-a hook, or over control mode. Do not build a tool's public surface on `command-alias`; call the
-underlying command instead. See
+`psmux x` asks the server for its `command-alias` array when `x` is not a psmux command, so it
+fails with `psmux: unknown command: x` when no server runs in that namespace or that server has
+no alias `x`. Check with `psmux show-options -s command-alias`. An alias named after a real
+command (`ls`) is never looked up from the command line. See
 [scripting.md, "User Defined Command Aliases"](scripting.md#user-defined-command-aliases).
 
 ### Control Mode Connection Issues

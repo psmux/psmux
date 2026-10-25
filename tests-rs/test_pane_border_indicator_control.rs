@@ -1,7 +1,6 @@
 use super::*;
 use std::io::{BufRead, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const TEST_KEY: &str = "pane-border-indicator-test-key";
@@ -26,7 +25,7 @@ fn simple_tcp_command(command: &str) -> (String, mpsc::Receiver<CtrlReq>) {
             stream,
             request_tx,
             TEST_KEY,
-            Arc::new(RwLock::new(std::collections::HashMap::new())),
+            Default::default(),
         );
     });
 
@@ -59,7 +58,7 @@ fn rejected_control_command(command: &str, args: &[&str]) -> String {
         None,
         false,
         None,
-        0, false,
+        0, false, &Default::default(),
     ));
     let response = response_rx.recv().unwrap();
     assert!(response.starts_with("\u{0001}ERR\u{0001}"));
@@ -354,7 +353,7 @@ fn persistent_control_accepts_global_window_forms() {
             None,
             false,
             None,
-            0, false,
+            0, false, &Default::default(),
         ));
         assert_eq!(response_rx.recv().unwrap(), "");
         assert_indicator_request(request_rx.recv().unwrap(), expected);
