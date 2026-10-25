@@ -170,6 +170,10 @@ struct Globals {
 
 const ECHO_TTL: Duration = Duration::from_secs(10);
 
+/// How long a connection may show a good AUTH line and nothing else before
+/// the shared server takes it for a client waiting for `OK` (an attach).
+const AUTH_ALONE_GRACE: Duration = Duration::from_millis(30);
+
 impl Globals {
     fn expect_echo(&self, sid: usize, line: &str) {
         if let Ok(mut e) = self.echoes.lock() {
@@ -225,6 +229,84 @@ fn clear_inherit_socket(s: &impl std::os::windows::io::AsRawSocket) {
 #[cfg(not(windows))]
 fn clear_inherit_socket<T>(_s: &T) {}
 
+/// The kernel object name of a namespace's one shared server lock (#897 C).
+///
+/// It must never equal a per session server's lock. Those are
+/// `Local\psmux-session-<tag>-<base>` (platform.rs `session_mutex_name`), and
+/// a base is `<ns>__<session>` with almost any session name, so ANY name built
+/// under that prefix can be taken by some session: `<ns>@shared-server`, the
+/// name step 2 used, is the lock of the per session session `y@shared-server`
+/// in `-L x` when this server's namespace is `x__y`, and this server then
+/// exited at start while the CLI waited 15 s for its marker. This prefix is
+/// one no per session lock can have. The namespace part follows the marker's
+/// naming (`default`, `L-<ns>`), with `%`, `\` and `/` escaped (a `\` is not
+/// allowed in a kernel object name) so two namespaces never share a name.
+fn namespace_lock_name(ns: Option<&str>, data_root_tag: &str) -> String {
+    let part = match ns {
+        None => "default".to_string(),
+        Some(n) => format!(
+            "L-{}",
+            n.replace('%', "%25").replace('\\', "%5C").replace('/', "%2F")
+        ),
+    };
+    format!("Local\\psmux-shared-server-{}-{}", data_root_tag, part)
+}
+
+/// The held namespace lock: a named mutex owned for the server's lifetime,
+/// with the per session lock's semantics (platform.rs
+/// `acquire_session_mutex`): owned, or abandoned by a server that died, means
+/// this process may run; held by a live process means it must exit; a
+/// failure of the call itself fails open.
+struct NamespaceLock {
+    #[cfg(windows)]
+    handle: *mut core::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateMutexW(attrs: *const core::ffi::c_void, initial_owner: i32, name: *const u16) -> *mut core::ffi::c_void;
+    fn WaitForSingleObject(h: *mut core::ffi::c_void, ms: u32) -> u32;
+    fn ReleaseMutex(h: *mut core::ffi::c_void) -> i32;
+    fn CloseHandle(h: isize) -> i32;
+}
+
+impl NamespaceLock {
+    #[cfg(windows)]
+    fn acquire(name: &str) -> Option<NamespaceLock> {
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let h = CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
+            if h.is_null() {
+                return Some(NamespaceLock { handle: std::ptr::null_mut() });
+            }
+            if WaitForSingleObject(h, 0) == WAIT_TIMEOUT {
+                CloseHandle(h as isize);
+                return None;
+            }
+            Some(NamespaceLock { handle: h })
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn acquire(_name: &str) -> Option<NamespaceLock> {
+        Some(NamespaceLock {})
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NamespaceLock {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                ReleaseMutex(self.handle);
+                CloseHandle(self.handle as isize);
+            }
+        }
+    }
+}
+
 fn namespace_label(ns: &Option<String>) -> String {
     match ns {
         Some(n) => format!("shared-server -L {}", n),
@@ -260,8 +342,7 @@ fn run(ns: Option<String>) -> ! {
     crate::platform::set_process_priority(&priority);
 
     // One shared server per namespace and data directory.
-    let mutex_name = format!("{}@shared-server", ns.as_deref().unwrap_or(""));
-    let _server_guard = match crate::platform::acquire_session_mutex(&mutex_name) {
+    let _server_guard = match NamespaceLock::acquire(&namespace_lock_name(ns.as_deref(), &crate::paths::data_root_tag())) {
         Some(g) => g,
         None => std::process::exit(0),
     };
@@ -331,19 +412,27 @@ fn run(ns: Option<String>) -> ! {
     let mut last_client_activity = Instant::now();
 
     loop {
+        // Sessions to end after this pass, and why.
+        let mut ended: Vec<(usize, &'static str)> = Vec::new();
         let data_ready = crate::types::PTY_DATA_READY.swap(false, Ordering::AcqRel);
         if data_ready {
             let cpr = crate::types::CPR_DATA_PENDING.swap(false, Ordering::AcqRel);
             let color = crate::types::COLOR_QUERY_PENDING.swap(false, Ordering::AcqRel);
-            for s in sessions.values_mut() {
-                s.lp.state_dirty = true;
-                data_ready_work(&mut s.app, cpr, color);
-            }
+            ended.extend(
+                for_each_session_guarded(&mut sessions, |app, lp| {
+                    lp.state_dirty = true;
+                    data_ready_work(app, cpr, color);
+                })
+                .into_iter()
+                .map(|sid| (sid, "panic")),
+            );
         }
         if crate::types::DEVICE_REPLY_PENDING.swap(false, Ordering::AcqRel) {
-            for s in sessions.values_mut() {
-                device_reply_work(&mut s.app);
-            }
+            ended.extend(
+                for_each_session_guarded(&mut sessions, |app, _lp| device_reply_work(app))
+                    .into_iter()
+                    .map(|sid| (sid, "panic")),
+            );
             crate::types::rearm_device_replies();
         }
         let echo_active = sessions
@@ -371,11 +460,13 @@ fn run(ns: Option<String>) -> ! {
             Msg::Req(_, CtrlReq::DumpState(..)) => 1,
             _ => 0,
         });
-        let mut ended: Vec<(usize, &'static str)> = Vec::new();
         for m in pending {
             match m {
                 Msg::Wake => crate::types::clear_wake_pending(),
                 Msg::Req(sid, req) => {
+                    if ended.iter().any(|(e, _)| *e == sid) {
+                        continue;
+                    }
                     if !matches!(req, CtrlReq::PtyWake | CtrlReq::DumpState(..)) {
                         last_client_activity = Instant::now();
                     }
@@ -397,10 +488,10 @@ fn run(ns: Option<String>) -> ! {
                     let outcome = match cmd {
                         ControlCmd::Ping => Outcome::Done(String::new()),
                         ControlCmd::NewSession(args) => {
-                            match create_session(&args, &mut ids, &ns, &msg_tx, &*pty_system, &globals) {
+                            match create_session_guarded(&args, &mut ids, &ns, &msg_tx, &*pty_system, &globals) {
                                 Ok(s) => {
                                     let sid = s.app.session_id;
-                                    let text = new_session_output(&s.app, &args);
+                                    let text = new_session_output_guarded(&s.app, &args);
                                     sessions.insert(sid, s);
                                     had_session = true;
                                     Outcome::Done(text)
@@ -431,7 +522,7 @@ fn run(ns: Option<String>) -> ! {
                 if let Ok(mut p) = globals.peers.write() {
                     p.retain(|p| p.sid != sid);
                 }
-                end_session(s, sessions.is_empty(), pid);
+                end_session_guarded(s, sessions.is_empty(), pid);
             }
         }
         if sessions.is_empty() {
@@ -450,10 +541,12 @@ fn run_request<F>(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, f: 
 where
     F: FnOnce(&mut AppState, &mut SessionLoop) -> io::Result<Flow>,
 {
-    enter(s, ids, ns);
-    let app = &mut s.app;
-    let lp = &mut s.lp;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(app, lp)));
+    // `enter` is inside the guard too (#894): a panic there must end this
+    // session, not unwind the loop thread and with it every session.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        enter(s, ids, ns);
+        f(&mut s.app, &mut s.lp)
+    }));
     ids.take_back(s.app.next_win_id, s.app.next_pane_id);
     match result {
         Ok(Ok(flow)) => flow,
@@ -719,30 +812,80 @@ fn create_session(
     app.attached_clients = 0;
     let sid = app.session_id;
 
-    let (tx, rx) = mpsc::channel::<CtrlReq>();
-    app.control_tx = Some(tx.clone());
+    let (tx, rx) = mpsc::channel::<CtrlReq>();    app.control_tx = Some(tx.clone());
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     app.control_port = Some(port);
     let session_key = random_key();
     app.session_key = session_key.clone();
+    let aliases: Aliases = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // From here on the session holds things a failure must give back (its
+    // registry files, its listener, its panes, the lent ids), so everything
+    // that can fail or panic runs under one guard (#894): a panic, in the
+    // user's config, a hook or the first window, becomes an ordinary failure
+    // of this new-session and goes through the cleanup below, and the other
+    // sessions and the server keep running.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        set_up_session(&mut app, args, ids, ns, msg_tx, pty_system, globals, &base, cwd.as_deref(), (tx, rx), listener, &aliases, &stop)
+    }))
+    .unwrap_or_else(|_| Err("create session failed: internal error (see crash.log)".to_string()));
+    ids.take_back(app.next_win_id, app.next_pane_id);
+    if let Err(msg) = result {
+        stop.store(true, Ordering::Release);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        crate::session::remove_session_registry_files(std::path::Path::new(&crate::paths::port_file(&base)));
+        let windows = &mut app.windows;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree::kill_all_children_batch(windows)));
+        return Err(msg);
+    }
+    if let Ok(mut p) = globals.peers.write() {
+        p.push(Peer { sid, name: name.clone(), port, key: session_key });
+    }
+    Ok(Session { app, lp: SessionLoop::new(aliases), cwd, port, stop, _guard: guard })
+}
+
+/// The part of `create_session` that runs with the new session holding its
+/// listener and files: entering it, its registry files, its threads, the
+/// config, the first window and the hooks. Runs under `create_session`'s
+/// guard; an `Err` or a panic here is cleaned up there.
+#[allow(clippy::too_many_arguments)]
+fn set_up_session(
+    app: &mut AppState,
+    args: &NewSessionArgs,
+    ids: &mut ServerIds,
+    ns: &Option<String>,
+    msg_tx: &mpsc::Sender<Msg>,
+    pty_system: &dyn portable_pty::PtySystem,
+    globals: &Arc<Globals>,
+    base: &str,
+    cwd: Option<&std::path::Path>,
+    channel: (mpsc::Sender<CtrlReq>, mpsc::Receiver<CtrlReq>),
+    listener: TcpListener,
+    aliases: &Aliases,
+    stop: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    let sid = app.session_id;
+    let session_key = app.session_key.clone();
+    let (tx, rx) = channel;
 
     // Enter the new session before anything can spawn a child or allocate
     // an id (load_config may run run-shell, create_window spawns the shell).
     ids.lend(&mut app.next_win_id, &mut app.next_pane_id);
-    std::env::set_var("PSMUX_TARGET_SESSION", &base);
+    std::env::set_var("PSMUX_TARGET_SESSION", base);
     crate::commands::publish_job_env(app.control_port, ns.as_deref());
-    if let Some(ref d) = cwd {
+    if let Some(d) = cwd {
         let _ = std::env::set_current_dir(d);
     }
     if let Ok(mut g) = CURRENT.lock() {
         g.clear();
-        g.push_str(&base);
+        g.push_str(base);
     }
 
     // .key before .port (issue #496), then the per session files.
-    let _ = std::fs::write(crate::paths::key_file(&base), session_key.as_bytes());
-    ensure_session_registry_files(&app);
+    let _ = std::fs::write(crate::paths::key_file(base), session_key.as_bytes());
+    ensure_session_registry_files(app);
 
     // Requests of this session, tagged and handed to the loop.
     {
@@ -755,12 +898,10 @@ fn create_session(
             }
         });
     }
-    let aliases: Aliases = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-    let stop = Arc::new(AtomicBool::new(false));
-    let identity: Arc<Vec<(String, String)>> = Arc::new(job_identity(port, ns, &base));
+    let identity: Arc<Vec<(String, String)>> =
+        Arc::new(job_identity(app.control_port.unwrap_or(0), ns, base));
     {
         let stop = stop.clone();
-        let tx = tx.clone();
         let key = session_key.clone();
         let aliases = aliases.clone();
         let globals = globals.clone();
@@ -783,58 +924,102 @@ fn create_session(
         });
     }
 
-    let result = (|| -> Result<(), String> {
-        if let (Some(w), Some(h)) = (args.width, args.height) {
-            let area = Rect { x: 0, y: 0, width: w, height: h };
-            app.client_area = area;
-            app.last_window_area = area;
-        } else if args.width.is_some() || args.height.is_some() {
-            let area = Rect { x: 0, y: 0, width: args.width.unwrap_or(80), height: args.height.unwrap_or(24) };
-            app.client_area = area;
-            app.last_window_area = area;
-        }
-        crate::util::merge_session_env_into_app(&mut app, &args.env);
-        crate::config::populate_default_bindings(&mut app);
-        load_config(&mut app);
-        {
-            let patterns = app.update_environment.clone();
-            crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
-        }
-        // The server wide writes made so far (set -g, setenv -g, set-hook -g,
-        // bind): tmux keeps them once per server, so a new session sees them.
-        // The server wide writes made so far are delivered to this session by
-        // the control connection that asked for it (`serve_control`), through
-        // its listener like any other delivery, before the CLI gets its reply.
-        // No spare panes in step 2 (the refill channel is never set).
-        app.warm_pane.target = 0;
-        if let Ok(mut w) = aliases.write() {
-            *w = app.command_aliases.clone();
-        }
-        resize_all_panes(&mut app);
-        let created = if let Some(ref raw) = args.raw {
-            create_window_raw(pty_system, &mut app, raw)
-        } else {
-            create_window(pty_system, &mut app, args.command.as_deref(), args.start_dir.as_deref(), false)
-        };
-        created.map_err(|e| format!("create window failed: {e}"))?;
-        resize_all_panes(&mut app);
-        apply_initial_window_name(&mut app, args.window_name.as_deref());
-        crate::commands::fire_hooks(&mut app, "client-attached");
-        crate::commands::fire_hooks(&mut app, "session-created");
-        Ok(())
-    })();
-    ids.take_back(app.next_win_id, app.next_pane_id);
-    if let Err(msg) = result {
-        stop.store(true, Ordering::Release);
-        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
-        crate::session::remove_session_registry_files(std::path::Path::new(&crate::paths::port_file(&base)));
-        tree::kill_all_children_batch(&mut app.windows);
-        return Err(msg);
+    if let (Some(w), Some(h)) = (args.width, args.height) {
+        let area = Rect { x: 0, y: 0, width: w, height: h };
+        app.client_area = area;
+        app.last_window_area = area;
+    } else if args.width.is_some() || args.height.is_some() {
+        let area = Rect { x: 0, y: 0, width: args.width.unwrap_or(80), height: args.height.unwrap_or(24) };
+        app.client_area = area;
+        app.last_window_area = area;
     }
-    if let Ok(mut p) = globals.peers.write() {
-        p.push(Peer { sid, name: name.clone(), port, key: session_key });
+    crate::util::merge_session_env_into_app(app, &args.env);
+    crate::config::populate_default_bindings(app);
+    load_config(app);
+    {
+        let patterns = app.update_environment.clone();
+        crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
     }
-    Ok(Session { app, lp: SessionLoop::new(aliases), cwd, port, stop, _guard: guard })
+    // The server wide writes made so far (set -g, setenv -g, set-hook -g,
+    // bind): tmux keeps them once per server, so a new session sees them.
+    // The server wide writes made so far are delivered to this session by
+    // the control connection that asked for it (`serve_control`), through
+    // its listener like any other delivery, before the CLI gets its reply.
+    // No spare panes in step 2 (the refill channel is never set).
+    app.warm_pane.target = 0;
+    if let Ok(mut w) = aliases.write() {
+        *w = app.command_aliases.clone();
+    }
+    resize_all_panes(app);
+    let created = if let Some(ref raw) = args.raw {
+        create_window_raw(pty_system, app, raw)
+    } else {
+        create_window(pty_system, app, args.command.as_deref(), args.start_dir.as_deref(), false)
+    };
+    created.map_err(|e| format!("create window failed: {e}"))?;
+    resize_all_panes(app);
+    apply_initial_window_name(app, args.window_name.as_deref());
+    crate::commands::fire_hooks(app, "client-attached");
+    crate::commands::fire_hooks(app, "session-created");
+    Ok(())
+}
+
+/// `create_session` with the rest of it guarded too (#894): a panic before
+/// the session holds anything (its name, its state, its listener) is a failed
+/// new-session, never the end of the server.
+fn create_session_guarded(
+    args: &NewSessionArgs,
+    ids: &mut ServerIds,
+    ns: &Option<String>,
+    msg_tx: &mpsc::Sender<Msg>,
+    pty_system: &dyn portable_pty::PtySystem,
+    globals: &Arc<Globals>,
+) -> Result<Session, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        create_session(args, ids, ns, msg_tx, pty_system, globals)
+    }))
+    .unwrap_or_else(|_| Err("create session failed: internal error (see crash.log)".to_string()))
+}
+
+/// `new_session_output` guarded (#894): the `-P -F` expansion of a session
+/// that was made. A panic in it loses only the printed text; the reply still
+/// names the session, so the CLI attaches to it.
+fn new_session_output_guarded(app: &AppState, args: &NewSessionArgs) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| new_session_output(app, args)))
+        .unwrap_or_else(|_| format!("session={}", app.session_name))
+}
+
+/// Run `f` for every session, each under its own guard (#894): the loop's
+/// own per session work outside a request (the data ready and device reply
+/// passes). The session a panic happens in is named in the crash report and
+/// returned, to be ended; the others go on. Returns the sessions to end.
+fn for_each_session_guarded<F>(sessions: &mut BTreeMap<usize, Session>, mut f: F) -> Vec<usize>
+where
+    F: FnMut(&mut AppState, &mut SessionLoop),
+{
+    let mut panicked = Vec::new();
+    for (sid, s) in sessions.iter_mut() {
+        let app = &mut s.app;
+        let lp = &mut s.lp;
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Ok(mut g) = CURRENT.lock() {
+                g.clear();
+                g.push_str(&app.port_file_base());
+            }
+            f(app, lp)
+        }));
+        if caught.is_err() {
+            panicked.push(*sid);
+        }
+    }
+    panicked
+}
+
+/// `end_session` guarded (#894): it runs for a session that may have just
+/// panicked half way through a change, so its own panic must not take the
+/// loop, and the other sessions, with it.
+fn end_session_guarded(s: Session, last: bool, pid: u32) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || end_session(s, last, pid)));
 }
 
 /// End one session: its registry files first (so nothing new reaches it),
@@ -877,7 +1062,7 @@ fn shutdown(
     let all: Vec<usize> = sessions.keys().copied().collect();
     for sid in all {
         if let Some(s) = sessions.remove(&sid) {
-            end_session(s, false, pid);
+            end_session_guarded(s, false, pid);
         }
     }
     if let Some(all) = scoped_all {
@@ -911,6 +1096,9 @@ fn serve_session_connection(
     let mut buf = vec![0u8; 16 * 1024];
     let deadline = Instant::now() + Duration::from_millis(2000);
     let mut n = 0usize;
+    // When a whole good AUTH line arrived with nothing after it.
+    let mut auth_alone_since: Option<Instant> = None;
+    let mut waits_for_ok = false;
     loop {
         match stream.peek(&mut buf) {
             Ok(0) => return,
@@ -922,34 +1110,60 @@ fn serve_session_connection(
             }
             Err(_) => break,
         }
+        // An attaching client sends `AUTH` and then waits for the handler's
+        // `OK` before it sends `PERSISTENT` (client.rs establish_connection),
+        // so waiting here for its second line only made every shared attach
+        // sit out the whole deadline, about 2 s against 0.1 s per session.
+        // A one shot CLI writes its command right after AUTH, well inside
+        // this grace.
+        if router::opening_authenticates(&buf[..n], key) && buf[..n].iter().filter(|b| **b == b'\n').count() == 1 && buf[n - 1] == b'\n' {
+            let since = *auth_alone_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= AUTH_ALONE_GRACE {
+                waits_for_ok = true;
+                break;
+            }
+        } else {
+            auth_alone_since = None;
+        }
         if Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    let refusal = match router::parse_opening(&buf[..n]) {
+    let opening = router::parse_opening(&buf[..n]);
+    match opening {
         router::Opening::Command {
             key: opening_key,
             line,
             lines,
         } if opening_key == key && line == "job-environ" => {
-            Some((Outcome::Done(job_environ_reply(identity)), lines))
+            refuse(stream, &Outcome::Done(job_environ_reply(identity)), lines)
         }
         router::Opening::Command { key: k, line, lines } if k == key => {
-            let refused = router::first_unsupported(&line).map(|name| (Outcome::Unsupported(name), lines));
-            if refused.is_none() {
-                apply_global_writes(&line, sid, globals);
+            match router::first_unsupported_aliased(&line, |name| alias_of(&aliases, name)) {
+                Some(name) => refuse(stream, &Outcome::Unsupported(name), lines),
+                None => {
+                    apply_global_writes(&line, sid, globals);
+                    serve_gated(stream, tx, key, aliases, sid, globals, lines);
+                }
             }
-            refused
         }
         router::Opening::Control { key: k } if k == key => {
-            Some((Outcome::Unsupported("control-mode".to_string()), 2))
+            refuse(stream, &Outcome::Unsupported("control-mode".to_string()), 2)
         }
-        _ => None,
-    };
-    match refusal {
-        Some((outcome, lines)) => refuse(stream, &outcome, lines),
-        None => connection::handle_connection(stream, tx, key, aliases),
+        // A client waiting for `OK` (an attach): the handler answers it, as
+        // before; its second line is `PERSISTENT`, and an attached client's
+        // connection is not gated.
+        router::Opening::Undecided if waits_for_ok => connection::handle_connection(stream, tx, key, aliases),
+        // A good AUTH, then bytes but no whole command line: a first line
+        // over the peek buffer, or one still arriving at the deadline (#897
+        // B). The handler answers it as a per session server does, but every
+        // command line it gets is checked first.
+        router::Opening::Undecided if router::opening_authenticates(&buf[..n], key) => {
+            serve_gated(stream, tx, key, aliases, sid, globals, 1);
+        }
+        // An attached client, or no good AUTH (the handler refuses it).
+        _ => connection::handle_connection(stream, tx, key, aliases),
     }
 }
 
@@ -984,6 +1198,135 @@ fn job_environ_reply(identity: &[(String, String)]) -> String {
     use base64::Engine;
     let env = with_session_identity(crate::commands::job_environment(), identity);
     base64::engine::general_purpose::STANDARD.encode(crate::client_env::encode_env_block(env))
+}
+
+/// The value of command alias `name` in a session's alias table.
+fn alias_of(aliases: &Aliases, name: &str) -> Option<String> {
+    aliases.read().ok().and_then(|m| m.get(name).cloned())
+}
+
+/// A connected loopback pair: (the end the protocol handler serves, the end
+/// this server writes the client's lines into and reads the replies from).
+fn loopback_pair() -> io::Result<(std::net::TcpStream, std::net::TcpStream)> {
+    let l = TcpListener::bind(("127.0.0.1", 0))?;
+    let ours = std::net::TcpStream::connect(l.local_addr()?)?;
+    let (theirs, _) = l.accept()?;
+    clear_inherit_socket(&ours);
+    clear_inherit_socket(&theirs);
+    let _ = ours.set_nodelay(true);
+    let _ = theirs.set_nodelay(true);
+    Ok((theirs, ours))
+}
+
+/// Serve a one shot connection whose opening was admitted, checking EVERY
+/// command line it sends, not only the first (#897 B).
+///
+/// The per session protocol handler reads further lines of a one shot
+/// connection (a batch, the CLI's `session-info` barrier), and only the
+/// opening can be peeked before it starts, so a refused command on a later
+/// line, or on a first line that came too late or too long for the peek, ran
+/// anyway. Here the handler gets its own loopback connection and this thread
+/// forwards the client's lines into it one by one: the `checked` opening lines
+/// as they are (the AUTH line, and the TARGET and command lines the router has
+/// already checked), a TARGET line right after AUTH as it is, and every other
+/// line only after the same check as the opening (aliases applied). A server
+/// wide write on a later line is not propagated to the other sessions: the
+/// handler may never run it (a one shot connection stops reading after some
+/// commands, display-message -p among them), and propagating it anyway would
+/// leave the sessions disagreeing. A refused line ends the request: nothing from it
+/// on reaches the handler, and once the handler's replies so far have been
+/// passed back, the client gets the per session unknown command reply for it.
+/// Persistent (attached) connections never come here.
+fn serve_gated(
+    outer: std::net::TcpStream,
+    tx: mpsc::Sender<CtrlReq>,
+    key: &str,
+    aliases: Aliases,
+    sid: usize,
+    globals: &Globals,
+    checked: usize,
+) {
+    use std::io::BufRead;
+    let (inner, mut to_handler) = match loopback_pair() {
+        Ok(p) => p,
+        Err(e) => {
+            // No way to check the rest: refuse rather than run it unchecked.
+            refuse(outer, &Outcome::Failed(format!("server error: {e}")), checked);
+            return;
+        }
+    };
+    let (Ok(mut to_client), Ok(mut from_handler)) = (outer.try_clone(), to_handler.try_clone()) else {
+        refuse(outer, &Outcome::Failed("server error".to_string()), checked);
+        return;
+    };
+    {
+        let key = key.to_string();
+        let aliases = aliases.clone();
+        thread::spawn(move || connection::handle_connection(inner, tx, &key, aliases));
+    }
+    let refusal: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let done = Arc::new(AtomicBool::new(false));
+    let replies = {
+        let refusal = refusal.clone();
+        let done = done.clone();
+        thread::spawn(move || {
+            let _ = io::copy(&mut from_handler, &mut to_client);
+            if let Some(text) = refusal.lock().ok().and_then(|mut r| r.take()) {
+                let _ = to_client.write_all(text.as_bytes());
+            }
+            let _ = to_client.flush();
+            let _ = to_client.shutdown(std::net::Shutdown::Write);
+            done.store(true, Ordering::Release);
+        })
+    };
+    let _ = outer.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut r = io::BufReader::new(outer);
+    let mut pending: Vec<u8> = Vec::new();
+    let mut index = 0usize;
+    // The opening's command line was checked, and its server wide writes
+    // propagated, by the caller when it is among the `checked` lines.
+    let mut first_command_done = checked > 1;
+    'read: loop {
+        if done.load(Ordering::Acquire) {
+            break;
+        }
+        let eof = match r.read_until(b'\n', &mut pending) {
+            Ok(0) => true,
+            Ok(_) if pending.ends_with(b"\n") => false,
+            Ok(_) => continue, // the last line, without its newline: EOF next
+            Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => continue,
+            Err(_) => break,
+        };
+        if !pending.is_empty() {
+            let text = String::from_utf8_lossy(&pending).trim().to_string();
+            let pass = index < checked
+                || text.is_empty()
+                || (index == 1 && text.starts_with("TARGET "));
+            if !pass {
+                if let Some(name) = router::first_unsupported_aliased(&text, |n| alias_of(&aliases, n)) {
+                    if let Ok(mut slot) = refusal.lock() {
+                        *slot = Some(reply::reply_text(&Outcome::Unsupported(name)));
+                    }
+                    break 'read;
+                }
+                if !first_command_done {
+                    // The opening's command, which the peek could not see.
+                    apply_global_writes(&text, sid, globals);
+                }
+                first_command_done = true;
+            }
+            if to_handler.write_all(&pending).and_then(|_| to_handler.flush()).is_err() {
+                break;
+            }
+            pending.clear();
+            index += 1;
+        }
+        if eof {
+            break;
+        }
+    }
+    let _ = to_handler.shutdown(std::net::Shutdown::Write);
+    let _ = replies.join();
 }
 
 /// A server wide write (`router::is_global_write`) arriving on one session's
@@ -1136,3 +1479,7 @@ fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>, 
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue798_shared_server_requests.rs"]
 mod tests_issue798_shared_server_requests;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue894_897_shared_guards.rs"]
+mod tests_issue894_897_shared_guards;

@@ -121,15 +121,19 @@ pub fn marker_process_alive(m: &Marker) -> bool {
     crate::platform::process_kill::process_creation_time(m.pid) == Some(m.creation)
 }
 
-/// The live shared server of a namespace, if there is one. A marker whose
-/// process is gone (or whose pid was recycled) is stale and is removed.
+/// The live shared server of a namespace, if there is one.
 pub fn live_marker(ns: Option<&str>) -> Option<Marker> {
-    let path = marker_path(ns);
-    let m = parse_marker(&std::fs::read_to_string(&path).ok()?)?;
-    if marker_process_alive(&m) {
-        Some(m)
-    } else {
-        let _ = std::fs::remove_file(&path);
-        None
-    }
+    live_marker_at(&marker_path(ns))
+}
+
+/// The marker at `path` when the process it names is still that same
+/// process. A stale marker (its process gone, or its pid recycled) is NOT
+/// removed here (#897 A): between reading it and removing it, another CLI may
+/// have started the namespace's server and renamed ITS marker into place, and
+/// the removal would then unpublish that live server, so every later
+/// `new-session` waits for a marker that never comes. The next server's
+/// `write_marker` renames over a stale file, which is all the cleanup it needs.
+pub fn live_marker_at(path: &Path) -> Option<Marker> {
+    let m = parse_marker(&std::fs::read_to_string(path).ok()?)?;
+    marker_process_alive(&m).then_some(m)
 }

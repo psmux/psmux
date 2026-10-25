@@ -70,9 +70,22 @@ pub fn is_supported(name: &str) -> bool {
 /// does not run, if any. tmux parses the whole list before it runs any of it,
 /// so one unsupported command anywhere refuses the whole line.
 pub fn first_unsupported(line: &str) -> Option<String> {
+    first_unsupported_aliased(line, |_| None)
+}
+
+/// `first_unsupported` with the session's command aliases applied first
+/// (#897 B), the way the protocol handler applies them (connection.rs: an
+/// alias replaces the command name by the first word of its value), so
+/// `command-alias 'list-tree=resize-pane -Z'` cannot carry a refused command
+/// in under a supported name. `alias` maps a command name to its alias value.
+pub fn first_unsupported_aliased(line: &str, alias: impl Fn(&str) -> Option<String>) -> Option<String> {
     for part in crate::config::split_chained_commands_pub(line.trim()) {
         let words = crate::commands::parse_command_line(&part);
         let Some(name) = words.into_iter().next() else { continue };
+        let name = match alias(&name) {
+            Some(value) => value.split_whitespace().next().map(str::to_string).unwrap_or(name),
+            None => name,
+        };
         if !is_supported(&name) {
             return Some(name);
         }
@@ -229,6 +242,14 @@ pub fn parse_opening(peeked: &[u8]) -> Opening {
         },
         line => Opening::Command { key, line: line.to_string(), lines: 2 },
     }
+}
+
+/// True when the peeked bytes start with a whole `AUTH <key>` line naming
+/// `key` (an opening that is still `Undecided` after it: no command line yet).
+pub fn opening_authenticates(peeked: &[u8], key: &str) -> bool {
+    let Some(end) = peeked.iter().position(|b| *b == b'\n') else { return false };
+    let first = String::from_utf8_lossy(&peeked[..end]);
+    first.trim_end_matches('\r').strip_prefix("AUTH ").map(str::trim) == Some(key)
 }
 
 /// True when enough bytes were peeked to decide.
