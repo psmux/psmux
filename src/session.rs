@@ -226,7 +226,7 @@ pub fn session_name_base(ns: Option<&str>, name: &str) -> String {
 /// and `CON.port` is an ordinary file on the Windows versions psmux runs on.
 pub fn unstorable_name_char(name: &str) -> Option<char> {
     name.chars()
-        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (*c as u32) < 0x20)
+        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || u32::from(*c) < 0x20)
 }
 
 /// The error for a `-L` namespace that cannot be stored (see
