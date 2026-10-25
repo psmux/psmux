@@ -474,9 +474,15 @@ client attached, the identity variables (`client_name`, `client_pid`, `client_re
 | `#{client_termname}` / `#{client_termtype}` | Terminal type reported by the client |
 | `#{client_termfeatures}` | Comma-separated terminal features reported at attach for the selected client; empty with no client |
 
-Clients advertise `256,RGB,hyperlinks,title`. Clients that send no valid feature report receive
-the same default. This reports psmux's fixed feature set, not detected host capabilities.
-Host detection, `terminal-features` configuration, and feature-based output gating are not implemented;
+ANSI-enabled ConEmu clients advertise `256,RGB,title`, without OSC 8 hyperlinks. Detection requires
+a nonempty `ConEmuPID` and `ConEmuANSI=ON` in the attaching client's environment. Competing host hints
+(`WT_SESSION`, `TERM_PROGRAM`, `TERMINAL_EMULATOR`, `WEZTERM_PANE`, or `ALACRITTY_LOG`) or SSH hints
+(`SSH_CONNECTION`, `SSH_CLIENT`, or `SSH_TTY`) make the profile ambiguous.
+
+All other environments retain the compatibility advertisement `256,RGB,hyperlinks,title`; this is
+an assumption, not a detected capability set. Clients that send no valid report receive the same
+server fallback. Detection runs at each attachment, including reconnection, and does not probe the
+terminal. `terminal-features` configuration and feature-based output gating are not implemented;
 OSC 8 forwarding is unchanged.
 
 The optional attach argument is `features=0x<hex digits>`, an unsigned 64-bit mask. Leading zeroes

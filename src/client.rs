@@ -3018,11 +3018,34 @@ pub(crate) fn status_rows_reserved(status_visible: bool, status_lines: usize) ->
 }
 
 fn reported_terminal_features() -> crate::terminal_features::TerminalFeatures {
+    terminal_features_from_env(|name| std::env::var(name).ok())
+}
+
+fn terminal_features_from_env(
+    env: impl Fn(&str) -> Option<String>,
+) -> crate::terminal_features::TerminalFeatures {
     use crate::terminal_features::TerminalFeatures;
-    TerminalFeatures::from_bits(
-        TerminalFeatures::COLOR_256.bits() | TerminalFeatures::RGB.bits()
-            | TerminalFeatures::HYPERLINKS.bits() | TerminalFeatures::TITLE.bits(),
-    )
+    let mut bits = TerminalFeatures::COLOR_256.bits() | TerminalFeatures::RGB.bits()
+        | TerminalFeatures::HYPERLINKS.bits() | TerminalFeatures::TITLE.bits();
+    // ConEmu's ANSI output supports colour and titles, but not OSC 8 links.
+    // Other host or SSH hints can be inherited alongside ConEmu's variables;
+    // leave those ambiguous environments on the compatibility advertisement.
+    let conemu = env("ConEmuPID").is_some_and(|pid| !pid.is_empty())
+        && env("ConEmuANSI").as_deref() == Some("ON");
+    let ambiguous = [
+        "WT_SESSION",
+        "TERM_PROGRAM",
+        "TERMINAL_EMULATOR",
+        "WEZTERM_PANE",
+        "ALACRITTY_LOG",
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "SSH_TTY",
+    ].iter().any(|name| env(name).is_some());
+    if conemu && !ambiguous {
+        bits &= !TerminalFeatures::HYPERLINKS.bits();
+    }
+    TerminalFeatures::from_bits(bits)
 }
 
 fn establish_connection_with_timeout(
