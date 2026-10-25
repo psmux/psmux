@@ -1298,6 +1298,15 @@ fn run_main() -> io::Result<()> {
         }
     }
 
+    // A `-L` name starts the file name of every registry entry it holds, so a
+    // character Windows cannot keep in a file name (`-L x:y`) wrote the
+    // entries where nothing finds them and orphaned the server. Refuse it
+    // before anything is spawned or written.
+    if let Some(msg) = l_socket_name.as_deref().and_then(crate::session::invalid_socket_name_error) {
+        eprintln!("psmux: {}", msg);
+        std::process::exit(1);
+    }
+
     // Issue #730: `-S <path>` names a server just as `-L` does, and wins over
     // `-L` like tmux (tmux.c main: a path, when given, is used as is and the
     // label is never expanded). It used to be skipped here, so every `-S`
@@ -2099,6 +2108,12 @@ fn run_main() -> io::Result<()> {
                 crate::server::shared::gate_server_process();
                 // Internal command - run headless server (used when spawning background server)
                 let name = args.iter().position(|a| a == "-s").and_then(|i| args.get(i+1)).map(|s| s.clone()).unwrap_or_else(|| "default".to_string());
+                // Last line of defence for a name no registry file can carry:
+                // every client refuses it first, so this is a direct spawn.
+                if crate::session::unstorable_name_char(&name).is_some() {
+                    eprintln!("invalid session name: {}", crate::util::visual_escape_message(&name));
+                    std::process::exit(1);
+                }
                 // Parse -L socket name for namespace isolation
                 let server_socket_name = args.iter().position(|a| a == "-L").and_then(|i| args.get(i+1)).map(|s| s.clone());
                 // Check for initial command via -c flag (shell-wrapped)
@@ -6131,6 +6146,12 @@ fn run_main() -> io::Result<()> {
         let session_name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| {
             crate::session::next_session_name(l_socket_name.as_deref())
         });
+        // PSMUX_SESSION_NAME names the registry files of the server spawned
+        // below, so a name no file name can carry is refused before it is.
+        if crate::session::unstorable_name_char(&session_name).is_some() {
+            eprintln!("invalid session name: {}", crate::util::visual_escape_message(&session_name));
+            std::process::exit(1);
+        }
         let port_file_base = if let Some(ref l) = l_socket_name {
             format!("{}__{}", l, session_name)
         } else {

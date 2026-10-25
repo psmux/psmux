@@ -265,6 +265,13 @@ fn new_session(ns: Option<&str>, words: &[String]) -> ! {
             g
         ));
     }
+    // Refused before the shared server is started for it; the server checks
+    // again for a new-session that reaches it another way.
+    if let Some(name) = parsed.args.name.as_deref().filter(|n| !n.is_empty()) {
+        if let Some(msg) = crate::session::reserved_session_name_error(ns, name) {
+            fail(&msg);
+        }
+    }
     if parsed.attach_if_exists {
         if let Some(ref name) = parsed.args.name {
             if session_exists(ns, name) {

@@ -3075,6 +3075,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "rename-session" => {
             if let Some(name) = crate::cli::first_operand("rename-session", &parts[1..]) {
+                // A name the server refuses must not become this client's
+                // name either.
+                if let Some(msg) = crate::session::reserved_session_name_error(app.socket_name.as_deref(), name) {
+                    app.status_message = Some((msg, Instant::now(), None));
+                    return Ok(());
+                }
                 app.session_name = name.to_string();
                 // Forward to server so external queries see the new session name
                 if let Some(port) = app.control_port {

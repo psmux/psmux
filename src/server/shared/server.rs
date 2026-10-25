@@ -775,6 +775,11 @@ fn create_session(
         Some(n) => n.to_string(),
         None => crate::session::next_session_name(ns.as_deref()),
     };
+    // The same names the per session path refuses: one that collides with an
+    // -L namespace's registry, and one no registry file name can carry.
+    if let Some(msg) = crate::session::reserved_session_name_error(ns.as_deref(), &name) {
+        return Err(msg);
+    }
     let base = match ns {
         Some(n) => format!("{}__{}", n, name),
         None => name.clone(),

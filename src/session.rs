@@ -208,6 +208,34 @@ pub fn session_name_base(ns: Option<&str>, name: &str) -> String {
     }
 }
 
+/// The first character of `name` that Windows cannot keep in a file name, if
+/// any: `< > : " / \ | ? *` and the control characters 0x00 to 0x1F.
+///
+/// Every registry file of a session is named after it (`<base>.port`,
+/// `.key`, `.pid`, `.sid`), so such a name never reaches the registry as
+/// itself: `a:b` is written as the NTFS alternate data streams `b.port` and
+/// so on of a file named `a`, and `a/b` or `a\b` points into a directory
+/// that does not exist. The server then runs with no registry entry anyone
+/// can find (`ls` says no server is running, `has-session` fails) and is
+/// orphaned with its warm standby. The same holds for a `-L` namespace,
+/// which starts every base. tmux keeps any valid UTF-8 name because it keeps
+/// its sessions in memory; psmux cannot, so it refuses the name up front.
+///
+/// Trailing dots and spaces and device names such as `CON` are not refused:
+/// the name is never the end of a file name (an extension always follows),
+/// and `CON.port` is an ordinary file on the Windows versions psmux runs on.
+pub fn unstorable_name_char(name: &str) -> Option<char> {
+    name.chars()
+        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (*c as u32) < 0x20)
+}
+
+/// The error for a `-L` namespace that cannot be stored (see
+/// [`unstorable_name_char`]), or None when it can.
+pub fn invalid_socket_name_error(ns: &str) -> Option<String> {
+    unstorable_name_char(ns)
+        .map(|_| format!("invalid socket name: {}", crate::util::visual_escape_message(ns)))
+}
+
 /// Why `name` cannot be the name of a new or renamed session in namespace
 /// `ns`, as the error line to print, or None when it can.
 ///
@@ -219,7 +247,13 @@ pub fn session_name_base(ns: Option<&str>, name: &str) -> String {
 /// the tools that read them, so the default namespace refuses `__` in a
 /// session name, as tmux refuses a name it cannot store (`invalid session:`).
 /// Under `-L` a name may contain `__`: the base splits at the first `__`.
+///
+/// A name with a character Windows cannot keep in a file name is refused
+/// first, in every namespace (see [`unstorable_name_char`]).
 pub fn reserved_session_name_error(ns: Option<&str>, name: &str) -> Option<String> {
+    if unstorable_name_char(name).is_some() {
+        return Some(format!("invalid session name: {}", crate::util::visual_escape_message(name)));
+    }
     let in_default = ns.is_none_or(|n| n.is_empty());
     if in_default && name.contains("__") {
         Some(format!(
@@ -3672,3 +3706,7 @@ mod tests_switch_client_last_namespace;
 #[cfg(test)]
 #[path = "../tests-rs/test_discussion844_namespace_names.rs"]
 mod tests_discussion844_namespace_names;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_unstorable_names.rs"]
+mod tests_unstorable_names;
