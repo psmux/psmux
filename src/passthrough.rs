@@ -254,9 +254,9 @@ impl Ending {
 /// The guard lines carry the same time, number and flags (tmux control.c).
 fn closes_block(line: &str, begin: &str) -> Option<bool> {
     let tail = begin.strip_prefix("%begin")?;
-    if line.strip_prefix("%end").map_or(false, |t| t == tail) {
+    if line.strip_prefix("%end") == Some(tail) {
         Some(true)
-    } else if line.strip_prefix("%error").map_or(false, |t| t == tail) {
+    } else if line.strip_prefix("%error") == Some(tail) {
         Some(false)
     } else {
         None

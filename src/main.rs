@@ -2254,9 +2254,9 @@ fn run_main() -> io::Result<()> {
                     return Ok(());
                 }
                 passthrough = client_flags.passthrough;
-                if client_flags.read_only {
-                    env::set_var("PSMUX_CLIENT_READONLY", "1");
-                }
+                // `-f read-only` is set for the client only where it attaches
+                // (below): set here, the server spawned further down would
+                // inherit it and hand it to every pane shell.
 
                 let name = session_name.unwrap_or_else(|| {
                     // tmux-compatible: auto-generate numeric name (0, 1, 2, ...)
@@ -2324,6 +2324,9 @@ fn run_main() -> io::Result<()> {
                             // -A flag: attach to existing session instead of erroring
                             env::set_var("PSMUX_SESSION_NAME", &port_file_base);
                             env::set_var("PSMUX_REMOTE_ATTACH", "1");
+                            if client_flags.read_only {
+                                env::set_var("PSMUX_CLIENT_READONLY", "1");
+                            }
                             // The rest of a command list runs on it first.
                             let _ = run_new_session_list(command_list.as_ref(), &port_file_base, l_socket_name.as_deref());
                             // Skip server creation, jump straight to attach
@@ -2802,6 +2805,9 @@ fn run_main() -> io::Result<()> {
                     // User wants attached session - set env vars to attach
                     env::set_var("PSMUX_SESSION_NAME", &port_file_base);
                     env::set_var("PSMUX_REMOTE_ATTACH", "1");
+                    if client_flags.read_only {
+                        env::set_var("PSMUX_CLIENT_READONLY", "1");
+                    }
                     // Continue to attach below...
                 }
             }
