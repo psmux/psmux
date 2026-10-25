@@ -58,6 +58,10 @@ name = "issue534_shrink_wide_erase"
 path = "tests/issue534_shrink_wide_erase.rs"
 
 [[test]]
+name = "soft_hyphen_width"
+path = "tests/soft_hyphen_width.rs"
+
+[[test]]
 name = "issue502_altscreen_attrs"
 path = "tests/issue502_altscreen_attrs.rs"
 

@@ -2339,6 +2339,21 @@ pub(crate) fn copy_cursor_in_selection(
     }
 }
 
+/// Text as ratatui should lay it out: U+00AD SOFT HYPHEN becomes a space.
+///
+/// The emulator gives a soft hyphen one column (see `vt100::char_width`), but
+/// ratatui measures spans with `unicode-width`, which gives it zero. The rest of
+/// the row then lands one column left of the background runs that psmux sent,
+/// and the stripes of colour (such as `colorcolumn`) break up. A soft hyphen is
+/// invisible anyway, so a space draws the same.
+fn ratatui_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\u{AD}') {
+        std::borrow::Cow::Owned(text.replace('\u{AD}', " "))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 pub fn render_layout_json(
     f: &mut Frame,
     node: &LayoutJson,
@@ -2470,14 +2485,14 @@ pub fn render_layout_json(
                         if cell.underline { style = style.add_modifier(Modifier::UNDERLINED); }
                         if cell.blink { style = style.add_modifier(Modifier::SLOW_BLINK); }
                         if cell.strikethrough { style = style.add_modifier(Modifier::CROSSED_OUT); }
-                        let text: &str = if cell.hidden {
+                        let text = ratatui_text(if cell.hidden {
                             " "
                         } else if cell.text.is_empty() {
                             " "
                         } else {
                             &cell.text
-                        };
-                        let char_width = vt100::str_width(text) as u16;
+                        });
+                        let char_width = vt100::str_width(&text) as u16;
                         if char_width >= 2 && c + char_width > max_c {
                             spans.push(Span::styled(" ", style));
                             c += 1;
@@ -2540,7 +2555,7 @@ pub fn render_layout_json(
                         } else if run.text.is_empty() {
                             " ".to_string()
                         } else {
-                            run.text.clone()
+                            ratatui_text(&run.text).into_owned()
                         };
                         if c + run_w > inner.width {
                             let avail = (inner.width - c) as usize;

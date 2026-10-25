@@ -225,8 +225,17 @@ pub fn char_width(c: char) -> Option<usize> {
     if let Some(w) = override_for(c) {
         return Some(usize::from(w));
     }
+    if c == SOFT_HYPHEN {
+        return Some(1);
+    }
     unicode_width::UnicodeWidthChar::width(c)
 }
+
+/// U+00AD SOFT HYPHEN. `unicode-width` calls it zero columns (it is a format
+/// character), but Neovim, tmux and Markus Kuhn's wcwidth all draw it as one.
+/// Counting it as zero put the emulator one column behind the program that
+/// wrote it, so every following cell on the row landed in the wrong place.
+const SOFT_HYPHEN: char = '\u{AD}';
 
 /// Columns `s` occupies, honouring `codepoint-widths`.
 ///
@@ -236,7 +245,7 @@ pub fn char_width(c: char) -> Option<usize> {
 /// back to summing per character, which is the granularity the option works at.
 #[must_use]
 pub fn str_width(s: &str) -> usize {
-    if OVERRIDE_COUNT.load(Ordering::Acquire) == 0 {
+    if OVERRIDE_COUNT.load(Ordering::Acquire) == 0 && !s.contains(SOFT_HYPHEN) {
         return unicode_width::UnicodeWidthStr::width(s);
     }
     s.chars().map(|c| char_width(c).unwrap_or(0)).sum()
@@ -451,6 +460,12 @@ pub fn str_cells(s: &str) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_hyphen_takes_one_column() {
+        assert_eq!(char_width(SOFT_HYPHEN), Some(1));
+        assert_eq!(str_width("a\u{AD}b"), 3);
+    }
 
     #[test]
     fn parses_single_hex_codepoint() {
