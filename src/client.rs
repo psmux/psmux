@@ -744,6 +744,8 @@ thread_local! {
     /// recursive `render_layout_json`.
     static FRAME_HYPERLINKS: std::cell::RefCell<Vec<HyperlinkRun>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static PREVIOUS_HYPERLINK_ROWS: std::cell::RefCell<Vec<u16>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn frame_hyperlinks_clear() {
@@ -756,6 +758,14 @@ pub(crate) fn frame_hyperlinks_push(run: HyperlinkRun) {
 
 pub(crate) fn frame_hyperlinks_take() -> Vec<HyperlinkRun> {
     FRAME_HYPERLINKS.with(|h| std::mem::take(&mut *h.borrow_mut()))
+}
+
+pub(crate) fn previous_hyperlink_rows_get() -> Vec<u16> {
+    PREVIOUS_HYPERLINK_ROWS.with(|rows| rows.borrow().clone())
+}
+
+pub(crate) fn previous_hyperlink_rows_set(new_rows: Vec<u16>) {
+    PREVIOUS_HYPERLINK_ROWS.with(|rows| *rows.borrow_mut() = new_rows);
 }
 
 /// SGR parameters for a ratatui color as a foreground (`base` 38/foreground)
@@ -822,6 +832,29 @@ pub(crate) fn build_osc8_overlay(runs: &[HyperlinkRun]) -> String {
     out.push_str("\x1b[0m"); // reset SGR
     out.push_str("\x1b8"); // DECRC: restore cursor
     out
+}
+
+pub(crate) fn hyperlink_rows(runs: &[HyperlinkRun]) -> Vec<u16> {
+    let mut rows: Vec<u16> = runs
+        .iter()
+        .filter(|run| !run.text.is_empty())
+        .map(|run| run.y)
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+pub(crate) fn redraw_hyperlink_rows(buffer: &mut ratatui::buffer::Buffer, rows: &[u16]) {
+    let area = buffer.area;
+    for &row in rows {
+        if row < area.top() || row >= area.bottom() {
+            continue;
+        }
+        for column in area.left()..area.right() {
+            buffer[(column, row)].set_diff_option(ratatui::buffer::CellDiffOption::AlwaysUpdate);
+        }
+    }
 }
 
 /// tmux ships a non-empty `pane-border-format`, so `set pane-border-status top`
@@ -10163,6 +10196,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
 
             crate::rendering::style_wide_trailing_cells(f.buffer_mut());
+            redraw_hyperlink_rows(f.buffer_mut(), &previous_hyperlink_rows_get());
         })?;
         if client_log_enabled() {
             client_log("draw", &format!("draw OK, render={}us overlays: popup={} confirm={} menu={} display_panes={}",
@@ -10178,6 +10212,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // for the common case (no links), so it does not touch the hot path.
         {
             let runs = frame_hyperlinks_take();
+            previous_hyperlink_rows_set(hyperlink_rows(&runs));
             if !runs.is_empty() {
                 // Part of the frame (#697): queued behind the cells, with the
                 // cursor hidden, and written in the frame's single write.
@@ -11454,6 +11489,10 @@ mod test_issue345_command_prompt_utf8;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue361_osc8_overlay.rs"]
 mod test_issue361_osc8_overlay;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_osc8_stale_link.rs"]
+mod test_osc8_stale_link;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_wants_mouse_selection.rs"]
