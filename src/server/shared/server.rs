@@ -1520,3 +1520,7 @@ mod tests_issue894_897_shared_guards;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue897_shared_new_session_size.rs"]
 mod tests_issue897_shared_new_session_size;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_shared_confirm_before.rs"]
+mod tests_shared_confirm_before;
