@@ -202,9 +202,11 @@ fn ask_capture(link: &Mutex<Link>, history: bool) -> io::Result<()> {
 }
 
 /// The prefix key as the one byte a terminal sends for it, if it is one.
+/// `-A` gives the session's own prefix where it sets one and the global one
+/// otherwise; `-g` alone would miss a session level prefix.
 fn prefix_byte(link: &Mutex<Link>) -> Option<u8> {
     let (tx, rx) = mpsc::channel();
-    send(link, "show-options -gv prefix", Reply::Lines(tx)).ok()?;
+    send(link, "show-options -Av prefix", Reply::Lines(tx)).ok()?;
     let name = rx.recv_timeout(Duration::from_secs(2)).ok()?.into_iter().next()?;
     let (code, mods) = crate::config::parse_key_name(&name)?;
     let bytes = crate::input::encode_key_event(&crossterm::event::KeyEvent::new(code, mods))?;

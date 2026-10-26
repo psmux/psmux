@@ -23,7 +23,8 @@ for it; it has nothing to do with the `allow-passthrough` option.
 - After that, the pane's output bytes go straight to the terminal as they
   arrive, line feeds included.
 - Keys go to the pane. `prefix d` detaches; pressing the prefix twice sends
-  one prefix to the pane.
+  one prefix to the pane. The prefix is the session's own if it sets one,
+  the global one otherwise.
 - The client size follows the terminal size.
 - When the active pane or window changes, the client prints the new pane's
   screen and follows its output.
