@@ -8344,6 +8344,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if window_id.is_none() {
                             if let Some((width, height)) = size {
                                 app.client_area = Rect::new(0, 0, width, height);
+                                // The client's own size is what `-C WxH` set,
+                                // as tmux's tty_set_size does
+                                // (cmd-refresh-client.c:101), so
+                                // #{client_width} and list-clients follow it.
+                                app.set_control_client_size(client_id, width, height);
                             }
                         }
                         let geometry_changed = crate::resize_window::refresh_dynamic_window_sizes(&mut app);

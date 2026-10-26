@@ -7617,10 +7617,37 @@ fn dispatch_control_command(
                 let _ = resp_tx.send(text);
                 return true;
             }
+            // #803 on this route too: `show -g <name>` reads the global
+            // table and `show -A <name>` marks a value the session inherits
+            // (options.c options_scope_from_flags:1101, cmd-show-options.c:197).
+            // This arm used to read the session's own value for `-g`, so a
+            // control client saw `set -t` overrides as the global value.
+            let has_g2 = combined_has2('g');
+            let has_a2 = combined_has2('A');
+            if let Some(name) = opt_name.as_deref().filter(|n| {
+                !window_scope2 && (has_g2 || has_a2) && crate::server::options::is_session_option(n)
+            }) {
+                let (qrtx, qrrx) = mpsc::channel::<(String, bool)>();
+                let _ = tx.send(CtrlReq::SessionOptionQuery(qrtx, name.to_string(), has_g2));
+                let reply = match qrrx.recv_timeout(Duration::from_millis(2000)) {
+                    Ok((value, _)) if value_only => value,
+                    Ok((value, inherited)) => format!(
+                        "{}{} {}", name, if has_a2 && inherited { "*" } else { "" }, value
+                    ),
+                    Err(_) => "\u{0001}ERR\u{0001}no response from server (timed out)".to_string(),
+                };
+                let _ = resp_tx.send(reply);
+                return true;
+            }
             // Array options print one `name[i] value` line per element (#700).
             let array_name = opt_name.clone().filter(|n| {
                 !window_scope2 && (n == "terminal-overrides" || n == crate::command_alias::OPTION)
             });
+            // A named query prints `name value` unless `-v` asks for the
+            // value alone, as the one-shot route and tmux do
+            // (cmd-show-options.c cmd_show_options_print). This arm used to
+            // send the bare value either way.
+            let named_query = opt_name.clone();
             if let Some(name) = opt_name {
                 // #648: `-wv <name>` used to fall into the plain
                 // ShowOptionValue arm because `value_only` was tested first,
@@ -7663,6 +7690,15 @@ fn dispatch_control_command(
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                // #803: a session listing answers for the table the flags
+                // pick, the same as the one-shot route.
+                let text = if !window_scope2 && !has_opt_name && (has_g2 || has_a2) {
+                    let (lrtx, lrrx) = mpsc::channel::<String>();
+                    let _ = tx.send(CtrlReq::ScopeSessionListing(lrtx, text.clone(), has_g2, has_a2));
+                    lrrx.recv_timeout(Duration::from_millis(2000)).unwrap_or(text)
+                } else {
+                    text
+                };
                 if value_only && !has_opt_name {
                     // Strip option names, keep values only
                     let values_only: String = text.lines()
@@ -7679,6 +7715,12 @@ fn dispatch_control_command(
                     .and_then(|n| show_array_text(n, &text, value_only, aliases))
                 {
                     let _ = resp_tx.send(t.trim_end_matches('\n').to_string());
+                } else if let Some(name) = named_query.filter(|_| !value_only) {
+                    if combined_has2('q') && text.is_empty() {
+                        let _ = resp_tx.send(String::new());
+                    } else {
+                        let _ = resp_tx.send(format!("{} {}", name, text));
+                    }
                 } else {
                     let _ = resp_tx.send(text);
                 }
@@ -8612,6 +8654,10 @@ mod tests_pr740_run_shell_reader;
 #[cfg(test)]
 #[path = "../../tests-rs/test_set_option_control.rs"]
 mod tests_set_option_control;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_control_show_options_scope.rs"]
+mod tests_control_show_options_scope;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_pane_border_indicator_control.rs"]

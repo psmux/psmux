@@ -2575,6 +2575,16 @@ impl AppState {
         true
     }
 
+    /// The size a control client set with `refresh-client -C WxH` is its own
+    /// size, as tmux's tty_set_size makes it (cmd-refresh-client.c:101), so
+    /// `#{client_width}`, `#{client_height}` and list-clients answer with it.
+    pub fn set_control_client_size(&mut self, cid: u64, width: u16, height: u16) {
+        if let Some(info) = self.client_registry.get_mut(&cid) {
+            info.width = width;
+            info.height = height;
+        }
+    }
+
     /// A prompt request is over (answered, cancelled, or its client is gone):
     /// forget it and release the command line waiting for it, if any.
     pub fn finish_prompt_request(&mut self, id: u64) {

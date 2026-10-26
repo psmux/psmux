@@ -1433,7 +1433,13 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
             None => app.client_area.width.to_string(),
         },
         "client_height" => {
-            let h = format_client(app).map(|ci| ci.height).unwrap_or(app.client_area.height);
+            let client = format_client(app);
+            let h = client.map(|ci| ci.height).unwrap_or(app.client_area.height);
+            // A control client draws no status line (tmux status.c:117
+            // status_line_size), so its height is the size it set.
+            if client.is_some_and(|ci| ci.is_control) {
+                return Some(h.to_string());
+            }
             // The client reports the rows left after its status line, so the
             // terminal height is that plus every status row (issue #883).
             (h + crate::client::status_rows_reserved(app.status_visible, app.status_lines)).to_string()
@@ -2754,3 +2760,7 @@ mod tests_issue734_side_sessionless;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue883_status_off_space.rs"]
 mod test_issue883_status_off_space;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_control_client_size_formats.rs"]
+mod tests_control_client_size_formats;
