@@ -471,6 +471,73 @@ pub fn enable_virtual_terminal_processing() {
     // No-op on non-Windows platforms
 }
 
+// ConPTY's compatibility HWND can have WS_VISIBLE too. Its distinct window
+// class, not desktop visibility, separates it from the classic console.
+#[cfg(any(windows, test))]
+fn classic_console_output_profile(class: &str, vt_output: bool, build: Option<u32>) -> bool {
+    class == "ConsoleWindowClass" && vt_output
+        && build.is_some_and(|build| build >= 15063) // Win10 1703 adds full RGB rendering.
+}
+
+#[cfg(windows)]
+pub(crate) fn is_classic_console_output() -> bool {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleCursorInfo, GetConsoleMode, GetConsoleWindow, GetStdHandle,
+        CONSOLE_CURSOR_INFO, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
+
+    // SAFETY: GetConsoleWindow has no arguments; its returned HWND is borrowed.
+    let window = unsafe { GetConsoleWindow() };
+    let mut class = [0u16; 64];
+    // SAFETY: class is writable for the supplied UTF-16 count. The API rejects
+    // invalid HWNDs and bounds a successful length to the supplied buffer.
+    let len = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+    if len <= 0 { return false; }
+    // SAFETY: STD_OUTPUT_HANDLE is a valid selector; the returned handle is borrowed.
+    let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    let mut mode = 0;
+    let mut cursor = CONSOLE_CURSOR_INFO::default();
+    // GetConsoleMode also accepts input handles, whose 0x4 bit means echo.
+    // The cursor query verifies stdout is an output screen buffer instead.
+    // SAFETY: cursor is a writable, correctly laid-out output structure. The
+    // API validates the handle and does not retain the pointer after returning.
+    let vt_output = unsafe { GetConsoleCursorInfo(handle, &mut cursor) } != 0
+        // SAFETY: mode is writable for the call; the API validates the handle
+        // and does not retain the pointer after returning.
+        && unsafe { GetConsoleMode(handle, &mut mode) } != 0
+        && mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0;
+    classic_console_output_profile(
+        &String::from_utf16_lossy(&class[..len as usize]), vt_output,
+        crate::ssh_input::windows_build_number(),
+    )
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_classic_console_output() -> bool { false }
+
+#[cfg(test)]
+mod terminal_feature_console_tests {
+    use super::classic_console_output_profile;
+
+    #[test]
+    fn classic_console_requires_positive_supported_output_evidence() {
+        for (class, vt_output, build, expected) in [
+            ("ConsoleWindowClass", true, Some(15063), true),
+            ("ConsoleWindowClass", true, Some(22631), true),
+            ("PseudoConsoleWindow", true, Some(22631), false),
+            ("", true, Some(22631), false),
+            ("OtherWindowClass", true, Some(22631), false),
+            ("ConsoleWindowClass", false, Some(22631), false),
+            ("ConsoleWindowClass", true, None, false),
+            ("ConsoleWindowClass", true, Some(15062), false),
+        ] {
+            assert_eq!(classic_console_output_profile(class, vt_output, build), expected,
+                "{class} vt_output={vt_output} build={build:?}");
+        }
+    }
+}
+
 #[cfg(windows)]
 #[derive(Default)]
 pub(crate) struct ControlConsoleReader {

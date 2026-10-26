@@ -474,16 +474,42 @@ client attached, the identity variables (`client_name`, `client_pid`, `client_re
 | `#{client_termname}` / `#{client_termtype}` | Terminal type reported by the client |
 | `#{client_termfeatures}` | Comma-separated terminal features reported at attach for the selected client; empty with no client |
 
-ANSI-enabled ConEmu clients advertise `256,RGB,title`, without OSC 8 hyperlinks. Detection requires
-a nonempty `ConEmuPID` and `ConEmuANSI=ON` in the attaching client's environment. Competing host hints
-(`WT_SESSION`, `TERM_PROGRAM`, `TERMINAL_EMULATOR`, `WEZTERM_PANE`, or `ALACRITTY_LOG`) or SSH hints
-(`SSH_CONNECTION`, `SSH_CLIENT`, or `SSH_TTY`) make the profile ambiguous.
+Feature reporting covers these terminal profiles:
 
-All other environments retain the compatibility advertisement `256,RGB,hyperlinks,title`; this is
-an assumption, not a detected capability set. Clients that send no valid report receive the same
-server fallback. Detection runs at each attachment, including reconnection, and does not probe the
-terminal. `terminal-features` configuration and feature-based output gating are not implemented;
-OSC 8 forwarding is unchanged.
+| Terminal | Features |
+|---|---|
+| Windows Terminal 1.4+ | `256,RGB,hyperlinks,title` |
+| WezTerm release `20240203-110809-5046fc22` (February 3, 2024) | `256,RGB,hyperlinks,title` |
+| Alacritty 0.11+ | `256,RGB,hyperlinks,title` |
+| Classic Windows console, Windows 10 1703+ | `256,RGB,title` |
+| ANSI-enabled ConEmu | `256,RGB,title` |
+
+These capabilities are documented in the [WT 1.4 release](https://github.com/microsoft/terminal/releases/tag/v1.4.3141.0),
+[WezTerm's release-pinned escape reference](https://github.com/wezterm/wezterm/blob/5046fc225992db6ba2ef8812743fadfdfe4b184a/docs/escape-sequences.md),
+[Alacritty's 0.11 changelog](https://github.com/alacritty/alacritty/blob/8dbaa0bbd308a72075910ff32d8ffcca09ae3529/CHANGELOG.md),
+and Microsoft's [Creators Update console colour announcement](https://devblogs.microsoft.com/commandline/windows-10-creators-update-whats-new-in-bashwsl-windows-console/).
+Windows Terminal and Alacritty environment markers name the application but provide no reliable version.
+Clients from either terminal advertise all four features; releases before the listed versions may lack OSC 8.
+Terminal settings control whether titles change or hyperlinks can be opened.
+
+The client recognizes a classic console by its `ConsoleWindowClass` window class. It also checks that
+stdout is a VT-enabled console output buffer and the Windows build is 15063 or later. This works on
+visible and hidden desktops.
+ConPTY uses the distinct `PseudoConsoleWindow` class in the
+[Microsoft implementation](https://github.com/microsoft/terminal/blob/62445ae3d02979a9289b5894043df7ac95103f0c/src/interactivity/base/InteractivityFactory.cpp).
+Redirected output and failed console queries use the compatibility fallback.
+
+The ConEmu profile requires a nonempty `ConEmuPID` and exact `ConEmuANSI=ON`.
+Competing host hints (`WT_SESSION`, `WT_PROFILE_ID`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`,
+`TERMINAL_EMULATOR`, `WEZTERM_PANE`, or `ALACRITTY_LOG`) and SSH hints (`SSH_CONNECTION`, `SSH_CLIENT`,
+or `SSH_TTY`) put ConEmu and classic-console clients on the compatibility fallback, even when their values
+are empty. Incomplete ConEmu hints use that fallback too.
+
+All other environments retain `256,RGB,hyperlinks,title` as a compatibility assumption, not verified
+capability support. Clients that send no valid report receive the independently owned four-bit server
+fallback. Detection uses the attaching client's environment and passive local console observations at each
+attachment, including reconnection. It does not probe the terminal. `terminal-features` configuration and
+feature-based output gating are not implemented; OSC 8 forwarding is unchanged.
 
 The optional attach argument is `features=0x<hex digits>`, an unsigned 64-bit mask. Leading zeroes
 are optional. Bits 0, 1, 2, and 3 represent `256`, `RGB`, `hyperlinks`, and `title`, respectively.

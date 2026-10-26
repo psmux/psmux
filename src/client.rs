@@ -3017,34 +3017,102 @@ pub(crate) fn status_rows_reserved(status_visible: bool, status_lines: usize) ->
     if status_visible { status_lines.max(1).min(u16::MAX as usize) as u16 } else { 0 }
 }
 
-fn reported_terminal_features() -> crate::terminal_features::TerminalFeatures {
-    terminal_features_from_env(|name| std::env::var(name).ok())
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientTerminal {
+    WindowsTerminal,
+    WezTerm,
+    Alacritty,
+    AnsiConEmu,
+    ClassicConsole,
+    Unknown,
 }
 
-fn terminal_features_from_env(
+fn identify_client_terminal(
     env: impl Fn(&str) -> Option<String>,
+    classic_console: impl Fn() -> bool,
+) -> ClientTerminal {
+    use ClientTerminal::*;
+    let conemu_pid = env("ConEmuPID");
+    let conemu_ansi = env("ConEmuANSI");
+    let wt_session = env("WT_SESSION");
+    let wt_profile = env("WT_PROFILE_ID");
+    let program = env("TERM_PROGRAM");
+    let version = env("TERM_PROGRAM_VERSION");
+    let wezterm_pane = env("WEZTERM_PANE");
+    let alacritty_log = env("ALACRITTY_LOG");
+    let modern = [&wt_session, &wt_profile, &program, &version, &wezterm_pane, &alacritty_log];
+    let modern_present = modern.iter().any(|value| value.is_some());
+    if ["TERMINAL_EMULATOR", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .iter().any(|name| env(name).is_some())
+        || modern.into_iter().flatten().any(|value| value.is_empty())
+    {
+        return Unknown;
+    }
+    if conemu_pid.is_some() || conemu_ansi.is_some() {
+        return if !modern_present && conemu_pid.is_some_and(|pid| !pid.is_empty())
+            && conemu_ansi.as_deref() == Some("ON")
+        { AnsiConEmu } else { Unknown };
+    }
+    if modern_present {
+        let windows_terminal = wt_session.is_some() || wt_profile.is_some();
+        let wezterm = wezterm_pane.is_some() || program.as_deref() == Some("WezTerm");
+        let alacritty = alacritty_log.is_some();
+        if program.as_deref().is_some_and(|name| name != "WezTerm")
+            || (version.is_some() && !wezterm)
+        {
+            return Unknown;
+        }
+        return match (windows_terminal, wezterm, alacritty) {
+            (true, false, false) => WindowsTerminal,
+            (false, true, false) => WezTerm,
+            (false, false, true) => Alacritty,
+            _ => Unknown,
+        };
+    }
+    if classic_console() { ClassicConsole } else { Unknown }
+}
+
+fn advertise_color_256(terminal: ClientTerminal) -> bool {
+    match terminal {
+        ClientTerminal::WindowsTerminal | ClientTerminal::WezTerm | ClientTerminal::Alacritty
+        | ClientTerminal::AnsiConEmu | ClientTerminal::ClassicConsole | ClientTerminal::Unknown => true,
+    }
+}
+
+fn advertise_rgb(terminal: ClientTerminal) -> bool {
+    match terminal {
+        ClientTerminal::WindowsTerminal | ClientTerminal::WezTerm | ClientTerminal::Alacritty
+        | ClientTerminal::AnsiConEmu | ClientTerminal::ClassicConsole | ClientTerminal::Unknown => true,
+    }
+}
+
+fn advertise_hyperlinks(terminal: ClientTerminal) -> bool {
+    match terminal {
+        ClientTerminal::AnsiConEmu | ClientTerminal::ClassicConsole => false,
+        ClientTerminal::WindowsTerminal | ClientTerminal::WezTerm | ClientTerminal::Alacritty
+        | ClientTerminal::Unknown => true,
+    }
+}
+
+fn advertise_title(terminal: ClientTerminal) -> bool {
+    match terminal {
+        ClientTerminal::WindowsTerminal | ClientTerminal::WezTerm | ClientTerminal::Alacritty
+        | ClientTerminal::AnsiConEmu | ClientTerminal::ClassicConsole | ClientTerminal::Unknown => true,
+    }
+}
+
+fn reported_terminal_features(
+    env: impl Fn(&str) -> Option<String>,
+    classic_console: impl Fn() -> bool,
 ) -> crate::terminal_features::TerminalFeatures {
     use crate::terminal_features::TerminalFeatures;
-    let mut bits = TerminalFeatures::COLOR_256.bits() | TerminalFeatures::RGB.bits()
-        | TerminalFeatures::HYPERLINKS.bits() | TerminalFeatures::TITLE.bits();
-    // ConEmu's ANSI output supports colour and titles, but not OSC 8 links.
-    // Other host or SSH hints can be inherited alongside ConEmu's variables;
-    // leave those ambiguous environments on the compatibility advertisement.
-    let conemu = env("ConEmuPID").is_some_and(|pid| !pid.is_empty())
-        && env("ConEmuANSI").as_deref() == Some("ON");
-    let ambiguous = [
-        "WT_SESSION",
-        "TERM_PROGRAM",
-        "TERMINAL_EMULATOR",
-        "WEZTERM_PANE",
-        "ALACRITTY_LOG",
-        "SSH_CONNECTION",
-        "SSH_CLIENT",
-        "SSH_TTY",
-    ].iter().any(|name| env(name).is_some());
-    if conemu && !ambiguous {
-        bits &= !TerminalFeatures::HYPERLINKS.bits();
-    }
+    let terminal = identify_client_terminal(env, classic_console);
+    let mut bits = 0;
+    // Unknown terminals retain each feature's compatibility advertisement.
+    if advertise_color_256(terminal) { bits |= TerminalFeatures::COLOR_256.bits(); }
+    if advertise_rgb(terminal) { bits |= TerminalFeatures::RGB.bits(); }
+    if advertise_hyperlinks(terminal) { bits |= TerminalFeatures::HYPERLINKS.bits(); }
+    if advertise_title(terminal) { bits |= TerminalFeatures::TITLE.bits(); }
     TerminalFeatures::from_bits(bits)
 }
 
@@ -3100,7 +3168,10 @@ fn establish_connection_with_timeout(
         let line = format!("client-environ {}\n", base64::engine::general_purpose::STANDARD.encode(&block));
         let _ = writer.write_all(line.as_bytes());
     }
-    let attach = format!("client-attach features={:#x}\n", reported_terminal_features().bits());
+    let features = reported_terminal_features(
+        |name| std::env::var(name).ok(), crate::platform::is_classic_console_output,
+    );
+    let attach = format!("client-attach features={:#x}\n", features.bits());
     let attach_res = writer.write_all(attach.as_bytes());
     if (persistent_res.is_err() || attach_res.is_err()) && crate::debug_log::reconnect_log_enabled() {
         crate::debug_log::reconnect_log(&format!(

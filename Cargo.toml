@@ -98,6 +98,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Memory",
     "Win32_System_DataExchange",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [[bin]]
