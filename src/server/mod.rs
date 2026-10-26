@@ -8522,8 +8522,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     state_dirty = true;
                 }
-                CtrlReq::OpenChooser(kind) => {
-                    crate::commands::open_client_chooser(&app, kind);
+                CtrlReq::OpenChooser(kind, template) => {
+                    crate::commands::open_client_chooser(&app, kind, template.as_deref());
                 }
                 CtrlReq::StatusMessage(msg) => {
                     app.status_message = Some((msg, std::time::Instant::now(), None));

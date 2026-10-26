@@ -220,6 +220,23 @@ filter text closes the picker.
 cancels, including `Enter`, which inside a chooser is the key that activates a
 row. The chooser stays open behind the question either way.
 
+#### A command template
+
+As in tmux, `choose-tree` (and `choose-session` / `choose-window`) takes a
+command template after its flags. `Enter` (or a jump key) then runs that
+template instead of switching, with `%%` (the first one) and every `%1`
+replaced by the chosen row's target: `=name:` for a session, `=name:index.`
+for a window and `=name:index.%id` for a pane. Without a template the chooser
+switches, which is tmux's default `switch-client -Zt '%%'`.
+
+```tmux
+bind s choose-tree -Zs "display-message 'picked %%'"   # shows picked =work:
+bind J choose-tree -Zw "join-pane -s '%%'"           # pull the chosen window's pane here
+bind S choose-tree -Zs "set -g @last-picked '%%' ; switch-client -t '%%'"
+```
+
+An empty template (`choose-tree -s ""`) runs nothing on `Enter`.
+
 `q` closes these choosers as it closes every tmux mode. Every other printable key not listed
 above is swallowed so it cannot leak into the focused pane. The pane's cursor is hidden while a
 chooser is open, as tmux hides it for every mode tree mode.

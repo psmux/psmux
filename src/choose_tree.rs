@@ -129,12 +129,96 @@ impl ChooserKind {
 
     /// The chooser a directive line names, if it names one.
     pub fn from_directive(line: &str) -> Option<ChooserKind> {
-        match line {
-            "CHOOSE-TREE" => Some(ChooserKind::Tree),
-            "CHOOSE-SESSION" => Some(ChooserKind::Session),
-            _ => None,
-        }
+        parse_directive(line).map(|(kind, _)| kind)
     }
+}
+
+/// The line that opens `kind` on a client, carrying the choose-tree template
+/// when there is one. The template goes as a JSON string after a space, so a
+/// newline or any quote in it cannot end the line or be misread.
+pub fn directive_line(kind: ChooserKind, template: Option<&str>) -> String {
+    match template {
+        Some(t) => format!(
+            "{} {}",
+            kind.directive(),
+            serde_json::to_string(t).unwrap_or_else(|_| "\"\"".to_string())
+        ),
+        None => kind.directive().to_string(),
+    }
+}
+
+/// The chooser and template a directive line carries, the reverse of
+/// [`directive_line`].
+pub fn parse_directive(line: &str) -> Option<(ChooserKind, Option<String>)> {
+    let (head, rest) = match line.split_once(' ') {
+        Some((h, r)) => (h, Some(r)),
+        None => (line, None),
+    };
+    let kind = match head {
+        "CHOOSE-TREE" => ChooserKind::Tree,
+        "CHOOSE-SESSION" => ChooserKind::Session,
+        _ => return None,
+    };
+    match rest {
+        None => Some((kind, None)),
+        Some(json) => serde_json::from_str::<String>(json).ok().map(|t| (kind, Some(t))),
+    }
+}
+
+/// The template argument of `choose-tree [flags] [template]` (and of the
+/// choose-window and choose-session aliases), as tmux's window_tree_init
+/// reads it: `args_string(args, 0)`, the first word after the flags, or
+/// `None` when there is none and the chooser keeps its own action
+/// (`WINDOW_TREE_DEFAULT_COMMAND`, `switch-client -Zt '%%'`). An empty
+/// template is kept: tmux then runs nothing on Enter.
+pub fn chooser_template<S: AsRef<str>>(args: &[S]) -> Option<String> {
+    let flags = crate::cli::expand_flag_clusters("choose-tree", args);
+    let mut i = 0;
+    while i < flags.len() {
+        let f = flags[i].as_str();
+        if f == "--" {
+            i += 1;
+            break;
+        }
+        let mut chars = f.chars();
+        if chars.next() != Some('-') {
+            break;
+        }
+        let Some(c) = chars.next() else { break };
+        if chars.next().is_some() {
+            break;
+        }
+        if crate::cli::flag_takes_value("choose-tree", c) {
+            i += 1;
+        }
+        i += 1;
+    }
+    flags.get(i).cloned()
+}
+
+/// tmux window_tree_get_target for a session row: `=name:`.
+pub fn session_row_target(session: &str) -> String {
+    format!("={}:", session)
+}
+
+/// tmux window_tree_get_target for a window row: `=name:index.`.
+pub fn window_row_target(session: &str, index: usize) -> String {
+    format!("={}:{}.", session, index)
+}
+
+/// tmux window_tree_get_target for a pane row: `=name:index.%id`.
+pub fn pane_row_target(session: &str, index: usize, pane_id: usize) -> String {
+    format!("={}:{}.%{}", session, index, pane_id)
+}
+
+/// The command a choose-tree template runs for a row, tmux's
+/// mode_tree_run_command: `cmd_template_replace(template, target, 1)`, so the
+/// first `%%` and every `%1` become the row's target. tmux escapes a `'` in
+/// the target for `%%` (cmd.c, `quote == SQ`), so a session called `it's`
+/// still fits in `'%%'`; [`crate::copy_prompt::template_replace`] does the
+/// same inside single quotes, in the spelling psmux's parser reads.
+pub fn template_command(template: &str, target: &str) -> String {
+    crate::copy_prompt::template_replace(template, target, 1)
 }
 
 /// The chooser `name args...` opens. tmux's window_tree_init (window-tree.c)
@@ -433,3 +517,7 @@ mod tests_disc776_chooser_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_choose_tree_kind.rs"]
 mod tests_choose_tree_kind;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue912_choose_tree_template.rs"]
+mod tests_issue912_choose_tree_template;

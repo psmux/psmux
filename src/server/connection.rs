@@ -6003,11 +6003,15 @@ match cmd {
         // own connection, so that client opens it. A CLI caller has no
         // client of its own: the server picks one, as switch-client does.
         // `-s` opens the session list and wins over `-w` (window-tree.c).
+        // A template (#912) travels with the directive and runs for the
+        // chosen row in place of the chooser's own switch.
         let kind = crate::choose_tree::chooser_kind(cmd, &args);
+        let template = crate::choose_tree::chooser_template(&args);
         if persistent {
-            let _ = crate::types::send_directive_to_client(client_id, kind.directive());
+            let line = crate::choose_tree::directive_line(kind, template.as_deref());
+            let _ = crate::types::send_directive_to_client(client_id, &line);
         } else {
-            let _ = tx.send(CtrlReq::OpenChooser(kind));
+            let _ = tx.send(CtrlReq::OpenChooser(kind, template));
         }
         if !persistent && pending_chain.is_empty() { break; }
     }

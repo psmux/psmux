@@ -1154,6 +1154,12 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "rename-window" | "renamew" => Some(Action::RenameWindow),
         "choose-window" | "choose-tree" | "choose-session" => {
             let words = parse_command_line(cmd);
+            // A template has to reach the chooser, which the two bare
+            // actions cannot carry, so that command stays whole and runs
+            // through execute_command_string like any other (#912).
+            if crate::choose_tree::chooser_template(words.get(1..).unwrap_or(&[])).is_some() {
+                return Some(Action::Command(cmd.to_string()));
+            }
             match crate::choose_tree::chooser_kind(parts[0], words.get(1..).unwrap_or(&[])) {
                 crate::choose_tree::ChooserKind::Session => Some(Action::SessionChooser),
                 crate::choose_tree::ChooserKind::Tree => Some(Action::WindowChooser),
@@ -1308,14 +1314,17 @@ pub fn format_action(action: &Action) -> String {
 /// (a hook, a menu item, a copy mode binding) asks the client to open one, as
 /// switch-client asks it to switch. The client that last sent input gets it,
 /// as with switch-client; with none known, every attached client does.
-pub fn open_client_chooser(app: &AppState, kind: crate::choose_tree::ChooserKind) {
-    let directive = kind.directive();
+///
+/// `template` is choose-tree's template argument (#912): the chooser runs it
+/// for the chosen row in place of its own switch.
+pub fn open_client_chooser(app: &AppState, kind: crate::choose_tree::ChooserKind, template: Option<&str>) {
+    let directive = crate::choose_tree::directive_line(kind, template);
     if let Some(cid) = app.latest_client_id {
-        if crate::types::send_directive_to_client(cid, directive) {
+        if crate::types::send_directive_to_client(cid, &directive) {
             return;
         }
     }
-    crate::types::send_directive_to_all_clients(directive);
+    crate::types::send_directive_to_all_clients(&directive);
 }
 
 /// Parse a command line string, respecting quoted arguments
@@ -1675,8 +1684,8 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
         Action::RenameWindow => {
             app.mode = Mode::RenamePrompt { input: String::new() };
         }
-        Action::WindowChooser => open_client_chooser(app, crate::choose_tree::ChooserKind::Tree),
-        Action::SessionChooser => open_client_chooser(app, crate::choose_tree::ChooserKind::Session),
+        Action::WindowChooser => open_client_chooser(app, crate::choose_tree::ChooserKind::Tree, None),
+        Action::SessionChooser => open_client_chooser(app, crate::choose_tree::ChooserKind::Session, None),
         Action::ZoomPane => {
             toggle_zoom(app);
         }
@@ -3109,8 +3118,11 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "choose-tree" | "choose-window" | "choose-session" => {
-            let kind = crate::choose_tree::chooser_kind(parts[0], &parts[1..]);
-            open_client_chooser(app, kind);
+            let words = parse_command_line(cmd);
+            let args = words.get(1..).unwrap_or(&[]);
+            let kind = crate::choose_tree::chooser_kind(parts[0], args);
+            let template = crate::choose_tree::chooser_template(args);
+            open_client_chooser(app, kind, template.as_deref());
         }
         "command-prompt" if app.mode.in_copy() => {
             // A copy mode key table binding (tmux's own `:`, `/`, `f`, ... are

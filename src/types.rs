@@ -4551,7 +4551,7 @@ pub enum CtrlReq {
     /// Open a client chooser (prefix+w's tree or prefix+s's session list) for
     /// a choose-tree that came from the CLI, on the client switch-client
     /// would pick.
-    OpenChooser(crate::choose_tree::ChooserKind),
+    OpenChooser(crate::choose_tree::ChooserKind, Option<String>),
     /// Set status bar message (fire-and-forget, no response channel needed).
     StatusMessage(String),
     /// Clear the command prompt history.
