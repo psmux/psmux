@@ -34,6 +34,12 @@ const FACTS_FORMAT: &str =
 
 /// How often the host terminal's size is compared with the client size.
 const SIZE_POLL: Duration = Duration::from_millis(250);
+
+/// How long a client whose terminal went away waits for the server to
+/// confirm its detach. The reader ends the process as soon as the server
+/// answers, which takes milliseconds; this only bounds a server that does
+/// not answer at all.
+const DETACH_DEADLINE: Duration = Duration::from_secs(2);
 /// Where a pane's cursor is and how many lines it holds, from `FACTS_FORMAT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneFacts {
@@ -415,8 +421,9 @@ pub fn run(flags: crate::cli::ClientFlags) -> io::Result<()> {
     }
     // The terminal went away (an SSH connection dropped): the session keeps
     // running. The reader exits once the server confirms the detach.
+    ending.detaching.store(true, Ordering::Release);
     let _ = send(&link, "detach-client", Reply::Ignore);
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(DETACH_DEADLINE);
     console.restore();
     Ok(())
 }
