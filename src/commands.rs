@@ -549,22 +549,25 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
                 return c;
             }
 
+            let ext = std::path::Path::new(&file_path).extension()
+                .and_then(|e| e.to_str()).map(|e| e.to_lowercase());
+
+            // Native executables run directly, spaces or not: CreateProcess
+            // quotes the path, and a hook that runs one on every pane switch
+            // should not pay for starting PowerShell around it.
+            if matches!(ext.as_deref(), Some("exe") | Some("com")) {
+                let mut c = std::process::Command::new(&file_path);
+                if !rest_args.is_empty() {
+                    for a in &parse_command_line(&rest_args) { c.arg(a); }
+                }
+                c.hide_window();
+                return c;
+            }
+
             // For other file types with spaces in the path, we must avoid
             // the Case 3 shell wrapping which breaks on spaces.
             if file_path.contains(' ') {
-                let ext = std::path::Path::new(&file_path).extension()
-                    .and_then(|e| e.to_str()).map(|e| e.to_lowercase());
-
                 match ext.as_deref() {
-                    // Native executables: Command::new handles path quoting via CreateProcess
-                    Some("exe") | Some("com") => {
-                        let mut c = std::process::Command::new(&file_path);
-                        if !rest_args.is_empty() {
-                            for a in &parse_command_line(&rest_args) { c.arg(a); }
-                        }
-                        c.hide_window();
-                        return c;
-                    }
                     // Batch files: run via cmd.exe /c with the path as a separate arg
                     // so CreateProcess quotes just the path, not path+args together
                     Some("cmd") | Some("bat") => {

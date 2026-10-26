@@ -177,6 +177,25 @@ fn build_run_shell_command_preserves_args() {
     assert!(args.contains(&"-Command".to_string()), "Should preserve -Command arg");
 }
 
+#[test]
+#[cfg(windows)]
+fn build_run_shell_command_runs_an_existing_exe_directly() {
+    // No shell around a native executable, with or without spaces in its
+    // path: hooks run such helpers on every pane switch.
+    let tmp = std::env::temp_dir().join(format!("psmux_test_direct_exe_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    for dir in [tmp.join("plain"), tmp.join("with space")] {
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("helper.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let cmd = build_run_shell_command(&format!("{} --quiet", exe.display()));
+        assert_eq!(std::path::Path::new(cmd.get_program()), exe);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["--quiet".to_string()]);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 // ─── expand_run_shell_path tests ────────────────────────────────────────────
 
 #[test]
