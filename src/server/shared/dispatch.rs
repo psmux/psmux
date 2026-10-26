@@ -3011,9 +3011,219 @@ pub(crate) fn dispatch(
                 CtrlReq::ShowNamedBuffer(resp, name) => {
                     let _ = resp.send(app.paste_get(&name).map(str::to_string));
                 }
-                // shared: everything step 2 does not handle (see the module
-                // comment). Its reply channel, if any, closes here.
-                _ => {}
+                // copied from server/mod.rs run_server (lines 7346 to 7363 at f6611646)
+                CtrlReq::SelectLayout(layout) => {
+                    unzoom_if_zoomed(&mut app);
+                    apply_layout(&mut app, &layout);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
+                    state_dirty = true;
+                    hook_event = Some("after-select-layout");
+                }
+                CtrlReq::NextLayout => {
+                    unzoom_if_zoomed(&mut app);
+                    cycle_layout(&mut app);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
+                    state_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 8308 at f6611646)
+                CtrlReq::PrevLayout => {
+                    unzoom_if_zoomed(&mut app);
+                    cycle_layout_reverse(&mut app);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
+                    state_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 6119 at f6611646)
+                CtrlReq::RotateWindow(upward) => {
+                    rotate_panes(&mut app, upward);
+                    meta_dirty = true;
+                    hook_event = Some("after-rotate-window");
+                }
+                // copied from server/mod.rs run_server (lines 5856 to 5903 at f6611646)
+                CtrlReq::SwapPane(dir) => {
+                    unzoom_if_zoomed(&mut app);
+                    let swapped = match dir.as_str() {
+                        "U" => swap_pane(&mut app, FocusDir::Up),
+                        "D" => swap_pane(&mut app, FocusDir::Down),
+                        "L" => swap_pane(&mut app, FocusDir::Left),
+                        "R" => swap_pane(&mut app, FocusDir::Right),
+                        _ => swap_pane(&mut app, FocusDir::Down),
+                    };
+                    if swapped {
+                        meta_dirty = true;
+                        hook_event = Some("after-swap-pane");
+                    }
+                }
+                CtrlReq::SwapPaneSrcDst { src, dst, detach, resp } => {
+                    // Both specs resolve inside this session's AppState only;
+                    // a pane of another session is "can't find pane" here.
+                    unzoom_if_zoomed(&mut app);
+                    match crate::window_ops::swap_pane_by_spec(&mut app, src.as_deref(), &dst, detach) {
+                        Ok(swapped) => {
+                            if swapped {
+                                meta_dirty = true;
+                                hook_event = Some("after-swap-pane");
+                            }
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(e) => {
+                            app.status_message = Some((format!("swap-pane: {}", e), std::time::Instant::now(), None));
+                            meta_dirty = true;
+                            let _ = resp.send(Err(e));
+                        }
+                    }
+                }
+                CtrlReq::SwapPanePosition(token) => {
+                    unzoom_if_zoomed(&mut app);
+                    if let Some(path) = crate::window_ops::pane_path_at_position(&app, &token) {
+                        if swap_pane_with_path(&mut app, path) {
+                            meta_dirty = true;
+                            hook_event = Some("after-swap-pane");
+                        }
+                    } else {
+                        app.status_message = Some((format!("swap-pane: can't find pane: {}", token), std::time::Instant::now(), None));
+                    }
+                }
+                // copied from server/mod.rs run_server (line 3946 at f6611646)
+                CtrlReq::FocusPaneByIndex(idx) => {
+                    let old_path = app.windows[app.active_idx].active_path.clone();
+                    if let Some(pos) = idx.checked_sub(app.pane_base_index_of(app.active_idx)) {
+                        switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
+                    }
+                    if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                        crate::tree::touch_mru(&mut win.pane_mru, pid);
+                    }
+                    meta_dirty = true;
+                }
+                // copied from server/mod.rs run_server (line 4692 at f6611646)
+                CtrlReq::SetPaneStyle(style) => {
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                        p.pane_style = Some(style);
+                    }
+                }
+                // copied from server/mod.rs run_server (line 4434 at f6611646)
+                CtrlReq::PasteBuffer(pb, resp) => {
+                    let reply = match crate::commands::run_paste_buffer(&mut app, &pb) {
+                        Ok(err) => err,
+                        Err(e) => Some(format!("paste-buffer: {}", e)),
+                    };
+                    let _ = resp.send(reply);
+                    echo_pending_until = Some(Instant::now());
+                }
+                // copied from server/mod.rs run_server (lines 5954 to 6025 at f6611646);
+                // each session keeps its own buffers, as a per session server does
+                CtrlReq::SetNamedBuffer(name, content) => {
+                    app.paste_set(&name, content);
+                }
+                CtrlReq::AppendNamedBuffer(name, content) => {
+                    let data = format!("{}{}", app.paste_get(&name).unwrap_or(""), content);
+                    app.paste_set(&name, data);
+                }
+                CtrlReq::ListBuffers(resp) => {
+                    let _ = resp.send(app.paste_listing(false));
+                }
+                CtrlReq::ListBuffersFormat(resp, fmt) => {
+                    let mut output = Vec::new();
+                    for (i, _buf) in app.paste_buffers.iter().enumerate() {
+                        set_buffer_idx_override(Some(i));
+                        output.push(expand_format(&fmt, &app));
+                        set_buffer_idx_override(None);
+                    }
+                    let mut names: Vec<String> = app.named_buffers.keys().cloned().collect();
+                    names.sort();
+                    for name in &names {
+                        set_named_buffer_override(Some(name.clone()));
+                        output.push(expand_format(&fmt, &app));
+                        set_named_buffer_override(None);
+                    }
+                    let _ = resp.send(output.join("\n"));
+                }
+                CtrlReq::DeleteBuffer => {
+                    if let Some(name) = app.paste_buffers.first().map(|b| b.name.clone()) {
+                        app.paste_delete(&name);
+                    }
+                }
+                CtrlReq::DeleteBufferAt(idx) => {
+                    if let Some(name) = app.paste_buffers.get(idx).map(|b| b.name.clone()) {
+                        app.paste_delete(&name);
+                    }
+                }
+                CtrlReq::SetBufferCmd(set, resp) => {
+                    let _ = resp.send(crate::commands::run_set_buffer_args(&mut app, &set));
+                }
+                CtrlReq::DeleteBufferCmd(name, resp) => {
+                    let _ = resp.send(crate::commands::run_delete_buffer(&mut app, name.as_deref()));
+                }
+                CtrlReq::DeleteNamedBuffer(name, resp) => {
+                    let found = app.paste_delete(&name);
+                    if let Some(resp) = resp { let _ = resp.send(found); }
+                }
+                CtrlReq::PasteBufferAt(name, idx) => {
+                    let text = match name {
+                        Some(name) => app.paste_get(&name).map(str::to_string),
+                        None => app.paste_buffers.get(idx).map(|b| b.data.clone()),
+                    };
+                    if let Some(text) = text {
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path).filter(|p| p.accepts_input()) {
+                            let _ = write!(p.writer, "{}", text);
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (lines 7935 to 7955 at f6611646)
+                CtrlReq::ClearHistory => {
+                    crate::window_ops::clear_active_pane_history(&mut app);
+                }
+                CtrlReq::SaveBuffer(path) => {
+                    if let Some(content) = app.paste_top() {
+                        let _ = std::fs::write(&path, content);
+                    }
+                }
+                CtrlReq::LoadBuffer(path) => {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        app.paste_add(content);
+                    }
+                }
+                // copied from server/mod.rs run_server (line 6273 at f6611646)
+                CtrlReq::RespawnPane(workdir, kill, command, empty, resp, env_sets) => {
+                    let float_fi = {
+                        let w = &app.windows[app.active_idx];
+                        w.floating_focus.filter(|fi| *fi < w.floating.len())
+                    };
+                    let outcome = match float_fi {
+                        Some(fi) => respawn_floating_pane(&mut app, fi, workdir.as_deref(), kill, command.as_deref(), empty),
+                        None => respawn_active_pane(&mut app, Some(pty_system), workdir.as_deref(), kill, command.as_deref(), empty, &env_sets),
+                    };
+                    match outcome {
+                        Ok(()) => {
+                            hook_event = Some("after-respawn-pane");
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(e) => {
+                            let msg = format!("respawn pane failed: {}", e);
+                            app.status_message = Some((msg.clone(), Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
+                }
+                // shared: everything else step 2 does not handle. A one shot
+                // command for it was refused by the router already, so what
+                // arrives here is an attached client's request (a binding,
+                // the prompt, a menu). It used to vanish without a word; the
+                // requesting client now says why nothing happened. Its reply
+                // channel, if any, closes here.
+                other => {
+                    if let Some(name) = super::refused::command_name(&other) {
+                        app.status_message = Some((super::refused::message(name), Instant::now(), None));
+                        state_dirty = true;
+                    }
+                }
         }
         // copied from run_server (server/mod.rs at 86a78100, after the match):
         // notification hooks, the after-<command> hook, the focus restore.

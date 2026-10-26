@@ -758,9 +758,28 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    `switch-client -t s:w.p`, `choose-tree` and the session chooser.
 2. Control mode (`-C`/`-CC`) on the shared server, with `%sessions-changed` to
    every control client on create and destroy (section 6, stage 1 list).
-3. The rest of the command set, each a copied arm with its test: buffers (server
-   wide, as in tmux), run-shell, if-shell, source-file, popups, menus,
-   rename-session (the registry rename), respawn, resize, layouts.
+3. The rest of the command set, each a copied arm with its test. Done so far
+   (copied arms, `tests-rs/test_shared_dropped_requests.rs` and
+   `tests/test_shared_dropped_requests.ps1`): select-layout, next-layout,
+   previous-layout, rotate-window, swap-pane (directional, `{position}` and
+   `-s`/`-t` within the session), select-pane by index, `select-pane -P`,
+   paste-buffer, set-buffer, list-buffers, delete-buffer, save-buffer,
+   load-buffer, clear-history and respawn-pane, from an attached client and as
+   one shot commands. Buffers are still each session's own, as step 2 had them;
+   making them server wide, as in tmux, is part of this item.
+
+   Still refused. A one shot command gets `unknown command`; an attached client's
+   binding, prompt or menu puts `not supported in shared server mode yet: <name>`
+   on that session's status line instead of doing nothing (`refused.rs`):
+   break-pane, join-pane, new-pane (floats), respawn-window, resize-window,
+   pipe-pane, move-window, swap-window, link-window, unlink-window,
+   find-window, rename-session (the registry rename), `new-session -t` (groups),
+   choose-buffer, display-menu, display-popup, customize-mode, list-clients,
+   detach-client (`-a`, `-s`, another client), lock-client, suspend-client,
+   refresh-client, source-file, show-messages, show-window-options,
+   list-commands, the prompt history commands, run-shell and wait-for. The
+   requests the server sends itself (finished config jobs, cross session
+   forwarding, control mode bookkeeping) are dropped silently, as before.
 4. Spare panes inside the shared process, so a new session's first pane is not a
    cold spawn.
 5. Then stage 2 of the plan: cross session move-window/join-pane/swap-pane as in

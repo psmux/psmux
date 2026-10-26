@@ -118,12 +118,12 @@ fn supported_and_unsupported_commands() {
         "has-session", "kill-session", "kill-server", "dump-state", "client-attach", "set", "bind"] {
         assert!(router::is_supported(ok), "{ok}");
     }
-    for no in ["rotate-window", "move-window", "link-window", "join-pane", "swap-pane",
+    for no in ["break-pane", "move-window", "link-window", "join-pane", "swap-window",
         "choose-tree", "new-session", "rename-session", "run-shell", "if-shell", "source-file"] {
         assert!(!router::is_supported(no), "{no}");
     }
     assert_eq!(router::first_unsupported("list-windows -F '#{window_id}'"), None);
-    assert_eq!(router::first_unsupported("rotate-window -t A"), Some("rotate-window".into()));
+    assert_eq!(router::first_unsupported("break-pane -t A"), Some("break-pane".into()));
     // Anywhere in a list: tmux parses the whole list before it runs any of it.
     assert_eq!(router::first_unsupported("list-windows ; bogus ; neww"), Some("bogus".into()));
     assert_eq!(router::first_unsupported("neww \\; join-pane -s 1"), Some("join-pane".into()));
