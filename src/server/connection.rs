@@ -368,12 +368,12 @@ fn if_shell_condition(
     }
 }
 
-/// run-shell's flags (`-b`, `-d delay`, commands::parse_run_shell_args) and
-/// its shell command: the rest, a balanced pair of outer quotes removed
-/// (#402), not yet format expanded.
+/// run-shell's flags (`-b`, `-d delay`, `-c start-directory`,
+/// commands::parse_run_shell_args) and its shell command: the rest, a
+/// balanced pair of outer quotes removed (#402), not yet format expanded.
 fn run_shell_command_text(
     args: &[&str],
-) -> Result<(bool, Option<Duration>, String), String> {
+) -> Result<(bool, Option<Duration>, String, Option<String>), String> {
     let parsed = crate::commands::parse_run_shell_args(args)?;
     let shell_cmd = parsed.command.join(" ");
     let trimmed = shell_cmd.trim();
@@ -385,7 +385,7 @@ fn run_shell_command_text(
     } else {
         trimmed.to_string()
     };
-    Ok((parsed.background, parsed.delay, shell_cmd))
+    Ok((parsed.background, parsed.delay, shell_cmd, parsed.cwd))
 }
 
 /// `expand_shell_command`, or with no session, window or pane when the
@@ -6220,7 +6220,7 @@ match cmd {
         // command silently never ran. Only unwrap when both ends match the same quote.
         let parsed = run_shell_command_text(&args);
         let parse_failed = parsed.is_err();
-        let (background, delay, shell_cmd) = match parsed {
+        let (background, delay, shell_cmd, cwd) = match parsed {
             Ok(parsed) => parsed,
             Err(e) => {
                 // `invalid delay time: x`, as tmux's cmdq_error.
@@ -6230,8 +6230,13 @@ match cmd {
                     let _ = write!(write_stream, "ERROR: {}\n", e);
                     let _ = write_stream.flush();
                 }
-                (false, None, String::new())
+                (false, None, String::new(), None)
             }
+        };
+        let build = |shell_cmd: &str| {
+            let mut c = crate::commands::build_run_shell_command(shell_cmd);
+            crate::commands::apply_run_shell_cwd(&mut c, cwd.as_deref());
+            c
         };
         // Expand formats against live server state (tmux parity). Without
         // this, `run-shell "helper '#{pane_id}'"` passed the helper the
@@ -6264,7 +6269,7 @@ match cmd {
             }
         } else {
             if background {
-                let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+                let mut c = build(&shell_cmd);
                 crate::commands::null_job_output(&mut c);
                 if let Some(delay) = delay {
                     // `-b -d N`: start it after the delay, without waiting
@@ -6305,7 +6310,7 @@ match cmd {
                 // behind it until the command exits. Run it on a thread and post
                 // the result back through the server loop, the way commands.rs
                 // already does for the in-process path.
-                let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+                let mut c = build(&shell_cmd);
                 // The thread needs an owned sender + target: `tx` here borrows
                 // the per-command TargetedSender, which does not outlive the
                 // command loop.
@@ -6343,7 +6348,7 @@ match cmd {
                 if let Some(delay) = delay {
                     std::thread::sleep(delay);
                 }
-                let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+                let mut c = build(&shell_cmd);
                 match c.output() {
                     Ok(out) => {
                         let text = run_shell_output_text(&out);
@@ -8348,7 +8353,7 @@ fn dispatch_control_command(
         // command" on this route (issue #793 follow up). Their output and
         // errors use the same %begin/%end/%error block as every command.
         "run-shell" | "run" => {
-            let (background, delay, shell_cmd) = match run_shell_command_text(args) {
+            let (background, delay, shell_cmd, cwd) = match run_shell_command_text(args) {
                 Ok(parsed) => parsed,
                 Err(e) => {
                     let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e));
@@ -8373,6 +8378,7 @@ fn dispatch_control_command(
                 return true;
             }
             let mut c = crate::commands::build_run_shell_command(&shell_cmd);
+            crate::commands::apply_run_shell_cwd(&mut c, cwd.as_deref());
             if background {
                 // -b does not wait; only a spawn failure is reported.
                 crate::commands::null_job_output(&mut c);

@@ -4419,6 +4419,15 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 };
                 let background = parsed.background;
                 let delay = parsed.delay;
+                // Only the user's own `-c` goes to the server. tmux runs a
+                // sessionless client's job in the client's directory
+                // (server_client_get_cwd, server-client.c:2955), but sending
+                // that unasked would put `-c` on every line, and a server
+                // from an older psmux still running after an upgrade hands
+                // `-c dir` to the shell as text. So a job the server runs
+                // without `-c` takes the server's directory, as a `#`
+                // command always has.
+                let cwd = parsed.cwd.clone();
                 let shell_cmd_str = parsed.command.join(" ");
                 if shell_cmd_str.trim().is_empty() {
                     // `-d` with no command only waits (cmd-run-shell.c:125).
@@ -4445,19 +4454,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 // raw, the server split it again and dropped its quotes, so
                 // `run-shell "Write-Output ('x' + '#{pid}')"` reached the shell
                 // as `Write-Output (x + 1234)`.
-                // `-b -d N` goes to the server too: this client returns at
-                // once, so the server is what waits out the delay.
-                if shell_cmd_str.contains('#') || (background && delay.is_some()) {
-                    let mut line = String::from("run-shell");
-                    if background {
-                        line.push_str(" -b");
-                    }
-                    if let Some(delay) = delay {
-                        line.push_str(&format!(" -d {}", delay.as_secs_f64()));
-                    }
-                    line.push(' ');
-                    line.push_str(&crate::util::quote_arg(&shell_cmd_str));
-                    line.push('\n');
+                // `-b` goes to the server too (cli_run_shell_goes_to_server).
+                if crate::commands::cli_run_shell_goes_to_server(&shell_cmd_str, background) {
+                    let line = crate::commands::cli_run_shell_server_line(
+                        background, delay, cwd.as_deref(), &shell_cmd_str);
                     // Waits for the server to finish the command (#734 follow
                     // up): with a read bound, a body slower than 3 s came back
                     // as "no response" and then ran AGAIN here.
@@ -4483,6 +4483,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 let job_env = crate::commands::fetch_server_job_environment();
                 let build = |cmd: &str| {
                     let mut c = crate::commands::build_run_shell_command(cmd);
+                    crate::commands::apply_run_shell_cwd(&mut c, parsed.cwd.as_deref());
                     if let Some(env) = &job_env {
                         crate::commands::apply_server_job_environment(&mut c, env);
                     }
@@ -4496,6 +4497,9 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 // Run the command using the resolved shell
                 if background {
                     let mut c = build(&shell_cmd);
+                    // Nobody reads a `-b` job's output, and inheriting this
+                    // client's handles ties the job to whoever reads them.
+                    crate::commands::null_job_output(&mut c);
                     // Report a failure to START the command. `-b` waives the
                     // output, not the error.
                     if let Err(e) = c.spawn() {

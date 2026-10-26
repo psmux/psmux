@@ -4033,6 +4033,7 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // (especially important when using -L socket namespaces like in tppanel preview).
     let target_session = app.port_file_base();
     let mut cmd = crate::commands::build_run_shell_command(&shell_cmd);
+    crate::commands::apply_run_shell_cwd(&mut cmd, parsed.cwd.as_deref());
     crate::commands::null_job_output(&mut cmd);
     if !target_session.is_empty() {
         cmd.env("PSMUX_TARGET_SESSION", &target_session);

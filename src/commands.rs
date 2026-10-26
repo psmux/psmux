@@ -260,22 +260,25 @@ pub(crate) struct RunShellArgs {
     pub background: bool,
     /// `-d delay`: wait this long before starting the command.
     pub delay: Option<std::time::Duration>,
+    /// `-c start-directory`: the directory the command runs in.
+    pub cwd: Option<String>,
     /// The shell command, one word per element.
     pub command: Vec<String>,
 }
 
-/// Read run-shell's `-b` and `-d delay` from the front of `args` (the words
-/// after the command name), the way tmux's getopt reads its flags
-/// (cmd-run-shell.c:47, `bd:Ct:Es:c:`): one word may carry several flags
-/// (`-bd 2`), `-d` takes the rest of its word or the next one (`-d2`,
-/// `-d 2`), and the flags end at `--` or at the first word that is not one.
+/// Read run-shell's `-b`, `-c start-directory` and `-d delay` from the front
+/// of `args` (the words after the command name), the way tmux's getopt reads
+/// its flags (cmd-run-shell.c:47, `bd:Ct:Es:c:`): one word may carry several
+/// flags (`-bd 2`), `-c` and `-d` take the rest of their word or the next one
+/// (`-d2`, `-d 2`), and the flags end at `--` or at the first word that is
+/// not one.
 ///
 /// The delay is in seconds and may be fractional, as tmux reads it with
 /// strtod (cmd-run-shell.c:125 to :131); anything else is tmux's
 /// `invalid delay time: <value>`. A word holding a flag psmux does not act on
-/// (`-C`, `-c`, `-E`, `-s`, `-t`) ends the flags and goes to the shell with
-/// the rest, as it always has. A `-b` word after the command is still taken
-/// as the flag, as before, unless a `--` ended the flags.
+/// (`-C`, `-E`, `-s`, `-t`) ends the flags and goes to the shell with the
+/// rest, as it always has. A `-b` word after the command is still taken as
+/// the flag, as before, unless a `--` ended the flags.
 pub(crate) fn parse_run_shell_args<S: AsRef<str>>(args: &[S]) -> Result<RunShellArgs, String> {
     let mut out = RunShellArgs::default();
     let mut i = 0;
@@ -289,19 +292,16 @@ pub(crate) fn parse_run_shell_args<S: AsRef<str>>(args: &[S]) -> Result<RunShell
         }
         let Some(flags) = word.strip_prefix('-').filter(|f| !f.is_empty()) else { break };
         let mut background = false;
-        let mut delay: Option<&str> = None;
-        let mut takes_next = false;
+        // The flag taking a value (`c` or `d`), and that value when it is the
+        // rest of this word.
+        let mut valued: Option<(char, Option<&str>)> = None;
         let mut ours = true;
         for (at, c) in flags.char_indices() {
             match c {
                 'b' => background = true,
-                'd' => {
+                'c' | 'd' => {
                     let rest = &flags[at + 1..];
-                    if rest.is_empty() {
-                        takes_next = true;
-                    } else {
-                        delay = Some(rest);
-                    }
+                    valued = Some((c, (!rest.is_empty()).then_some(rest)));
                     break;
                 }
                 _ => {
@@ -313,13 +313,22 @@ pub(crate) fn parse_run_shell_args<S: AsRef<str>>(args: &[S]) -> Result<RunShell
         if !ours {
             break;
         }
-        if takes_next {
-            match args.get(i + 1) {
-                Some(v) => {
-                    delay = Some(v.as_ref());
-                    i += 1;
-                }
-                None => return Err("-d expects an argument".to_string()),
+        let mut delay: Option<&str> = None;
+        if let Some((flag, value)) = valued {
+            let value = match value {
+                Some(v) => v,
+                None => match args.get(i + 1) {
+                    Some(v) => {
+                        i += 1;
+                        v.as_ref()
+                    }
+                    None => return Err(format!("-{} expects an argument", flag)),
+                },
+            };
+            if flag == 'c' {
+                out.cwd = Some(value.to_string());
+            } else {
+                delay = Some(value);
             }
         }
         out.background |= background;
@@ -373,6 +382,64 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
     apply_job_env(&mut c);
     c.stdin(std::process::Stdio::null());
     c
+}
+
+/// Whether the CLI hands a run-shell to the server instead of running it
+/// itself: a command with a format in it, which only the server can expand,
+/// and any `-b`. In tmux a `-b` job is the server's and the command returns
+/// at once (cmd-run-shell.c:187). Spawned by the CLI, the job was the CLI's
+/// child holding its stdout, so a caller reading that pipe waited for the
+/// whole job and got its output, and a job writing after the reader closed
+/// hit a broken pipe. The server also waits out a `-b -d N` delay.
+pub(crate) fn cli_run_shell_goes_to_server(shell_cmd: &str, background: bool) -> bool {
+    shell_cmd.contains('#') || background
+}
+
+/// The line the CLI sends for [`cli_run_shell_goes_to_server`], newline
+/// ended. The command goes over as ONE quoted argument: joined raw, the
+/// server split it again and dropped its quotes, so
+/// `run-shell "Write-Output ('x' + '#{pid}')"` reached the shell as
+/// `Write-Output (x + 1234)`. `cwd` is the user's `-c` and nothing else, so
+/// a line without one reads the same to a server from an older psmux.
+pub(crate) fn cli_run_shell_server_line(
+    background: bool,
+    delay: Option<std::time::Duration>,
+    cwd: Option<&str>,
+    shell_cmd: &str,
+) -> String {
+    let mut line = String::from("run-shell");
+    if background {
+        line.push_str(" -b");
+    }
+    if let Some(delay) = delay {
+        line.push_str(&format!(" -d {}", delay.as_secs_f64()));
+    }
+    if let Some(cwd) = cwd {
+        line.push_str(" -c ");
+        line.push_str(&crate::util::quote_arg(cwd));
+    }
+    line.push(' ');
+    line.push_str(&crate::util::quote_arg(shell_cmd));
+    line.push('\n');
+    line
+}
+
+/// Run the job in run-shell's `-c start-directory`, falling back to the home
+/// directory when it is not one, as tmux's job_run does when its chdir fails
+/// (job.c:143 to :147). Spawning in a directory that does not exist would
+/// fail the whole command instead.
+pub(crate) fn apply_run_shell_cwd(c: &mut std::process::Command, cwd: Option<&str>) {
+    let Some(cwd) = cwd.filter(|d| !d.is_empty()) else { return };
+    let home = crate::paths::home_dir();
+    let dir = match cwd.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => format!("{}{}", home, rest),
+        _ => cwd.to_string(),
+    };
+    if std::path::Path::new(&dir).is_dir() {
+        c.current_dir(dir);
+    } else if !home.is_empty() {
+        c.current_dir(home);
+    }
 }
 
 /// stdout and stderr for a job whose output nobody reads (`run-shell -b`, an
@@ -4146,6 +4213,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             };
             let background = parsed.background;
             let delay = parsed.delay;
+            let cwd = parsed.cwd;
             let shell_cmd = parsed.command.join(" ");
             if shell_cmd.is_empty() && delay.is_some() {
                 // `-d` with no command only waits (cmd-run-shell.c:125); here
@@ -4181,6 +4249,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 if background {
                     // -b flag: fire and forget, no output capture
                     let mut c = build_run_shell_command(&shell_cmd);
+                    apply_run_shell_cwd(&mut c, cwd.as_deref());
                     null_job_output(&mut c);
                     if !target_session.is_empty() {
                         c.env("PSMUX_TARGET_SESSION", &target_session);
@@ -4222,6 +4291,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                             std::thread::sleep(delay);
                         }
                         let mut c = build_run_shell_command(&shell_cmd);
+                        apply_run_shell_cwd(&mut c, cwd.as_deref());
                         if !target_session.is_empty() {
                             c.env("PSMUX_TARGET_SESSION", &target_session);
                         }
@@ -4330,6 +4400,10 @@ mod tests_issue804_job_env;
 #[cfg(test)]
 #[path = "../tests-rs/test_hide_window.rs"]
 mod tests_hide_window;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_run_shell_b_cli.rs"]
+mod tests_run_shell_b_cli;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue209_tmux_compat.rs"]
