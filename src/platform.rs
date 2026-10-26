@@ -6788,6 +6788,9 @@ pub fn pipe_term_size() -> Option<(u16, u16)> {
 }
 
 /// Maps a ratatui colour onto the crossterm colour crossterm 0.29 writes.
+/// Only the tests use it now, to prove `write_sgr_color` writes the bytes
+/// crossterm would.
+#[cfg(test)]
 fn to_crossterm_color(c: ratatui::style::Color) -> crossterm::style::Color {
     use crossterm::style::Color as C;
     use ratatui::style::Color as R;
@@ -6905,10 +6908,7 @@ where
 {
     use crossterm::cursor::MoveTo;
     use crossterm::queue;
-    use crossterm::style::{
-        Attribute as CtAttribute, Color as CtColor, Print, SetAttribute,
-        SetBackgroundColor, SetForegroundColor,
-    };
+    use crossterm::style::{Attribute as CtAttribute, Print, SetAttribute};
     use ratatui::style::Modifier;
 
     let mut fg = ratatui::style::Color::Reset;
@@ -6951,11 +6951,11 @@ where
         }
 
         if cell.fg != fg {
-            queue!(*w, SetForegroundColor(to_crossterm_color(cell.fg)))?;
+            write_sgr_color(w, 38, cell.fg)?;
             fg = cell.fg;
         }
         if cell.bg != bg {
-            queue!(*w, SetBackgroundColor(to_crossterm_color(cell.bg)))?;
+            write_sgr_color(w, 48, cell.bg)?;
             bg = cell.bg;
         }
         if cell.underline_color != underline_color {
@@ -6966,13 +6966,63 @@ where
         queue!(*w, Print(cell.symbol()))?;
     }
 
-    queue!(
-        *w,
-        SetForegroundColor(CtColor::Reset),
-        SetBackgroundColor(CtColor::Reset),
-    )?;
+    write_sgr_color(w, 38, ratatui::style::Color::Reset)?;
+    write_sgr_color(w, 48, ratatui::style::Color::Reset)?;
     write_underline_color(w, ratatui::style::Color::Reset)?;
     queue!(*w, SetAttribute(CtAttribute::Reset))
+}
+
+/// Writes an SGR 38 (foreground) or 48 (background) colour, byte for byte
+/// what crossterm's `SetForegroundColor` / `SetBackgroundColor` write.
+///
+/// Not through crossterm on purpose: crossterm's `Colored` writes NOTHING
+/// when `NO_COLOR` is set in the environment (crossterm 0.29
+/// `style/types/colored.rs`, `ansi_color_disabled_memoized`), so a user who
+/// exported `NO_COLOR` got a client that drew every pane, border and status
+/// line without colour.  `NO_COLOR` asks a program not to colour its own
+/// output; a multiplexer relaying its panes' colours is not that, and tmux
+/// has no `NO_COLOR` handling at all.  The panes still inherit `NO_COLOR`
+/// and honour it themselves.
+fn write_sgr_color<W: std::io::Write>(
+    w: &mut W,
+    base: u8,
+    color: ratatui::style::Color,
+) -> std::io::Result<()> {
+    use ratatui::style::Color as R;
+    match color {
+        R::Reset => write!(w, "\x1b[{}m", base + 1),
+        R::Rgb(r, g, b) => write!(w, "\x1b[{base};2;{r};{g};{b}m"),
+        other => match ansi_index(other) {
+            Some(idx) => write!(w, "\x1b[{base};5;{idx}m"),
+            None => Ok(()),
+        },
+    }
+}
+
+/// The 256 colour palette index of a named or indexed ratatui colour, the
+/// same numbers crossterm writes for them.
+fn ansi_index(color: ratatui::style::Color) -> Option<u8> {
+    use ratatui::style::Color as R;
+    Some(match color {
+        R::Black => 0,
+        R::Red => 1,
+        R::Green => 2,
+        R::Yellow => 3,
+        R::Blue => 4,
+        R::Magenta => 5,
+        R::Cyan => 6,
+        R::Gray => 7,
+        R::DarkGray => 8,
+        R::LightRed => 9,
+        R::LightGreen => 10,
+        R::LightYellow => 11,
+        R::LightBlue => 12,
+        R::LightMagenta => 13,
+        R::LightCyan => 14,
+        R::White => 15,
+        R::Indexed(i) => i,
+        R::Reset | R::Rgb(..) => return None,
+    })
 }
 
 /// Writes the SGR 58 underline colour in the COLON subparameter form, and SGR
@@ -6996,29 +7046,10 @@ fn write_underline_color<W: std::io::Write>(
         R::Rgb(r, g, b) => {
             write!(w, "\x1b[58:2::{r}:{g}:{b}m")
         }
-        other => {
-            let idx = match other {
-                R::Black => 0,
-                R::Red => 1,
-                R::Green => 2,
-                R::Yellow => 3,
-                R::Blue => 4,
-                R::Magenta => 5,
-                R::Cyan => 6,
-                R::Gray => 7,
-                R::DarkGray => 8,
-                R::LightRed => 9,
-                R::LightGreen => 10,
-                R::LightYellow => 11,
-                R::LightBlue => 12,
-                R::LightMagenta => 13,
-                R::LightCyan => 14,
-                R::White => 15,
-                R::Indexed(i) => i,
-                _ => return Ok(()),
-            };
-            write!(w, "\x1b[58:5:{idx}m")
-        }
+        other => match ansi_index(other) {
+            Some(idx) => write!(w, "\x1b[58:5:{idx}m"),
+            None => Ok(()),
+        },
     }
 }
 
@@ -7359,6 +7390,10 @@ mod tests_issue726_hidden_cursor_ime_park;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue589_undercurl.rs"]
 mod tests_issue589_undercurl;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_no_color_client.rs"]
+mod tests_no_color_client;
 
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue599_data_root_mutex.rs"]
