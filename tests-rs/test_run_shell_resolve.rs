@@ -196,6 +196,41 @@ fn build_run_shell_command_runs_an_existing_exe_directly() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+#[test]
+#[cfg(windows)]
+fn build_run_shell_command_keeps_the_shell_for_shell_syntax_after_an_exe() {
+    // tmux runs every run-shell command through `sh -c`, so redirection,
+    // pipes, separators and variables after an exe path must reach a shell
+    // instead of arriving at the exe as literal arguments.
+    let tmp = std::env::temp_dir().join(format!("psmux_test_exe_syntax_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    for dir in [tmp.join("plain"), tmp.join("with space")] {
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("helper.exe");
+        std::fs::write(&exe, b"").unwrap();
+        for rest in ["hi > out.txt", "hi | Out-File x.txt", "one; two", "$env:USERNAME", "a && b", "%USERNAME%"] {
+            let line = format!("{} {}", exe.display(), rest);
+            let cmd = build_run_shell_command(&line);
+            let prog = std::path::Path::new(cmd.get_program()).to_path_buf();
+            assert_ne!(prog, exe, "{:?} ran the exe without a shell", line);
+            let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let last = args.last().cloned().unwrap_or_default();
+            assert!(last.contains(rest), "{:?}: shell must get {:?} whole, got {:?}", line, rest, args);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn has_shell_syntax_detects_operators_but_not_plain_or_quoted_args() {
+    assert!(!has_shell_syntax(""));
+    assert!(!has_shell_syntax("--quiet -n 3 C:\\dir\\file.txt"));
+    assert!(!has_shell_syntax("'a b' \"c d\""));
+    for s in ["a > b", "a | b", "a; b", "a && b", "$x", "%X%", "a`b", "*.txt", "~\\x", "# c"] {
+        assert!(has_shell_syntax(s), "{:?} should count as shell syntax", s);
+    }
+}
+
 // ─── expand_run_shell_path tests ────────────────────────────────────────────
 
 #[test]

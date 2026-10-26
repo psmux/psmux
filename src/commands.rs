@@ -108,6 +108,16 @@ fn resolve_shell_binary(name: &str) -> String {
 /// tries "C:\Program", then "C:\Program Files\App\run.ps1", etc.).
 /// Returns `Some((file_path, remaining_args))` on success.
 #[cfg(windows)]
+/// Whether run-shell arguments use anything a shell would act on:
+/// redirection, pipes, command separators, variables, escapes, globs,
+/// grouping or comments. Quotes alone are not counted, `parse_command_line`
+/// splits them as PowerShell would.
+fn has_shell_syntax(args: &str) -> bool {
+    args.chars().any(|c| matches!(c,
+        '|' | '&' | ';' | '<' | '>' | '$' | '%' | '`' | '^' | '(' | ')'
+        | '{' | '}' | '[' | ']' | '*' | '?' | '~' | '#' | '!' | '@'))
+}
+
 fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() { return None; }
@@ -554,8 +564,13 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
 
             // Native executables run directly, spaces or not: CreateProcess
             // quotes the path, and a hook that runs one on every pane switch
-            // should not pay for starting PowerShell around it.
-            if matches!(ext.as_deref(), Some("exe") | Some("com")) {
+            // should not pay for starting PowerShell around it. Only when the
+            // arguments hold no shell syntax, though: tmux always runs the
+            // command through `sh -c` (job.c), so `>`, `|`, `;` or `$env:X`
+            // after the path must still reach a shell.
+            if matches!(ext.as_deref(), Some("exe") | Some("com"))
+                && !has_shell_syntax(&rest_args)
+            {
                 let mut c = std::process::Command::new(&file_path);
                 if !rest_args.is_empty() {
                     for a in &parse_command_line(&rest_args) { c.arg(a); }
@@ -580,7 +595,8 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
                         c.hide_window();
                         return c;
                     }
-                    // Unknown extension with spaces: use the resolved shell with
+                    // Unknown extension with spaces, or an exe followed by
+                    // shell syntax: use the resolved shell with
                     // proper quoting. For PowerShell, use the call operator & 'path'
                     // so the path is treated as a single literal string.
                     _ => {
