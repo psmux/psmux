@@ -44,3 +44,11 @@ fn narrow_non_ascii_is_one_column_per_char() {
     let m = search_line_matches("\u{2500}\u{2500}x\u{2500}x", "x");
     assert_eq!(m, vec![(2, 3), (4, 5)]);
 }
+
+#[test]
+fn soft_hyphen_takes_its_grid_column() {
+    // The grid gives U+00AD one cell (#916), so a hit after one starts a
+    // column later than unicode-width's zero would put it.
+    assert_eq!(search_line_matches("a\u{ad}bc", "b"), vec![(2, 3)]);
+    assert_eq!(search_line_matches("a\u{ad}bc", "\u{ad}b"), vec![(1, 3)]);
+}

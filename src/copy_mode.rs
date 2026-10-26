@@ -1767,14 +1767,15 @@ fn copy_cursor_abs(app: &mut AppState) -> (usize, u16) {
 /// starts with a multi byte character (日本, école) used to resume inside it
 /// and the slice panicked, taking the whole server down (#712 audit).
 pub(crate) fn search_line_matches(lower: &str, query_lower: &str) -> Vec<(u16, u16)> {
-    use unicode_width::UnicodeWidthStr;
+    // Measured as the grid measures (codepoint-widths, soft hyphen), so a hit
+    // lands on the cells the line was read from.
     let mut out = Vec::new();
     if query_lower.is_empty() { return out; }
-    let qlen = UnicodeWidthStr::width(query_lower) as u16;
+    let qlen = vt100::str_width(query_lower) as u16;
     let mut start = 0usize;
     while let Some(pos) = lower[start..].find(query_lower) {
         let byte_at = start + pos;
-        let col_start = UnicodeWidthStr::width(&lower[..byte_at]) as u16;
+        let col_start = vt100::str_width(&lower[..byte_at]) as u16;
         out.push((col_start, col_start + qlen));
         start = byte_at + lower[byte_at..].chars().next().map_or(1, char::len_utf8);
         if start >= lower.len() { break; }
