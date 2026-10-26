@@ -37,7 +37,7 @@ Step by step, tested on the shipped binary, copy pasteable.
 | [Pane Titles](pane-titles.md) | Pane titles, border labels, OSC sequences, why pwsh shows a path |
 | [Chooser Preview](preview.md) | The live preview pane in `choose-tree` and `choose-session` |
 | [Mouse Over SSH](mouse-ssh.md) | Mouse support on remote Windows servers and the Windows build requirements |
-| [Passthrough Client](passthrough.md) | `-f passthrough`: the pane's own output goes to the host terminal, so its scrollback works over SSH |
+| [Scrollback Client](scrollback.md) | `-f scrollback`: the pane's own output goes to the host terminal, so its scrollback works over SSH |
 | [Claude Code](claude-code.md) | Claude Code agent teams: teammates spawn into psmux panes automatically |
 | [FAQ](faq.md) | Common questions: mouse and wheel behaviour, Windows builds, shells, colours |
 | [Diagnostics](diagnostics.md) | Debug logs, crash logs, state files, measuring the terminal around you, what to attach to a bug report |

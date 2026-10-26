@@ -2252,14 +2252,15 @@ pub fn attach_client_flags<'a>(args: impl IntoIterator<Item = &'a str>) -> Clien
 /// The client flags psmux acts on, from `-r` and the `-f` list of
 /// `attach-session` and `new-session`.
 ///
-/// `passthrough` is psmux's own: the client hands the host terminal the
+/// `scrollback` is psmux's own: the client hands the host terminal the
 /// active pane's output bytes instead of drawing frames, so the terminal's
 /// own scrollback fills as it would in a plain shell session (see
-/// `crate::passthrough`).
+/// `crate::scrollback`). `passthrough` is accepted as another name for it;
+/// it is unrelated to the `allow-passthrough` option.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ClientFlags {
     pub read_only: bool,
-    pub passthrough: bool,
+    pub scrollback: bool,
 }
 
 impl ClientFlags {
@@ -2273,7 +2274,7 @@ impl ClientFlags {
             };
             match name {
                 "read-only" => self.read_only = on,
-                "passthrough" => self.passthrough = on,
+                "scrollback" | "passthrough" => self.scrollback = on,
                 _ => {}
             }
         }

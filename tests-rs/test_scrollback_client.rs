@@ -1,4 +1,4 @@
-// The passthrough client (`attach -f passthrough`): what it prints for a
+// The scrollback client (`attach -f scrollback`): what it prints for a
 // capture, how it reads `%output`, and how it splits typed keys.
 use super::*;
 
@@ -94,10 +94,19 @@ fn a_block_closes_on_its_own_guard_line() {
 }
 
 #[test]
-fn passthrough_is_a_client_flag() {
+fn scrollback_is_a_client_flag() {
     use crate::cli::{attach_client_flags, ClientFlags};
-    assert!(attach_client_flags(["-f", "passthrough"]).passthrough);
-    assert!(attach_client_flags(["-t", "main", "-fread-only,passthrough"]) == ClientFlags { read_only: true, passthrough: true });
-    assert!(!attach_client_flags(["-f", "passthrough,!passthrough"]).passthrough);
-    assert!(!attach_client_flags(["-t", "passthrough"]).passthrough);
+    assert!(attach_client_flags(["-f", "scrollback"]).scrollback);
+    assert!(attach_client_flags(["-t", "main", "-fread-only,scrollback"]) == ClientFlags { read_only: true, scrollback: true });
+    assert!(!attach_client_flags(["-f", "scrollback,!scrollback"]).scrollback);
+    assert!(!attach_client_flags(["-t", "scrollback"]).scrollback);
+}
+
+#[test]
+fn passthrough_is_another_name_for_scrollback() {
+    use crate::cli::attach_client_flags;
+    assert!(attach_client_flags(["-f", "passthrough"]).scrollback);
+    assert!(attach_client_flags(["-f", "read-only,passthrough"]).read_only);
+    assert!(!attach_client_flags(["-f", "passthrough,!scrollback"]).scrollback);
+    assert!(!attach_client_flags(["-f", "scrollback,!passthrough"]).scrollback);
 }

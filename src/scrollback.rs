@@ -1,4 +1,5 @@
-//! Passthrough client: `attach -f passthrough` and `new-session -f passthrough`.
+//! Scrollback client: `attach -f scrollback` and `new-session -f scrollback`
+//! (`-f passthrough` is another name for it).
 //!
 //! The normal client draws the session in frames and places every cell with
 //! a cursor move, so the host terminal never sees a line scroll off its top
@@ -399,5 +400,5 @@ pub fn run() -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[path = "../tests-rs/test_passthrough_client.rs"]
+#[path = "../tests-rs/test_scrollback_client.rs"]
 mod tests;

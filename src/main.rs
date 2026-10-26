@@ -41,7 +41,7 @@ mod ssh_input;
 mod console_tap;
 mod debug_log;
 mod control;
-mod passthrough;
+mod scrollback;
 mod control_ring;
 mod resize_window;
 mod proxy_pane;
@@ -1338,8 +1338,8 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     let mut f_config_file: Option<String> = None;
     let mut precommand_target: Option<String> = None;
     let mut control_mode: u8 = 0; // 0=off, 1=-C (echo), 2=-CC (no echo)
-    // `-f passthrough` on attach-session or new-session (crate::passthrough).
-    let mut passthrough = false;
+    // `-f scrollback` on attach-session or new-session (crate::scrollback).
+    let mut scrollback = false;
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
@@ -2173,7 +2173,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 } else {
                     env::remove_var("PSMUX_CLIENT_READONLY");
                 }
-                passthrough = flags.passthrough;
+                scrollback = flags.scrollback;
             }
             "server" => {
                 // #798: every server process starts here; only per-session goes on.
@@ -2351,7 +2351,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
                     return Ok(());
                 }
-                passthrough = client_flags.passthrough;
+                scrollback = client_flags.scrollback;
                 // `-f read-only` is set for the client only where it attaches
                 // (below): set here, the server spawned further down would
                 // inherit it and hand it to every pane shell.
@@ -6442,10 +6442,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     if control_mode > 0 {
         return run_control_mode(control_mode);
     }
-    // Passthrough: the host terminal gets the active pane's own output bytes
-    // instead of frames, so its scrollback works (crate::passthrough).
-    if passthrough {
-        return crate::passthrough::run();
+    // Scrollback client: the host terminal gets the active pane's own output
+    // bytes instead of frames, so its scrollback works (crate::scrollback).
+    if scrollback {
+        return crate::scrollback::run();
     }
 
     // Raw VT pipe detection: under mintty (Git Bash/MSYS2, issue #474) and
