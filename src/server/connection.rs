@@ -5993,19 +5993,16 @@ match cmd {
         }
     }
     "confirm-before" | "confirm" => {
-        let mut prompt: Option<String> = None;
-        let mut i = 0;
-        while i < args.len() {
-            if args[i] == "-p" {
-                if let Some(p) = args.get(i+1) { prompt = Some(p.to_string()); i += 1; }
+        match crate::confirm::parse_confirm_args(&args) {
+            Ok((spec, start)) => {
+                let command = crate::confirm::command_line(&args[start..], requote_command_tail);
+                let _ = tx.send(CtrlReq::ConfirmBefore(spec, command));
             }
-            i += 1;
+            Err(e) => {
+                let _ = writeln!(write_stream, "ERROR: confirm-before: {}", e);
+                let _ = write_stream.flush();
+            }
         }
-        let command = crate::cli::deferred_command_start(cmd, &args)
-            .map(|i| requote_command_tail(&args[i..]))
-            .unwrap_or_default();
-        let prompt_str = prompt.unwrap_or_else(|| format!("Run '{}'", command));
-        let _ = tx.send(CtrlReq::ConfirmBefore(prompt_str, command));
     }
     // tmux standard aliases (issue #275: full -a/-s/-t/-P parity)
     "detach-client" | "detach" => {

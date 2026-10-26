@@ -414,6 +414,8 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         prompt: "kill-pane? (y/n)".into(),
                         command: "kill-pane".into(),
                         input: String::new(),
+                        key: 'y',
+                        default_yes: false,
                     };
                     true
                 }
@@ -511,6 +513,8 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         prompt: "kill-window? (y/n)".into(),
                         command: "kill-window".into(),
                         input: String::new(),
+                        key: 'y',
+                        default_yes: false,
                     };
                     true
                 }
@@ -1441,23 +1445,18 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             
             Ok(false)
         }
-        Mode::ConfirmMode { prompt: _, ref command, ref mut input } => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    app.mode = Mode::Passthrough;
-                }
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    let cmd = command.clone();
-                    app.mode = Mode::Passthrough;
-                    let _ = execute_command_string(app, &cmd);
-                }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                }
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                _ => {}
+        Mode::ConfirmMode { ref command, key: confirm_key, default_yes, .. } => {
+            // One key answers, as tmux's PROMPT_SINGLE prompt does: the
+            // confirm key (or Enter with -y) runs the command and any other
+            // key closes the prompt (cmd-confirm-before.c:134).
+            if !crate::confirm::ConfirmInput::answers(key.code) {
+                return Ok(false);
+            }
+            let yes = crate::confirm::is_yes(confirm_key, default_yes, crate::confirm::ConfirmInput::from_key_code(key.code));
+            let cmd = command.clone();
+            app.mode = Mode::Passthrough;
+            if yes {
+                let _ = execute_command_string(app, &cmd);
             }
             Ok(false)
         }
@@ -3975,22 +3974,15 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         }
         return Ok(());
     }
-    if matches!(app.mode, Mode::ConfirmMode { .. }) {
-        for c in text.chars() {
-            match c {
-                'y' | 'Y' => {
-                    if let Mode::ConfirmMode { ref command, .. } = app.mode {
-                        let cmd = command.clone();
-                        app.mode = Mode::Passthrough;
-                        crate::config::parse_config_line(app, &cmd);
-                    }
-                    return Ok(());
-                }
-                'n' | 'N' => {
-                    app.mode = Mode::Passthrough;
-                    return Ok(());
-                }
-                _ => {} // Ignore other chars during confirm
+    if let Mode::ConfirmMode { ref command, key: confirm_key, default_yes, .. } = app.mode {
+        // The first character answers, as one key would.
+        if let Some(c) = text.chars().next() {
+            let input = if c == '\r' { crate::confirm::ConfirmInput::Enter } else { crate::confirm::ConfirmInput::Char(c) };
+            let yes = crate::confirm::is_yes(confirm_key, default_yes, input);
+            let cmd = command.clone();
+            app.mode = Mode::Passthrough;
+            if yes {
+                crate::config::parse_config_line(app, &cmd);
             }
         }
         return Ok(());
@@ -4351,10 +4343,18 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
         }
         return Ok(());
     }
-    if matches!(app.mode, Mode::ConfirmMode { .. }) {
+    if let Mode::ConfirmMode { ref command, default_yes, .. } = app.mode {
         match k {
             "esc" | "escape" => {
                 app.mode = Mode::Passthrough;
+            }
+            // Enter answers yes only with -y (cmd-confirm-before.c:134).
+            "enter" => {
+                let cmd = command.clone();
+                app.mode = Mode::Passthrough;
+                if default_yes {
+                    crate::config::parse_config_line(app, &cmd);
+                }
             }
             _ => {} // y/n handled via send_text_to_active
         }

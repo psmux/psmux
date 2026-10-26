@@ -861,12 +861,15 @@ pub fn serialize_popup_overlay(app: &AppState) -> String {
             }
             out.push(']');
         }
-        Mode::ConfirmMode { prompt, .. } => {
+        Mode::ConfirmMode { prompt, key, default_yes, .. } => {
             out.push_str(",\"popup_active\":false,\"popup_rows\":[],\"popup_lines\":[],\"popup_has_pty\":false");
             out.push_str(",\"menu_active\":false,\"menu_title\":\"\",\"menu_selected\":0,\"menu_items\":[]");
             out.push_str(",\"confirm_active\":true,\"confirm_prompt\":\"");
             out.push_str(&json_escape_string(prompt));
-            out.push('"');
+            out.push_str("\",\"confirm_key\":\"");
+            out.push_str(&json_escape_string(&key.to_string()));
+            out.push_str("\",\"confirm_default_yes\":");
+            out.push_str(if *default_yes { "true" } else { "false" });
         }
         Mode::PaneChooser { .. } => {
             out.push_str(",\"popup_active\":false,\"popup_rows\":[],\"popup_lines\":[],\"popup_has_pty\":false");

@@ -2793,14 +2793,24 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             app.mode = Mode::PaneChooser { opened_at: Instant::now() };
         }
         "confirm-before" | "confirm" => {
-            // Quoted again where needed: the command is parsed a second time
-            // when it runs.
-            let rest = requote(&parts[1..]);
-            app.mode = Mode::ConfirmMode {
-                prompt: format!("Run '{}'?", rest),
-                command: rest,
-                input: String::new(),
-            };
+            // The flags are tmux's (`-b`, `-c`, `-p`, `-t`, `-y`) and are not
+            // part of the command. The command is quoted again where needed:
+            // it is parsed a second time when it runs.
+            match crate::confirm::parse_confirm_args(&parts[1..]) {
+                Ok((spec, start)) => {
+                    let rest = crate::confirm::command_line(&parts[1 + start..], requote);
+                    app.mode = Mode::ConfirmMode {
+                        prompt: crate::confirm::prompt_text(&spec, &rest),
+                        command: rest,
+                        input: String::new(),
+                        key: spec.key,
+                        default_yes: spec.default_yes,
+                    };
+                }
+                Err(e) => {
+                    app.status_message = Some((format!("confirm-before: {}", e), Instant::now(), None));
+                }
+            }
         }
         "display-menu" | "menu" => {
             // parse_menu_definition reads quoted items, so they are quoted again.

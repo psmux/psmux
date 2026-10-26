@@ -1461,10 +1461,14 @@ pub enum Mode {
         look: crate::popup::PopupLook,
     },
     /// Confirmation prompt before command
-    ConfirmMode { 
-        prompt: String, 
+    ConfirmMode {
+        prompt: String,
         command: String,
         input: String,
+        /// `-c`: the key that runs the command (`y` by default).
+        key: char,
+        /// `-y`: Enter runs it too.
+        default_yes: bool,
     },
     /// Copy-mode search input
     CopySearch {
@@ -4476,7 +4480,8 @@ pub enum CtrlReq {
     /// Parsed `display-popup` arguments and whether the popup closes when its
     /// command exits.
     DisplayPopup(crate::popup::DisplayPopupArgs, bool),
-    ConfirmBefore(String, String),
+    /// `confirm-before`'s flags and the command it guards.
+    ConfirmBefore(crate::confirm::ConfirmSpec, String),
     ClockMode,
     ResizePaneAbsolute(String, u16),
     ResizePanePercent(String, u8), // axis, percentage (0-100)

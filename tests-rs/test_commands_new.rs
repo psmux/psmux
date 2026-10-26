@@ -763,7 +763,7 @@ fn confirm_before_stores_command_and_prompt() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "confirm-before kill-server").unwrap();
     match &app.mode {
-        Mode::ConfirmMode { prompt, command, input } => {
+        Mode::ConfirmMode { prompt, command, input, .. } => {
             assert!(prompt.contains("kill-server"), "prompt should mention the command");
             assert_eq!(command, "kill-server", "stored command must be exact");
             assert!(input.is_empty(), "input should start empty");

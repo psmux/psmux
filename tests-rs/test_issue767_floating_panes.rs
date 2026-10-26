@@ -325,8 +325,8 @@ fn client_draws_floats_before_its_own_overlays() {
         "            if command_input {",
         // The confirm box takes `chooser_kill` as well as `confirm_cmd` now
         // (#778), so the marker is the start of that line rather than all of
-        // it.
-        "            if let Some(cmd) = confirm_cmd",
+        // it. Since #616 it draws the binding's own prompt text.
+        "            if let Some(text) = confirm_cmd",
     ] {
         let at = src.find(marker).unwrap_or_else(|| panic!("marker {:?} not found", marker));
         assert!(floats_at < at, "floats must draw before {:?} so it is not painted over", marker);

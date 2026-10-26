@@ -8106,22 +8106,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(r) = resp { let _ = r.send(String::new()); }
                     }
                 }
-                CtrlReq::ConfirmBefore(prompt, cmd) => {
-                    let prompt_text = if prompt.is_empty() {
-                        format!("Confirm: {}? (y/n)", cmd)
-                    } else {
-                        // Don't append (y/n) if prompt already contains it
-                        if prompt.contains("(y/n)") {
-                            prompt.clone()
-                        } else {
-                            let base = prompt.trim_end_matches('?');
-                            format!("{}? (y/n)", base)
-                        }
+                CtrlReq::ConfirmBefore(spec, cmd) => {
+                    // tmux shows `-p` as given, formats expanded
+                    // (status_prompt_set), and otherwise
+                    // `Confirm '<command>'? (y/n)`.
+                    let prompt_text = match &spec.prompt {
+                        Some(p) => crate::format::expand_format(p, &app),
+                        None => crate::confirm::prompt_text(&spec, &cmd),
                     };
                     app.mode = Mode::ConfirmMode {
                         prompt: prompt_text,
                         command: cmd,
                         input: String::new(),
+                        key: spec.key,
+                        default_yes: spec.default_yes,
                     };
                     state_dirty = true;
                 }

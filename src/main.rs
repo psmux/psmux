@@ -39,6 +39,7 @@ mod preview;
 mod client;
 mod ssh_input;
 mod console_tap;
+mod confirm;
 mod debug_log;
 mod control;
 mod scrollback;

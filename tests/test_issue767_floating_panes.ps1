@@ -229,7 +229,7 @@ if (-not (Test-Path $injector) -or -not (Test-Path $conread)) {
 
             Write-Host "`n[C3] prefix x over the float draws the confirmation" -ForegroundColor Yellow
             & $injector $cid "^b{SLEEP:300}x" | Out-Null
-            $shown = Wait-Until { $s = Read-Screen; if (($s | Select-Object -Skip 1) -match 'kill-pane\? \(y/n\)') { $true } } 4000
+            $shown = Wait-Until { $s = Read-Screen; if (($s | Select-Object -Skip 1) -match 'kill-pane( \d+)?\? \(y/n\)') { $true } } 4000
             if ($shown) { Write-Pass "kill-pane? (y/n) is on screen over the float" }
             else { Write-Fail "no kill-pane? (y/n) on screen with the float focused" }
 
@@ -246,7 +246,7 @@ if (-not (Test-Path $injector) -or -not (Test-Path $conread)) {
 
             Write-Host "`n[C5] prefix x then y kills the float" -ForegroundColor Yellow
             & $injector $cid "^b{SLEEP:300}x" | Out-Null
-            $shown2 = Wait-Until { $s = Read-Screen; if (($s | Select-Object -Skip 1) -match 'kill-pane\? \(y/n\)') { $true } } 4000
+            $shown2 = Wait-Until { $s = Read-Screen; if (($s | Select-Object -Skip 1) -match 'kill-pane( \d+)?\? \(y/n\)') { $true } } 4000
             & $injector $cid "y" | Out-Null
             $gone = Wait-Until { $x = Get-Floats $TUI; if ($x.Count -eq 0) { $true } } 5000
             if ($shown2 -and $gone) { Write-Pass "confirmation shown, y killed the float" }
@@ -261,7 +261,7 @@ if (-not (Test-Path $injector) -or -not (Test-Path $conread)) {
             Write-Host "`n[C6] tiled pane: n wipes the kill-pane? box" -ForegroundColor Yellow
             Start-Sleep -Milliseconds 800
             & $injector $cid "^b{SLEEP:300}x" | Out-Null
-            $shown3 = Wait-Until { $s = Read-Screen; if (($s | Select-Object -Skip 1) -match 'kill-pane\? \(y/n\)') { $true } } 4000
+            $shown3 = Wait-Until { $s = Read-Screen; if (($s | Select-Object -Skip 1) -match 'kill-pane( \d+)?\? \(y/n\)') { $true } } 4000
             & $injector $cid "n" | Out-Null
             $cleared3 = Wait-Until { $s = Read-Screen; if ($s.Count -gt 1 -and -not (($s | Select-Object -Skip 1) -match 'y/n')) { $true } } 4000
             if ($shown3 -and $cleared3) { Write-Pass "box shown, then wiped after n" }

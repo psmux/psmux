@@ -887,7 +887,7 @@ pub fn deferred_command_start<S: AsRef<str>>(command: &str, args: &[S]) -> Optio
     let value_options: &[&str] = match command {
         "bind-key" | "bind" => &["-T", "-N"],
         "set-hook" => &["-t"],
-        "confirm-before" | "confirm" => &["-p", "-t"],
+        "confirm-before" | "confirm" => &["-c", "-p", "-t"],
         _ => return None,
     };
 

@@ -327,36 +327,6 @@ pub(crate) fn local_chooser(cmd: &str) -> Option<crate::choose_tree::ChooserKind
     plain.then(|| crate::choose_tree::chooser_kind(args))
 }
 
-fn extract_confirm_command(args: &str) -> String {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let mut i = 0;
-    while i < parts.len() {
-        if parts[i] == "-p" {
-            i += 1; // skip flag
-            // skip the prompt value (may be quoted with single quotes spanning multiple parts)
-            if i < parts.len() {
-                if parts[i].starts_with('\'') {
-                    // scan until closing quote
-                    while i < parts.len() && !parts[i].ends_with('\'') {
-                        i += 1;
-                    }
-                } else if parts[i].starts_with('"') {
-                    while i < parts.len() && !parts[i].ends_with('"') {
-                        i += 1;
-                    }
-                }
-                i += 1; // move past the prompt value
-            }
-        } else if parts[i].starts_with('-') {
-            i += 1; // skip other flags like -b, -y
-        } else {
-            // Remaining parts form the command
-            return parts[i..].join(" ");
-        }
-    }
-    args.to_string()
-}
-
 /// What a `command-prompt` binding's flags asked the client to do: the text the
 /// prompt opens with (`-I`), the overlay heading (`-p`), and the command to run
 /// with `%%` replaced by whatever the user typed. A bare `command-prompt`
@@ -3530,7 +3500,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut popup_drag_anchor: (u16, u16) = (0, 0);
     let mut popup_initial_offset: (i32, i32) = (0, 0);
     let mut popup_rect_last: Option<Rect> = None;
-    let mut confirm_cmd: Option<String> = None;  // pending kill confirmation
+    let mut confirm_cmd: Option<crate::confirm::PendingConfirm> = None;  // pending confirm-before
     // The kill a chooser's `x` has asked about and is waiting on, with the
     // chooser still open behind it, the way tmux's `status_prompt_set(...
     // PROMPT_SINGLE ...)` leaves the mode open behind its own prompt
@@ -3753,6 +3723,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut srv_confirm_active = false;
     #[allow(unused_assignments)]
     let mut srv_confirm_prompt = String::new();
+    let mut srv_confirm_key = 'y';
+    let mut srv_confirm_default_yes = false;
     #[allow(unused_assignments)]
     let mut srv_menu_active = false;
     #[allow(unused_assignments)]
@@ -4109,6 +4081,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         confirm_active: bool,
         #[serde(default)]
         confirm_prompt: Option<String>,
+        /// The confirm overlay's `-c` key and `-y` (absent from an older
+        /// server: `y`, and Enter answers no).
+        #[serde(default)]
+        confirm_key: Option<String>,
+        #[serde(default)]
+        confirm_default_yes: bool,
         /// A command prompt the server asks one client to open (#789 follow
         /// up): `psmux command-prompt`, or one a hook ran.
         #[serde(default)]
@@ -5322,14 +5300,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                         }
                         else if srv_confirm_active {
-                            match key.code {
-                                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                    cmd_batch.push("confirm-respond y\n".into());
-                                }
-                                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                                    cmd_batch.push("confirm-respond n\n".into());
-                                }
-                                _ => {} // Ignore other keys during confirm
+                            // One key answers, as tmux's PROMPT_SINGLE prompt
+                            // does: the confirm key (or Enter with -y) is yes,
+                            // every other key no (cmd-confirm-before.c:134).
+                            if crate::confirm::ConfirmInput::answers(key.code) {
+                                let yes = crate::confirm::is_yes(
+                                    srv_confirm_key,
+                                    srv_confirm_default_yes,
+                                    crate::confirm::ConfirmInput::from_key_code(key.code),
+                                );
+                                cmd_batch.push(if yes { "confirm-respond y\n" } else { "confirm-respond n\n" }.into());
                             }
                         }
                         else if srv_menu_active {
@@ -5439,6 +5419,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         }
                                     }
                                     _ => {}
+                                }
+                            }
+                        }
+                        // A binding's confirm-before box takes the next key
+                        // whatever it is, as tmux's PROMPT_SINGLE prompt does:
+                        // the confirm key (or Enter with -y) runs the command
+                        // and every other key, the prefix included, closes the
+                        // box (cmd-confirm-before.c:134). The Y key of a non
+                        // Latin layout counts as y (issue #616).
+                        else if confirm_cmd.is_some() && crate::confirm::ConfirmInput::answers(key.code) {
+                            if let Some(pending) = confirm_cmd.take() {
+                                if crate::confirm::is_yes(pending.key, pending.default_yes,
+                                    crate::confirm::ConfirmInput::from_key_code(key.code)) {
+                                    cmd_batch.push(format!("{}\n", pending.command));
                                 }
                             }
                         }
@@ -5652,12 +5646,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 let cmd = &entry.c;
                                 if cmd == "detach-client" || cmd == "detach" {
                                     quit = true;
-                                } else if cmd.starts_with("confirm-before") {
-                                    // Extract the actual command from confirm-before wrapper
-                                    let inner = cmd.strip_prefix("confirm-before").unwrap_or(cmd).trim();
-                                    // Skip -p 'prompt' flags to get the actual command
-                                    let actual_cmd = extract_confirm_command(inner);
-                                    confirm_cmd = Some(actual_cmd);
+                                } else if cmd.starts_with("confirm-before") || cmd == "confirm" || cmd.starts_with("confirm ") {
+                                    // The binding's flags (-c, -p, -y) shape
+                                    // the box; the rest is what runs on yes.
+                                    match crate::confirm::PendingConfirm::from_line(cmd) {
+                                        Ok(mut pending) => {
+                                            // A -p prompt is expanded as a format
+                                            // (`kill-pane #P? (y/n)`), as tmux
+                                            // expands it in status_prompt_set.
+                                            if pending.prompt.contains('#') {
+                                                let fmt = crate::util::quote_arg_if_needed(&pending.prompt);
+                                                pending.prompt = overlay_initial_name(port, &session_key, &fmt, &pending.prompt);
+                                            }
+                                            confirm_cmd = Some(pending);
+                                        }
+                                        Err(e) => {
+                                            cmd_batch.push(format!("display-message {}\n",
+                                                crate::util::quote_arg_if_needed(&format!("confirm-before: {}", e))));
+                                        }
+                                    }
                                 } else if cmd == "kill-pane" || cmd == "kill-window" || cmd == "kill-session" {
                                     // Direct kill without confirmation (user explicitly bound without confirm-before)
                                     cmd_batch.push(format!("{}\n", cmd));
@@ -5748,8 +5755,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('c') => { cmd_batch.push("new-window\n".into()); }
                                 KeyCode::Char('%') => { cmd_batch.push("split-window -h\n".into()); }
                                 KeyCode::Char('"') => { cmd_batch.push("split-window -v\n".into()); }
-                                KeyCode::Char('x') => { confirm_cmd = Some("kill-pane".into()); }
-                                KeyCode::Char('&') => { confirm_cmd = Some("kill-window".into()); }
+                                KeyCode::Char('x') => { confirm_cmd = Some(crate::confirm::PendingConfirm::plain("kill-pane", "kill-pane? (y/n)")); }
+                                KeyCode::Char('&') => { confirm_cmd = Some(crate::confirm::PendingConfirm::plain("kill-window", "kill-window? (y/n)")); }
                                 KeyCode::Char('z') => { cmd_batch.push("zoom-pane\n".into()); }
                                 KeyCode::Char('[') => { cmd_batch.push("copy-enter\n".into()); }
                                 // tmux key-bindings.c:422 binds ] to
@@ -6507,15 +6514,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('l') if keys_viewer => { keys_viewer_scroll += 1; }
                                 KeyCode::Char('g') if keys_viewer => { keys_viewer_scroll = 0; }
                                 KeyCode::Char('G') if keys_viewer => { keys_viewer_scroll = keys_viewer_lines.len().saturating_sub(1); }
-                                // --- kill confirmation: y/Y/Enter confirms, n/N/Esc cancels ---
-                                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter if confirm_cmd.is_some() => {
-                                    if let Some(cmd) = confirm_cmd.take() {
-                                        cmd_batch.push(format!("{}\n", cmd));
-                                    }
-                                }
-                                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc if confirm_cmd.is_some() => {
-                                    confirm_cmd = None;
-                                }
                                 // A control character is an editing key, not
                                 // text, so it goes to the editor. AltGr is the
                                 // exception: Windows reports it as Ctrl+Alt, so
@@ -8600,6 +8598,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         };
         srv_confirm_active = state.confirm_active;
         srv_confirm_prompt = state.confirm_prompt.unwrap_or_default();
+        srv_confirm_key = state.confirm_key.as_deref().and_then(|k| k.chars().next()).unwrap_or('y');
+        srv_confirm_default_yes = state.confirm_default_yes;
         // A prompt the server asked THIS client to open (by process id; 0 is
         // any client). Each id opens once, though it rides in every frame
         // until the prompt closes. A client that already has a prompt or an
@@ -10040,15 +10040,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             // box so the question reads the same wherever it came from, and
             // only one of the two can be up: the prefix table is out of reach
             // while a chooser is open.
-            if let Some(cmd) = confirm_cmd
-                .as_deref()
-                .or(chooser_kill.as_ref().map(|k| k.prompt.as_str()))
+            // A binding's box shows its own prompt (tmux's default when it
+            // had no -p); the chooser's question gets the `? (y/n)` here.
+            if let Some(text) = confirm_cmd
+                .as_ref()
+                .map(|c| c.prompt.clone())
+                .or(chooser_kill.as_ref().map(|k| format!("{}? (y/n)", k.prompt)))
             {
                 let overlay = Block::default().borders(Borders::ALL).title("confirm");
                 let oa = centered_rect(50, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
-                let para = Paragraph::new(format!("{}? (y/n)", cmd));
+                let para = Paragraph::new(text);
                 f.render_widget(para, overlay.inner(oa));
             }
 
