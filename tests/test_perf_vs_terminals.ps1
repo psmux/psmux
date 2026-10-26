@@ -154,14 +154,16 @@
 #       the client, the server, the ConPTY and the warm claim. Measured 175 to
 #       213 ms on master after the double shell fix, against 440 to 530 ms for
 #       the bug that fix removed, so 350 ms still catches that regression.
-#       T1 is the cold server cell, T1b the steady state one, same budget.
-#   T2  psmux inside WT must not add more than 300 ms over plain WT, again in
-#       the steady state. The owner proposed 300 ms for one number, but the
-#       data shows two populations: with a server already running psmux adds
-#       the client, a warm claim and a ConPTY, while the first psmux window of
-#       the day additionally pays a cold server spawn (about 215 ms measured
-#       separately in docs/performance.md). So 300 ms is applied to the steady
-#       state and the cold case gets its own budget, T2b at 700 ms.
+#       T1 is the cold server cell. T1b, the steady state one, has a limit of
+#       0 ms since 2026-10-27: with a warm server psmux must reach the screen
+#       BEFORE the bare shell does (134 against 552 ms measured), and T1c fails
+#       on any warm repetition that did not claim the standby. Before that day
+#       the warm cells passed their own pane command, which a standby cannot
+#       take, so they never claimed and read like the cold cells.
+#   T2  psmux inside WT with a warm server must not be slower than plain WT
+#       (limit 0 ms since 2026-10-27, 216 against 572 ms measured). The first
+#       psmux window of the day additionally pays a cold server spawn, so the
+#       cold case keeps its own budget, T2b at 700 ms.
 #   T3  psmux keystroke to screen. T3a: psmux's own hops per keystroke, median
 #       <= 2.5 ms, T3c: their p99 <= 6 ms, both split out of end to end with
 #       the server's pty trace in the same run (since 2026-10-01; before that
@@ -1007,13 +1009,15 @@ function New-Wrapper {
     # $Trace: a PSMUX_PTY_TRACE base for a psmux cell hosted by a terminal. The
     # tab is created by the terminal process, which does not pass the caller's
     # environment through, so the variable has to be set here, inside the tab.
-    param([string]$Tag, [string]$Line, [string]$Trace = "")
+    # $StartupTrace: a PSMUX_STARTUP_TRACE base, for the same reason.
+    param([string]$Tag, [string]$Line, [string]$Trace = "", [string]$StartupTrace = "")
     $f = Join-Path $RunDir "wrap_$Tag.cmd"
     $body = "@echo off`r`n" +
             "set PSMUX_DATA_DIR=$env:PSMUX_DATA_DIR`r`n" +
             "set PSMUX_SERVER_IMAGE_NAMES=$env:PSMUX_SERVER_IMAGE_NAMES`r`n" +
             "set PSMUX_SESSION_NAME=`r`n" +
             $(if ($Trace) { "set PSMUX_PTY_TRACE=$Trace`r`n" } else { "" }) +
+            $(if ($StartupTrace) { "set PSMUX_STARTUP_TRACE=$StartupTrace`r`n" } else { "" }) +
             "$Line`r`n"
     Set-Content -Path $f -Value $body -Encoding ASCII
     return $f
@@ -1108,6 +1112,17 @@ $null = Save-Metrics
 # steady state a user meets after the first window of the day. Separate
 # namespaces are what let the two be interleaved instead of run in blocks.
 #
+# THE WARM CELLS RUN THE DEFAULT SHELL, NOT THE MARKER SHELL. A standby can
+# only be claimed by a new-session with no command of its own (main.rs, the
+# claimed_warm condition), so a warm cell that passed the marker shell as its
+# command never claimed anything: every repetition spawned a server, and the
+# two warm rows read the same as the cold ones (612 against 607 ms on
+# 2026-10-26, with no cli.warm.claimed in a single trace). A warm cell now
+# starts `new-session -s <name>` alone and is timed with PSMUX_STARTUP_TRACE to
+# the client's first cli.draw, which is the first frame of a shell the standby
+# already brought to its prompt. A repetition that does not claim is reported
+# and dropped, and T1c fails on it, because that is the pool being broken.
+#
 # A repetition whose marker never arrives is RETRIED once. A single missed
 # marker used to cost the whole cell its sample, and a cell with no samples is
 # a dash in the summary table; one retry turns a transient miss back into data.
@@ -1122,6 +1137,7 @@ function Invoke-LaunchRep {
     $since = Get-Date
 
     if ($gui -and $script:HostDown.Contains($gui)) { return -1.0 }
+    if ($Cell.Warm) { return (Invoke-WarmLaunchRep -Cell $Cell -Spec $spec -Snap $snap -Since $since) }
     $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
     try {
         $p = Start-Process -FilePath $spec.Exe -ArgumentList $spec.Argv -PassThru -ErrorAction Stop
@@ -1152,9 +1168,68 @@ function Invoke-LaunchRep {
     return $ms
 }
 
+# One warm repetition (see THE WARM CELLS above). $Spec.StartupTrace is the
+# trace base the launched client writes <base>.<pid> to: set here for an
+# attached cell, and inside the wrapper for a terminal hosted one.
+$script:WarmClaims = @{}
+function Invoke-WarmLaunchRep {
+    param([hashtable]$Cell, [hashtable]$Spec, $Snap, $Since)
+    $name = $Cell.Name
+    if (-not $script:WarmClaims.Contains($name)) { $script:WarmClaims[$name] = @{ claimed = 0; missed = 0 } }
+    # The previous claim used up the standby; its server starts the next one.
+    # Give that one time to bring its shell up, or the rep measures a spawn.
+    $wp = Join-Path $env:PSMUX_DATA_DIR ("{0}____warm__.port" -f $RunId)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path $wp) -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 50 }
+    if ($sw.ElapsedMilliseconds -gt 100) { Start-Sleep -Milliseconds 1500 }
+    $base = $Spec.StartupTrace
+    Get-ChildItem -Path (Split-Path -Parent $base) -Filter ((Split-Path -Leaf $base) + ".*") -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    if (-not $Cell.Gui) { $env:PSMUX_STARTUP_TRACE = $base }
+    $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
+    try {
+        $p = Start-Process -FilePath $Spec.Exe -ArgumentList $Spec.Argv -PassThru -ErrorAction Stop
+    } catch {
+        Remove-Item Env:\PSMUX_STARTUP_TRACE -ErrorAction SilentlyContinue
+        Set-HostDown $Cell.Gui ($_.Exception.Message -replace '\s+', ' ')
+        return -1.0
+    }
+    Remove-Item Env:\PSMUX_STARTUP_TRACE -ErrorAction SilentlyContinue
+    Register-Started $p.Id
+    # The client's file is the one with cli.attach; the server and its next
+    # standby write their own files under the same base.
+    $ms = -1.0; $claimed = $false
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($ms -lt 0 -and $sw.ElapsedMilliseconds -lt 30000) {
+        foreach ($f in @(Get-ChildItem -Path (Split-Path -Parent $base) -Filter ((Split-Path -Leaf $base) + ".*") -ErrorAction SilentlyContinue)) {
+            $lines = @(Get-Content $f.FullName -ErrorAction SilentlyContinue)
+            if (-not ($lines -match ' cli\.attach$')) { continue }
+            $claimed = [bool]($lines -match ' cli\.warm\.claimed$')
+            $d = $lines | Where-Object { $_ -match '^\d+ cli\.draw$' } | Select-Object -First 1
+            if ($d) { $ms = ([long]($d -split ' ')[0] - $t0) * 1000.0 / $Freq }
+        }
+        if ($ms -lt 0) { Start-Sleep -Milliseconds 20 }
+    }
+    if ($ms -ge 0 -and $claimed) {
+        $script:WarmClaims[$name].claimed++
+        Write-Host ("    {0,-22}   {1,8:F1} ms (claimed the standby, to the first client draw)" -f $name, $ms) -ForegroundColor DarkGray
+    } else {
+        $script:WarmClaims[$name].missed++
+        Warn ("    {0,-22}: {1}; the sample is dropped" -f $name, $(if ($ms -lt 0) { "no client draw within 30 s" } else { "the standby was NOT claimed ({0:F0} ms)" -f $ms }))
+        $ms = -1.0
+    }
+    Start-Sleep -Milliseconds 700
+    $hosts = Find-CellHosts -Snap $Snap -Since $Since -Gui $Cell.Gui -Ours @($p.Id)
+    # There is no marker shell pid to end the cell with, so end its session: the
+    # client exits with it, and a terminal tab closes with the client.
+    & $Psmux -L $RunId kill-session -t $Spec.Session 2>&1 | Out-Null
+    Close-Cell -Hosts $hosts -LauncherPid $p.Id -ShellPid 0 -Ns ""
+    return $ms
+}
+
 $script:LaunchCells = @()
 if (-not $SkipLaunch) {
-    Head "1. LAUNCH TO PROMPT  (identical shell in every cell: pwsh -NoProfile, cells interleaved)"
+    Head "1. LAUNCH TO PROMPT  (pwsh -NoProfile in every cell but the warm ones, which run the default shell a standby holds; cells interleaved)"
     Stop-OurPsmux -Ns $RunId
     Stop-OurPsmux -Ns $ColdId
 
@@ -1178,11 +1253,13 @@ if (-not $SkipLaunch) {
         [void]$cells.Add(@{ Name="psmux_in_wt"; Gui="WindowsTerminal"; Cold=$true; Build = {
             param($i,$mf); $w = New-Wrapper "pwt_$i" ("`"$Psmux`" -L $ColdId new-session -s pw$i " + (Shell-CmdLine $mf)); @{ Exe = $WT; Argv = @("-w",$WtWindow,"cmd","/c",$w) } } })
     }
-    [void]$cells.Add(@{ Name="psmux_attached_warm"; Gui=""; Cold=$false; Build = {
-        param($i,$mf); @{ Exe = $Psmux; Argv = (@("-L",$RunId,"new-session","-s","lw$i") + (Shell-Argv $mf)) } } })
+    [void]$cells.Add(@{ Name="psmux_attached_warm"; Gui=""; Cold=$false; Warm=$true; Build = {
+        param($i,$mf); @{ Exe = $Psmux; Argv = @("-L",$RunId,"new-session","-s","lw$i"); StartupTrace = (Join-Path $RunDir "st_lw$i"); Session = "lw$i" } } })
     if ($WT) {
-        [void]$cells.Add(@{ Name="psmux_in_wt_warm"; Gui="WindowsTerminal"; Cold=$false; Build = {
-            param($i,$mf); $w = New-Wrapper "pww_$i" ("`"$Psmux`" -L $RunId new-session -s pww$i " + (Shell-CmdLine $mf)); @{ Exe = $WT; Argv = @("-w",$WtWindow,"cmd","/c",$w) } } })
+        [void]$cells.Add(@{ Name="psmux_in_wt_warm"; Gui="WindowsTerminal"; Cold=$false; Warm=$true; Build = {
+            param($i,$mf); $st = Join-Path $RunDir "st_pww$i"
+            $w = New-Wrapper "pww_$i" ("`"$Psmux`" -L $RunId new-session -s pww$i") -StartupTrace $st
+            @{ Exe = $WT; Argv = @("-w",$WtWindow,"cmd","/c",$w); StartupTrace = $st; Session = "pww$i" } } })
     }
     $script:LaunchCells = @($cells | ForEach-Object { $_.Name })
 
@@ -1243,17 +1320,28 @@ if (-not $SkipLaunch) {
         Check -LoadSensitive "T1 psmux attached launch minus bare pwsh (cold server)" ($pc.median - $bare.median) 350 "ms" `
             ("psmux_attached median {0:F0} ms minus bare pwsh {1:F0} ms; this cell pays a server spawn on every repetition" -f $pc.median, $bare.median)
     } else { Warn "T1 not evaluated (a cell is missing)" }
-    # The steady state case the old ratio was judged on keeps its own line, same
-    # budget: this is the launch a user meets all day, with a server already up.
+    # The steady state, the launch a user meets all day with a server already up.
+    # Since the warm cells really claim (2026-10-27) psmux must be AHEAD of the
+    # bare shell here, not merely within a budget of it: measured 134 ms against
+    # 552 ms (-418 ms), and in WT 216 against 572 ms (-356 ms). A claim that
+    # stops working falls back to the cold path, +74 ms and +108 ms in the same
+    # run, so a limit of 0 catches it on the delta alone, and T1c catches it
+    # by name.
     if ($bare -and $script:Launch["psmux_attached_warm"]) {
         $pa = $script:Launch["psmux_attached_warm"]
-        Check -LoadSensitive "T1b psmux attached launch minus bare pwsh (warm server)" ($pa.median - $bare.median) 350 "ms" `
-            ("psmux_attached_warm median {0:F0} ms minus bare pwsh {1:F0} ms" -f $pa.median, $bare.median)
+        Check -LoadSensitive "T1b psmux attached launch minus bare pwsh (warm server)" ($pa.median - $bare.median) 0 "ms" `
+            ("psmux_attached_warm median {0:F0} ms (to the first client draw) minus bare pwsh {1:F0} ms" -f $pa.median, $bare.median)
     } else { Warn "T1b not evaluated (a cell is missing)" }
+    $missed = 0
+    foreach ($k in $script:WarmClaims.Keys) { $missed += $script:WarmClaims[$k].missed }
+    if ($script:WarmClaims.Count -gt 0) {
+        Check "T1c warm repetitions that did not claim the standby" $missed 0 "" `
+            (@($script:WarmClaims.Keys | ForEach-Object { "{0} claimed {1}, missed {2}" -f $_, $script:WarmClaims[$_].claimed, $script:WarmClaims[$_].missed }) -join "; ")
+    }
     if ($script:Launch["wt_pwsh"] -and $script:Launch["psmux_in_wt_warm"]) {
         $pw = $script:Launch["psmux_in_wt_warm"]; $wtc = $script:Launch["wt_pwsh"]
-        Check -LoadSensitive "T2 psmux in WT over plain WT (warm)" ($pw.median - $wtc.median) 300 "ms" `
-            ("psmux_in_wt_warm {0:F0} ms minus wt_pwsh {1:F0} ms" -f $pw.median, $wtc.median)
+        Check -LoadSensitive "T2 psmux in WT over plain WT (warm)" ($pw.median - $wtc.median) 0 "ms" `
+            ("psmux_in_wt_warm {0:F0} ms (to the first client draw) minus wt_pwsh {1:F0} ms" -f $pw.median, $wtc.median)
     } else { Warn "T2 not evaluated (a cell is missing)" }
     if ($script:Launch["wt_pwsh"] -and $script:Launch["psmux_in_wt"]) {
         Check -LoadSensitive "T2b psmux in WT over plain WT (cold server)" ($script:Launch["psmux_in_wt"].median - $script:Launch["wt_pwsh"].median) 700 "ms" `
