@@ -97,9 +97,19 @@ fn a_block_closes_on_its_own_guard_line() {
 fn scrollback_is_a_client_flag() {
     use crate::cli::{attach_client_flags, ClientFlags};
     assert!(attach_client_flags(["-f", "scrollback"]).scrollback);
-    assert!(attach_client_flags(["-t", "main", "-fread-only,scrollback"]) == ClientFlags { read_only: true, scrollback: true });
+    assert!(attach_client_flags(["-t", "main", "-fread-only,scrollback"]) == ClientFlags { read_only: true, scrollback: true, ignore_size: false });
     assert!(!attach_client_flags(["-f", "scrollback,!scrollback"]).scrollback);
     assert!(!attach_client_flags(["-t", "scrollback"]).scrollback);
+}
+
+#[test]
+fn the_server_gets_the_flags_it_acts_on() {
+    use crate::cli::attach_client_flags;
+    let flags = |args: &[&str]| client_flags_command(&attach_client_flags(args.iter().copied()));
+    assert_eq!(flags(&["-f", "scrollback"]), None);
+    assert_eq!(flags(&["-f", "scrollback,read-only"]).as_deref(), Some("refresh-client -f read-only"));
+    assert_eq!(flags(&["-r", "-f", "scrollback,ignore-size"]).as_deref(), Some("refresh-client -f read-only,ignore-size"));
+    assert_eq!(flags(&["-f", "scrollback,ignore-size,!ignore-size"]), None);
 }
 
 #[test]

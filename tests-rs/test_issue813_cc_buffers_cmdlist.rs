@@ -42,7 +42,7 @@ fn run(cmd: &str, args: &[&str], have: &[(&str, &str)]) -> (bool, String, crate:
     let (rs, rr) = mpsc::channel::<String>();
     let answered = {
         let tx = TargetedSender::new(&ctx, None);
-        dispatch_control_command(cmd, args, &tx, rs, None, false, None, 1, false, &Default::default())
+        dispatch_control_command(cmd, args, &tx, rs, None, false, None, 1, &Default::default(), false, &Default::default())
     };
     drop(ctx);
     let reply = rr.try_recv().unwrap_or_else(|_| "<no reply>".to_string());

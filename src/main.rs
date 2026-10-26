@@ -1339,7 +1339,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     let mut precommand_target: Option<String> = None;
     let mut control_mode: u8 = 0; // 0=off, 1=-C (echo), 2=-CC (no echo)
     // `-f scrollback` on attach-session or new-session (crate::scrollback).
-    let mut scrollback = false;
+    let mut scrollback: Option<crate::cli::ClientFlags> = None;
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
@@ -2173,7 +2173,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 } else {
                     env::remove_var("PSMUX_CLIENT_READONLY");
                 }
-                scrollback = flags.scrollback;
+                scrollback = flags.scrollback.then_some(flags);
             }
             "server" => {
                 // #798: every server process starts here; only per-session goes on.
@@ -2351,7 +2351,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
                     return Ok(());
                 }
-                scrollback = client_flags.scrollback;
+                scrollback = client_flags.scrollback.then_some(client_flags);
                 // `-f read-only` is set for the client only where it attaches
                 // (below): set here, the server spawned further down would
                 // inherit it and hand it to every pane shell.
@@ -6444,8 +6444,8 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     }
     // Scrollback client: the host terminal gets the active pane's own output
     // bytes instead of frames, so its scrollback works (crate::scrollback).
-    if scrollback {
-        return crate::scrollback::run();
+    if let Some(flags) = scrollback {
+        return crate::scrollback::run(flags);
     }
 
     // Raw VT pipe detection: under mintty (Git Bash/MSYS2, issue #474) and

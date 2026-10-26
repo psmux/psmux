@@ -12,8 +12,10 @@ psmux attach -t work -f scrollback   # attach to an existing session
 ```
 
 `scrollback` is a client flag like `read-only`, so the two combine:
-`attach -f read-only,scrollback`. `-f passthrough` is accepted as another name
-for it; it has nothing to do with the `allow-passthrough` option.
+`attach -f read-only,scrollback`. A read-only scrollback client shows up as
+read-only in `list-clients`, and the server refuses its keys. `-f passthrough`
+is accepted as another name for it; it has nothing to do with the
+`allow-passthrough` option.
 
 ## What it does
 
@@ -25,7 +27,11 @@ for it; it has nothing to do with the `allow-passthrough` option.
 - Keys go to the pane. `prefix d` detaches; pressing the prefix twice sends
   one prefix to the pane. The prefix is the session's own if it sets one,
   the global one otherwise.
-- The client size follows the terminal size.
+- The client size follows the terminal size, and it counts for the window
+  size like any other attached client's (`window-size`, `latest` by default,
+  so the session takes the size of whichever client was resized last). With
+  `-f scrollback,ignore-size` it leaves the window size to the other clients;
+  pane lines wider than the terminal then wrap there.
 - When the active pane or window changes, the client prints the new pane's
   screen and follows its output.
 

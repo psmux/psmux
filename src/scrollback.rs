@@ -17,6 +17,9 @@
 //! of that capture on the live output is written as it arrives. The host
 //! terminal shows the one active pane, with no status line and no borders.
 //! `prefix d` detaches; the prefix pressed twice sends it to the pane once.
+//! `read-only` and `ignore-size` go to the server as `refresh-client -f`,
+//! so the server refuses a read only client's keys and other clients see
+//! its flags.
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
@@ -31,7 +34,6 @@ const FACTS_FORMAT: &str =
 
 /// How often the host terminal's size is compared with the client size.
 const SIZE_POLL: Duration = Duration::from_millis(250);
-
 /// Where a pane's cursor is and how many lines it holds, from `FACTS_FORMAT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneFacts {
@@ -162,6 +164,21 @@ pub fn route_keys(input: &[u8], prefix: Option<u8>, after_prefix: &mut bool) -> 
         }
     }
     (keys, KeyAction::None)
+}
+
+/// The `refresh-client -f` that hands the server the client flags it acts
+/// on: `read-only` makes the server refuse this client's keys and commands
+/// and shows in `list-clients`, `ignore-size` leaves the window size to the
+/// other clients.
+pub fn client_flags_command(flags: &crate::cli::ClientFlags) -> Option<String> {
+    let mut names = Vec::new();
+    if flags.read_only {
+        names.push("read-only");
+    }
+    if flags.ignore_size {
+        names.push("ignore-size");
+    }
+    (!names.is_empty()).then(|| format!("refresh-client -f {}", names.join(",")))
 }
 
 pub fn send_keys_command(keys: &[u8]) -> String {
@@ -337,10 +354,9 @@ fn read_server(mut reader: io::BufReader<TcpStream>, link: Arc<Mutex<Link>>, end
     ending.finish(&view)
 }
 
-pub fn run() -> io::Result<()> {
+pub fn run(flags: crate::cli::ClientFlags) -> io::Result<()> {
     let session = std::env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let shown = std::env::var("PSMUX_SESSION_DISPLAY_NAME").unwrap_or_else(|_| session.clone());
-    let read_only = std::env::var("PSMUX_CLIENT_READONLY").map(|v| v == "1").unwrap_or(false);
 
     let console = Arc::new(crate::platform::RawVtConsole::enable());
     let (reader, out) = crate::session::open_control_connection(&session, "CONTROL_QUIET")?;
@@ -352,7 +368,11 @@ pub fn run() -> io::Result<()> {
         std::thread::spawn(move || read_server(reader, link, ending));
     }
 
-    // The client size goes first, so the first capture is taken at it.
+    // The flags go first, so `ignore-size` is set before the size, then the
+    // size, so the first capture is taken at it.
+    if let Some(command) = client_flags_command(&flags) {
+        send(&link, &command, Reply::Ignore)?;
+    }
     let mut size = crossterm::terminal::size().ok();
     if let Some((w, h)) = size {
         send(&link, &format!("refresh-client -C {}x{}", w, h), Reply::Ignore)?;
@@ -385,7 +405,7 @@ pub fn run() -> io::Result<()> {
             Ok(n) => n,
         };
         let (keys, action) = route_keys(&buf[..n], prefix, &mut after_prefix);
-        if !keys.is_empty() && !read_only {
+        if !keys.is_empty() {
             send(&link, &send_keys_command(&keys), Reply::Ignore)?;
         }
         if action == KeyAction::Detach {

@@ -1893,6 +1893,25 @@ pub(crate) fn readonly_client_may_run(cmd: &str) -> bool {
     )
 }
 
+/// The commands a read only control client may run: those of any read only
+/// client, and the reads a control client shows a pane from. tmux refuses
+/// these too (none is CMD_READONLY), which would leave a read only control
+/// client nothing to show; they change nothing, as `show-options` and
+/// `client-size` above change nothing for an attached client. On this route
+/// `capture-pane` always returns the text and fills no buffer, and
+/// `refresh-client -l` is refused because it fills one.
+pub(crate) fn readonly_control_client_may_run(cmd: &str, args: &[&str]) -> bool {
+    if readonly_client_may_run(cmd) {
+        return true;
+    }
+    match cmd {
+        "capture-pane" | "capturep" => true,
+        "display-message" | "display" => crate::cli::has_short_flag(args, 'p'),
+        "refresh-client" | "refresh" => !crate::cli::has_short_flag(args, 'l'),
+        _ => false,
+    }
+}
+
 /// Did a client read merely not complete, rather than fail?
 ///
 /// Every client connection is read with a `set_read_timeout` budget, and the
@@ -2177,6 +2196,8 @@ if control_echo || control_quiet || control_noecho {
 
     let ctrl_client_id = crate::types::next_client_id();
     crate::types::register_persistent_stream(ctrl_client_id, &write_stream);
+    // Set by `refresh-client -f read-only` (dispatch_control_command).
+    let ctrl_readonly = std::cell::Cell::new(false);
 
     let (notif_tx, notif_rx) = std::sync::mpsc::channel::<ControlNotification>();
 
@@ -2401,7 +2422,9 @@ if control_echo || control_quiet || control_noecho {
                 let _ = ws.flush();
                 continue;
             }
-            let parts = coalesce_send_commands(parts);
+            // A read only client's sends are each refused with their own
+            // %error, so they are not merged into one write.
+            let parts = if ctrl_readonly.get() { parts } else { coalesce_send_commands(parts) };
             if parts.is_empty() { continue; }
             let mut iter = parts.into_iter();
             let first = iter.next().unwrap();
@@ -2484,6 +2507,25 @@ if control_echo || control_quiet || control_noecho {
         } else {
             cmd_args
         };
+        // A control client made read only by `refresh-client -f read-only`
+        // runs only what readonly_control_client_may_run allows, refused
+        // before any target is resolved, with tmux's error (cmd-queue.c).
+        if ctrl_readonly.get() && !readonly_control_client_may_run(cmd_name, &cmd_args) {
+            let mut out = String::new();
+            if control_echo {
+                out.push_str(trimmed);
+                out.push('\n');
+            }
+            out.push_str(&control::format_begin(ts, cmd_counter));
+            out.push('\n');
+            out.push_str("client is read-only\n");
+            out.push_str(&control::format_error(ts, cmd_counter));
+            out.push('\n');
+            let mut ws = write_lock.lock().unwrap();
+            let _ = ws.write_all(out.as_bytes());
+            let _ = ws.flush();
+            continue;
+        }
         // A bare `-t` name, resolved as on the attached route (see
         // bare_target_rewrite); an error is this command's %error.
         let ctrl_resolved_args: Vec<String>;
@@ -2772,7 +2814,7 @@ if control_echo || control_quiet || control_noecho {
             let dispatched = dispatch_control_command(
                 cmd_name, &filtered_args, &targeted_tx, resp_s,
                 ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
-                ctrl_client_id, ctrl_target_failed, &aliases_ctrl,
+                ctrl_client_id, &ctrl_readonly, ctrl_target_failed, &aliases_ctrl,
             );
             // Collect the response BEFORE acquiring the write lock, so the
             // notification thread can still write while we wait.
@@ -6868,6 +6910,7 @@ fn dispatch_control_command(
     pane_is_id: bool,
     raw_target: Option<&str>,
     client_id: u64,
+    readonly: &std::cell::Cell<bool>,
     target_failed: bool,
     aliases: &crate::command_alias::SharedAliases,
 ) -> bool {
@@ -8184,6 +8227,11 @@ fn dispatch_control_command(
                                     client_id,
                                     !flag.starts_with('!'),
                                 ));
+                            } else if flag == "read-only" {
+                                // `!read-only` is ignored: a client made read
+                                // only stays so (server_client_set_flags).
+                                readonly.set(true);
+                                let _ = tx.send(CtrlReq::SetClientReadonly(client_id, true));
                             }
                         }
                     }
@@ -8371,7 +8419,7 @@ fn dispatch_control_command(
                 let sub_tx = TargetedSender::new(tx.inner, sub_target);
                 let (stx, srx) = mpsc::channel::<String>();
                 let answered = dispatch_control_command(
-                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, sub_failed, aliases,
+                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, readonly, sub_failed, aliases,
                 );
                 if !answered { continue; }
                 let text = srx.recv_timeout(Duration::from_secs(15)).unwrap_or_default();
@@ -8604,3 +8652,7 @@ mod tests_issue813_cc_buffers_cmdlist;
 #[cfg(test)]
 #[path = "../../tests-rs/test_set_hook_quoted_command.rs"]
 mod tests_set_hook_quoted_command;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_readonly_control_client.rs"]
+mod tests_readonly_control_client;

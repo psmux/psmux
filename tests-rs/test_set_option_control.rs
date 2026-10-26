@@ -33,7 +33,7 @@ fn dispatched_assignment(args: &[&str], expansion: &str) -> (String, String) {
         None,
         false,
         None,
-        0, false, &Default::default(),
+        0, &Default::default(), false, &Default::default(),
     ));
     drop(request_tx);
     server.join().unwrap().expect("an option assignment must reach the store")
@@ -50,7 +50,7 @@ fn rejected_control_command(command: &str, args: &[&str]) -> String {
         None,
         false,
         None,
-        0, false, &Default::default(),
+        0, &Default::default(), false, &Default::default(),
     ));
     let response = response_rx.recv().unwrap();
     assert!(response.starts_with("\u{0001}ERR\u{0001}"));

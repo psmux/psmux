@@ -28,7 +28,7 @@ fn run_with(cmd: &str, args: &[&str], x_outcome: Result<(), String>) -> (bool, R
     let (rs, rr) = mpsc::channel::<String>();
     let answered = {
         let tx = TargetedSender::new(&ctx, None);
-        dispatch_control_command(cmd, args, &tx, rs, None, false, None, 0, false, &Default::default())
+        dispatch_control_command(cmd, args, &tx, rs, None, false, None, 0, &Default::default(), false, &Default::default())
     };
     drop(ctx);
     let reqs = server.join().unwrap();
@@ -98,7 +98,7 @@ fn show_buffer_of_a_missing_buffer_is_tmux_error_not_a_dropped_reply() {
     });
     let (rs, rr) = mpsc::channel::<String>();
     let tx = TargetedSender::new(&ctx, None);
-    assert!(dispatch_control_command("show-buffer", &["-b", "nosuch"], &tx, rs, None, false, None, 0, false, &Default::default()));
+    assert!(dispatch_control_command("show-buffer", &["-b", "nosuch"], &tx, rs, None, false, None, 0, &Default::default(), false, &Default::default()));
     server.join().unwrap();
     // cmd-save-buffer.c:92: cmdq_error(item, "no buffer %s", bufname).
     assert_eq!(rr.try_recv(), Ok("\u{0001}ERR\u{0001}no buffer nosuch".to_string()));

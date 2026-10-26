@@ -2256,11 +2256,13 @@ pub fn attach_client_flags<'a>(args: impl IntoIterator<Item = &'a str>) -> Clien
 /// active pane's output bytes instead of drawing frames, so the terminal's
 /// own scrollback fills as it would in a plain shell session (see
 /// `crate::scrollback`). `passthrough` is accepted as another name for it;
-/// it is unrelated to the `allow-passthrough` option.
+/// it is unrelated to the `allow-passthrough` option. `ignore-size` is read
+/// for the scrollback client, which passes it on with `refresh-client -f`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ClientFlags {
     pub read_only: bool,
     pub scrollback: bool,
+    pub ignore_size: bool,
 }
 
 impl ClientFlags {
@@ -2275,6 +2277,7 @@ impl ClientFlags {
             match name {
                 "read-only" => self.read_only = on,
                 "scrollback" | "passthrough" => self.scrollback = on,
+                "ignore-size" => self.ignore_size = on,
                 _ => {}
             }
         }
