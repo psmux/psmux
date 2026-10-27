@@ -164,3 +164,27 @@ fn show_lines_prints_as_show_options_does() {
     );
     assert_eq!(a.show_lines("command-alias", true), "c=new-window\nd=split-window -h\n");
 }
+
+#[test]
+fn is_array_name_takes_the_bare_name_or_any_bracketed_index() {
+    assert_eq!(is_array_name("terminal-overrides").map(|spec| spec.name), Some("terminal-overrides"));
+    assert_eq!(is_array_name("terminal-overrides[10]").map(|spec| spec.name), Some("terminal-overrides"));
+    // A bad index is still the array's, so set answers it with invalid option.
+    assert_eq!(is_array_name("terminal-overrides[x]").map(|spec| spec.name), Some("terminal-overrides"));
+    assert!(parse_name("terminal-overrides[x]").is_err());
+    assert_eq!(is_array_name("command-alias[0]").map(|spec| spec.name), Some("command-alias"));
+    assert!(is_array_name("terminal-overridesx").is_none());
+    assert!(is_array_name("terminal-overrides[1").is_none());
+    assert!(is_array_name("status-left").is_none());
+}
+
+#[test]
+fn terminal_overrides_starts_as_tmux_default() {
+    // options-table.c:518-525 at 3.7c: `.default_str = "linux*:AX@"`,
+    // `.separator = ","`; tmux 3.7c `show -s terminal-overrides` prints
+    // `terminal-overrides[0] linux*:AX@`.
+    let spec = spec("terminal-overrides").unwrap();
+    assert_eq!(spec.separator, ",");
+    let array = OptionArray::with_default(spec);
+    assert_eq!(items(&array), vec![(0, "linux*:AX@")]);
+}

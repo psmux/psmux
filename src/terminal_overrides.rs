@@ -1,7 +1,8 @@
 //! `terminal-overrides` (issue #700).
 //!
 //! tmux keeps `terminal-overrides` as a server scope ARRAY option
-//! (options-table.c: `OPTIONS_TABLE_IS_ARRAY`, `.separator = ","`). Every
+//! (options-table.c: `OPTIONS_TABLE_IS_ARRAY`, `.separator = ","`), and so
+//! does psmux, on crate::option_array with tmux's default `linux*:AX@`. Every
 //! element is `pattern:cap[@|=value]:cap...`, the first field is matched with
 //! `fnmatch(3)` against the TERM of the attaching client, and the rest is
 //! applied in order on top of that client's terminfo entry
@@ -21,18 +22,6 @@
 //! TERM is matched as the empty string. `*` matches it, `xterm*` does not.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-
-/// Split an assigned value into array elements the way `options_array_assign`
-/// does: on `,`, dropping empty elements, so `set -ga terminal-overrides
-/// ',*:smcup@'` adds exactly one element.
-pub fn split_array(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect()
-}
 
 /// Split one element into its `:` separated fields, `::` being a literal
 /// colon (tmux `tty_term_override_next`).
@@ -251,35 +240,6 @@ pub fn alt_screen_caps<S: AsRef<str>>(overrides: &[S], term: &str) -> AltScreenC
 /// string when unset (tmux client.c does the same).
 pub fn client_term() -> String {
     std::env::var("TERM").unwrap_or_default()
-}
-
-/// `show-options` text for an array option, the way tmux prints one
-/// (options.c options_array_item / cmd-show-options.c): one
-/// `name[index] value` line per element, the bare name when the array is
-/// empty, and with `-v` the values alone. `joined` is the stored value as
-/// `get_option_value` returns it (elements joined with `,`). Returns None for
-/// options psmux does not print as arrays.
-pub fn show_array_lines(name: &str, joined: &str, values_only: bool) -> Option<String> {
-    if name != "terminal-overrides" {
-        return None;
-    }
-    let items = split_array(joined);
-    let mut out = String::new();
-    if items.is_empty() {
-        if !values_only {
-            out.push_str(name);
-            out.push('\n');
-        }
-        return Some(out);
-    }
-    for (i, item) in items.iter().enumerate() {
-        if values_only {
-            out.push_str(&format!("{}\n", item));
-        } else {
-            out.push_str(&format!("{}[{}] {}\n", name, i, item));
-        }
-    }
-    Some(out)
 }
 
 // ── Client screen state ────────────────────────────────────────────────────

@@ -214,18 +214,25 @@ pub(crate) fn is_error_reply(text: &str) -> bool {
 }
 
 /// `show-options` text for an array option (#700). `command-alias` comes from
-/// the alias table, which keeps each element's own index (`command-alias[100]`);
-/// the others from their joined value.
+/// the alias table this thread can read; the others (terminal-overrides, or
+/// one element of it) from the server, which keeps each element's own index
+/// (`terminal-overrides[10]`) where the joined value would lose it. `None`
+/// for an option that is no array.
 fn show_array_text(
     name: &str,
-    joined: &str,
     values_only: bool,
     aliases: &crate::command_alias::SharedAliases,
+    tx: &TargetedSender<'_>,
 ) -> Option<String> {
     if name == crate::command_alias::OPTION {
         return Some(crate::command_alias::read(aliases).show_lines(values_only));
     }
-    crate::terminal_overrides::show_array_lines(name, joined, values_only)
+    if !crate::server::options::is_stored_array_option(name) {
+        return None;
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    let _ = tx.send(CtrlReq::ShowArrayOption(rtx, name.to_string(), values_only));
+    rrx.recv_timeout(Duration::from_millis(2000)).ok()
 }
 
 /// Whether `name` is a tmux command or alias in the [`TMUX_COMMANDS`] catalog.
@@ -5201,7 +5208,7 @@ match cmd {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
                 if let Ok(v) = rrx.recv_timeout(Duration::from_millis(2000)) {
-                    if let Some(text) = show_array_text(name, &v, values_only, &aliases) {
+                    if let Some(text) = show_array_text(name, values_only, &aliases, tx) {
                         out.push_str(&text);
                     } else if values_only {
                         out.push_str(&format!("{}\n", v));
@@ -5409,7 +5416,7 @@ match cmd {
                         let array_text = if window_scope {
                             None
                         } else {
-                            show_array_text(name, &resolved, has_v, &aliases)
+                            show_array_text(name, has_v, &aliases, tx)
                         };
                         let output = if let Some(text) = array_text {
                             text
@@ -7616,7 +7623,7 @@ fn dispatch_control_command(
                     let (srtx, srrx) = mpsc::channel::<String>();
                     let _ = tx.send(CtrlReq::ShowOptionValue(srtx, name.to_string()));
                     if let Ok(v) = srrx.recv_timeout(Duration::from_millis(2000)) {
-                        if let Some(t) = show_array_text(name, &v, value_only, aliases) {
+                        if let Some(t) = show_array_text(name, value_only, aliases, tx) {
                             text.push_str(&t);
                         } else if value_only {
                             text.push_str(&format!("{}\n", v));
@@ -7652,7 +7659,8 @@ fn dispatch_control_command(
             }
             // Array options print one `name[i] value` line per element (#700).
             let array_name = opt_name.clone().filter(|n| {
-                !window_scope2 && (n == "terminal-overrides" || n == crate::command_alias::OPTION)
+                !window_scope2
+                    && (crate::server::options::is_stored_array_option(n) || n == crate::command_alias::OPTION)
             });
             // A named query prints `name value` unless `-v` asks for the
             // value alone, as the one-shot route and tmux do
@@ -7723,7 +7731,7 @@ fn dispatch_control_command(
                     let _ = resp_tx.send(values_only);
                 } else if let Some(t) = array_name
                     .as_deref()
-                    .and_then(|n| show_array_text(n, &text, value_only, aliases))
+                    .and_then(|n| show_array_text(n, value_only, aliases, tx))
                 {
                     let _ = resp_tx.send(t.trim_end_matches('\n').to_string());
                 } else if let Some(name) = named_query.filter(|_| !value_only) {

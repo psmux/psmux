@@ -1692,9 +1692,8 @@ pub(crate) fn dispatch(
                             "codepoint-widths" => {
                                 crate::server::options::append_codepoint_widths(&mut app, &value);
                             }
-                            "terminal-overrides" => {
-                                app.terminal_overrides
-                                    .extend(crate::terminal_overrides::split_array(&value));
+                            name if crate::server::options::is_stored_array_option(name) => {
+                                let _ = crate::server::options::set_array_option(&mut app, name, &value, true);
                             }
                             "status-left" => { app.status_left.push_str(&value); }
                             "status-right" => { app.status_right.push_str(&value); }
@@ -1857,6 +1856,9 @@ pub(crate) fn dispatch(
                 CtrlReq::ShowOptionValue(resp, name) => {
                     let val = get_option_value(&app, &name);
                     let _ = resp.send(val);
+                }
+                CtrlReq::ShowArrayOption(resp, name, values_only) => {
+                    let _ = resp.send(crate::server::options::array_option_show_lines(&app, &name, values_only));
                 }
                 // copied from server/mod.rs run_server (line 6278 at 86a78100)
                 CtrlReq::ShowOptions(resp) => {

@@ -2014,16 +2014,22 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
             }
             return;
         }
+        if crate::server::options::is_stored_array_option(key) {
+            if let Err(error) = crate::server::options::set_array_option(app, key, &value, true) {
+                warn_config(app, error);
+            }
+            return;
+        }
     }
 
     // Handle -a (append to current value)
     let final_value = if append_mode {
         let current = crate::format::lookup_option_pub(key, app).unwrap_or_default();
-        if matches!(key, "terminal-overrides" | "codepoint-widths") {
+        if key == "codepoint-widths" {
             // ARRAY option: `-a` adds elements, it does not glue characters
             // onto the last one (tmux options_array_assign), so
-            // `set -ga terminal-overrides 'xterm*:Tc'` without a leading
-            // comma still lands as its own element.
+            // `set -ga codepoint-widths 'U+2500=2'` without a leading comma
+            // still lands as its own element.
             format!("{},{}", current, value)
         } else {
             format!("{}{}", current, value)
@@ -2306,10 +2312,14 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "allow-set-title" => {
             app.allow_set_title = matches!(value, "on" | "true" | "1" | "yes");
         }
-        "terminal-overrides" => {
-            // Array option (issue #700): smcup/rmcup decide whether the
-            // attach client uses the host's alternate screen.
-            app.terminal_overrides = crate::terminal_overrides::split_array(value);
+        // terminal-overrides and `terminal-overrides[N]` (issue #700): an
+        // array option, whose smcup/rmcup decide whether the attach client
+        // uses the host's alternate screen.
+        name if crate::server::options::is_stored_array_option(name) => {
+            if let Err(error) = crate::server::options::set_array_option(app, name, value, false) {
+                warn_config(app, error);
+                return false;
+            }
         }
         "default-terminal" => {
             // tmux sets the TERM env var from this option (#137)

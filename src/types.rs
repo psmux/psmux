@@ -2057,10 +2057,11 @@ pub struct AppState {
     /// lookup table lives in the vt100 crate, which is where every width
     /// decision is made.
     pub codepoint_widths: Vec<String>,
-    /// terminal-overrides: server-scope ARRAY of `pattern:cap...` entries,
-    /// raw strings in tmux order. The attach client honours smcup/rmcup from
-    /// it (issue #700, see crate::terminal_overrides).
-    pub terminal_overrides: Vec<String>,
+    /// terminal-overrides: server-scope ARRAY of `pattern:cap...` entries by
+    /// index, starting as tmux's default `linux*:AX@` (crate::option_array).
+    /// The attach client honours smcup/rmcup from it (issue #700, see
+    /// crate::terminal_overrides).
+    pub terminal_overrides: crate::option_array::OptionArray,
     /// Config parse warnings (unknown command/option, malformed value, missing
     /// args) collected during a config load or source-file, surfaced to the
     /// user instead of being silently ignored (issue #370 follow-up).
@@ -3419,7 +3420,9 @@ impl AppState {
                 crate::command_alias::CommandAliases::with_defaults(),
             )),
             codepoint_widths: Vec::new(),
-            terminal_overrides: Vec::new(),
+            terminal_overrides: crate::option_array::OptionArray::with_default(
+                crate::option_array::spec("terminal-overrides").expect("terminal-overrides is in ARRAY_OPTIONS"),
+            ),
             config_warnings: Vec::new(),
             source_jobs_running: 0,
             config_warn_line: None,
@@ -4523,6 +4526,11 @@ pub enum CtrlReq {
     ResizePaneAbsolute(String, u16),
     ResizePanePercent(String, u8), // axis, percentage (0-100)
     ShowOptionValue(mpsc::Sender<String>, String),
+    /// `show-options` text for an array option the server stores
+    /// (terminal-overrides), the bare name or `name[N]`, and whether `-v`
+    /// asked for the values alone. The connection thread cannot print it from
+    /// the joined value, which loses each element's index.
+    ShowArrayOption(mpsc::Sender<String>, String, bool),
     /// Read a window-scoped option value. The third field is the RAW `-t`
     /// target so the server resolves `s:zero`, `s:1`, `@3` and tmux's
     /// symbolic window spellings alike; empty means the active window.

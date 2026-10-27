@@ -677,7 +677,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("copy-command",               "\"\""),
     // Unicode
     ("codepoint-widths",           "\"\""),
-    ("terminal-overrides",         "\"\""),
+    ("terminal-overrides",         "linux*:AX@"),
     ("set-clipboard",              "external"),
     ("set-titles-string",          "\"\""),
     // psmux extensions
