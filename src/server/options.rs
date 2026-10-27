@@ -740,6 +740,9 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
         // user_options; a missing entry is the tmux default.
         "extended-keys" => "off",
         "extended-keys-format" => "xterm",
+        // tmux options-table.c:439, INPUT_BUF_DEFAULT_SIZE. Stored as text in
+        // user_options like extended-keys; the parsers read the number.
+        "input-buffer-size" => "1048576",
         // tmux server_client_get_key_table: unset or empty is root.
         "key-table" => "root",
         // TERM handed to panes when default-terminal was never set.
@@ -1210,10 +1213,13 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
     if key == "extended-keys" {
         vt100::set_extended_keys_option(0);
     }
+    if key == "input-buffer-size" {
+        vt100::set_input_buffer_size(vt100::DEFAULT_INPUT_BUFFER_SIZE);
+    }
     if matches!(
         key,
         "window-style" | "window-active-style" | "pane-border-indicators"
-            | "extended-keys" | "extended-keys-format"
+            | "extended-keys" | "extended-keys-format" | "input-buffer-size"
     ) {
         return;
     }
@@ -1556,6 +1562,16 @@ pub(crate) fn apply_set_option(
             // tmux's input.c reads `global_options` (issue #860).
             app.user_options.insert(option.to_string(), value.to_string());
             vt100::set_extended_keys_option(extended_keys_option_number(value));
+        }
+        "input-buffer-size" => {
+            // Kept as text for `show`, and handed to the pane parsers, which
+            // hold a sixel DCS to it as tmux's input_input holds its strings
+            // (input.c); tmux's options.c calls input_set_buffer_size the
+            // same way when the option changes.
+            if let Ok(bytes) = value.trim().parse::<usize>() {
+                app.user_options.insert(option.to_string(), value.to_string());
+                vt100::set_input_buffer_size(bytes);
+            }
         }
         _ => {
             // Handle status-format[N] patterns
@@ -1912,3 +1928,7 @@ mod tests_issue535_setoption_no_value;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue559_monitor_silence_options.rs"]
 mod tests_issue559_monitor_silence_options;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue919_input_buffer_size.rs"]
+mod tests_issue919_input_buffer_size;

@@ -29,6 +29,10 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         // only accepts the mode it runs in, so there is no other value to
         // sweep. tests-rs/test_issue798_server_mode_switch.rs covers it.
         "server-mode" => return None,
+        // input-buffer-size sets the process wide limit every pane parser
+        // holds a sixel DCS to, so sweeping it could drop or keep an image in
+        // a neighbouring test. test_issue919_input_buffer_size covers it.
+        "input-buffer-size" => return None,
         "escape-time" => "123",
         "focus-events" => "on",
         "history-limit" => "4321",

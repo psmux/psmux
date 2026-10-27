@@ -26,6 +26,7 @@ pub enum NumberKind {
     Usize,
     Index,
     RepeatTime,
+    InputBufferSize,
 }
 
 impl NumberKind {
@@ -37,6 +38,8 @@ impl NumberKind {
             Self::Usize => (0, usize::MAX as i128),
             Self::Index => (0, isize::MAX as i128),
             Self::RepeatTime => (0, crate::server::options::REPEAT_TIME_MAX_MS as i128),
+            // tmux options-table.c:437: INPUT_BUF_DEFAULT_SIZE to UINT_MAX.
+            Self::InputBufferSize => (vt100::DEFAULT_INPUT_BUFFER_SIZE as i128, u32::MAX as i128),
         }
     }
 
@@ -224,7 +227,7 @@ impl ValidationOnlyOptionDef {
 }
 
 use ChoiceKind::{Priority, Unvalidated};
-use NumberKind::{I64, Index, RepeatTime, U64, Usize};
+use NumberKind::{I64, Index, InputBufferSize, RepeatTime, U64, Usize};
 use OptionScope::{Pane, Server, Session, Window};
 use OptionType::{Boolean, Choice, Number};
 
@@ -258,6 +261,10 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // no negotiation for (input.rs ctrl_key_win32_seq).
     OptionDef { name: "extended-keys", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeys), default: "off", description: "Whether a pane may ask for extended keys (off/on/always), as in tmux: with on, a program that writes CSI > 4 ; 1 m or ; 2 m gets modified keys such as C-Space in the extended form; always puts every pane in mode 1" },
     OptionDef { name: "extended-keys-format", scope: Server, option_type: Choice(ChoiceKind::ExtendedKeysFormat), default: "xterm", description: "The format of extended keys written to a pane (csi-u/xterm): CSI k;mu or CSI 27;m;k~" },
+    // tmux options-table.c:434, server scope, default INPUT_BUF_DEFAULT_SIZE.
+    // tmux holds every DCS, OSC and APC string to it (input.c input_input);
+    // psmux holds only a sixel DCS to it (vt100 perform.rs).
+    OptionDef { name: "input-buffer-size", scope: Server, option_type: Number(InputBufferSize), default: "1048576", description: "Number of bytes a sixel image may hold before it is dropped (tmux also holds OSC and APC strings to it)" },
     // ── Session options ──
     OptionDef { name: "prefix", scope: Session, option_type: OptionType::Key, default: "C-b", description: "Primary prefix key" },
     OptionDef { name: "prefix2", scope: Session, option_type: OptionType::Key, default: "None", description: "Secondary prefix key" },

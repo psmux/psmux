@@ -628,6 +628,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("set-titles",                 "off"),
     ("allow-passthrough",          "off"),
     ("sixel",                      "on"),
+    ("input-buffer-size",          "1048576"),
     ("priority",                   "above-normal"),
     ("default-command",            "(system shell)"),
     ("word-separators",            "\"!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^`{|}~\""),
