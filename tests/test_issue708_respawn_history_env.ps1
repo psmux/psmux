@@ -315,7 +315,11 @@ try {
         P send-keys -t $tp -X cancel | Out-Null
         Start-Sleep -Milliseconds 500
         $live = Get-ClientScreen $cli.Id
-        if (($live -join "`n") -match 'TUI_RESPAWNED' -and ($live -join "`n") -notmatch 'MARKER_T') { Write-Pass "after leaving copy mode the client shows the new process, not the old screen" }
+        # The respawned `echo` exits at once and the pane's remain-on-exit
+        # keeps it, so its bottom line is remain-on-exit-format's text. Writing
+        # it scrolls the screen by one line, which puts TUI_RESPAWNED (the top
+        # row) into the history, as tmux 3.7c and 3.8 do (server-fn.c:406-408 at 3.8).
+        if (($live -join "`n") -match 'Pane is dead \(status 0' -and ($live -join "`n") -notmatch 'MARKER_T' -and (Cap $tp) -match 'TUI_RESPAWNED') { Write-Pass "after leaving copy mode the client shows the new process, not the old screen" }
         else { Write-Fail "client live view: $((($live | Where-Object { $_.Trim() }) | Select-Object -First 3) -join ' | ')" }
         if ((Run-P @('has-session', '-t', $tuiSess)).Code -eq 0) { Write-Pass "attached client session alive after the respawns" } else { Write-Fail "attached session died" }
     }
