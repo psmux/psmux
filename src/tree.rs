@@ -834,19 +834,25 @@ pub fn get_split_mut<'a>(node: &'a mut Node, path: &Vec<usize>) -> Option<&'a mu
 /// option (options.c walks the pane table, the window table, then the global
 /// window table). `pane` is the pane's own `set-option -p` entry, `window` is
 /// what `set-option -w` resolved to for the window that holds it (#648) with
-/// the session-wide value as its parent, and `failed` keeps the pane only when
-/// the process exited nonzero — what a supervisor wants: crashed panes stay
-/// visible with their error, clean exits close.
-pub fn keep_dead_pane(pane: Option<&str>, window: bool, exit_success: bool) -> bool {
-    match pane {
-        Some("on") => true,
-        Some("off") => false,
-        Some("failed") => !exit_success,
-        _ => window,
-    }
+/// the session-wide value as its parent. `failed` keeps the pane only when
+/// the process exited nonzero, which is what a supervisor wants: crashed panes
+/// stay visible with their error, clean exits close. `key` keeps it until a
+/// key is typed in it, and `failed-key` keeps only a failed one until then
+/// (server-fn.c:385-394).
+pub fn keep_dead_pane(pane: Option<&str>, window: crate::types::RemainOnExit, exit_success: bool) -> bool {
+    pane.and_then(crate::types::RemainOnExit::parse)
+        .unwrap_or(window)
+        .keeps(exit_success)
 }
 
-pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (Option<Node>, usize) {
+/// `dead_ids` collects the ids of the panes this call kept dead, so the
+/// caller can write remain-on-exit-format on each of them once.
+pub fn prune_exited(
+    n: Node,
+    remain_on_exit: crate::types::RemainOnExit,
+    kill_descendants: bool,
+    dead_ids: &mut Vec<usize>,
+) -> (Option<Node>, usize) {
     match n {
         Node::Leaf(mut p) => {
             if p.dead { return (Some(Node::Leaf(p)), 0); }
@@ -868,6 +874,11 @@ pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (O
                             parser.screen_mut().program_status_mut().expire();
                         }
                         p.dead = true;
+                        p.dead_info = Some(crate::types::DeadInfo {
+                            status: status.exit_code(),
+                            time: chrono::Local::now(),
+                        });
+                        dead_ids.push(p.id);
                         (Some(Node::Leaf(p)), 1)
                     } else {
                         // Shell exited on its own: sweep any orphaned descendants
@@ -894,7 +905,7 @@ pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (O
             let mut newly_dead = 0;
             let mut kept: Vec<Option<Node>> = Vec::new();
             for child in children.into_iter() {
-                let (pruned, dead_count) = prune_exited(child, remain_on_exit, kill_descendants);
+                let (pruned, dead_count) = prune_exited(child, remain_on_exit, kill_descendants, dead_ids);
                 newly_dead += dead_count;
                 kept.push(pruned);
             }
@@ -1465,6 +1476,7 @@ fn has_any_exited(node: &mut Node) -> bool {
 pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
     let global_remain = app.remain_on_exit;
     let kill_descendants = app.kill_descendants_on_exit();
+    let mut newly_dead: Vec<usize> = Vec::new();
     let mut any_pruned = false;
     let mut any_newly_dead = false;
     for i in (0..app.windows.len()).rev() {
@@ -1478,10 +1490,10 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
         // session-wide flag for every window, so `set -w -t <one window>
         // remain-on-exit on` kept dead panes alive everywhere; the reporter's
         // ordinary PowerShell panes stopped closing after `exit` because of it.
-        let remain = crate::server::options::window_flag(app, i, "remain-on-exit", global_remain);
+        let remain = crate::server::options::win_remain_on_exit(&app.windows[i], global_remain);
         normalize_window_sizes(&mut app.windows[i]);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
-        let (pruned_result, newly_dead_count) = prune_exited(root, remain, kill_descendants);
+        let (pruned_result, newly_dead_count) = prune_exited(root, remain, kill_descendants, &mut newly_dead);
         if newly_dead_count > 0 {
             any_newly_dead = true;
         }
@@ -1529,6 +1541,11 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
                 }
             }
         }
+    }
+    // tmux writes remain-on-exit-format once, when the pane dies
+    // (server-fn.c:395-417, PANE_STATUSDRAWN).
+    for pane_id in newly_dead {
+        crate::server::helpers::write_remain_on_exit_text(app, pane_id);
     }
     Ok((app.windows.is_empty(), any_pruned, any_newly_dead))
 }

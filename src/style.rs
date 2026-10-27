@@ -352,6 +352,53 @@ fn apply_modifier(token: &str, style: &mut Style) {
 
 // ─── Inline style parsing ───────────────────────────────────────────────────
 
+/// One SGR sequence that sets `style`'s colours (default when unset) and its
+/// added modifiers. The client writes it for the OSC 8 overlay, and the server
+/// for remain-on-exit-format's `#[...]` styles in a dead pane's screen.
+pub(crate) fn style_sgr(style: Style) -> String {
+    let mut params = vec![color_sgr(style.fg.unwrap_or(ratatui::style::Color::Reset), true),
+                          color_sgr(style.bg.unwrap_or(ratatui::style::Color::Reset), false)];
+    let m = style.add_modifier;
+    if m.contains(Modifier::BOLD) { params.push("1".into()); }
+    if m.contains(Modifier::DIM) { params.push("2".into()); }
+    if m.contains(Modifier::ITALIC) { params.push("3".into()); }
+    if m.contains(Modifier::UNDERLINED) { params.push("4".into()); }
+    if m.contains(Modifier::SLOW_BLINK) { params.push("5".into()); }
+    if m.contains(Modifier::REVERSED) { params.push("7".into()); }
+    if m.contains(Modifier::CROSSED_OUT) { params.push("9".into()); }
+    format!("\x1b[{}m", params.join(";"))
+}
+
+/// SGR parameters for a ratatui color as a foreground (`base` 38/foreground)
+/// or background (`base` 48). Returns the numeric params without the leading
+/// `\x1b[` or trailing `m`.
+fn color_sgr(c: ratatui::style::Color, fg: bool) -> String {
+    use ratatui::style::Color::*;
+    // 30-37 / 40-47 normal, 90-97 / 100-107 bright, 39/49 default.
+    let (base, bright_base, def) = if fg { (30u8, 90u8, 39u8) } else { (40u8, 100u8, 49u8) };
+    match c {
+        Reset => def.to_string(),
+        Black => (base).to_string(),
+        Red => (base + 1).to_string(),
+        Green => (base + 2).to_string(),
+        Yellow => (base + 3).to_string(),
+        Blue => (base + 4).to_string(),
+        Magenta => (base + 5).to_string(),
+        Cyan => (base + 6).to_string(),
+        Gray => (base + 7).to_string(),
+        DarkGray => (bright_base).to_string(),
+        LightRed => (bright_base + 1).to_string(),
+        LightGreen => (bright_base + 2).to_string(),
+        LightYellow => (bright_base + 3).to_string(),
+        LightBlue => (bright_base + 4).to_string(),
+        LightMagenta => (bright_base + 5).to_string(),
+        LightCyan => (bright_base + 6).to_string(),
+        White => (bright_base + 7).to_string(),
+        Indexed(n) => format!("{};5;{}", if fg { 38 } else { 48 }, n),
+        Rgb(r, g, b) => format!("{};2;{};{};{}", if fg { 38 } else { 48 }, r, g, b),
+    }
+}
+
 /// Parse inline `#[fg=...,bg=...,bold]` style directives from pre-expanded text.
 ///
 /// Unlike `parse_status()`, this does NOT re-expand status variables.

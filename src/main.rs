@@ -3052,6 +3052,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 let mut zoom_after_split = false;
                 let mut before = false;
                 let mut full = false;
+                // -k / -m message: the new pane stays until a key is typed in
+                // it (cmd-split-window.c:256-262).
+                let mut keep = false;
+                let mut keep_message: Option<String> = None;
                 let mut sw_positional: Vec<String> = Vec::new();
                 let mut sw_saw_ddash = false;
                 {
@@ -3064,6 +3068,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                             s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-T" => { i += 1; if i < cmd_args.len() { title_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
+                            "-m" => { i += 1; if i < cmd_args.len() { keep_message = Some(cmd_args[i].to_string()); } }
                             "-p" => { i += 1; if i < cmd_args.len() { size_pct = Some(cmd_args[i].to_string()); size_cells = None; } }
                             "-l" => { i += 1; if i < cmd_args.len() { let v = cmd_args[i].to_string(); if v.ends_with('%') { size_pct = Some(v); size_cells = None; } else { size_cells = Some(v); size_pct = None; } } }
                             // -e KEY=VALUE environment for the new pane (#489)
@@ -3078,15 +3083,16 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                             // width/height (tmux SPAWN_BEFORE / SPAWN_FULLSIZE).
                             "-b" => { before = true; }
                             "-f" => { full = true; }
+                            "-k" => { keep = true; }
                             "-I" => { /* ignored for compatibility */ }
                             // A cluster of argument-less flags (`-hb`, `-fvd`).
-                            _ if a.len() > 2 && a[1..].chars().all(|c| "bdfhIPvZ".contains(c)) => {
+                            _ if a.len() > 2 && a[1..].chars().all(|c| "bdfhIkPvZ".contains(c)) => {
                                 for c in a[1..].chars() {
                                     match c {
                                         'h' => flag = "-h", 'v' => flag = "-v",
                                         'd' => detached = true, 'P' => print_info = true,
                                         'Z' => zoom_after_split = true, 'b' => before = true,
-                                        'f' => full = true, _ => {}
+                                        'f' => full = true, 'k' => keep = true, _ => {}
                                     }
                                 }
                             }
@@ -3117,6 +3123,11 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 if zoom_after_split { cmd_line.push_str(" -Z"); }
                 if before { cmd_line.push_str(" -b"); }
                 if full { cmd_line.push_str(" -f"); }
+                if let Some(message) = &keep_message {
+                    cmd_line.push_str(&format!(" -m {}", crate::util::quote_arg(message)));
+                } else if keep {
+                    cmd_line.push_str(" -k");
+                }
                 if let Some(ref fmt) = format_str {
                     cmd_line.push_str(&format!(" -F {}", crate::util::quote_arg(&fmt)));
                 }

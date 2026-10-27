@@ -18,7 +18,7 @@ fn pane(id: usize) -> Pane {
         })),
         last_rows: 24, last_cols: 80, id, title: "test".into(), title_locked: true,
         child_pid: None, data_version: Arc::new(AtomicU64::new(0)),
-        last_title_check: Instant::now(), last_infer_title: Instant::now(), dead: false,
+        last_title_check: Instant::now(), last_infer_title: Instant::now(), dead: false, dead_info: None,
         last_text_input: None, last_special_key: None, vt_bridge_cache: None,
         vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false,
         scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None,

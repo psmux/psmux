@@ -213,6 +213,15 @@ pub(crate) fn is_error_reply(text: &str) -> bool {
     text.starts_with("ERROR")
 }
 
+/// split-window `-k` and `-m message` (cmd-split-window.c:256-262):
+/// `Some(None)` for `-k`, `Some(Some(message))` for `-m`, `None` for neither.
+fn split_keep(args: &[&str]) -> Option<Option<String>> {
+    if let Some(message) = extract_flag_value(args, "-m") {
+        return Some(Some(message.trim_matches('"').to_string()));
+    }
+    crate::cli::has_short_flag(args, 'k').then_some(None)
+}
+
 /// `show-options` text for an array option (#700). `command-alias` comes from
 /// the alias table, which keeps each element's own index (`command-alias[100]`);
 /// the others from their joined value.
@@ -3541,6 +3550,7 @@ match cmd {
             size: split_size,
             before: crate::cli::has_short_flag(&args, 'b'),
             full: crate::cli::has_short_flag(&args, 'f'),
+            keep: split_keep(&args),
         };
         // tmux parity (#582): same `--` argv handling as new-window above.
         let cmd_str: Option<String> = if let Some(pos) = args.iter().position(|a| *a == "--") {
@@ -3552,7 +3562,7 @@ match cmd {
             }
         } else {
             args.iter()
-                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)))
+                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-m" && w[1] == **a)))
                 .map(|s| s.trim_matches('"').to_string())
         };
         if print_info {
@@ -7160,6 +7170,7 @@ fn dispatch_control_command(
                 size: split_size,
                 before: crate::cli::has_short_flag(&args, 'b'),
                 full: crate::cli::has_short_flag(&args, 'f'),
+                keep: split_keep(args),
             };
             let (rtx, rrx) = mpsc::channel::<String>();
             if print_info {

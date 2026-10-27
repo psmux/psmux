@@ -226,6 +226,7 @@ pub(crate) fn dispatch(
                     // shell alone, never to the ConPTY host. See the #630 note on
                     // CtrlReq::NewWindow above.
                     let prev_pane_id = crate::tree::get_active_pane_id(&app.windows[app.active_idx].root, &app.windows[app.active_idx].active_path);
+                    let keep = split_size.keep.clone();
                     let split_succeeded = match crate::pane::split_active_placed(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets, split_size) {
                         Err(e) => {
                             let msg = format!("split-window: {e}");
@@ -241,6 +242,10 @@ pub(crate) fn dispatch(
                     // `-l` is applied by the split itself, in cells (tmux
                     // layout_split_sizes); it used to be rewritten here as a
                     // percentage of the WINDOW after a 50/50 split.
+                    // -k / -m: the new pane stays until a key is typed in it.
+                    if split_succeeded {
+                        crate::pane::apply_split_keep(&mut app, &keep);
+                    }
                     // -T: the just-created pane is currently active in this
                     // window, so set its title before any detached revert.
                     if let Some(t) = title {
@@ -301,6 +306,7 @@ pub(crate) fn dispatch(
                     // shell alone, never to the ConPTY host. See the #630 note on
                     // CtrlReq::NewWindow above.
                     let prev_pane_id = crate::tree::get_active_pane_id(&app.windows[app.active_idx].root, &app.windows[app.active_idx].active_path);
+                    let keep = split_size.keep.clone();
                     let split_succeeded = match crate::pane::split_active_placed(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets, split_size) {
                         Err(e) => {
                             app.status_message = Some((format!("split-window: {e}"), std::time::Instant::now(), None));
@@ -309,6 +315,10 @@ pub(crate) fn dispatch(
                         }
                         Ok(()) => true,
                     };
+                    // -k / -m: the new pane stays until a key is typed in it.
+                    if split_succeeded {
+                        crate::pane::apply_split_keep(&mut app, &keep);
+                    }
                     // -T: set the new (currently active) pane's title.
                     if let Some(t) = title {
                         let win = &mut app.windows[app.active_idx];
@@ -562,7 +572,13 @@ pub(crate) fn dispatch(
                     if crate::input::snap_interactive_to_live(&mut app) {
                         state_dirty = true;
                     }
-                    send_text_to_active(&mut app, &s)?;
+                    // remain-on-exit key: a typed key closes a dead pane and goes
+                    // nowhere else (server-client.c:1411-1428).
+                    if crate::server::helpers::close_dead_key_pane(&mut app) {
+                        state_dirty = true;
+                    } else {
+                        send_text_to_active(&mut app, &s)?;
+                    }
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
@@ -598,7 +614,13 @@ pub(crate) fn dispatch(
                     if crate::input::snap_interactive_to_live(&mut app) {
                         state_dirty = true;
                     }
-                    send_key_to_active(&mut app, &k)?;
+                    // remain-on-exit key: a typed key closes a dead pane and goes
+                    // nowhere else (server-client.c:1411-1428).
+                    if crate::server::helpers::close_dead_key_pane(&mut app) {
+                        state_dirty = true;
+                    } else {
+                        send_key_to_active(&mut app, &k)?;
+                    }
                     if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
@@ -1905,7 +1927,7 @@ pub(crate) fn dispatch(
                     // looked like the option had been silently dropped.
                     output.push_str(&format!("monitor-silence {}\n", app.monitor_silence));
                     output.push_str(&format!("synchronize-panes {}\n", if app.sync_input { "on" } else { "off" }));
-                    output.push_str(&format!("remain-on-exit {}\n", if app.remain_on_exit { "on" } else { "off" }));
+                    output.push_str(&format!("remain-on-exit {}\n", app.remain_on_exit.as_str()));
                     output.push_str(&format!("destroy-unattached {}\n", if app.destroy_unattached { "on" } else { "off" }));
                     output.push_str(&format!("exit-empty {}\n", if app.exit_empty { "on" } else { "off" }));
                     output.push_str(&format!("set-titles {}\n", if app.set_titles { "on" } else { "off" }));

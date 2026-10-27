@@ -193,12 +193,12 @@ of them work against psmux, and the whole sequence is pinned by an end to end te
 |---|---|
 | `new-session -d -s <team> -- cat` | tmux's blocker idiom: a pane that sits and reads stdin. On Windows a bare `cat` would hit PowerShell's `Get-Content` alias and wedge at a parameter prompt, so psmux substitutes a real stdin draining blocker, on both the `new-session` and `new-window` shapes and on the direct exec (`--`) path |
 | `split-window -t %N ...`, `send-keys -t %N ...`, `respawn-pane -t %N` | Bare `%id` pane targets resolve across every window of the session, not just the active one, and a target that does not exist is refused with an error at exit 1 instead of silently acting on the active pane |
-| `set-option -p -t %N remain-on-exit failed` | Pane scoped options. `-p` is the tmux pane scope flag, not a target flag. `remain-on-exit` follows tmux semantics per pane (`on`, `off`, `failed`): a teammate that crashes stays visible with its error, a teammate that exits cleanly closes its pane |
+| `set-option -p -t %N remain-on-exit failed` | Pane scoped options. `-p` is the tmux pane scope flag, not a target flag. `remain-on-exit` follows tmux semantics per pane (`on`, `off`, `failed`, `key`, `failed-key`): a teammate that crashes stays visible with its error, a teammate that exits cleanly closes its pane, and `remain-on-exit-format` sets the line written on the dead pane |
 | `show-options -p -t %N` | Lists the pane's options as `name value` lines. The `-v` flag and an option name filter are not yet applied at pane scope (still open under #580), so parse the `name value` shape |
 
-Exactly two pane scoped options exist, `remain-on-exit` and psmux's own `@mouse-force` (see
-below). Any other name is refused with
-`pane-scoped option 'x' is not supported (supported: remain-on-exit, @mouse-force)` at exit 1
+The pane scoped catalog options are `remain-on-exit` and `remain-on-exit-format`, beside psmux's own `@mouse-force` (see
+below) and any `@user` option. Any other name is refused with
+`pane-scoped option 'x' is not supported (supported: remain-on-exit, remain-on-exit-format, @mouse-force, any @user option)` at exit 1
 rather than stored as a silent no-op, and a `%id` that does not exist answers
 `can't find pane: %N`.
 

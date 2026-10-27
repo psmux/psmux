@@ -2269,7 +2269,11 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
             app.visual_activity = matches!(value, "on" | "true" | "1" | "yes");
         }
         "remain-on-exit" => {
-            app.remain_on_exit = matches!(value, "on" | "true" | "1" | "yes");
+            // off, on, failed, key or failed-key; the catalog check above
+            // refused the rest.
+            if let Some(remain) = crate::types::RemainOnExit::parse(value) {
+                app.remain_on_exit = remain;
+            }
         }
         "destroy-unattached" => {
             app.destroy_unattached = matches!(value, "on" | "true" | "1" | "yes");

@@ -326,7 +326,7 @@ fn set_option_allow_rename() {
 fn set_option_remain_on_exit() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "set-option -g remain-on-exit on").unwrap();
-    assert!(app.remain_on_exit);
+    assert_eq!(app.remain_on_exit, crate::types::RemainOnExit::On);
 }
 
 #[test]

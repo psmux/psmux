@@ -840,7 +840,7 @@ fn generate_show_options(app: &AppState) -> String {
     output.push_str(&format!("automatic-rename {}\n", if app.automatic_rename { "on" } else { "off" }));
     output.push_str(&format!("monitor-activity {}\n", if app.monitor_activity { "on" } else { "off" }));
     output.push_str(&format!("synchronize-panes {}\n", if app.sync_input { "on" } else { "off" }));
-    output.push_str(&format!("remain-on-exit {}\n", if app.remain_on_exit { "on" } else { "off" }));
+    output.push_str(&format!("remain-on-exit {}\n", app.remain_on_exit.as_str()));
     output.push_str(&format!("allow-predictions {}\n", if app.allow_predictions { "on" } else { "off" }));
     // Include @user-options
     for (key, val) in &app.user_options {

@@ -4355,6 +4355,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     // the pane, not its process, and tmux's spawn.c keeps `wp->flags` across
     // a respawn apart from PANE_STATUSREADY / PANE_STATUSDRAWN.
     pane.dead = false;
+    pane.dead_info = None;
     pane.spawned_at = Some(std::time::Instant::now());
 
     Ok(())
@@ -4473,6 +4474,7 @@ pub fn heal_respawn_pane(
     pane.win32_input_latched = false;
     // `input_off` survives the respawn, as in tmux (see respawn_active_pane).
     pane.dead = false;
+    pane.dead_info = None;
     pane.spawned_at = Some(std::time::Instant::now());
     Ok(())
 }

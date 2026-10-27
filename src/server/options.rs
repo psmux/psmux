@@ -295,6 +295,33 @@ pub(crate) fn win_flag(window: &crate::types::Window, name: &str, global: bool) 
     }
 }
 
+/// The `remain-on-exit` a window resolves to: its own `set -w` value, then
+/// the global one (options.c walks the window table, then global_w_options).
+pub(crate) fn win_remain_on_exit(
+    window: &crate::types::Window,
+    global: crate::types::RemainOnExit,
+) -> crate::types::RemainOnExit {
+    window
+        .window_options
+        .get("remain-on-exit")
+        .and_then(|value| crate::types::RemainOnExit::parse(value))
+        .unwrap_or(global)
+}
+
+/// The `remain-on-exit-format` a pane resolves to: its own `set -p` text,
+/// its window's, then the global one.
+pub(crate) fn remain_on_exit_format(
+    app: &AppState,
+    window: &crate::types::Window,
+    pane: &crate::types::Pane,
+) -> String {
+    pane.pane_options
+        .get("remain-on-exit-format")
+        .or_else(|| window.window_options.get("remain-on-exit-format"))
+        .cloned()
+        .unwrap_or_else(|| get_option_value(app, "remain-on-exit-format"))
+}
+
 /// [`window_number`] for a caller that already holds the `Window`.
 pub(crate) fn win_number(window: &crate::types::Window, name: &str, global: u64) -> u64 {
     window
@@ -537,8 +564,7 @@ pub(crate) fn apply_set_session_option(
         }
     }
     let new_value = if toggle {
-        let current = get_option_value(app, option);
-        if matches!(current.as_str(), "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
+        toggled_value(option, &get_option_value(app, option))
     } else if append {
         format!("{}{}", crate::format::lookup_option_pub(option, app).unwrap_or_default(), value)
     } else {
@@ -615,7 +641,7 @@ pub(crate) fn write_shadowed_global(app: &mut AppState, option: &str, op: Global
             if !is_boolean_option(option) {
                 return Err(format!("empty value for '{}'", option));
             }
-            if matches!(current.as_str(), "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
+            toggled_value(option, &current)
         }
     };
     crate::server::option_catalog::validate_option_value(option, &new_value)?;
@@ -803,7 +829,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "visual-activity" => if app.visual_activity { "on".into() } else { "off".into() },
         "aggressive-resize" => if app.aggressive_resize { "on".into() } else { "off".into() },
         "synchronize-panes" => if app.sync_input { "on".into() } else { "off".into() },
-        "remain-on-exit" => if app.remain_on_exit { "on".into() } else { "off".into() },
+        "remain-on-exit" => app.remain_on_exit.as_str().into(),
         "destroy-unattached" => if app.destroy_unattached { "on".into() } else { "off".into() },
         "exit-empty" => if app.exit_empty { "on".into() } else { "off".into() },
         // #798: the mode this server runs in; a per session server is one.
@@ -884,6 +910,16 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "claude-code-fix-tty" => if app.claude_code_fix_tty { "on".into() } else { "off".into() },
         "claude-code-force-interactive" => if app.claude_code_force_interactive { "on".into() } else { "off".into() },
         "session-group" => app.session_group.clone().unwrap_or_default(),
+        // Stored as text in user_options. An empty value is a real one (the
+        // dead pane gets no text), so only a missing entry is tmux's default
+        // (options-table.c:1713); the empty check below must not see it.
+        "remain-on-exit-format" => {
+            return app
+                .user_options
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| crate::server::option_catalog::REMAIN_ON_EXIT_FORMAT_DEFAULT.to_string());
+        }
         _ => {
             // Check user_options first (@-prefixed), then environment
             app.user_options.get(name).cloned()
@@ -1134,9 +1170,21 @@ pub(crate) fn toggle_option(app: &mut AppState, option: &str) -> bool {
     if !is_boolean_option(option) {
         return false;
     }
-    let current = get_option_value(app, option);
-    let new_value = if current == "on" { "off" } else { "on" };
-    apply_set_option(app, option, new_value, false).is_ok()
+    let new_value = toggled_value(option, &get_option_value(app, option));
+    apply_set_option(app, option, &new_value, false).is_ok()
+}
+
+/// What `set <option>` with no value writes over `current`. A flag flips;
+/// `remain-on-exit` is a CHOICE in tmux, where `off` and `on` swap and
+/// `failed`, `key` and `failed-key` stay (options.c:1263-1266,
+/// options_from_string_choice).
+fn toggled_value(option: &str, current: &str) -> String {
+    if option == "remain-on-exit" {
+        if let Some(remain) = crate::types::RemainOnExit::parse(current) {
+            return remain.toggled().as_str().to_string();
+        }
+    }
+    if matches!(current, "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
 }
 
 /// Restore one option to the value a freshly started server reports for it,
@@ -1213,7 +1261,7 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
     if matches!(
         key,
         "window-style" | "window-active-style" | "pane-border-indicators"
-            | "extended-keys" | "extended-keys-format"
+            | "extended-keys" | "extended-keys-format" | "remain-on-exit-format"
     ) {
         return;
     }
@@ -1403,7 +1451,14 @@ pub(crate) fn apply_set_option(
         }
         "focus-events" => { app.focus_events = matches!(value, "on" | "true" | "1" | "yes"); }
         "renumber-windows" => { app.renumber_windows = matches!(value, "on" | "true" | "1" | "yes"); }
-        "remain-on-exit" => { app.remain_on_exit = matches!(value, "on" | "true" | "1" | "yes"); }
+        "remain-on-exit" => {
+            if let Some(remain) = crate::types::RemainOnExit::parse(value) {
+                app.remain_on_exit = remain;
+            }
+        }
+        "remain-on-exit-format" => {
+            app.user_options.insert(option.to_string(), value.to_string());
+        }
         "destroy-unattached" => { app.destroy_unattached = matches!(value, "on" | "true" | "1" | "yes"); }
         "exit-empty" => {
             app.exit_empty = matches!(value, "on" | "true" | "1" | "yes");
@@ -1598,14 +1653,14 @@ pub(crate) fn apply_set_option(
 /// Catalog options psmux stores per pane, in the order `show-options -p`
 /// prints them.
 ///
-/// `set-option -p` accepts one catalog name ([`apply_set_pane_option`]):
-/// `remain-on-exit`, which a pane can inherit from its window and then the
-/// global store. Everything else it stores is a USER option (`@mouse-force`,
+/// `set-option -p` accepts two catalog names ([`apply_set_pane_option`]):
+/// `remain-on-exit` and `remain-on-exit-format`, which a pane can inherit
+/// from its window and then the global store. Everything else it stores is a USER option (`@mouse-force`,
 /// and since #728 any `@name`). tmux prints a user option from the
 /// table's own entries (cmd-show-options.c:249-254, the `options_table_entry(o)
 /// == NULL` walk) and never invents an inherited one for it, so only the
 /// catalog name belongs here.
-pub(crate) const PANE_OPTION_NAMES: &[&str] = &["remain-on-exit"];
+pub(crate) const PANE_OPTION_NAMES: &[&str] = &["remain-on-exit", "remain-on-exit-format"];
 
 /// Resolve a `set-option -p` / `show-options -p` target to the pane it names.
 ///
@@ -1679,13 +1734,13 @@ pub(crate) fn apply_set_pane_option(
                 return String::new();
             }
             let valid = if option == "remain-on-exit" {
-                matches!(value, "on" | "off" | "failed")
+                crate::types::RemainOnExit::parse(value).is_some()
             } else {
                 matches!(value, "on" | "off" | "1" | "0" | "true" | "false" | "yes" | "no")
             };
             if !valid {
                 return if option == "remain-on-exit" {
-                    format!("ERROR: set-option -p remain-on-exit: bad value '{}' (want on, off or failed)", value)
+                    format!("ERROR: set-option -p remain-on-exit: bad value '{}' (want on, off, failed, key or failed-key)", value)
                 } else {
                     format!("ERROR: set-option -p @mouse-force: bad value '{}' (want on or off)", value)
                 };
@@ -1694,6 +1749,25 @@ pub(crate) fn apply_set_pane_option(
                 return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
             }
             store.insert(option.to_string(), value.to_string());
+            String::new()
+        }
+        // tmux's window and pane option (options-table.c:1710): a pane's own
+        // text wins over its window's. An empty value is a real value here,
+        // which writes nothing on the dead pane, so only -u removes it.
+        "remain-on-exit-format" => {
+            if unset {
+                store.remove(option);
+                return String::new();
+            }
+            if only_if_unset && store.contains_key(option) {
+                return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
+            }
+            let stored = if append {
+                format!("{}{}", store.get(option).map(String::as_str).unwrap_or(""), value)
+            } else {
+                value.to_string()
+            };
+            store.insert(option.to_string(), stored);
             String::new()
         }
         name if name.starts_with('@') && name.len() > 1 => {
@@ -1716,7 +1790,7 @@ pub(crate) fn apply_set_pane_option(
         // backend checked nothing but exit codes and a swallowed pane option
         // looked exactly like success (#580).
         other => format!(
-            "ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit, @mouse-force, any @user option)",
+            "ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit, remain-on-exit-format, @mouse-force, any @user option)",
             other
         ),
     }
@@ -1912,3 +1986,7 @@ mod tests_issue535_setoption_no_value;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue559_monitor_silence_options.rs"]
 mod tests_issue559_monitor_silence_options;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue923_remain_on_exit.rs"]
+mod tests_issue923_remain_on_exit;

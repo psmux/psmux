@@ -96,6 +96,7 @@ pub(super) fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
         last_title_check: epoch,
         last_infer_title: epoch,
         dead: false,
+        dead_info: None,
         last_text_input: None,
         last_special_key: None,
         vt_bridge_cache: None,
