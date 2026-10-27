@@ -8,9 +8,9 @@
 //!
 //! [`ARRAY_OPTIONS`] lists the options built on this so far. tmux 3.7c has
 //! more, and they move here one at a time: codepoint-widths,
-//! terminal-overrides, terminal-features and user-keys split on `,`;
-//! status-format, update-environment and pane-colours on space and `,`;
-//! every hook is an array of commands that does not split at all.
+//! terminal-features and user-keys split on `,`; status-format,
+//! update-environment and pane-colours on space and `,`; every hook is an
+//! array of commands that does not split at all.
 
 use std::collections::BTreeMap;
 
@@ -37,12 +37,30 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
                   choose-window=choose-tree -w,\
                   choose-session=choose-tree -s",
     },
+    // options-table.c:518-525
+    ArraySpec {
+        name: "terminal-overrides",
+        separator: ",",
+        default: "linux*:AX@",
+    },
 ];
 
 /// The array option `name` is, judged by its base name.
 pub fn spec(name: &str) -> Option<&'static ArraySpec> {
     let (base, _) = parse_name(name).ok()?;
     ARRAY_OPTIONS.iter().find(|spec| spec.name == base)
+}
+
+/// The array option `name` names, as the bare name or as `name[...]` with
+/// anything between the brackets, so `set` can answer a bad index with
+/// `invalid option` from [`parse_name`] instead of keeping it as text.
+pub fn is_array_name(name: &str) -> Option<&'static ArraySpec> {
+    ARRAY_OPTIONS.iter().find(|spec| {
+        name == spec.name
+            || name
+                .strip_prefix(spec.name)
+                .is_some_and(|rest| rest.starts_with('[') && rest.ends_with(']'))
+    })
 }
 
 /// `name` split into its base name and its index, `None` for no index

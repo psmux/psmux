@@ -235,7 +235,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `warm` | Bool | `on` | Pre-spawn shells for instant window/pane creation (see [warm-sessions.md](warm-sessions.md)) |
 | `copy-command` | Str | | Shell command for clipboard pipe |
 | `codepoint-widths` | Str | | Comma separated overrides for how many columns Unicode codepoints occupy (see [Codepoint widths](#codepoint-widths)) |
-| `terminal-overrides` | Str | | Array of `pattern:cap:cap` entries matched against the client's `TERM`. `smcup@` and `rmcup@` keep the attached client off the host terminal's alternate screen (see [Terminal overrides](#terminal-overrides)) |
+| `terminal-overrides` | Str | `linux*:AX@` | Array of `pattern:cap:cap` entries matched against the client's `TERM`. `smcup@` and `rmcup@` keep the attached client off the host terminal's alternate screen (see [Terminal overrides](#terminal-overrides)) |
 | `set-clipboard` | Str | `external` | Clipboard interaction (`on`/`off`/`external`). A copy mode yank reaches the Windows clipboard on every value, with OSC 52 to the outer terminal unless `off`. An application's own OSC 52 creates a paste buffer only on `on`, as in tmux; on `external` psmux still forwards it to the outer terminal and the Windows clipboard, where tmux ignores it; `off` ignores it |
 | `main-pane-width` | String | `80` | Main pane width in the main-vertical layout, in cells or a percentage such as `30%` |
 | `main-pane-height` | String | `24` | Main pane height in the main-horizontal layout, in cells or a percentage such as `30%` |
@@ -1466,9 +1466,13 @@ for a pane's history.
 
 How entries are read, the same way tmux reads them:
 
-- It is an array option. Each element is `pattern:cap:cap...`. `set -g`
-  replaces the whole array, `set -ga` adds elements (a leading comma is
-  optional), and `set -gu` empties it.
+- It is an array option, as in tmux. Each element is `pattern:cap:cap...` and
+  has its own index, `terminal-overrides[N]`. `set -g` replaces the whole
+  array (split on `,`, spaces kept), `set -ga` adds each element at the lowest
+  free index (a leading comma is optional), `set -g terminal-overrides[N]`
+  sets one element, `set -gu terminal-overrides[N]` removes one, and
+  `set -gu terminal-overrides` puts tmux's default `linux*:AX@` back. psmux
+  ignores `AX`, so the default changes nothing here.
 - The pattern is matched against the `TERM` of the attaching client with
   shell style wildcards (`*`, `?`, `[...]`). Elements are applied in order, so
   a later element wins over an earlier one.
@@ -1486,5 +1490,6 @@ Read it back with:
 
 ```powershell
 psmux show-options -g terminal-overrides
-# terminal-overrides[0] *:smcup@:rmcup@
+# terminal-overrides[0] linux*:AX@
+# terminal-overrides[1] *:smcup@:rmcup@
 ```

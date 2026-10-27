@@ -1061,9 +1061,8 @@ fn drain_plugin_req(
                     "codepoint-widths" => {
                         crate::server::options::append_codepoint_widths(app, &value);
                     }
-                    "terminal-overrides" => {
-                        app.terminal_overrides
-                            .extend(crate::terminal_overrides::split_array(&value));
+                    name if crate::server::options::is_stored_array_option(name) => {
+                        let _ = crate::server::options::set_array_option(app, name, &value, true);
                     }
                     "status-left" => app.status_left.push_str(&value),
                     "status-right" => app.status_right.push_str(&value),
@@ -1122,6 +1121,9 @@ fn drain_plugin_req(
         CtrlReq::ShowOptionValue(resp, name) => {
             let val = get_option_value(app, &name);
             let _ = resp.send(val);
+        }
+        CtrlReq::ShowArrayOption(resp, name, values_only) => {
+            let _ = resp.send(crate::server::options::array_option_show_lines(app, &name, values_only));
         }
         CtrlReq::ShowWindowOptionValue(resp, name, target) => {
             let val = crate::server::options::window_option_value_for_target(app, &name, &target);
@@ -6472,9 +6474,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "codepoint-widths" => {
                                 crate::server::options::append_codepoint_widths(&mut app, &value);
                             }
-                            "terminal-overrides" => {
-                                app.terminal_overrides
-                                    .extend(crate::terminal_overrides::split_array(&value));
+                            name if crate::server::options::is_stored_array_option(name) => {
+                                let _ = crate::server::options::set_array_option(&mut app, name, &value, true);
                             }
                             "status-left" => { app.status_left.push_str(&value); }
                             "status-right" => { app.status_right.push_str(&value); }
@@ -8246,6 +8247,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ShowOptionValue(resp, name) => {
                     let val = get_option_value(&app, &name);
                     let _ = resp.send(val);
+                }
+                CtrlReq::ShowArrayOption(resp, name, values_only) => {
+                    let _ = resp.send(crate::server::options::array_option_show_lines(&app, &name, values_only));
                 }
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
                     let val = crate::server::options::window_option_value_for_target(&app, &name, &target);

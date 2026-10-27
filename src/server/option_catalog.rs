@@ -265,7 +265,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "default-terminal", scope: Server, option_type: OptionType::String, default: "xterm-256color", description: "TERM value for new panes" },
     OptionDef { name: "copy-command", scope: Server, option_type: OptionType::String, default: "", description: "External copy command (pipe selection)" },
     OptionDef { name: "codepoint-widths", scope: Server, option_type: OptionType::String, default: "", description: "Array of override widths for Unicode codepoints, e.g. U+2500-U+257F=2 (comma separated; widths 0, 1 or 2)" },
-    OptionDef { name: "terminal-overrides", scope: Server, option_type: OptionType::String, default: "", description: "Array of pattern:cap overrides matched against the client TERM; smcup@/rmcup@ keep the attached client off the host's alternate screen (#700)" },
+    OptionDef { name: "terminal-overrides", scope: Server, option_type: OptionType::String, default: "linux*:AX@", description: "Array of pattern:cap overrides matched against the client TERM; smcup@/rmcup@ keep the attached client off the host's alternate screen (#700)" },
     // The default array (option_array::ARRAY_OPTIONS) as `#{command-alias}`
     // reads it, the elements joined with a space.
     OptionDef { name: "command-alias", scope: Server, option_type: OptionType::String, default: "split-pane=split-window splitp=split-window server-info=show-messages -JT info=show-messages -JT choose-window=choose-tree -w choose-session=choose-tree -s", description: "Array of command aliases, each name=command; set one element with command-alias[N]" },
@@ -550,6 +550,13 @@ pub fn validate_option_value(name: &str, value: &str) -> Result<(), String> {
     // #798: a running server cannot change its mode (server/shared).
     if name == crate::server::shared::OPTION {
         return crate::server::shared::set_on_running_per_session_server(value);
+    }
+    // An array element whose index is no index (`terminal-overrides[x]`) is no
+    // option at all (options.c `options_parse`), and tmux's set fails. The
+    // CLI checks here before it sends anything, so the server's own refusal
+    // was never seen and the command looked as if it had worked.
+    if crate::option_array::is_array_name(name).is_some() {
+        crate::option_array::parse_name(name)?;
     }
     if let Some(definition) = option_definition(name) {
         return definition.validate_value(value);

@@ -464,10 +464,12 @@ pub(crate) fn expand_status_formats(
             } else {
                 Some(app.codepoint_widths.clone())
             },
+            // The elements in index order, the order tmux applies them in
+            // (tty-term.c tty_term_apply_overrides).
             terminal_overrides: if app.terminal_overrides.is_empty() {
                 None
             } else {
-                Some(app.terminal_overrides.clone())
+                Some(app.terminal_overrides.iter().map(|(_, entry)| entry.to_string()).collect())
             },
             word_separators: Some(app.word_separators.clone()),
         },

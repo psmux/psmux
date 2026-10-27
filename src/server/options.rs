@@ -1,3 +1,4 @@
+use crate::option_array::OptionArray;
 use crate::types::AppState;
 use crate::server::option_catalog::WINDOW_OPTION_NAMES;
 
@@ -67,6 +68,86 @@ pub(crate) fn set_codepoint_widths(app: &mut AppState, value: &str) {
 pub(crate) fn append_codepoint_widths(app: &mut AppState, value: &str) {
     app.codepoint_widths.extend(split_codepoint_widths(value));
     sync_codepoint_widths(app);
+}
+
+/// The array option `base` names, where the server keeps it. command-alias is
+/// not here: the connection threads read it too, so it lives behind its own
+/// lock (crate::command_alias). Every other array option that has moved onto
+/// crate::option_array is answered here, so set, `-a`, `-u` and show reach it
+/// through the functions below on every route.
+fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut OptionArray> {
+    match base {
+        "terminal-overrides" => Some(&mut app.terminal_overrides),
+        _ => None,
+    }
+}
+
+fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
+    match base {
+        "terminal-overrides" => Some(&app.terminal_overrides),
+        _ => None,
+    }
+}
+
+/// True for an array option this file stores, as the bare name or `name[...]`.
+pub(crate) fn is_stored_array_option(name: &str) -> bool {
+    crate::option_array::is_array_name(name)
+        .is_some_and(|spec| spec.name != crate::command_alias::OPTION)
+}
+
+/// `set-option NAME VALUE` (with `-a` when `append`) on an array option or one
+/// of its elements (cmd-set-option.c:194-225).
+pub(crate) fn set_array_option(app: &mut AppState, name: &str, value: &str, append: bool) -> Result<(), String> {
+    let (base, index) = crate::option_array::parse_name(name)?;
+    let spec = crate::option_array::spec(base).ok_or_else(|| format!("invalid option: {}", name))?;
+    let array = array_option_mut(app, base).ok_or_else(|| format!("invalid option: {}", name))?;
+    array.apply_set(index, value, append, spec.separator);
+    Ok(())
+}
+
+/// `set-option -u`: one element, or the whole array back to its default
+/// (options.c:1275, `options_remove_or_default`).
+pub(crate) fn unset_array_option(app: &mut AppState, name: &str) -> Result<(), String> {
+    let (base, index) = crate::option_array::parse_name(name)?;
+    let spec = crate::option_array::spec(base).ok_or_else(|| format!("invalid option: {}", name))?;
+    let array = array_option_mut(app, base).ok_or_else(|| format!("invalid option: {}", name))?;
+    array.apply_unset(index, spec);
+    Ok(())
+}
+
+/// The value as `#{NAME}` and `show -v NAME[N]` give it: one element, or the
+/// whole array joined with spaces (options.c:590-614, `options_to_string`).
+pub(crate) fn array_option_value(app: &AppState, name: &str) -> String {
+    let Ok((base, index)) = crate::option_array::parse_name(name) else {
+        return String::new();
+    };
+    let Some(array) = array_option(app, base) else {
+        return String::new();
+    };
+    match index {
+        Some(index) => array.get(index).unwrap_or_default().to_string(),
+        None => array.joined(),
+    }
+}
+
+/// `show-options` text for an array option (cmd-show-options.c:156-192): a
+/// `name[N] value` line per element for the bare name, the one line for
+/// `name[N]`, and only the values with `-v`.
+pub(crate) fn array_option_show_lines(app: &AppState, name: &str, values_only: bool) -> String {
+    let Ok((base, index)) = crate::option_array::parse_name(name) else {
+        return String::new();
+    };
+    let Some(array) = array_option(app, base) else {
+        return String::new();
+    };
+    match index {
+        None => array.show_lines(base, values_only),
+        Some(index) => match array.get(index) {
+            Some(value) if values_only => format!("{}\n", value),
+            Some(value) => format!("{}[{}] {}\n", base, index, crate::util::quote_arg_if_needed(value)),
+            None => String::new(),
+        },
+    }
 }
 
 /// Parse a main-pane-width / main-pane-height value.
@@ -902,7 +983,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         // tmux options-table.c default "0" (the main pane decides).
         "other-pane-width" | "other-pane-height" => app.user_options.get(name).cloned().unwrap_or_else(|| "0".to_string()),
         "codepoint-widths" => app.codepoint_widths.join(","),
-        "terminal-overrides" => app.terminal_overrides.join(","),
+        n if is_stored_array_option(n) => array_option_value(app, n),
         n if crate::command_alias::is_alias_option(n) => {
             crate::command_alias::read(&app.command_aliases).value(n)
         }
@@ -1258,6 +1339,10 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
         let _ = crate::command_alias::write(&app.command_aliases).unset(key);
         return;
     }
+    if is_stored_array_option(key) {
+        let _ = unset_array_option(app, key);
+        return;
+    }
 
     // Drop any stored override first. Options whose default is represented by
     // a missing entry are fully restored by removal; applying their catalog
@@ -1330,8 +1415,10 @@ pub(crate) fn apply_set_option(
             }
         }
         "codepoint-widths" => { set_codepoint_widths(app, value); }
-        "terminal-overrides" => {
-            app.terminal_overrides = crate::terminal_overrides::split_array(value);
+        // terminal-overrides and its elements (`terminal-overrides[N]`), as
+        // for any array option.
+        name if is_stored_array_option(name) => {
+            set_array_option(app, name, value, false)?;
         }
         "mouse" => { app.mouse_enabled = value == "on" || value == "true" || value == "1" || value == "yes"; }
         "bold-is-bright" => {
