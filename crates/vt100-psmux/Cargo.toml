@@ -97,6 +97,10 @@ path = "tests/program_status.rs"
 name = "query_detector"
 path = "tests/query_detector.rs"
 
+[[test]]
+name = "issue919_input_buffer_size"
+path = "tests/issue919_input_buffer_size.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 
