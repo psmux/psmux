@@ -126,15 +126,16 @@ if ($r -and $r.Status -and $r.H -eq 0) { Write-Pass "after runtime set -ga the a
 else { Write-Fail "after runtime set -ga expected 1049h=0, got 1049h=$($r.H) status=$($r.Status)" }
 
 $show = (& $PSMUX -L $SOCK show-options -g terminal-overrides 2>&1) -join "`n"
-if ($show -eq "terminal-overrides[0] *:smcup@:rmcup@") { Write-Pass "show-options -g prints the array element: $show" }
-else { Write-Fail "show-options -g printed '$show', expected 'terminal-overrides[0] *:smcup@:rmcup@'" }
+$show = $show -replace "`n", "|"
+if ($show -eq "terminal-overrides[0] linux*:AX@|terminal-overrides[1] *:smcup@:rmcup@") { Write-Pass "show-options -g prints tmux's default and the new element: $show" }
+else { Write-Fail "show-options -g printed '$show', expected 'terminal-overrides[0] linux*:AX@|terminal-overrides[1] *:smcup@:rmcup@'" }
 
 & $PSMUX -L $SOCK set -ga terminal-overrides 'xterm*:Tc'
 $show = (& $PSMUX -L $SOCK show-options -g terminal-overrides 2>&1) -join "|"
-if ($show -eq "terminal-overrides[0] *:smcup@:rmcup@|terminal-overrides[1] xterm*:Tc") { Write-Pass "set -ga without a leading comma appends element [1]: $show" }
+if ($show -eq "terminal-overrides[0] linux*:AX@|terminal-overrides[1] *:smcup@:rmcup@|terminal-overrides[2] xterm*:Tc") { Write-Pass "set -ga without a leading comma appends element [2]: $show" }
 else { Write-Fail "after a second set -ga, show printed '$show'" }
 $showv = (& $PSMUX -L $SOCK show-options -gv terminal-overrides 2>&1) -join "|"
-if ($showv -eq "*:smcup@:rmcup@|xterm*:Tc") { Write-Pass "show-options -gv prints the values one per line" }
+if ($showv -eq "linux*:AX@|*:smcup@:rmcup@|xterm*:Tc") { Write-Pass "show-options -gv prints the values one per line" }
 else { Write-Fail "show-options -gv printed '$showv'" }
 
 & $PSMUX -L $SOCK set -g terminal-overrides 'screen*:smcup@:rmcup@'
@@ -147,7 +148,7 @@ else { Write-Fail "after set -g expected 1049h=1, got 1049h=$($r.H)" }
 
 & $PSMUX -L $SOCK set -gu terminal-overrides
 $show = (& $PSMUX -L $SOCK show-options -g terminal-overrides 2>&1) -join "|"
-if ($show -eq "terminal-overrides") { Write-Pass "set -gu empties it and show prints the bare name like tmux" }
+if ($show -eq "terminal-overrides[0] linux*:AX@") { Write-Pass "set -gu puts tmux's default back: $show" }
 else { Write-Fail "after set -gu, show printed '$show'" }
 
 Finish
