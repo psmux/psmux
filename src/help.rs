@@ -621,6 +621,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("focus-events",               "off"),
     ("program-status",             "off"),
     ("remain-on-exit",             "off"),
+    ("remain-on-exit-format",      "Pane is dead (...)"),
     ("renumber-windows",           "off"),
     ("aggressive-resize",          "off"),
     ("automatic-rename",           "on"),

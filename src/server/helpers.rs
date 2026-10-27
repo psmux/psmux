@@ -25,6 +25,104 @@ pub(crate) fn collect_pane_paths_server(
     }
 }
 
+/// The bytes that write remain-on-exit-format into a dead pane's screen, as
+/// tmux's server_destroy_pane does (server-fn.c:403-417): the scroll region
+/// back to the whole screen, the cursor to the bottom row, a line feed so the
+/// text gets a line of its own, then `text` with its `#[...]` styles cut to
+/// `cols` cells. `None` (an empty format) writes no text. Either way the
+/// cursor is hidden (`wp->base.mode &= ~MODE_CURSOR`).
+pub(crate) fn remain_on_exit_bytes(text: Option<&str>, rows: u16, cols: u16) -> String {
+    let mut out = String::new();
+    if let Some(text) = text {
+        out.push_str(&format!("\x1b[r\x1b[{};1H\n", rows.max(1)));
+        let mut room = cols as usize;
+        for span in crate::style::parse_inline_styles(text, ratatui::style::Style::default()) {
+            if room == 0 {
+                break;
+            }
+            let mut piece = String::new();
+            for c in span.content.chars() {
+                let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                if w > room {
+                    room = 0;
+                    break;
+                }
+                room -= w;
+                piece.push(c);
+            }
+            if !piece.is_empty() {
+                // Each span carries its whole style (parse_inline_styles
+                // folds every #[...] so far into it), and style_sgr only sets
+                // what is on, so reset first: after #[bold]A#[default]B or
+                // #[nobold], B must not stay bold.
+                out.push_str("\x1b[0m");
+                out.push_str(&crate::style::style_sgr(span.style));
+                out.push_str(&piece);
+            }
+        }
+        out.push_str("\x1b[0m");
+    }
+    out.push_str("\x1b[?25l");
+    out
+}
+
+/// Write remain-on-exit-format on the bottom line of the pane `pane_id`,
+/// which remain-on-exit has just kept dead. The format is the pane's own,
+/// its window's, or the global one, expanded for that pane, so
+/// `#{pane_dead_status}` and `#{t:pane_dead_time}` read its death.
+pub(crate) fn write_remain_on_exit_text(app: &mut AppState, pane_id: usize) {
+    let Some((win_idx, pos)) = crate::tree::find_pane_by_id_global(app, pane_id) else { return };
+    let Some(window) = app.windows.get(win_idx) else { return };
+    let Some(pane) = crate::tree::get_nth_pane(&window.root, pos) else { return };
+    let format = crate::server::options::remain_on_exit_format(app, window, pane);
+    let text = (!format.is_empty())
+        .then(|| crate::format::expand_format_for_pane_by_id(&format, app, pane_id));
+    let parser = pane.live_parser().clone();
+    let Ok(mut parser) = parser.lock() else { return };
+    let (rows, cols) = parser.screen().size();
+    parser.process(remain_on_exit_bytes(text.as_deref(), rows, cols).as_bytes());
+}
+
+/// A key typed in a client reached the active pane: close it if it is dead
+/// and remain-on-exit is `key` or `failed-key` for it, and say so, so the caller
+/// drops the key.
+///
+/// tmux does this where a client's key is forwarded to the pane, for any key
+/// but a mouse event or a paste (server-client.c:1411-1428): it sets the
+/// pane's remain-on-exit to off and destroys the pane. psmux does the same by
+/// turning the pane's own value off and handing it back to the reaper, which
+/// closes it like any pane that exits under `off`, window and layout
+/// included. `send-keys` never comes here, as in tmux (cmd-send-keys.c:96).
+pub(crate) fn close_dead_key_pane(app: &mut AppState) -> bool {
+    let global = app.remain_on_exit;
+    let Some(window) = app.windows.get_mut(app.active_idx) else { return false };
+    let window_remain = crate::server::options::win_remain_on_exit(window, global);
+    let Some(pane) = crate::tree::active_pane_mut(&mut window.root, &window.active_path) else {
+        return false;
+    };
+    // A pane in copy mode or a chooser takes the key itself: tmux looks it up
+    // in the mode's table and drops it when nothing binds it
+    // (server-client.c:1531-1538, :1684-1688), so it never reaches the dead
+    // pane check at forward_key (:1690-1692). Overlays (a popup, a menu, a
+    // confirm prompt) take it before that in tmux too. psmux's clock mode
+    // also keeps the key; tmux's has no key table, so there a key would
+    // close the dead pane.
+    if !matches!(app.mode, crate::types::Mode::Passthrough) || !pane.dead {
+        return false;
+    }
+    let remain = pane
+        .pane_options
+        .get("remain-on-exit")
+        .and_then(|value| crate::types::RemainOnExit::parse(value))
+        .unwrap_or(window_remain);
+    if !remain.closes_on_key() {
+        return false;
+    }
+    pane.pane_options.insert("remain-on-exit".to_string(), "off".to_string());
+    pane.dead = false;
+    true
+}
+
 /// A key press closes the status message, as in tmux, unless that message was
 /// shown with `display-message -N` (status_message_set ignore_keys): then it
 /// stays until its delay expires.

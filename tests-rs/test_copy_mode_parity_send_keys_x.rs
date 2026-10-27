@@ -61,6 +61,7 @@ fn make_pane() -> crate::types::Pane {
         last_title_check: epoch,
         last_infer_title: epoch,
         dead: false,
+        dead_info: None,
         last_text_input: None,
         last_special_key: None,
         vt_bridge_cache: None,

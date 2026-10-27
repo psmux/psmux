@@ -274,10 +274,16 @@ fn show_pa_adds_the_inherited_pane_option_with_a_marker() {
 
 #[test]
 fn show_pa_leaves_a_pane_local_unmarked_and_does_not_duplicate_it() {
-    let inherited = |_: &str| Some("off".to_string());
+    // remain-on-exit-format is a pane option too, so a pane that does not
+    // own it lists the inherited text with a marker.
+    let inherited = |name: &str| match name {
+        "remain-on-exit" => Some("off".to_string()),
+        "remain-on-exit-format" => Some("bye".to_string()),
+        _ => None,
+    };
     assert_eq!(
         render_pane_options("remain-on-exit failed", true, inherited),
-        "remain-on-exit failed\n",
+        "remain-on-exit failed\nremain-on-exit-format* bye\n",
     );
 }
 

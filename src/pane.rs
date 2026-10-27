@@ -1118,7 +1118,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             let spare_cwd = wp.spawn_cwd.take();
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
-            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()), start_command: String::new(), cwd_hint: None };
+            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()), start_command: String::new(), cwd_hint: None };
             // A warm-pool spare is only claimed for a DEFAULT-SHELL pane
             // (`command.is_none()` gates this whole branch), so its
             // `#{pane_start_command}` is the empty string — the wrapper the
@@ -1228,7 +1228,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -1731,7 +1731,7 @@ pub fn adopt_boot_pane(app: &mut AppState, wp: crate::types::WarmPane, boot: &Bo
     };
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = wp.pane_id;
-    let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: wp.rows, last_cols: wp.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(wp.spawned_at), start_command, cwd_hint: None };
+    let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: wp.rows, last_cols: wp.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(wp.spawned_at), start_command, cwd_hint: None };
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
@@ -1894,7 +1894,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let raw_pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw_argv(raw_args), cwd_hint: None };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw_argv(raw_args), cwd_hint: None };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -1987,7 +1987,7 @@ pub fn client_path_override(extra_env: &[(String, String)], inherited: Option<&s
 }
 
 /// Where a split puts its new pane: `-l` and `-b` of split-window.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SplitPlacement {
     /// `-l`: (cells, false) or (percent of the pane being split, true).
     pub size: Option<(u16, bool)>,
@@ -1995,6 +1995,23 @@ pub struct SplitPlacement {
     pub before: bool,
     /// `-f`: the new pane spans the whole window (SPAWN_FULLSIZE).
     pub full: bool,
+    /// `-k` (`Some(None)`) or `-m message` (`Some(Some(message))`): the new
+    /// pane stays when its program exits until a key is typed in it, with
+    /// `message` as its remain-on-exit-format (cmd-split-window.c:256-262).
+    pub keep: Option<Option<String>>,
+}
+
+/// split-window `-k` / `-m`, on the pane the split just made and focused:
+/// its own remain-on-exit is `key`, and `-m` sets its remain-on-exit-format
+/// (cmd-split-window.c:256-262).
+pub fn apply_split_keep(app: &mut AppState, keep: &Option<Option<String>>) {
+    let Some(message) = keep else { return };
+    let win = &mut app.windows[app.active_idx];
+    let Some(p) = active_pane_mut(&mut win.root, &win.active_path) else { return };
+    p.pane_options.insert("remain-on-exit".to_string(), "key".to_string());
+    if let Some(message) = message {
+        p.pane_options.insert("remain-on-exit-format".to_string(), message.clone());
+    }
 }
 
 /// Put `new_leaf` into the active window beside its active pane, with tmux's
@@ -2174,7 +2191,7 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
             let spare_cwd = wp.spawn_cwd.take();
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let new_pane_id = wp.pane_id;
-            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()), start_command: String::new(), cwd_hint: None };
+            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()), start_command: String::new(), cwd_hint: None };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell,
             // in the dialect that shell speaks (#600), unless it was started in
             // that directory (spare_needs_rehome).
@@ -2251,7 +2268,7 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let split_pane_id = app.next_pane_id;
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None });
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None });
     app.next_pane_id += 1;
     insert_split_leaf(app, kind, new_leaf, placement);
     let win = &mut app.windows[app.active_idx];
@@ -2266,10 +2283,21 @@ fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
     let killed_id = crate::tree::get_active_pane_id(&win.root, path);
     // Collect ordered pane IDs before kill for prev-by-index fallback (#71).
     let ordered_ids_before = crate::tree::collect_pane_ids(&win.root);
+    // The window's last pane cannot be cut out of the tree; the reaper closes
+    // it and the window once its process is gone. tmux kills the window then
+    // whatever remain-on-exit says (server-fn.c:221-236 at 3.8,
+    // server_kill_pane), so turn the pane's own value off and hand a pane
+    // that is already dead back to the reaper. Under `on` the window used to
+    // stay with a dead pane in it.
+    let last_pane = matches!(win.root, Node::Leaf(_));
     // Explicitly kill the target pane's process tree FIRST.
     // remove_node() doesn't call kill_node() when the root is a single Leaf,
     // so we must do it here to ensure no orphaned processes.
     if let Some(p) = active_pane_mut(&mut win.root, path) {
+        if last_pane {
+            p.pane_options.insert("remain-on-exit".to_string(), "off".to_string());
+            p.dead = false;
+        }
         crate::platform::process_kill::kill_process_tree(&mut p.child);
     }
     // In cells, so the neighbour gets exactly the dead pane's cells.

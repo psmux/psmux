@@ -27,6 +27,7 @@ fn leaf(id: usize) -> Node {
         last_title_check: Instant::now(),
         last_infer_title: Instant::now(),
         dead: false,
+        dead_info: None,
         last_text_input: None,
         last_special_key: None,
         vt_bridge_cache: None,

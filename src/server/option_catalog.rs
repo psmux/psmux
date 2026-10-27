@@ -77,7 +77,17 @@ pub enum ChoiceKind {
     ExtendedKeys,
     /// tmux `options_table_extended_keys_format_list` (options-table.c:105).
     ExtendedKeysFormat,
+    /// tmux `options_table_remain_on_exit_list` (options-table.c:93 at 3.8).
+    RemainOnExit,
 }
+
+/// tmux's `remain-on-exit-format` default (options-table.c:1713-1718).
+pub const REMAIN_ON_EXIT_FORMAT_DEFAULT: &str = concat!(
+    "Pane is dead (",
+    "#{?#{!=:#{pane_dead_status},},status #{pane_dead_status},}",
+    "#{?#{!=:#{pane_dead_signal},},signal #{pane_dead_signal},}, ",
+    "#{t:pane_dead_time})",
+);
 
 /// The values tmux's CHOICE option `extended-keys` takes.
 pub const EXTENDED_KEYS_CHOICES: &[&str] = &["off", "on", "always"];
@@ -101,6 +111,9 @@ impl ChoiceKind {
                     Err(format!("unknown value: {}", value))
                 }
             }
+            Self::RemainOnExit => crate::types::RemainOnExit::parse(value.trim())
+                .map(|_| ())
+                .ok_or_else(|| format!("unknown value: {}", value)),
             Self::CopyModeLineNumbers => {
                 if crate::copy_line_numbers::CHOICES.contains(&value.trim()) {
                     Ok(())
@@ -127,7 +140,7 @@ impl ChoiceKind {
     const fn allows_append(self) -> bool {
         match self {
             Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
-            | Self::ExtendedKeys | Self::ExtendedKeysFormat => true,
+            | Self::ExtendedKeys | Self::ExtendedKeysFormat | Self::RemainOnExit => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -135,7 +148,7 @@ impl ChoiceKind {
     const fn allows_local_window_override(self) -> bool {
         match self {
             Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
-            | Self::ExtendedKeys | Self::ExtendedKeysFormat => true,
+            | Self::ExtendedKeys | Self::ExtendedKeysFormat | Self::RemainOnExit => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -328,7 +341,9 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // ── Window options ──
     OptionDef { name: "automatic-rename", scope: Window, option_type: Boolean, default: "on", description: "Auto-rename windows based on running command" },
     OptionDef { name: "monitor-activity", scope: Window, option_type: Boolean, default: "off", description: "Monitor for activity in window" },
-    OptionDef { name: "remain-on-exit", scope: Window, option_type: Boolean, default: "off", description: "Keep pane open after command exits" },
+    // tmux options-table.c:1699-1721, window and pane scope.
+    OptionDef { name: "remain-on-exit", scope: Window, option_type: Choice(ChoiceKind::RemainOnExit), default: "off", description: "Whether a pane stays after its program exits: off, on, failed (only for a nonzero status), key (until a key is typed in it) or failed-key (a failed exit, until a key is typed in it)" },
+    OptionDef { name: "remain-on-exit-format", scope: Window, option_type: OptionType::String, default: REMAIN_ON_EXIT_FORMAT_DEFAULT, description: "Text written on the bottom line of a pane remain-on-exit kept" },
     OptionDef { name: "aggressive-resize", scope: Window, option_type: Boolean, default: "off", description: "Resize window to smallest attached client" },
     // tmux types both of these OPTIONS_TABLE_STRING (options-table.c:1474) and
     // documents a percentage form ("10%"), so they cannot be validated as a

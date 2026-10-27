@@ -186,6 +186,88 @@ pub fn client_tty_name(cid: u64, pid: Option<u32>) -> String {
     }
 }
 
+/// The `remain-on-exit` window and pane option, tmux's CHOICE of `off`,
+/// `on`, `failed`, `key` and `failed-key` (options-table.c:93-95 at tmux 3.8,
+/// numbers 0 to 4; `failed-key` is new in 3.8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemainOnExit {
+    /// The pane closes when its program exits.
+    #[default]
+    Off,
+    /// The pane stays, dead, until it is respawned or killed.
+    On,
+    /// The pane stays only when its program exited with a nonzero status.
+    Failed,
+    /// The pane stays until a key typed in a client reaches it
+    /// (server-client.c:1411-1428).
+    Key,
+    /// `failed` and `key` together: a clean exit closes the pane, a failed
+    /// one keeps it until a key is typed in it.
+    FailedKey,
+}
+
+impl RemainOnExit {
+    /// One of tmux's five names; anything else is no value
+    /// (options_find_choice, `unknown value: X`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            "failed" => Some(Self::Failed),
+            "key" => Some(Self::Key),
+            "failed-key" => Some(Self::FailedKey),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Failed => "failed",
+            Self::Key => "key",
+            Self::FailedKey => "failed-key",
+        }
+    }
+
+    /// Whether a pane whose program just exited stays (server-fn.c:385-394):
+    /// `failed` and `failed-key` keep it only for a nonzero status.
+    pub fn keeps(self, exit_success: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::On | Self::Key => true,
+            Self::Failed | Self::FailedKey => !exit_success,
+        }
+    }
+
+    /// Whether a key typed in the dead pane closes it: `key` and
+    /// `failed-key` (server-client.c:1423).
+    pub fn closes_on_key(self) -> bool {
+        matches!(self, Self::Key | Self::FailedKey)
+    }
+
+    /// `set remain-on-exit` with no value (options.c:1263-1266): `off` and
+    /// `on` swap, `failed`, `key` and `failed-key` stay as they are.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Off => Self::On,
+            Self::On => Self::Off,
+            other => other,
+        }
+    }
+}
+
+/// How the program in a pane that remain-on-exit kept ended, for
+/// `#{pane_dead_status}` and `#{pane_dead_time}` (format.c:2269-2312).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeadInfo {
+    /// The exit code. Windows has no signals, so `#{pane_dead_signal}` stays
+    /// empty and the code is always the status.
+    pub status: u32,
+    /// When the pane died, the time tmux keeps in `wp->dead_time`.
+    pub time: chrono::DateTime<chrono::Local>,
+}
+
 /// Which client a format is expanded for (`display-message -c`, issue #724).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientSel {
@@ -251,6 +333,8 @@ pub struct Pane {
     pub last_infer_title: Instant,
     /// True when the child process has exited but remain-on-exit keeps the pane visible.
     pub dead: bool,
+    /// The exit status and time of death of a dead pane, `None` while it runs.
+    pub dead_info: Option<DeadInfo>,
     /// Timestamp of the last printable keystroke routed via the INTERACTIVE
     /// text-input route (`handle_key -> forward_key_to_active`); `None` until
     /// the first one. NOT updated by the injected route (`send-keys` /
@@ -1925,8 +2009,10 @@ pub struct AppState {
     pub activity_action: String,
     /// silence-action: what to do on silence ("any", "none", "current", "other")
     pub silence_action: String,
-    /// remain-on-exit: keep panes open after process exits
-    pub remain_on_exit: bool,
+    /// remain-on-exit: whether a pane stays after its program exits
+    /// (off, on, failed, key or failed-key), the global value windows and
+    /// panes inherit.
+    pub remain_on_exit: RemainOnExit,
     /// destroy-unattached: exit server when no clients remain attached
     pub destroy_unattached: bool,
     /// exit-empty: exit server when all panes/windows are empty
@@ -3356,7 +3442,7 @@ impl AppState {
             visual_activity: false,
             activity_action: "other".to_string(),
             silence_action: "other".to_string(),
-            remain_on_exit: false,
+            remain_on_exit: RemainOnExit::Off,
             destroy_unattached: false,
             exit_empty: true,
             aggressive_resize: false,

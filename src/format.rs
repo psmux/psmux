@@ -2019,7 +2019,18 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 if p.dead { "1".into() } else { "0".into() }
             } else { "0".into() }
         }
-        "pane_dead_signal" | "pane_dead_status" | "pane_dead_time" => "0".into(),
+        // tmux format.c:2269-2312: the exit status and the time of death of
+        // a pane remain-on-exit kept, empty while it runs. Windows has no
+        // signals, so pane_dead_signal is always empty.
+        "pane_dead_status" => target_pane()
+            .and_then(|p| p.dead_info)
+            .map(|info| info.status.to_string())
+            .unwrap_or_default(),
+        "pane_dead_time" => target_pane()
+            .and_then(|p| p.dead_info)
+            .map(|info| info.time.timestamp().to_string())
+            .unwrap_or_default(),
+        "pane_dead_signal" => String::new(),
         "pane_format" => "1".into(),
         // select-pane -d / -e (tmux format.c format_cb_pane_input_off:
         // `wp->flags & PANE_INPUTOFF`).

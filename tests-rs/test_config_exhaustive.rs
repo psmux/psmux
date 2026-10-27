@@ -192,7 +192,7 @@ fn default_visual_activity() {
 #[test]
 fn default_remain_on_exit() {
     let app = mock_app();
-    assert!(!app.remain_on_exit);
+    assert_eq!(app.remain_on_exit, crate::types::RemainOnExit::Off);
 }
 
 #[test]
@@ -736,7 +736,7 @@ fn config_file_visual_activity_on() {
 fn config_file_remain_on_exit_on() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g remain-on-exit on\n");
-    assert!(app.remain_on_exit);
+    assert_eq!(app.remain_on_exit, crate::types::RemainOnExit::On);
 }
 
 #[test]

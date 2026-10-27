@@ -1471,7 +1471,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     monitor-activity    Bool Flag windows with new output (default: off)
     monitor-silence     Int  Seconds before silence flag (default: 0)
     synchronize-panes   Bool Send input to all panes (default: off)
-    remain-on-exit      Bool Keep panes after process exits (default: off)
+    remain-on-exit      Keep panes after process exits: off, on, failed, key, failed-key (default: off)
     aggressive-resize   Bool Resize to smallest client (default: off)
     set-titles          Bool Update terminal title (default: off)
     set-titles-string   Str  Terminal title format

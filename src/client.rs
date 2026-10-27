@@ -773,42 +773,11 @@ pub(crate) fn previous_hyperlink_rows_set(new_rows: Vec<u16>) {
     PREVIOUS_HYPERLINK_ROWS.with(|rows| *rows.borrow_mut() = new_rows);
 }
 
-/// SGR parameters for a ratatui color as a foreground (`base` 38/foreground)
-/// or background (`base` 48). Returns the numeric params without the leading
-/// `\x1b[` or trailing `m`.
-fn color_sgr(c: ratatui::style::Color, fg: bool) -> String {
-    use ratatui::style::Color::*;
-    // 30-37 / 40-47 normal, 90-97 / 100-107 bright, 39/49 default.
-    let (base, bright_base, def) = if fg { (30u8, 90u8, 39u8) } else { (40u8, 100u8, 49u8) };
-    match c {
-        Reset => def.to_string(),
-        Black => (base).to_string(),
-        Red => (base + 1).to_string(),
-        Green => (base + 2).to_string(),
-        Yellow => (base + 3).to_string(),
-        Blue => (base + 4).to_string(),
-        Magenta => (base + 5).to_string(),
-        Cyan => (base + 6).to_string(),
-        Gray => (base + 7).to_string(),
-        DarkGray => (bright_base).to_string(),
-        LightRed => (bright_base + 1).to_string(),
-        LightGreen => (bright_base + 2).to_string(),
-        LightYellow => (bright_base + 3).to_string(),
-        LightBlue => (bright_base + 4).to_string(),
-        LightMagenta => (bright_base + 5).to_string(),
-        LightCyan => (bright_base + 6).to_string(),
-        White => (bright_base + 7).to_string(),
-        Indexed(n) => format!("{};5;{}", if fg { 38 } else { 48 }, n),
-        Rgb(r, g, b) => format!("{};2;{};{};{}", if fg { 38 } else { 48 }, r, g, b),
-    }
-}
-
 /// Build the raw escape sequence that overlays the collected hyperlink runs on
 /// top of an already-drawn frame: save cursor, then for each run move to its
 /// position, set its style, write the text wrapped in OSC 8, and finally
 /// restore the cursor. Pure function so it can be unit-tested.
 pub(crate) fn build_osc8_overlay(runs: &[HyperlinkRun]) -> String {
-    use ratatui::style::Modifier;
     if runs.is_empty() {
         return String::new();
     }
@@ -820,17 +789,7 @@ pub(crate) fn build_osc8_overlay(runs: &[HyperlinkRun]) -> String {
         }
         // Move to 1-based (row;col), reset, then set the run's style.
         out.push_str(&format!("\x1b[{};{}H\x1b[0m", run.y + 1, run.x + 1));
-        let mut params = vec![color_sgr(run.style.fg.unwrap_or(ratatui::style::Color::Reset), true),
-                              color_sgr(run.style.bg.unwrap_or(ratatui::style::Color::Reset), false)];
-        let m = run.style.add_modifier;
-        if m.contains(Modifier::BOLD) { params.push("1".into()); }
-        if m.contains(Modifier::DIM) { params.push("2".into()); }
-        if m.contains(Modifier::ITALIC) { params.push("3".into()); }
-        if m.contains(Modifier::UNDERLINED) { params.push("4".into()); }
-        if m.contains(Modifier::SLOW_BLINK) { params.push("5".into()); }
-        if m.contains(Modifier::REVERSED) { params.push("7".into()); }
-        if m.contains(Modifier::CROSSED_OUT) { params.push("9".into()); }
-        out.push_str(&format!("\x1b[{}m", params.join(";")));
+        out.push_str(&crate::style::style_sgr(run.style));
         // OSC 8 open ; text ; OSC 8 close.
         out.push_str(&format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", run.uri, run.text));
     }

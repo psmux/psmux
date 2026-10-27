@@ -49,7 +49,7 @@
 // the inherited values in with a `*`, `-wg` is the global window table.
 
 use super::*;
-use crate::types::{AppState, LayoutKind, Node};
+use crate::types::{AppState, LayoutKind, Node, RemainOnExit};
 
 fn make_window(name: &str, id: usize) -> crate::types::Window {
     crate::types::Window {
@@ -112,8 +112,9 @@ fn set_w_with_a_window_target_writes_only_that_window() {
         "off",
         "BUG #648: a window targeted write changed the GLOBAL store",
     );
-    assert!(
-        !app.remain_on_exit,
+    assert_eq!(
+        app.remain_on_exit,
+        RemainOnExit::Off,
         "BUG #648: a window targeted write flipped the session-wide field",
     );
 }
@@ -180,7 +181,7 @@ fn set_wg_writes_the_global_table_and_no_window() {
     // the global path, which is the config parser's `is_global` branch.
     crate::config::parse_config_line(&mut app, "set -wg remain-on-exit on");
     assert_eq!(get_option_value(&app, "remain-on-exit"), "on", "global table took it");
-    assert!(app.remain_on_exit);
+    assert_eq!(app.remain_on_exit, RemainOnExit::On);
     assert!(
         window_local_option(&app, 0, "remain-on-exit").is_none(),
         "BUG: -wg wrote the WINDOW's own table",
@@ -251,25 +252,25 @@ fn a_pane_option_outranks_the_window_option() {
     // `-p on` on the one pane that should survive. tree::keep_dead_pane is the
     // single place reap_children resolves the chain.
     assert!(
-        crate::tree::keep_dead_pane(Some("on"), false, true),
+        crate::tree::keep_dead_pane(Some("on"), RemainOnExit::Off, true),
         "pane `on` must beat window `off`",
     );
     assert!(
-        !crate::tree::keep_dead_pane(Some("off"), true, true),
+        !crate::tree::keep_dead_pane(Some("off"), RemainOnExit::On, true),
         "pane `off` must beat window `on`",
     );
     assert!(
-        crate::tree::keep_dead_pane(Some("failed"), false, false),
+        crate::tree::keep_dead_pane(Some("failed"), RemainOnExit::Off, false),
         "pane `failed` keeps a nonzero exit even when the window says off",
     );
     assert!(
-        !crate::tree::keep_dead_pane(Some("failed"), true, true),
+        !crate::tree::keep_dead_pane(Some("failed"), RemainOnExit::On, true),
         "pane `failed` closes a clean exit even when the window says on",
     );
     // ... and with no pane entry the WINDOW decides, which is the #648 fix:
     // this argument used to be one session-wide flag for every window.
-    assert!(crate::tree::keep_dead_pane(None, true, true));
-    assert!(!crate::tree::keep_dead_pane(None, false, false));
+    assert!(crate::tree::keep_dead_pane(None, RemainOnExit::On, true));
+    assert!(!crate::tree::keep_dead_pane(None, RemainOnExit::Off, false));
 }
 
 #[test]
@@ -280,10 +281,10 @@ fn the_reporter_scenario_leaves_the_other_window_closing_panes() {
     // in window `one` must still close.
     let mut app = two_windows();
     apply_set_window_option(&mut app, "s:zero", "remain-on-exit", "on", false, false, false, false);
-    let zero = window_flag(&app, 0, "remain-on-exit", app.remain_on_exit);
-    let one = window_flag(&app, 1, "remain-on-exit", app.remain_on_exit);
-    assert!(zero, "the targeted window keeps dead panes");
-    assert!(!one, "BUG #648: a later pane in ANOTHER window stopped closing");
+    let zero = crate::server::options::win_remain_on_exit(&app.windows[0], app.remain_on_exit);
+    let one = crate::server::options::win_remain_on_exit(&app.windows[1], app.remain_on_exit);
+    assert_eq!(zero, RemainOnExit::On, "the targeted window keeps dead panes");
+    assert_eq!(one, RemainOnExit::Off, "BUG #648: a later pane in ANOTHER window stopped closing");
     assert!(crate::tree::keep_dead_pane(None, zero, true));
     assert!(!crate::tree::keep_dead_pane(None, one, true));
 }
@@ -385,7 +386,7 @@ fn a_config_line_with_dash_w_and_a_target_writes_one_window() {
         "off",
         "BUG #648: a config `set -w -t` line still wrote every window",
     );
-    assert!(!app.remain_on_exit, "BUG #648: it also wrote the global");
+    assert_eq!(app.remain_on_exit, RemainOnExit::Off, "BUG #648: it also wrote the global");
 }
 
 #[test]
@@ -499,7 +500,7 @@ fn chained_window_writes_each_reach_their_own_window() {
     assert_eq!(show_w(&app, 1, "remain-on-exit"), "off");
     assert_eq!(show_w(&app, 1, "monitor-activity"), "on");
     assert_eq!(show_w(&app, 0, "monitor-activity"), "off");
-    assert!(!app.remain_on_exit && !app.monitor_activity, "globals untouched");
+    assert!(app.remain_on_exit == RemainOnExit::Off && !app.monitor_activity, "globals untouched");
 }
 
 // ── the options that were already per window keep working ────────────────────
