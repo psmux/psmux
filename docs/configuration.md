@@ -194,6 +194,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `status-right-length` | Int | `40` | Max width of status-right |
 | `focus-events` | Bool | `off` | Pass focus events to apps |
 | `sixel` | Choice | `auto` | When to draw the sixel images programs in a pane write (`off`/`on`/`auto`). They reach psmux only through a console host that passes sixel on, which the inbox `conhost.exe` does not: point `PSMUX_CONPTY_DIR` at an OpenConsole, see [The Console Host Seam](diagnostics.md#the-console-host-seam). With `auto` the client draws them only when the outer terminal's DA1 reply lists sixel (4), as Windows Terminal's does, which is what tmux does. `on` draws them whatever the terminal said, for a terminal that sends no reply, and `off` never draws them |
+| `input-buffer-size` | Int | `1048576` | Bytes a sixel image's DCS may hold before it is dropped, as in tmux. Range `1048576` to `4294967295`. tmux also holds OSC and APC strings to it; psmux holds only sixel |
 | `program-status` | Bool | `off` | psmux extension. Accept OSC 7501 program status reports and answer its capability query. Off, OSC 7501 is ignored and the query draws no reply. See [program-status.md](program-status.md) |
 | `alternate-screen` | Bool | `on` | Honour the DEC 47 / 1049 alternate screen. Set `off` so full screen program output lands in the scrollback instead of being discarded on exit. See [Alternate Screen](#alternate-screen) |
 | `mode-keys` | Str | `emacs` | `vi` or `emacs` |

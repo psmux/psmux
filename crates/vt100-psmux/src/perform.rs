@@ -1,12 +1,33 @@
 const BASE64: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
 const CLIPBOARD_SELECTOR: &[u8] = b"cpqs01234567";
+/// tmux's `input-buffer-size` default (`INPUT_BUF_DEFAULT_SIZE`, tmux.h), which
+/// is also the option's minimum (options-table.c).
+pub const DEFAULT_INPUT_BUFFER_SIZE: usize = 1 << 20;
+
 /// The most a sixel DCS may hold before it is thrown away: tmux's
-/// `input-buffer-size` default (INPUT_BUF_DEFAULT_SIZE, tmux.h), past which
-/// `input_input` sets INPUT_DISCARD and the image is never drawn.  Without a
-/// limit a pane that writes `ESC P q` and no ST grew the server by twice
-/// what it wrote.
-const SIXEL_MAX_BYTES: usize = 1 << 20;
+/// `input-buffer-size`, past which `input_input` sets `INPUT_DISCARD` and the
+/// image is never drawn.  Without a limit a pane that writes `ESC P q` and no
+/// ST grew the server by twice what it wrote.  One per process because tmux
+/// keeps it in a static (`input_buffer_size`, input.c) that every pane's
+/// parser reads; psmux stores it here so the parser can do the same.
+static INPUT_BUFFER_SIZE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_INPUT_BUFFER_SIZE);
+
+/// Record the `input-buffer-size` server option for every pane parser in this
+/// process, as tmux's `input_set_buffer_size` (input.c) does.
+///
+/// Only a sixel DCS is held to it here; tmux also holds OSC and APC strings
+/// to it.
+pub fn set_input_buffer_size(bytes: usize) {
+    INPUT_BUFFER_SIZE.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The `input-buffer-size` last given to [`set_input_buffer_size`].
+#[must_use]
+pub fn input_buffer_size() -> usize {
+    INPUT_BUFFER_SIZE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     pub screen: crate::screen::Screen,
@@ -539,7 +560,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
     fn put(&mut self, byte: u8) {
         if self.dcs_active {
-            if self.dcs_buf.len() >= SIXEL_MAX_BYTES {
+            if self.dcs_buf.len() >= input_buffer_size() {
                 self.dcs_active = false;
                 self.dcs_buf = Vec::new();
                 return;
