@@ -33,6 +33,10 @@ pub const SUPPORTED: &[&str] = &[
     "swap-pane", "swapp",
     "respawn-pane", "respawnp",
     "clear-history", "clearhist",
+    // copy mode: the dispatcher had its arms (CopyEnter, CopyModeCmd) from
+    // step 2, but a one shot `copy-mode` was refused here, so a script's
+    // `copy-mode -t s:` left pane_in_mode at 0 at exit 0
+    "copy-mode",
     // input and output
     "send-keys", "send",
     "send-text", "send-key", "send-paste",

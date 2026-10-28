@@ -94,6 +94,11 @@ try {
     $r = Raw A 'kill-session -t D'
     Check (WaitFor { -not (Has D) }) "kill-session -t D on A's listener ends D" ($r -replace "`n", ' / ')
     Check (Has A) "and A is alive" ""
+    # a one shot copy-mode (the router refused it, the dispatcher had its arms)
+    P copy-mode -t "=B:" | Out-Null
+    $mode = (P display -p -t B '#{pane_in_mode}') -join ''
+    Check ($mode -eq '1') "a one shot copy-mode -t =B: enters copy mode" "pane_in_mode=$mode"
+    P send-keys -t B -X cancel | Out-Null
     $r = Raw A 'new-window -d -t C9: -n NOWHERE'
     Check ($r -match "can't find session") "a target naming no session is still tmux's error" ($r -replace "`n", ' / ')
 

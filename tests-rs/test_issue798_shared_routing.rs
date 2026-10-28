@@ -130,6 +130,13 @@ fn within_session_drops_the_session_part() {
 }
 
 #[test]
+fn a_one_shot_copy_mode_is_served() {
+    // the dispatcher has copy mode's arms; the router refused the command
+    assert!(crate::server::shared::router::is_supported("copy-mode"));
+    assert_eq!(crate::server::shared::router::first_unsupported("copy-mode -t =a:"), None);
+}
+
+#[test]
 fn server_start_args_of_a_binding_new_session() {
     let a: Vec<String> = ["psmux", "server", "-s", "N1", "-L", "ns", "-d", "C:\\w", "-n", "win", "-x", "100", "-y", "40", "-e", "K=V", "-c", "cmd /k echo"]
         .iter()
