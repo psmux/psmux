@@ -317,6 +317,67 @@ fn new_session(ns: Option<&str>, words: &[String]) -> ! {
     attach(ns, &name);
 }
 
+/// A `psmux server -s NAME ...` process started while the switch says shared
+/// (#798 step 3). A shared server's protocol handler starts one for a
+/// `new-session` from a key binding or the prompt, exactly as a per session
+/// server starts its new session's server (connection.rs), and then waits on
+/// its connection thread for the session's registry files. With a live shared
+/// server in the namespace this process hands the session to it, as the
+/// shared CLI's `new-session -d` does, and exits: 0 when it was made, 1 with
+/// the server's message when not. With none it returns, and the caller refuses
+/// as before. The arguments are the ones that handler passes: `-s`, `-L`,
+/// `-d` (start directory), `-n`, `-c` (command), `-x`, `-y`, `-e K=V`.
+pub(super) fn forward_server_start() {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(args) = server_start_args(&args) else { return };
+    let ns = args.0;
+    let Some(marker) = registry::live_marker(ns.as_deref()) else { return };
+    let mut req = args.1;
+    req.cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned());
+    let mut lines = vec!["new-session".to_string()];
+    lines.extend(router::new_session_fields(&req));
+    lines.push("end".to_string());
+    match control_request(&marker, &lines) {
+        Ok(_) => std::process::exit(0),
+        Err(e) => fail(&format!("psmux: {e}")),
+    }
+}
+
+/// The namespace and the session request of `psmux server -s NAME ...`
+/// arguments (see `forward_server_start`). None for any other process.
+pub(super) fn server_start_args(args: &[String]) -> Option<(Option<String>, NewSessionArgs)> {
+    if args.get(1).map(String::as_str) != Some("server") {
+        return None;
+    }
+    let mut ns = None;
+    let mut out = NewSessionArgs::default();
+    let mut i = 2;
+    while i < args.len() {
+        let value = args.get(i + 1).cloned();
+        match args[i].as_str() {
+            "-s" => out.name = value,
+            "-L" => ns = value,
+            "-d" => out.start_dir = value,
+            "-n" => out.window_name = value,
+            "-c" => out.command = value,
+            "-x" => out.width = value.and_then(|v| v.parse().ok()),
+            "-y" => out.height = value.and_then(|v| v.parse().ok()),
+            "-e" => {
+                if let Some((k, v)) = value.as_deref().and_then(|v| v.split_once('=')) {
+                    out.env.push((k.to_string(), v.to_string()));
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+    out.name.as_ref()?;
+    Some((ns, out))
+}
+
 /// The shared mode CLI. Never returns.
 pub(super) fn run(ns: Option<&str>) -> ! {
     let args: Vec<String> = std::env::args().collect();
