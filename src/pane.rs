@@ -443,38 +443,94 @@ pub fn prefer_app_execution_alias(resolved: String) -> String {
 /// the package store and which activates fine in any process context. This
 /// turns a hard "psmux: failed to create session" for Store-only-pwsh users
 /// attaching over SSH into a graceful degrade instead (issue #167 class).
+///
+/// The SSH markers alone are not enough (#924): a server started in session
+/// 0 without them (a service, a scheduled task, an SSH command whose
+/// environment was scrubbed) hits the same ACCESS_DENIED on every pane.
+/// Windows OpenSSH runs every session in session 0, so "this process runs in
+/// session 0" is the condition that actually matters; it is one syscall,
+/// taken once per process inside this cache, so the normal path spawns no
+/// probe process.
 pub fn cached_shell() -> Option<&'static str> {
     CACHED_SHELL_PATH.get_or_init(|| {
-        // tmux seeds `default-shell` from $SHELL before anything else
-        // (tmux.c getshell(), gated by checkshell()). An explicit SHELL is the
-        // user's choice, so it wins over the pwsh > powershell > cmd walk and
-        // over the SSH store guard below (#683).
-        if let Some(from_env) = shell_from_env() {
-            return Some(from_env);
-        }
-        let resolved = which::which("pwsh").ok()
-            .or_else(|| which::which("powershell").ok())
-            .or_else(|| which::which("cmd").ok())
-            .map(|p| prefer_app_execution_alias(p.to_string_lossy().into_owned()));
-        if let Some(ref path) = resolved {
-            let is_store = path.to_ascii_lowercase().contains("\\windowsapps\\");
-            let is_ssh_spawned = std::env::var("SSH_CONNECTION").is_ok()
-                || std::env::var("SSH_CLIENT").is_ok();
-            if is_store && is_ssh_spawned {
-                if let Ok(classic) = which::which("powershell") {
-                    let classic = classic.to_string_lossy().into_owned();
-                    if !classic.to_ascii_lowercase().contains("\\windowsapps\\") {
-                        return Some(classic);
-                    }
-                }
-                // No classic PowerShell found; cmd.exe is never MSIX-packaged.
-                if let Ok(cmd) = which::which("cmd") {
-                    return Some(cmd.to_string_lossy().into_owned());
-                }
-            }
-        }
-        resolved
+        let store_unusable = || {
+            std::env::var_os("SSH_CONNECTION").is_some()
+                || std::env::var_os("SSH_CLIENT").is_some()
+                || in_session_zero()
+        };
+        let which_path = |name: &str| {
+            which::which(name).ok().map(|p| p.to_string_lossy().into_owned())
+        };
+        let walk = which_path("pwsh")
+            .or_else(|| which_path("powershell"))
+            .or_else(|| which_path("cmd"))
+            .map(prefer_app_execution_alias);
+        select_default_shell(
+            shell_from_env(),
+            walk,
+            store_unusable,
+            || which_path("powershell"),
+            || which_path("cmd"),
+        )
     }).as_deref()
+}
+
+/// Is this path an MSIX/Store packaged executable (app execution alias or
+/// package interior)? Both live under a `\WindowsApps\` directory.
+pub fn is_store_shell_path(path: &str) -> bool {
+    path.to_ascii_lowercase().contains("\\windowsapps\\")
+}
+
+/// Pick the default shell from its candidates, as `cached_shell` does, with
+/// every environment probe passed in so the rule is unit testable (#924).
+///
+/// tmux seeds `default-shell` from $SHELL first (tmux.c getshell()), and
+/// keeps it only when checkshell() says it can be executed; otherwise it
+/// falls back (spawn.c uses `_PATH_BSHELL` when checkshell fails). The
+/// Windows reading: a Store packaged shell cannot be executed when
+/// `store_unusable()` is true, so neither an explicit SHELL nor the
+/// pwsh > powershell > cmd walk may pick one then; the fallback is classic
+/// Windows PowerShell, then cmd.exe, neither of which is ever MSIX packaged.
+/// `store_unusable` and the fallbacks are only evaluated when a Store path
+/// was actually chosen, so the normal path costs nothing extra.
+pub fn select_default_shell(
+    from_env: Option<String>,
+    walk: Option<String>,
+    store_unusable: impl FnOnce() -> bool,
+    classic_powershell: impl FnOnce() -> Option<String>,
+    cmd: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let chosen = from_env.or(walk)?;
+    if !is_store_shell_path(&chosen) || !store_unusable() {
+        return Some(chosen);
+    }
+    if let Some(classic) = classic_powershell().filter(|p| !is_store_shell_path(p)) {
+        return Some(classic);
+    }
+    if let Some(cmd) = cmd() {
+        return Some(cmd);
+    }
+    // Nothing better exists; let the spawn report the real error.
+    Some(chosen)
+}
+
+/// Does this process run in session 0 (services, Windows OpenSSH)? MSIX app
+/// activation needs an interactive session, which session 0 never is.
+#[cfg(windows)]
+fn in_session_zero() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ProcessIdToSessionId(dw_process_id: u32, p_session_id: *mut u32) -> i32;
+    }
+    let mut session_id: u32 = u32::MAX;
+    // SAFETY: plain out parameter for our own pid.
+    let ok = unsafe { ProcessIdToSessionId(std::process::id(), &mut session_id) };
+    ok != 0 && session_id == 0
+}
+
+#[cfg(not(windows))]
+fn in_session_zero() -> bool {
+    false
 }
 
 /// The shell named by the SHELL environment variable, if it is one psmux can
@@ -5046,3 +5102,6 @@ mod tests_issue712_bash_quote_strip;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue794_argv_metachars.rs"]
 mod test_issue794_argv_metachars;
+#[cfg(test)]
+#[path = "../tests-rs/test_issue924_store_shell_session0.rs"]
+mod test_issue924_store_shell_session0;
