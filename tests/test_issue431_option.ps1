@@ -1,7 +1,7 @@
-# Issue #431 (MODULE M7): dedicated session boolean option `sixel` (default on).
+# Issue #431 (MODULE M7): dedicated session option `sixel` (default auto).
 #
 # Proves:
-#   1. `sixel` defaults to on on a fresh session (show-options -g -v sixel).
+#   1. `sixel` defaults to auto on a fresh session (show-options -g -v sixel).
 #   2. `set-option -g sixel off` is reflected by show-options.
 #   3. `set-option -g sixel on` flips it back.
 #   4. The dump-state JSON carries a boolean `sixel` field (downstream M5/M6
@@ -74,10 +74,10 @@ function Get-ShowOpt {
 
 Write-Host "`n=== Issue #431 M7: sixel option plumbing + dump-state field ===" -ForegroundColor Cyan
 
-# 1. Default on
+# 1. Default auto
 $v = Get-ShowOpt
-if ($v -match "on") { Write-Pass "default: show-options -g -v sixel = 'on' (got '$v')" }
-else { Write-Fail "default: expected 'on', got '$v'" }
+if ($v -match "auto") { Write-Pass "default: show-options -g -v sixel = 'auto' (got '$v')" }
+else { Write-Fail "default: expected 'auto', got '$v'" }
 
 $d = Get-SixelField
 if ($d -and $d.present) { Write-Pass "dump-state carries a 'sixel' field" }
