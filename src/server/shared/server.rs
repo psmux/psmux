@@ -35,13 +35,24 @@ use super::super::*;
 use super::buffers::ServerBuffers;
 use super::ids::ServerIds;
 use super::reply::{self, Outcome};
-use super::{registry, router};
+use super::{registry, route, router};
 
 static IN_SHARED_SERVER: AtomicBool = AtomicBool::new(false);
 
 /// True inside the shared server process.
 pub(crate) fn in_shared_server() -> bool {
     IN_SHARED_SERVER.load(Ordering::Relaxed)
+}
+
+thread_local! {
+    static ON_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True on the shared server's loop thread: the thread every session's
+/// requests, hooks and timers run on. Anything here that waits for the loop
+/// to serve a request waits on itself.
+pub(crate) fn on_loop_thread() -> bool {
+    ON_LOOP.with(|c| c.get())
 }
 
 /// The session whose request is running, for the panic hook's report.
@@ -133,6 +144,12 @@ struct Peer {
     name: String,
     port: u16,
     key: String,
+    /// The registry base, for a target that names it (`route`).
+    base: String,
+    /// The session's request channel and alias table: a command line whose
+    /// target names this session runs on its handler with these (`route`).
+    tx: mpsc::Sender<CtrlReq>,
+    aliases: Aliases,
 }
 
 /// Deliver one server wide write to a session through its own listener,
@@ -317,6 +334,7 @@ fn namespace_label(ns: &Option<String>) -> String {
 
 fn run(ns: Option<String>) -> ! {
     IN_SHARED_SERVER.store(true, Ordering::Relaxed);
+    ON_LOOP.with(|c| c.set(true));
     let _ = crate::format::JOB_CONTEXT.set(capture_job_context);
     #[cfg(windows)]
     crate::platform::mouse_inject::SERVER_PROCESS.store(true, Ordering::Relaxed);
@@ -477,6 +495,12 @@ fn run(ns: Option<String>) -> ! {
                     if matches!(req, CtrlReq::PtyWake) {
                         crate::types::clear_wake_pending();
                     }
+                    // #798 step 3: switch-client to a window or pane of a
+                    // sibling session selects it there first, in process.
+                    let req = match switch_across(&mut sessions, sid, req, &mut ids, &mut bufs, &ns, &*pty_system, &mut ended) {
+                        Some(req) => req,
+                        None => continue,
+                    };
                     let Some(s) = sessions.get_mut(&sid) else { continue };
                     match run_request(s, &mut ids, &mut bufs, &ns, |app, lp| {
                         super::dispatch::dispatch(app, lp, req, &*pty_system)
@@ -566,6 +590,99 @@ where
         // Quarantine: the panic hook logged it to crash.log; this session's
         // state may be half updated, so it ends, and only it.
         Err(_) => Flow::EndSession,
+    }
+}
+
+/// `switch-client -t RAW` arriving for session `sid` whose target is a window
+/// or pane of ANOTHER session of this server (#798 step 3, item 1). tmux
+/// selects the window and pane in the destination session and moves the
+/// client there (cmd-switch-client.c:140-151). The per session route checks
+/// and pre-selects it on the destination's own listener, which here is served
+/// by this loop, so it would wait on itself; the copied arm refuses it. Here
+/// the loop does it in process: the target is resolved in the destination
+/// with no side effect, then selected there by the destination's own copied
+/// arm (as a target of its own session, so its hooks fire there), and then
+/// the request goes on to `sid` with the session alone, which switches the
+/// client exactly as a session target always has. A target that does not
+/// resolve is the error on `sid`, nothing changes in the destination.
+/// Returns the request to dispatch on `sid`, or None when it was answered.
+#[allow(clippy::too_many_arguments)]
+fn switch_across(
+    sessions: &mut BTreeMap<usize, Session>,
+    sid: usize,
+    req: CtrlReq,
+    ids: &mut ServerIds,
+    bufs: &mut ServerBuffers,
+    ns: &Option<String>,
+    pty_system: &dyn portable_pty::PtySystem,
+    ended: &mut Vec<(usize, &'static str)>,
+) -> Option<CtrlReq> {
+    let CtrlReq::SwitchClientTarget(raw, resp) = req else { return Some(req) };
+    let dest = {
+        let refs: Vec<route::SessionRef<'_>> = sessions
+            .iter()
+            .map(|(k, s)| route::SessionRef { sid: *k, name: &s.app.session_name, base: "" })
+            .collect();
+        let holds = |k: usize, kind: route::IdKind, id: usize| {
+            sessions.get(&k).is_some_and(|s| match kind {
+                route::IdKind::Pane => crate::tree::find_pane_by_id_global(&s.app, id).is_some(),
+                route::IdKind::Window => s.app.windows.iter().any(|w| w.id == id),
+            })
+        };
+        route::switch_client_destination(&raw, sid, &refs, holds)
+    };
+    let Some(dest) = dest else { return Some(CtrlReq::SwitchClientTarget(raw, resp)) };
+    let local = route::within_session(&raw);
+    let pt = crate::cli::parse_target(&local);
+    let check = sessions.get(&dest).map(|d| {
+        temp_target::resolve_temp_target(
+            &d.app,
+            &crate::types::TempTarget {
+                win: pt.window,
+                win_is_id: pt.window_is_id,
+                win_name: pt.window_name.clone(),
+                pane: pt.pane,
+                pane_is_id: pt.pane_is_id,
+                ..Default::default()
+            },
+        )
+    });
+    let fail = |sessions: &mut BTreeMap<usize, Session>, msg: String| {
+        if let Some(s) = sessions.get_mut(&sid) {
+            s.app.status_message = Some((format!("switch-client: {}", msg), Instant::now(), None));
+            s.lp.state_dirty = true;
+        }
+        let _ = resp.send(format!("ERROR {}", msg));
+    };
+    match check {
+        Some(Ok(_)) => {}
+        Some(Err(msg)) => {
+            fail(sessions, msg);
+            return None;
+        }
+        None => return Some(CtrlReq::SwitchClientTarget(raw, resp)),
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    let name = {
+        let d = sessions.get_mut(&dest)?;
+        let flow = run_request(d, ids, bufs, ns, |app, lp| {
+            super::dispatch::dispatch(app, lp, CtrlReq::SwitchClientTarget(local, rtx), pty_system)
+        });
+        if flow == Flow::EndSession {
+            ended.push((dest, "panic"));
+        }
+        d.app.session_name.clone()
+    };
+    match rrx.try_recv() {
+        Ok(r) if r == "OK" => Some(CtrlReq::SwitchClientTarget(name, resp)),
+        Ok(r) => {
+            fail(sessions, r.trim_start_matches("ERROR ").to_string());
+            None
+        }
+        Err(_) => {
+            fail(sessions, format!("can't find session: {}", name));
+            None
+        }
     }
 }
 
@@ -874,8 +991,16 @@ fn create_session(
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree::kill_all_children_batch(windows)));
         return Err(msg);
     }
-    if let Ok(mut p) = globals.peers.write() {
-        p.push(Peer { sid, name: name.clone(), port, key: session_key });
+    if let (Ok(mut p), Some(tx)) = (globals.peers.write(), app.control_tx.clone()) {
+        p.push(Peer {
+            sid,
+            name: name.clone(),
+            port,
+            key: session_key,
+            base: base.clone(),
+            tx,
+            aliases: aliases.clone(),
+        });
     }
     Ok(Session { app, lp: SessionLoop::new(aliases), cwd, port, stop, _guard: guard })
 }
@@ -1172,6 +1297,16 @@ fn serve_session_connection(
             refuse(stream, &Outcome::Done(job_environ_reply(identity)), lines)
         }
         router::Opening::Command { key: k, line, lines } if k == key => {
+            // #798 step 3: a line whose target names ANOTHER session of this
+            // server (a hook's or the server's own line sent to this
+            // listener, or any client) runs on that session's handler, as if
+            // it had been sent to that session's listener. The client
+            // authenticated for this server already; every session of it is
+            // the same user's, as every session of a tmux socket is.
+            let (tx, aliases, sid) = match sibling_peer(globals, sid, &line) {
+                Some(p) => (p.tx, p.aliases, p.sid),
+                None => (tx, aliases, sid),
+            };
             match router::first_unsupported_aliased(&line, |name| alias_of(&aliases, name)) {
                 Some(name) => refuse(stream, &Outcome::Unsupported(name), lines),
                 None => {
@@ -1197,6 +1332,18 @@ fn serve_session_connection(
         // An attached client, or no good AUTH (the handler refuses it).
         _ => connection::handle_connection(stream, tx, key, aliases),
     }
+}
+
+/// The session of this server a command line arriving on session `sid`'s
+/// listener must run in instead (`route::sibling_for_line`), if any.
+fn sibling_peer(globals: &Globals, sid: usize, line: &str) -> Option<Peer> {
+    let peers = globals.peers.read().ok()?;
+    let refs: Vec<route::SessionRef<'_>> = peers
+        .iter()
+        .map(|p| route::SessionRef { sid: p.sid, name: &p.name, base: &p.base })
+        .collect();
+    let dest = route::sibling_for_line(line, sid, &refs)?;
+    peers.iter().find(|p| p.sid == dest).cloned()
 }
 
 fn capture_job_context() -> Option<crate::format::JobContext> {

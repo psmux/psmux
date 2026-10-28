@@ -36,6 +36,7 @@ pub(crate) mod buffers;
 pub(crate) mod ids;
 pub(crate) mod registry;
 pub(crate) mod reply;
+pub(crate) mod route;
 pub(crate) mod router;
 mod cli;
 mod dispatch;
@@ -191,8 +192,8 @@ pub fn resolve_for_this_process() -> Result<ServerMode, String> {
 /// `new-session` from a hook, key binding or prompt.
 pub fn not_available_message() -> String {
     if server::in_shared_server() {
-        "shared server mode: new-session from a hook, key binding or prompt is not supported yet \
-         (step 2 of #798); run psmux new-session from a shell"
+        "shared server mode: new-session from a hook or the config is not supported yet \
+         (#798 step 3); run psmux new-session from a shell, a key binding or the prompt"
             .to_string()
     } else {
         "shared server mode cannot start a session from inside a per-session server (#798); \
@@ -237,6 +238,16 @@ pub fn gate_server_start(ns: Option<&str>) {
 /// caller starts and claims nothing. With the switch at `per-session` the
 /// caller goes on exactly as before.
 pub fn check_server_start() -> Result<(), String> {
+    // #798 step 3: inside the shared server, a start asked for on a
+    // connection thread (a key binding's or the prompt's new-session, which
+    // the protocol handler runs there) goes on: the `psmux server -s NAME`
+    // process it spawns hands the session to this server (`gate_server_process`)
+    // and the thread waits for the session's files while the loop makes it.
+    // On the loop thread (a hook's new-session) the caller would wait for a
+    // session only this same thread can make, so it stays refused.
+    if server::in_shared_server() {
+        return if server::on_loop_thread() { Err(not_available_message()) } else { Ok(()) };
+    }
     match resolve_for_this_process() {
         Ok(ServerMode::PerSession) => Ok(()),
         Ok(ServerMode::Shared) => Err(not_available_message()),
@@ -257,10 +268,17 @@ pub fn gate_server_process() {
     }
     match resolve_for_this_process() {
         Ok(ServerMode::PerSession) => {}
-        Ok(ServerMode::Shared) => die(
-            "a per-session server cannot start while server-mode is shared (#798); \
-             psmux new-session starts the shared server",
-        ),
+        Ok(ServerMode::Shared) => {
+            // A namespace with a live shared server: the session this
+            // process was asked to run is made there instead (#798 step 3).
+            // This is how a shared server's own new-session from a binding or
+            // the prompt reaches it (see `check_server_start`).
+            cli::forward_server_start();
+            die(
+                "a per-session server cannot start while server-mode is shared (#798); \
+                 psmux new-session starts the shared server",
+            )
+        }
         Err(e) => die(&e),
     }
 }
