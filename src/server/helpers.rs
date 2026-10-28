@@ -1300,21 +1300,15 @@ pub(crate) fn build_color_replies_for_pane(
 /// `WriteConsoleInputW` batch so the replies arrive in query order.  Returns
 /// true when delivered (or nothing needed answering); false means the caller
 /// must fall back to the pending-bits → server-loop pipe path.
-pub(crate) fn answer_color_queries_sync(
+pub(crate) fn color_replies_text(
     bits: u32,
-    child_pid: Option<u32>,
     colors: &crate::types::HostColors,
     pane_id: usize,
-) -> bool {
-    if bits == 0 { return true; }
+) -> String {
+    if bits == 0 { return String::new(); }
     let (scheme, osc) =
         build_color_replies_for_pane(bits, colors, crate::types::pane_palette(pane_id));
-    let combined = format!("{}{}", scheme.as_deref().unwrap_or(""), osc);
-    if combined.is_empty() { return true; }
-    match child_pid {
-        Some(pid) => crate::platform::mouse_inject::send_vt_reply(pid, &combined),
-        None => false,
-    }
+    format!("{}{}", scheme.as_deref().unwrap_or(""), osc)
 }
 
 /// Issue #473: walk a pane tree and answer any pending terminal color queries.

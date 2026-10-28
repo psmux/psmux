@@ -5020,7 +5020,7 @@ pub static PIPE_WRITERS: Mutex<Vec<(usize, Box<dyn std::io::Write + Send>)>> = M
 /// the pane has no entry of its own (`input_add_request`,
 /// `INPUT_REQUEST_PALETTE`).  psmux's responder lives in the pane READER
 /// thread (`pane.rs` `scan_color_queries` plus
-/// `server::helpers::answer_color_queries_sync`, issues #473 and #556), which
+/// `server::helpers::color_replies_text`, issues #473 and #556), which
 /// runs ahead of the parser thread and must not block on it, so the parser
 /// thread publishes here after each batch that changed the palette.
 ///

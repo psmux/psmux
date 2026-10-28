@@ -3943,6 +3943,27 @@ pub fn xtversion_reply() -> String {
     format!("\x1bP>|{} {}\x1b\\", name.trim(), crate::types::VERSION)
 }
 
+/// The colour and XTVERSION replies to the queries of one read, as one text
+/// for one injection, in the order their queries came.
+///
+/// A terminal answers queries in the order they are asked, and tmux does,
+/// since it answers each as its parser meets it.  When both kinds are in the
+/// read, the XTVERSION reply goes first if its query comes before the first
+/// colour query.  A query split across two reads is not found here, and the
+/// colour replies then go first.
+pub(crate) fn injected_replies(batch: &[u8], colour: &str, xtversion: &str) -> String {
+    let find = |needle: &[u8]| batch.windows(needle.len()).position(|w| w == needle);
+    let xt_at = [&b"\x1b[>q"[..], &b"\x1b[>0q"[..]].iter().filter_map(|n| find(n)).min();
+    let colour_at = [&b"\x1b]10;"[..], &b"\x1b]11;"[..], &b"\x1b]4;"[..], &b"\x1b[?996n"[..]]
+        .iter()
+        .filter_map(|n| find(n))
+        .min();
+    match (xt_at, colour_at) {
+        (Some(x), Some(c)) if x < c => format!("{}{}", xtversion, colour),
+        _ => format!("{}{}", colour, xtversion),
+    }
+}
+
 /// Returns true if `data` contains an XTVERSION query that deserves a reply.
 ///
 /// The query is `CSI > Ps q`, and xterm only treats `Ps` of 0 (or an omitted
@@ -4452,12 +4473,6 @@ pub fn spawn_reader_thread(
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
                     crate::pty_trace::mark("r", pane_id, &local[..n]);
-                    // Push raw bytes into staging (no parser lock involved).
-                    let (lock, cv) = &*staging_r;
-                    if let Ok(mut buf) = lock.lock() {
-                        buf.extend_from_slice(&local[..n]);
-                        cv.notify_one();
-                    }
                     // Issue #556: answer terminal color queries (OSC 4/10/11,
                     // CSI ?996n, issue #473) HERE, straight off the read,
                     // rather than signaling the server loop.  The old
@@ -4467,30 +4482,6 @@ pub fn spawn_reader_thread(
                     // ConPTY's own DA1 auto-answer) — yazi then re-parsed
                     // the late reply as an interactive `shell` action.  The
                     // scan is one `memchr` for ESC when no query is present.
-                    let color_query_bits = color_scanner.scan(&local[..n]);
-                    if color_query_bits != 0 {
-                        let colors = crate::types::shared_host_colors();
-                        if !crate::server::helpers::answer_color_queries_sync(
-                            color_query_bits, child_pid, &colors, pane_id,
-                        ) {
-                            // Injection unavailable (no child pid, or a
-                            // non-Windows build): keep the #473 server-loop
-                            // pipe path as delivery of record.
-                            color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
-                            crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
-                            // The server loop drains these bits only on a pass
-                            // that saw pane data, and the parser thread has
-                            // usually announced THIS read already: it wakes the
-                            // loop within its coalescing wait, while a refused
-                            // attach above can take longer than that.  The loop
-                            // then finds nothing pending, and a program blocked
-                            // on the reply prints nothing more to trigger
-                            // another pass, so the pipe reply never went out
-                            // (issue #597).  Ask for the pass ourselves.
-                            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
-                            crate::types::wake_server_loop();
-                        }
-                    }
                     // Issue #597: answer XTVERSION (`CSI > q`) here too, for the
                     // same reason the colour queries are answered off the read:
                     // the asking program (Claude Code sends it three times at
@@ -4508,19 +4499,62 @@ pub fn spawn_reader_thread(
                     // arrives as a bare ESC with its body eaten, so a fallback
                     // would deliver no reply AND hand the pane a spurious
                     // Escape keypress.  A failed injection is logged instead.
-                    if xtversion_scanner.scan(&local[..n]) {
-                        let reply = xtversion_reply();
-                        let delivered = match child_pid {
-                            Some(pid) => crate::platform::mouse_inject::send_vt_reply(
-                                pid, &reply,
-                            ),
+                    //
+                    // Both go in with one injection, the replies in the order
+                    // their queries came (`injected_replies`).  Two injections
+                    // attached to the child's console twice, and the second,
+                    // the XTVERSION answer, was now and then lost.
+                    let color_query_bits = color_scanner.scan(&local[..n]);
+                    let xtversion = xtversion_scanner.scan(&local[..n]);
+                    if color_query_bits != 0 || xtversion {
+                        let colors = crate::types::shared_host_colors();
+                        let colour = crate::server::helpers::color_replies_text(
+                            color_query_bits, &colors, pane_id,
+                        );
+                        let xt = if xtversion { xtversion_reply() } else { String::new() };
+                        let text = injected_replies(&local[..n], &colour, &xt);
+                        let delivered = text.is_empty() || match child_pid {
+                            Some(pid) => crate::platform::mouse_inject::send_vt_reply(pid, &text),
                             None => false,
                         };
-                        if !delivered {
+                        if !delivered && color_query_bits != 0 {
+                            // Injection unavailable (no child pid, or a
+                            // non-Windows build): keep the #473 server-loop
+                            // pipe path as delivery of record.
+                            color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
+                            crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
+                            // The server loop drains these bits only on a pass
+                            // that saw pane data, and the parser thread has
+                            // usually announced THIS read already: it wakes the
+                            // loop within its coalescing wait, while a refused
+                            // attach above can take longer than that.  The loop
+                            // then finds nothing pending, and a program blocked
+                            // on the reply prints nothing more to trigger
+                            // another pass, so the pipe reply never went out
+                            // (issue #597).  Ask for the pass ourselves.
+                            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                            crate::types::wake_server_loop();
+                        }
+                        if !delivered && xtversion {
                             crate::platform::mouse_inject::log_lost_reply(
-                                child_pid, "XTVERSION", reply.len(),
+                                child_pid, "XTVERSION", xt.len(),
                             );
                         }
+                    }
+                    // Push raw bytes into staging (no parser lock involved)
+                    // only now, after the colour and XTVERSION answers above
+                    // are in the console's input.  The parser thread finds
+                    // DA1, DSR and DECRQM in these bytes and the server loop
+                    // writes their answers down the PTY, a path that can beat
+                    // the injection above: with a client attached it did on
+                    // every probe, and a program that takes the DA1 answer
+                    // as the end of its replies (yazi) gave up on the rest.
+                    // Handing the bytes over after the injection answers the
+                    // queries of one read in the order they were asked.
+                    let (lock, cv) = &*staging_r;
+                    if let Ok(mut buf) = lock.lock() {
+                        buf.extend_from_slice(&local[..n]);
+                        cv.notify_one();
                     }
                     // Append raw output to ring buffer for control mode %output.
                     // This is independent of parser state and must stay live.
@@ -4797,6 +4831,10 @@ mod test_sync_output_gate;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue597_xtversion_reply.rs"]
 mod test_issue597_xtversion_reply;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_reply_order.rs"]
+mod test_pane_reply_order;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue597_da_replies.rs"]
