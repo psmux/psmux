@@ -38,7 +38,7 @@ fn a_panicking_request_ends_only_its_session_and_keeps_the_ids() {
     let mut a = session("A");
     let mut b = session("B");
     // A request of A that allocates two ids and then panics.
-    let flow = run_request(&mut a, &mut ids, &ns, |app, _lp| {
+    let flow = run_request(&mut a, &mut ids, &mut ServerBuffers::new(), &ns, |app, _lp| {
         app.next_win_id += 1;
         app.next_pane_id += 2;
         panic!("injected #798 test panic");
@@ -47,7 +47,7 @@ fn a_panicking_request_ends_only_its_session_and_keeps_the_ids() {
     // The ids it took are not handed out again.
     assert_eq!((ids.next_window(), ids.next_pane()), (2, 3));
     // B runs normally afterwards, and continues the server wide sequence.
-    let flow = run_request(&mut b, &mut ids, &ns, |app, _lp| {
+    let flow = run_request(&mut b, &mut ids, &mut ServerBuffers::new(), &ns, |app, _lp| {
         assert_eq!((app.next_win_id, app.next_pane_id), (2, 3));
         app.next_win_id += 1;
         app.next_pane_id += 1;
@@ -66,7 +66,7 @@ fn a_request_runs_with_its_own_session_entered() {
     let mut sessions = [session("A"), session("B")];
     for (i, want) in [(0usize, "t798__A"), (1, "t798__B"), (0, "t798__A")] {
         let seen = std::cell::RefCell::new(String::new());
-        run_request(&mut sessions[i], &mut ids, &ns, |_app, _lp| {
+        run_request(&mut sessions[i], &mut ids, &mut ServerBuffers::new(), &ns, |_app, _lp| {
             *seen.borrow_mut() = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
             Ok(Flow::Continue)
         });
@@ -75,19 +75,19 @@ fn a_request_runs_with_its_own_session_entered() {
 }
 
 /// Run one show-buffer request of `s` through the shared dispatch.
-fn show(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, name: Option<&str>) -> Result<Option<String>, std::sync::mpsc::TryRecvError> {
+fn show(s: &mut Session, ids: &mut ServerIds, bufs: &mut ServerBuffers, ns: &Option<String>, name: Option<&str>) -> Result<Option<String>, std::sync::mpsc::TryRecvError> {
     let pty_system = portable_pty::native_pty_system();
     match name {
         None => {
             let (rtx, rrx) = std::sync::mpsc::channel::<String>();
-            run_request(s, ids, ns, |app, lp| {
+            run_request(s, ids, bufs, ns, |app, lp| {
                 crate::server::shared::dispatch::dispatch(app, lp, CtrlReq::ShowBuffer(rtx), &*pty_system)
             });
             rrx.try_recv().map(Some)
         }
         Some(name) => {
             let (rtx, rrx) = std::sync::mpsc::channel::<Option<String>>();
-            run_request(s, ids, ns, |app, lp| {
+            run_request(s, ids, bufs, ns, |app, lp| {
                 crate::server::shared::dispatch::dispatch(app, lp, CtrlReq::ShowNamedBuffer(rtx, name.to_string()), &*pty_system)
             });
             rrx.try_recv()
@@ -95,26 +95,28 @@ fn show(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, name: Option<
     }
 }
 
-// #896: show-buffer answers from the requesting session's own buffers, as a
-// per session server does (server/mod.rs ShowBuffer and ShowNamedBuffer).
+// #896: show-buffer answers from the server's buffers (server/mod.rs
+// ShowBuffer and ShowNamedBuffer). Since #925 they are one set for every
+// session, as in tmux (paste.c:32 to :36), so B sees what A made.
 #[test]
-fn show_buffer_reads_the_requesting_sessions_buffers() {
+fn show_buffer_reads_the_server_wide_buffers() {
     let _lock = crate::util::lock_test_env();
     let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
     let ns = Some("t798".to_string());
     let mut ids = ServerIds::new();
+    let mut bufs = ServerBuffers::new();
     let mut a = session("A");
     let mut b = session("B");
     a.app.paste_add("hello".to_string());
     a.app.paste_set("kept", "named data".to_string());
-    assert_eq!(show(&mut a, &mut ids, &ns, None), Ok(Some("hello".to_string())));
-    assert_eq!(show(&mut a, &mut ids, &ns, Some("buffer0")), Ok(Some("hello".to_string())));
-    assert_eq!(show(&mut a, &mut ids, &ns, Some("kept")), Ok(Some("named data".to_string())));
-    assert_eq!(show(&mut a, &mut ids, &ns, Some("nosuch")), Ok(None));
-    // B holds no buffer: A's are not visible from it.
-    assert_eq!(show(&mut b, &mut ids, &ns, None), Ok(Some(String::new())));
-    assert_eq!(show(&mut b, &mut ids, &ns, Some("buffer0")), Ok(None));
-    assert_eq!(show(&mut b, &mut ids, &ns, Some("kept")), Ok(None));
+    assert_eq!(show(&mut a, &mut ids, &mut bufs, &ns, None), Ok(Some("hello".to_string())));
+    assert_eq!(show(&mut a, &mut ids, &mut bufs, &ns, Some("buffer0")), Ok(Some("hello".to_string())));
+    assert_eq!(show(&mut a, &mut ids, &mut bufs, &ns, Some("kept")), Ok(Some("named data".to_string())));
+    assert_eq!(show(&mut a, &mut ids, &mut bufs, &ns, Some("nosuch")), Ok(None));
+    assert_eq!(show(&mut b, &mut ids, &mut bufs, &ns, None), Ok(Some("hello".to_string())));
+    assert_eq!(show(&mut b, &mut ids, &mut bufs, &ns, Some("buffer0")), Ok(Some("hello".to_string())));
+    assert_eq!(show(&mut b, &mut ids, &mut bufs, &ns, Some("kept")), Ok(Some("named data".to_string())));
+    assert_eq!(show(&mut b, &mut ids, &mut bufs, &ns, Some("nosuch")), Ok(None));
 }
 
 #[test]
@@ -124,10 +126,41 @@ fn an_io_error_keeps_the_session() {
     let ns = None;
     let mut ids = ServerIds::new();
     let mut a = session("A");
-    let flow = run_request(&mut a, &mut ids, &ns, |_app, _lp| {
+    let flow = run_request(&mut a, &mut ids, &mut ServerBuffers::new(), &ns, |_app, _lp| {
         Err(io::Error::new(io::ErrorKind::Other, "routine failure"))
     });
     assert_eq!(flow, Flow::Continue);
+}
+
+// #925: a buffer made by one session's request is there for the next request
+// of another session, and a request that panics does not take the server's
+// buffers with its session.
+#[test]
+fn buffers_cross_sessions_and_survive_a_panicking_request() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("t925".to_string());
+    let mut ids = ServerIds::new();
+    let mut bufs = ServerBuffers::new();
+    let mut a = session("A");
+    let mut b = session("B");
+    let mut c = session("C");
+    run_request(&mut a, &mut ids, &mut bufs, &ns, |app, _lp| {
+        app.paste_set("g", "hola".to_string());
+        Ok(Flow::Continue)
+    });
+    let flow = run_request(&mut b, &mut ids, &mut bufs, &ns, |app, _lp| {
+        app.paste_add("from b".to_string());
+        panic!("injected #925 test panic");
+    });
+    assert_eq!(flow, Flow::EndSession);
+    let seen = std::cell::RefCell::new((None, None));
+    run_request(&mut c, &mut ids, &mut bufs, &ns, |app, _lp| {
+        *seen.borrow_mut() = (app.paste_get("g").map(str::to_string), app.paste_top().map(str::to_string));
+        Ok(Flow::Continue)
+    });
+    assert_eq!(seen.into_inner(), (Some("hola".to_string()), Some("from b".to_string())),
+        "BUG #925: session C does not see the buffers A and B made");
 }
 
 use std::ffi::OsString;
@@ -248,7 +281,7 @@ fn the_reply_carries_the_identity_and_never_the_socket_path() {
     let mut session_a = session("A");
     session_a.app.control_port = Some(1111);
     let reply = std::cell::RefCell::new(String::new());
-    run_request(&mut session_a, &mut ids, &ns, |_app, _lp| {
+    run_request(&mut session_a, &mut ids, &mut ServerBuffers::new(), &ns, |_app, _lp| {
         *reply.borrow_mut() = job_environ_reply(&identity_b());
         Ok(Flow::Continue)
     });

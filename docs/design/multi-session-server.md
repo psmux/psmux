@@ -765,8 +765,9 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    `-s`/`-t` within the session), select-pane by index, `select-pane -P`,
    paste-buffer, set-buffer, list-buffers, delete-buffer, save-buffer,
    load-buffer, clear-history and respawn-pane, from an attached client and as
-   one shot commands. Buffers are still each session's own, as step 2 had them;
-   making them server wide, as in tmux, is part of this item.
+   one shot commands. Buffers are server wide, as in tmux (#925): the server
+   keeps one set and lends it to a session for each request, as it lends the
+   id counters (`src/server/shared/buffers.rs`).
 
    Still refused. A one shot command gets `unknown command`; an attached client's
    binding, prompt or menu puts `not supported in shared server mode yet: <name>`

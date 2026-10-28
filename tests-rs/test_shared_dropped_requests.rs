@@ -33,8 +33,12 @@ impl Drop for EnvBack {
 }
 
 fn send(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, req: CtrlReq) {
+    send_b(s, ids, &mut ServerBuffers::new(), ns, req)
+}
+
+fn send_b(s: &mut Session, ids: &mut ServerIds, bufs: &mut ServerBuffers, ns: &Option<String>, req: CtrlReq) {
     let pty_system = portable_pty::native_pty_system();
-    let flow = run_request(s, ids, ns, |app, lp| {
+    let flow = run_request(s, ids, bufs, ns, |app, lp| {
         crate::server::shared::dispatch::dispatch(app, lp, req, &*pty_system)
     });
     assert_eq!(flow, Flow::Continue);
@@ -45,29 +49,30 @@ fn status(app: &AppState) -> Option<String> {
 }
 
 #[test]
-fn named_buffers_are_set_appended_listed_and_deleted_in_their_own_session() {
+fn named_buffers_are_set_appended_listed_and_deleted_server_wide() {
     let _lock = crate::util::lock_test_env();
     let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
     let ns = Some("tdrops".to_string());
     let mut ids = ServerIds::new();
+    let mut bufs = ServerBuffers::new();
     let mut a = session("A");
     let mut b = session("B");
-    send(&mut a, &mut ids, &ns, CtrlReq::SetNamedBuffer("nb".into(), "one".into()));
-    assert_eq!(a.app.paste_get("nb"), Some("one"),
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::SetNamedBuffer("nb".into(), "one".into()));
+    assert_eq!(bufs.get("nb"), Some("one"),
         "BUG: shared dispatch dropped SetNamedBuffer (set-buffer -b)");
-    send(&mut a, &mut ids, &ns, CtrlReq::AppendNamedBuffer("nb".into(), "two".into()));
-    assert_eq!(a.app.paste_get("nb"), Some("onetwo"), "set-buffer -a appends");
-    assert_eq!(b.app.paste_get("nb"), None, "B's buffers are its own");
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::AppendNamedBuffer("nb".into(), "two".into()));
+    assert_eq!(bufs.get("nb"), Some("onetwo"), "set-buffer -a appends");
+    assert_eq!(b.app.paste_get("nb"), None, "outside a request a session holds no buffer of its own");
 
     let (tx, rx) = mpsc::channel();
-    send(&mut a, &mut ids, &ns, CtrlReq::ListBuffers(tx));
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::ListBuffers(tx));
     let listing = rx.try_recv().expect("BUG: list-buffers got no reply");
     assert!(listing.contains("nb"), "{listing}");
 
     let (tx, rx) = mpsc::channel();
-    send(&mut a, &mut ids, &ns, CtrlReq::DeleteNamedBuffer("nb".into(), Some(tx)));
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::DeleteNamedBuffer("nb".into(), Some(tx)));
     assert_eq!(rx.try_recv(), Ok(true), "delete-buffer -b answers found");
-    assert_eq!(a.app.paste_get("nb"), None);
+    assert_eq!(bufs.get("nb"), None);
 }
 
 #[test]
@@ -76,19 +81,20 @@ fn the_top_buffer_is_deleted_and_files_load_and_save() {
     let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
     let ns = Some("tdrops".to_string());
     let mut ids = ServerIds::new();
+    let mut bufs = ServerBuffers::new();
     let mut a = session("A");
     let dir = std::env::temp_dir().join(format!("psmux_tdrops_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("in.txt");
     std::fs::write(&file, "FROM_FILE").unwrap();
 
-    send(&mut a, &mut ids, &ns, CtrlReq::LoadBuffer(file.display().to_string()));
-    assert_eq!(a.app.paste_top(), Some("FROM_FILE"), "BUG: load-buffer dropped");
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::LoadBuffer(file.display().to_string()));
+    assert_eq!(bufs.top(), Some("FROM_FILE"), "BUG: load-buffer dropped");
     let out = dir.join("out.txt");
-    send(&mut a, &mut ids, &ns, CtrlReq::SaveBuffer(out.display().to_string()));
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::SaveBuffer(out.display().to_string()));
     assert_eq!(std::fs::read_to_string(&out).ok().as_deref(), Some("FROM_FILE"), "BUG: save-buffer dropped");
-    send(&mut a, &mut ids, &ns, CtrlReq::DeleteBuffer);
-    assert_eq!(a.app.paste_top(), None, "BUG: delete-buffer dropped");
+    send_b(&mut a, &mut ids, &mut bufs, &ns, CtrlReq::DeleteBuffer);
+    assert_eq!(bufs.top(), None, "BUG: delete-buffer dropped");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

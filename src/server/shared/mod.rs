@@ -32,6 +32,7 @@
 
 use std::io::Write;
 
+pub(crate) mod buffers;
 pub(crate) mod ids;
 pub(crate) mod registry;
 pub(crate) mod reply;

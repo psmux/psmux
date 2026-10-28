@@ -3106,7 +3106,8 @@ pub(crate) fn dispatch(
                     echo_pending_until = Some(Instant::now());
                 }
                 // copied from server/mod.rs run_server (lines 5954 to 6025 at f6611646);
-                // each session keeps its own buffers, as a per session server does
+                // the buffers here are the server's one set, lent for this
+                // request (buffers.rs, #925)
                 CtrlReq::SetNamedBuffer(name, content) => {
                     app.paste_set(&name, content);
                 }

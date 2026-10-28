@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::super::*;
+use super::buffers::ServerBuffers;
 use super::ids::ServerIds;
 use super::reply::{self, Outcome};
 use super::{registry, router};
@@ -407,6 +408,8 @@ fn run(ns: Option<String>) -> ! {
 
     let pty_system = native_pty_system();
     let mut ids = ServerIds::new();
+    // One set of paste buffers for every session, as tmux (#925).
+    let mut bufs = ServerBuffers::new();
     let mut sessions: BTreeMap<usize, Session> = BTreeMap::new();
     let mut had_session = false;
     let started = Instant::now();
@@ -475,7 +478,7 @@ fn run(ns: Option<String>) -> ! {
                         crate::types::clear_wake_pending();
                     }
                     let Some(s) = sessions.get_mut(&sid) else { continue };
-                    match run_request(s, &mut ids, &ns, |app, lp| {
+                    match run_request(s, &mut ids, &mut bufs, &ns, |app, lp| {
                         super::dispatch::dispatch(app, lp, req, &*pty_system)
                     }) {
                         Flow::Continue => {}
@@ -489,7 +492,7 @@ fn run(ns: Option<String>) -> ! {
                     let outcome = match cmd {
                         ControlCmd::Ping => Outcome::Done(String::new()),
                         ControlCmd::NewSession(args) => {
-                            match create_session_guarded(&args, &mut ids, &ns, &msg_tx, &*pty_system, &globals) {
+                            match create_session_guarded(&args, &mut ids, &mut bufs, &ns, &msg_tx, &*pty_system, &globals) {
                                 Ok(s) => {
                                     let sid = s.app.session_id;
                                     let text = new_session_output_guarded(&s.app, &args);
@@ -513,7 +516,7 @@ fn run(ns: Option<String>) -> ! {
                 continue;
             }
             let Some(s) = sessions.get_mut(&sid) else { continue };
-            let flow = run_request(s, &mut ids, &ns, |app, lp| upkeep(app, lp, &*pty_system));
+            let flow = run_request(s, &mut ids, &mut bufs, &ns, |app, lp| upkeep(app, lp, &*pty_system));
             if flow == Flow::EndSession {
                 ended.push((sid, "exit-empty"));
             }
@@ -538,17 +541,20 @@ fn run(ns: Option<String>) -> ! {
 
 /// Run `f` for one session with the session entered (see the module comment),
 /// a panic caught and reported, and the server wide counters taken back.
-fn run_request<F>(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, f: F) -> Flow
+fn run_request<F>(s: &mut Session, ids: &mut ServerIds, bufs: &mut ServerBuffers, ns: &Option<String>, f: F) -> Flow
 where
     F: FnOnce(&mut AppState, &mut SessionLoop) -> io::Result<Flow>,
 {
     // `enter` is inside the guard too (#894): a panic there must end this
     // session, not unwind the loop thread and with it every session.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bufs.lend(&mut s.app);
         enter(s, ids, ns);
         f(&mut s.app, &mut s.lp)
     }));
     ids.take_back(s.app.next_win_id, s.app.next_pane_id);
+    // Even after a panic: the buffers belong to the server, not the session.
+    bufs.take_back(&mut s.app);
     match result {
         Ok(Ok(flow)) => flow,
         Ok(Err(e)) => {
@@ -781,6 +787,7 @@ fn new_session_size_error(args: &NewSessionArgs) -> Option<String> {
 fn create_session(
     args: &NewSessionArgs,
     ids: &mut ServerIds,
+    bufs: &mut ServerBuffers,
     ns: &Option<String>,
     msg_tx: &mpsc::Sender<Msg>,
     pty_system: &dyn portable_pty::PtySystem,
@@ -851,11 +858,14 @@ fn create_session(
     // user's config, a hook or the first window, becomes an ordinary failure
     // of this new-session and goes through the cleanup below, and the other
     // sessions and the server keep running.
+    // The config and the session-created hooks may make or read buffers.
+    bufs.lend(&mut app);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         set_up_session(&mut app, args, ids, ns, msg_tx, pty_system, globals, &base, cwd.as_deref(), (tx, rx), listener, &aliases, &stop)
     }))
     .unwrap_or_else(|_| Err("create session failed: internal error (see crash.log)".to_string()));
     ids.take_back(app.next_win_id, app.next_pane_id);
+    bufs.take_back(&mut app);
     if let Err(msg) = result {
         stop.store(true, Ordering::Release);
         let _ = std::net::TcpStream::connect(("127.0.0.1", port));
@@ -991,13 +1001,14 @@ fn set_up_session(
 fn create_session_guarded(
     args: &NewSessionArgs,
     ids: &mut ServerIds,
+    bufs: &mut ServerBuffers,
     ns: &Option<String>,
     msg_tx: &mpsc::Sender<Msg>,
     pty_system: &dyn portable_pty::PtySystem,
     globals: &Arc<Globals>,
 ) -> Result<Session, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        create_session(args, ids, ns, msg_tx, pty_system, globals)
+        create_session(args, ids, bufs, ns, msg_tx, pty_system, globals)
     }))
     .unwrap_or_else(|_| Err("create session failed: internal error (see crash.log)".to_string()))
 }

@@ -35,7 +35,7 @@ impl Drop for EnvBack {
 
 fn send(s: &mut Session, ids: &mut ServerIds, ns: &Option<String>, req: CtrlReq) {
     let pty_system = portable_pty::native_pty_system();
-    let flow = run_request(s, ids, ns, |app, lp| {
+    let flow = run_request(s, ids, &mut crate::server::shared::buffers::ServerBuffers::new(), ns, |app, lp| {
         crate::server::shared::dispatch::dispatch(app, lp, req, &*pty_system)
     });
     assert_eq!(flow, Flow::Continue);
