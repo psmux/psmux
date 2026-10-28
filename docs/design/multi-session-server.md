@@ -1,6 +1,7 @@
 # Design: a shared multi session server (issue #798)
 
-Status: stage 1, steps 1 and 2 implemented. Step 1 is the switch (`PSMUX_SERVER_MODE`
+Status: stage 1, steps 1 and 2 implemented, step 3 item 1 in part (sub step
+1a, see section 11). Step 1 is the switch (`PSMUX_SERVER_MODE`
 and `server-mode`); step 2 is a minimal shared server behind it (one process per
 namespace holding its sessions, see "Step 2 (implemented)" below). Everything else
 here is still a proposal.
@@ -756,6 +757,86 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    window or pane) has to reach a sibling session over TCP, which today waits on
    the loop serving it. With it: `new-session` from a hook, binding or prompt,
    `switch-client -t s:w.p`, `choose-tree` and the session chooser.
+
+   **Sub step 1a (implemented).** Measured before it on master (shared mode,
+   two sessions A and B, `tests/test_issue798_shared_routing.ps1`): nothing
+   hung or stalled (the loop answered within 30 to 90 ms each time); every
+   entry point failed instead, mostly silently. A hook's `new-window -t B:`
+   or `rename-window -t B:0` did nothing (the line reached A's own listener,
+   whose handler answered `can't find session: B`); a one shot line naming B
+   on A's listener got that error, and `kill-session -t D` there did nothing
+   at exit 0; `switch-client -t B:SW.1` was refused (`a window or pane of
+   another session is not supported`), `-t %N` / `-t @N` of B said `can't find
+   pane` / `can't find window`; `new-session` from a binding or the prompt was
+   refused on the status line. The session chooser already worked (the
+   client routes it itself). What it does now, all in `src/server/shared/`:
+
+   * `route.rs` (pure) decides which session a line belongs to: an explicit
+     `sess:...` or `$N` for any command whose target must be in its own
+     session, a bare session name only for the session target commands
+     (kill-session, has-session, list-windows, set/show-environment), by
+     tmux's lookup order (`$N`, exact name, unique prefix, `=` exact only).
+     Never moved: switch-client, detach and the other client commands,
+     new-session, set-buffer, and the move/link/join/swap/break commands.
+   * A one shot line naming a sibling runs on the sibling's own protocol
+     handler with the sibling's request channel (`serve_session_connection`),
+     exactly as if it had been sent to the sibling's listener. That covers
+     a hook's commands that the in server route forwards to the session's
+     listener (new-window, split-window, rename-window, send-keys, ...).
+   * `switch-client` to a window or pane of a sibling (`s:w.p`, or a server
+     wide `%N` / `@N` the session does not hold) is done by the loop
+     (`switch_across`): resolved in the destination with no side effect,
+     selected there by the destination's own copied arm (its hooks fire
+     there), then the client switches as for a session target. A target
+     that does not resolve is the error, and nothing changes anywhere.
+   * `new-session` from a binding or the prompt: the protocol handler runs it
+     on a connection thread and starts `psmux server -s NAME ...` as a per
+     session server would; inside the shared server `check_server_start`
+     lets it, and that process (`gate_server_process`, `cli::forward_server_start`)
+     hands the session to the live shared server over its control listener,
+     so the handler's wait for the session's files is served by the loop.
+     Without `-d` the client then switches to it.
+
+   Still not routed, measured, each needs code outside `src/server/shared/`
+   or a design decision:
+
+   * Lines an attached client sends on its persistent connection (a key
+     binding's or the prompt's `new-window -t B:`, `send-keys -t B:...`):
+     the connection goes straight to the per session handler. Routing them
+     means passing every attached client's bytes through the shared code
+     (one more loopback hop per frame, and `#{client_pid}` and the read
+     only check would have to be carried over), or a narrow hook in
+     `connection.rs`.
+   * Commands the in server route runs in place rather than sending them to
+     the listener (`set -t B: ...`, `kill-window -t B:1`, ...) from a hook:
+     they act on, or fail in, the hook's own session.
+   * `new-session` from a hook: it runs on the loop thread, and the in
+     server route then waits for the new session's files, which only that
+     same thread can make. It stays refused (`new-session from a hook or the
+     config is not supported yet`). It needs a narrow hook in `commands.rs`
+     that hands the arguments to the shared server.
+   * The config: on the shared server its command lines do not run at all,
+     not even for their own session (`config.rs` keeps no startup source
+     job for the shared server, and the shared loop runs none), so there is
+     nothing to route yet. That belongs with source-file in item 3.
+
+   Also in this sub step: a one shot `copy-mode` was refused by the router
+   although the dispatcher had its arms, so `copy-mode -t =a:` left
+   `pane_in_mode` at 0 at exit 0; it is served now.
+
+   Measured (`tests/perf_issue798_shared_ops.ps1`, 24 runs each, one session
+   alive, cmd.exe panes, CLI wall time; metrics JSON in
+   `~/.psmux-test-data/metrics/`). The shared column is the same on the build
+   before this sub step (p50 33 / 20 / 25 / 37 ms), so routing costs nothing
+   measurable; the shared one shot path's extra 7 ms on new-window and
+   split-window predates it (the gated relay of #897 B is the likely place).
+
+   | p50 / p90 ms | per session | shared |
+   |---|---|---|
+   | `new-session -d` | 116 / 120 | 33 / 35 |
+   | `new-window -d` | 13 / 14 | 21 / 22 |
+   | `split-window -d` | 17 / 19 | 23 / 25 |
+   | `send-keys` echo seen by `capture-pane` | 44 / 47 | 36 / 39 |
 2. Control mode (`-C`/`-CC`) on the shared server, with `%sessions-changed` to
    every control client on create and destroy (section 6, stage 1 list).
 3. The rest of the command set, each a copied arm with its test. Done so far
