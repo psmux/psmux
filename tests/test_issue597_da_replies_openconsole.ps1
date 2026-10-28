@@ -140,7 +140,7 @@ function Get-ProbeHex($text, $name) {
     return $null
 }
 
-# tmux input.c: 1589 "\033[?1;2c", 1602 "\033[>84;0;0c",
+# tmux input.c: 1588 "\033[?1;2;4c" (built with sixel, tmux 3.8), 1602 "\033[>84;0;0c",
 #               1650-1721 "\033[?%d;%d$y".
 # 2026 is reported 2 (reset) like tmux since PR #781 gave psmux synchronized
 # output (tmux input.c, case 2026: MODE_SYNC ? 1 : 2).  The inbox console host
@@ -148,7 +148,7 @@ function Get-ProbeHex($text, $name) {
 # 1006 is SGR mouse reporting, which the probe has not enabled, so tmux's
 # value semantics make it 2 (reset).
 foreach ($case in @(
-    @{ n = "DA1";         want = "1b 5b 3f 31 3b 32 63";                   why = "ESC[?1;2c, tmux input.c:1589" },
+    @{ n = "DA1";         want = "1b 5b 3f 31 3b 32 3b 34 63";             why = "ESC[?1;2;4c, tmux input.c:1588" },
     @{ n = "DA2";         want = "1b 5b 3e 38 34 3b 30 3b 30 63";          why = "ESC[>84;0;0c, tmux input.c:1602" },
     @{ n = "DECRQM_2026"; want = "1b 5b 3f 32 30 32 36 3b 32 24 79";       why = "ESC[?2026;2`$y, reset (PR #781)" },
     @{ n = "DECRQM_1006"; want = "1b 5b 3f 31 30 30 36 3b 32 24 79";       why = "ESC[?1006;2`$y, reset" },

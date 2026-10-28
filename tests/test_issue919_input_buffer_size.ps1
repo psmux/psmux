@@ -98,11 +98,13 @@ function Get-Leaves($node) {
 
 # Writes a sixel of about 1.5 MiB in a new window and returns how many images
 # that window holds. The padding is `#1` colour selects, which draw nothing,
-# so the image stays 4 by 6 pixels however long the DCS is.
+# so the image stays 4 by 6 pixels however long the DCS is. Two line feeds
+# follow it: the cursor stays on the image's row, and the mark written there
+# would erase the image's cells, as in Windows Terminal.
 function Emit-BigSixel($mark) {
     P new-window -t a 'pwsh -NoProfile -NoLogo' | Out-Null
     Start-Sleep -Seconds 3
-    $cmd = "`$p = '#1' * 786432; [Console]::Out.Write([char]27 + 'Pq#1;2;100;100;0#1~~' + `$p + '~~' + [char]27 + '\'); '$mark'"
+    $cmd = "`$p = '#1' * 786432; [Console]::Out.Write([char]27 + 'Pq#1;2;100;100;0#1~~' + `$p + '~~' + [char]27 + '\' + [char]10 + [char]10); '$mark'"
     P send-keys -t a -l $cmd | Out-Null
     P send-keys -t a Enter | Out-Null
     $null = WaitText 'a' "(?m)^$mark\s*$"

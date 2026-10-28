@@ -140,7 +140,7 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     $forwarded = $offReply -match '<ESC>\[>84;0;0c'
     Assert ($offReply -notmatch '7501') 'off: the OSC 7501 capability query draws no reply, as before'
     if ($forwarded) {
-        Assert ($offReply -match '<ESC>\[\?1;2c') 'off: psmux still answers the device queries around it'
+        Assert ($offReply -match '<ESC>\[\?1;2;4c') 'off: psmux still answers the device queries around it'
     } else {
         Write-Host 'SKIP: the off assertion above is vacuous on this console host; it answers device queries itself and swallows OSC replies (set PSMUX_CONPTY_DIR to an OpenConsole build)'
     }
@@ -155,7 +155,7 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     $onReply = Probe-Replies 'on'
     Write-Host "INFO: replies with program-status on: $onReply"
     if ($forwarded) {
-        Assert ($onReply -match '<ESC>\]7501;\?:states=idle,working,done,blocked,error:kinds=permission,question,auth<ESC>\\<ESC>\[\?1;2c') 'on: the capability reply arrives, before the DA1 reply'
+        Assert ($onReply -match '<ESC>\]7501;\?:states=idle,working,done,blocked,error:kinds=permission,question,auth<ESC>\\<ESC>\[\?1;2;4c') 'on: the capability reply arrives, before the DA1 reply'
     } else {
         Write-Host 'SKIP: this console host answers device queries itself and swallows OSC replies (set PSMUX_CONPTY_DIR to an OpenConsole build to see them)'
     }

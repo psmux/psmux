@@ -57,7 +57,9 @@ function Info($m){ Write-Host "  [INFO] $m" -ForegroundColor DarkCyan }
 # ESC P q "1;1;24;12  #7;2;13;57;91  #7 !24~ $ - !24~ $ - ESC \
 $MARKER = "13;57;91"
 $mid = [System.Text.Encoding]::ASCII.GetBytes('q"1;1;24;12#7;2;13;57;91#7!24~$-!24~$-')
-$sixel = [byte[]]@(0x1B,0x50) + $mid + [byte[]]@(0x1B,0x5C)
+# Two line feeds after it: the cursor stays on the image's row, and text
+# written there erases the image cells under it, as in Windows Terminal.
+$sixel = [byte[]]@(0x1B,0x50) + $mid + [byte[]]@(0x1B,0x5C,0x0D,0x0A,0x0D,0x0A)
 $hex = ($sixel | ForEach-Object { '0x{0:X2}' -f $_ }) -join ','
 $emitter = Join-Path $psmuxDir "sixel_emit_431blobs.ps1"
 @"

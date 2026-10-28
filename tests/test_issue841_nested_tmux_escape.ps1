@@ -78,17 +78,17 @@ if (-not (Test-Path $probe)) {
     if ($r18 -match "^\x1b\[8;(\d+);(\d+)t$") {
         $rows = [int]$Matches[1]; $cols = [int]$Matches[2]
         Write-Pass "CSI 18 t still answered exactly once by the console host: $(Show $r18)"
-        $want14 = "$([char]27)[4;$($rows * 32);$($cols * 16)t"
+        $want14 = "$([char]27)[4;$($rows * 20);$($cols * 10)t"
         if ($r14 -eq $want14) {
-            Write-Pass "CSI 14 t answered exactly once, $(Show $r14) (tmux: rows*32, cols*16)"
+            Write-Pass "CSI 14 t answered exactly once, $(Show $r14) (the pane's 10x20 sixel cell: rows*20, cols*10)"
         } else {
             Write-Fail "CSI 14 t reply was [$(Show $r14)], expected [$(Show $want14)]  (empty = the #841 bug: tmux 3.8 holds every Escape 500 ms)"
         }
     } else {
         Write-Fail "could not read the pane size from the CSI 18 t reply: [$(Show $r18)]"
     }
-    if ($r16 -eq "$([char]27)[6;32;16t") { Write-Pass "CSI 16 t answered with tmux's default cell, $(Show $r16)" }
-    else { Write-Fail "CSI 16 t reply was [$(Show $r16)], expected [ESC[6;32;16t]" }
+    if ($r16 -eq "$([char]27)[6;20;10t") { Write-Pass "CSI 16 t answered with the pane's sixel cell, $(Show $r16)" }
+    else { Write-Fail "CSI 16 t reply was [$(Show $r16)], expected [ESC[6;20;10t]" }
 }
 
 # ── Part 2: Escape latency through a real tmux 3.8 nested in a psmux pane ────

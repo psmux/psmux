@@ -10,6 +10,10 @@
 //   no    ESC [ ? 61;6;7;14;21;22;23;24;28;32;42 c       (the same without 4)
 //   none  nothing at all
 //
+// With CONPTY_DA1_HOST_CELL=<w>x<h> in the environment it also answers each
+// `ESC [ 16 t` with `ESC [ 6 ; h ; w t`, the cell size in pixels; without it
+// that question goes unanswered.
+//
 // <flags> goes to CreatePseudoConsole (8 is PSEUDOCONSOLE_PASSTHROUGH_MODE).
 // After <holdMs> the client is ended and the pseudoconsole closed.
 // Prints "client pid <n>".
@@ -74,6 +78,13 @@ class ConPtyDa1Host
         byte[] reply = null;
         if (da1 == "yes") reply = Encoding.ASCII.GetBytes("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c");
         else if (da1 == "no") reply = Encoding.ASCII.GetBytes("\x1b[?61;6;7;14;21;22;23;24;28;32;42c");
+        byte[] cellReply = null;
+        string cell = Environment.GetEnvironmentVariable("CONPTY_DA1_HOST_CELL");
+        if (!string.IsNullOrEmpty(cell))
+        {
+            string[] wh = cell.Split('x');
+            cellReply = Encoding.ASCII.GetBytes("\x1b[6;" + int.Parse(wh[1]) + ";" + int.Parse(wh[0]) + "t");
+        }
 
         IntPtr mod = LoadLibraryW(dll);
         if (mod == IntPtr.Zero) { Console.Error.WriteLine("LoadLibrary failed: " + Marshal.GetLastWin32Error()); return 1; }
@@ -104,16 +115,25 @@ class ConPtyDa1Host
                     output.Write(buf, 0, (int)n);
                     byte[] all = output.GetBuffer();
                     int len = (int)output.Length;
-                    // Answer every DA1 request, `ESC [ c` or `ESC [ 0 c`.
-                    for (int i = Math.Max(0, scanned - 3); i + 2 < len; i++)
+                    // Answer every DA1 request, `ESC [ c` or `ESC [ 0 c`. A
+                    // request may straddle two reads, so look back far enough
+                    // for one, and answer only those that end in this read.
+                    for (int i = Math.Max(0, scanned - 4); i + 2 < len; i++)
                     {
                         if (all[i] != 0x1b || all[i + 1] != (byte)'[') continue;
                         int j = i + 2;
                         if (all[j] == (byte)'0' && j + 1 < len) j++;
-                        if (all[j] == (byte)'c' && reply != null)
+                        if (all[j] == (byte)'c' && j >= scanned && reply != null)
                         {
                             uint w;
                             WriteFile(inW, reply, (uint)reply.Length, out w, IntPtr.Zero);
+                        }
+                        // `ESC [ 16 t`, the cell size question.
+                        if (cellReply != null && i + 4 < len && i + 4 >= scanned && all[i + 2] == (byte)'1'
+                            && all[i + 3] == (byte)'6' && all[i + 4] == (byte)'t')
+                        {
+                            uint w;
+                            WriteFile(inW, cellReply, (uint)cellReply.Length, out w, IntPtr.Zero);
                         }
                     }
                     scanned = len;

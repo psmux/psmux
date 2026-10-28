@@ -49,7 +49,10 @@ function P { & $exe -L $ns @args 2>$null }
 # A two colour 16 by 12 pixel sixel: two bands of six rows.
 $sixelBody = 'Pq#1;2;100;100;0#2;2;0;100;0#1~~@@vv@@~~@@~~$#2??}}GG}}??}}??-#1@@@@@@@@@@@@@@'
 $sixelBytes = [byte[]]@(0x1B) + [Text.Encoding]::ASCII.GetBytes($sixelBody) + [byte[]]@(0x1B, 0x5C)
-$emit = "[Console]::Out.Write([char]27 + '$sixelBody' + [char]27 + '\'); 'EMITTED'"
+# Two line feeds after it: the cursor stays on the row of the image's last
+# band, and text written there erases the image cells under it, as in
+# Windows Terminal.
+$emit = "[Console]::Out.Write([char]27 + '$sixelBody' + [char]27 + '\' + [char]10 + [char]10); 'EMITTED'"
 
 function WaitSession($s) {
     for ($i = 0; $i -lt 60; $i++) {

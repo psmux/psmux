@@ -151,7 +151,8 @@ if (-not $env:PSMUX_CONPTY_DIR_FOR_TEST -or -not (Test-Path (Join-Path $conptyDi
     if (-not (WaitSession 'b')) { Check 'session starts on OpenConsole' $false '' }
     else {
         Start-Sleep -Seconds 2
-        P send-keys -t b "[Console]::Out.Write([char]27 + '$body' + [char]27 + '\'); 'EMITTED'" Enter | Out-Null
+        # Two line feeds after it, so the marker is not written over the image.
+        P send-keys -t b "[Console]::Out.Write([char]27 + '$body' + [char]27 + '\' + [char]10 + [char]10); 'EMITTED'" Enter | Out-Null
         $ok = $false
         for ($i = 0; $i -lt 40; $i++) {
             if ((P capture-pane -p -t b | Out-String) -match '(?m)^EMITTED') { $ok = $true; break }
