@@ -1286,20 +1286,22 @@ pub(crate) fn build_color_replies_for_pane(
     (scheme, osc)
 }
 
-/// Issue #556: best-effort synchronous answer, called from the pane READER
-/// thread the moment a color query is detected in the ConPTY output stream.
+/// Issue #556: the text of the colour replies the pane READER thread injects
+/// the moment a colour query is detected in the ConPTY output stream.
 ///
 /// The server-loop path adds a coalescing wait (1-8ms) plus a loop tick on
 /// top of ConPTY's forward latency; on hosts whose conhost forwards OSC
 /// 10;?/11;? to us (older builds), that total lands the reply AFTER the
-/// app's startup probe window has closed — yazi then re-parses the reply as
-/// an interactive `shell` action (issue #556).  Answering here, straight off
-/// the read, is the earliest point psmux can physically respond.
+/// app's startup probe window has closed, and yazi then re-parses the reply
+/// as an interactive `shell` action (issue #556).  Answering straight off
+/// the read is the earliest point psmux can physically respond.
 ///
-/// Everything (scheme + OSC replies) is injected as one
-/// `WriteConsoleInputW` batch so the replies arrive in query order.  Returns
-/// true when delivered (or nothing needed answering); false means the caller
-/// must fall back to the pending-bits → server-loop pipe path.
+/// This only builds the text (scheme reply first, then the OSC replies).
+/// Since #930 the reader joins it with the XTVERSION reply in query order
+/// (`pane::injected_replies`) and injects both in one `WriteConsoleInputW`
+/// batch before it hands the read to the parser thread; when that injection
+/// fails the reader falls back to the pending bits and the server loop pipe
+/// path.  An empty string means nothing needs answering.
 pub(crate) fn color_replies_text(
     bits: u32,
     colors: &crate::types::HostColors,
