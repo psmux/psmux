@@ -594,6 +594,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             anchor_line: 0,    // filled by add_image
             anchor_col: 0,     // filled by add_image
             on_alt: false,     // filled by add_image
+            erased: Vec::new(),
         };
         self.screen.add_image(img);
 

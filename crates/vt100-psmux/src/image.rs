@@ -69,4 +69,42 @@ pub struct SixelImage {
     /// Grid ownership: images tagged `on_alt` belong to the alternate screen
     /// and are dropped when it exits.
     pub on_alt: bool,
+    /// The image's cells that text or an erase has since been written over,
+    /// row major, `cell_width * cell_height`; empty while there are none.
+    pub erased: Vec<bool>,
+}
+
+impl SixelImage {
+    /// Mark the cells `col0..col1` of the image's row `row` as written over.
+    ///
+    /// Windows Terminal, whose sixel parser the pane's `OpenConsole` runs,
+    /// erases the part of an image under any text or erase written after it,
+    /// cell by cell (`TextBuffer::Replace` and `FillRect` call
+    /// `ImageSlice::EraseCells`, src/buffer/out/textBuffer.cpp), so the
+    /// program's next line can sit on the image's last, partly filled row.
+    pub fn erase_cells(&mut self, row: u16, col0: u16, col1: u16) {
+        let (w, h) = (usize::from(self.cell_width), usize::from(self.cell_height));
+        let (row, col0, col1) = (usize::from(row), usize::from(col0), usize::from(col1).min(w));
+        if row >= h || col0 >= col1 {
+            return;
+        }
+        if self.erased.is_empty() {
+            self.erased = vec![false; w * h];
+        }
+        self.erased[row * w + col0..row * w + col1].fill(true);
+    }
+
+    /// Whether the cell at `row`, `col` of the image has been written over.
+    #[must_use]
+    pub fn is_erased(&self, row: u16, col: u16) -> bool {
+        let (row, col) = (usize::from(row), usize::from(col));
+        col < usize::from(self.cell_width)
+            && self.erased.get(row * usize::from(self.cell_width) + col).copied().unwrap_or(false)
+    }
+
+    /// Whether every cell of the image has been written over.
+    #[must_use]
+    pub fn is_all_erased(&self) -> bool {
+        !self.erased.is_empty() && self.erased.iter().all(|&e| e)
+    }
 }

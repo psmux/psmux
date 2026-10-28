@@ -903,6 +903,32 @@ pub(crate) struct ImageDesc {
     pub cw: u16,
     /// Image height in cells.
     pub ch: u16,
+    /// The image's cells text has since been written over, as runs of
+    /// `[row, col, len]` in the image's own cells; the client leaves them out.
+    pub erased: Vec<[u16; 3]>,
+}
+
+/// The cells of `img` text has been written over, as `[row, col, len]` runs.
+pub(crate) fn erased_runs(img: &vt100::SixelImage) -> Vec<[u16; 3]> {
+    let mut runs = Vec::new();
+    if img.erased.is_empty() {
+        return runs;
+    }
+    for row in 0..img.cell_height {
+        let mut col = 0;
+        while col < img.cell_width {
+            if !img.is_erased(row, col) {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            while col < img.cell_width && img.is_erased(row, col) {
+                col += 1;
+            }
+            runs.push([row, start, col - start]);
+        }
+    }
+    runs
 }
 
 /// Gather the sixel images of `screen` that intersect the visible viewport,
@@ -944,6 +970,7 @@ pub(crate) fn visible_pane_images(
             ph: img.px_height,
             cw: img.cell_width,
             ch: img.cell_height,
+            erased: erased_runs(img),
         });
     }
     out
@@ -1528,6 +1555,10 @@ pub(crate) const TMUX_COMMANDS: &[&str] = &[
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue431_server_desc.rs"]
 mod test_issue431_server_desc;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_sixel_erased_desc.rs"]
+mod test_sixel_erased_desc;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_live_client_styles.rs"]

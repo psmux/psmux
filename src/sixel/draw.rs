@@ -1,12 +1,20 @@
 //! The client side of pane sixel images (#431): which images a frame draws,
 //! and the bytes that draw them over the frame ratatui has written.
 
+use std::collections::HashMap;
+
 use ratatui::layout::Rect;
 
+use super::decode::{decode, SixelPixels};
+use super::encode::encode;
+use super::scale::{crop_scale, VisibleCells};
+
 /// A single sixel image to re-emit after the frame is drawn (#431). `x`/`y`
-/// are OUTER-terminal 0-based cell coordinates of the image's top-left corner;
-/// `id` keys into the session-lifetime blob cache; `cw`/`ch` are the cell
-/// footprint, which `plan_sixel_frame` repaints when the image moves away.
+/// are OUTER-terminal 0-based cell coordinates of the top-left corner of the
+/// part that is visible; `id` keys into the session-lifetime blob cache;
+/// `cw`/`ch` are the whole image's cells; `i`/`j` the first visible cell
+/// inside it and `rx`/`ry` how many are visible, the footprint
+/// `plan_sixel_frame` repaints when the image moves away.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SixelEmit {
     pub x: u16,
@@ -14,6 +22,25 @@ pub(crate) struct SixelEmit {
     pub id: u64,
     pub cw: u16,
     pub ch: u16,
+    pub i: u16,
+    pub j: u16,
+    pub rx: u16,
+    pub ry: u16,
+}
+
+impl SixelEmit {
+    /// An image drawn whole at `x`, `y`.
+    pub(crate) fn whole(x: u16, y: u16, id: u64, cw: u16, ch: u16) -> Self {
+        Self { x, y, id, cw, ch, i: 0, j: 0, rx: cw, ry: ch }
+    }
+
+    fn is_whole(&self) -> bool {
+        self.i == 0 && self.j == 0 && self.rx == self.cw && self.ry == self.ch
+    }
+
+    fn part(&self) -> VisibleCells {
+        VisibleCells { i: self.i, j: self.j, x: 0, y: 0, rx: self.rx, ry: self.ry }
+    }
 }
 
 thread_local! {
@@ -38,22 +65,64 @@ pub(crate) fn frame_sixels_take() -> Vec<SixelEmit> {
     FRAME_SIXELS.with(|h| std::mem::take(&mut *h.borrow_mut()))
 }
 
-/// Decode the blobs a frame ships in `image_blobs` into the client's cache.
+/// Decode the blobs a frame ships in `image_blobs` into the client's cache,
+/// and return the ids that arrived.
 ///
 /// A server ships a blob once per id, again only after a resync, so whatever
 /// arrives replaces what the cache holds for that id: the client may have
 /// cached that id from another server (after `switch-client`), whose ids start
 /// at 1 as well.  Malformed ids and undecodable base64 are skipped.
 pub(crate) fn merge_image_blobs(
-    cache: &mut std::collections::HashMap<u64, Vec<u8>>,
-    blobs: &std::collections::HashMap<String, String>,
-) {
+    cache: &mut HashMap<u64, Vec<u8>>,
+    blobs: &HashMap<String, String>,
+) -> Vec<u64> {
     use base64::Engine;
+    let mut arrived = Vec::new();
     for (id_str, b64) in blobs {
         let Ok(id) = id_str.parse::<u64>() else { continue };
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
             cache.insert(id, bytes);
+            arrived.push(id);
         }
+    }
+    arrived
+}
+
+/// Images decoded from their blobs, and the bytes drawn for a part of one at
+/// a cell size, kept so a frame that draws the same again does not decode
+/// and encode it again.
+#[derive(Default)]
+pub(crate) struct SixelDrawCache {
+    decoded: HashMap<u64, Option<SixelPixels>>,
+    drawn: HashMap<(u64, VisibleCells, (u32, u32)), Vec<u8>>,
+}
+
+/// Entries kept before a cache starts over.
+const DRAW_CACHE_MAX: usize = 64;
+
+impl SixelDrawCache {
+    /// Drop what was made from `id`'s blob, which a new blob replaced.
+    pub(crate) fn forget(&mut self, id: u64) {
+        self.decoded.remove(&id);
+        self.drawn.retain(|key, _| key.0 != id);
+    }
+
+    /// The sixel for the part of `emit`'s image it shows, at `cell` pixels a
+    /// cell. `None` when the blob does not decode or the part is empty.
+    fn redrawn(&mut self, emit: &SixelEmit, blob: &[u8], cell: (u32, u32)) -> Option<&[u8]> {
+        let key = (emit.id, emit.part(), cell);
+        if !self.drawn.contains_key(&key) {
+            if self.decoded.len() >= DRAW_CACHE_MAX && !self.decoded.contains_key(&emit.id) {
+                self.decoded.clear();
+            }
+            let image = self.decoded.entry(emit.id).or_insert_with(|| decode(blob)).as_ref()?;
+            let part = crop_scale(image, vt100::image::DEFAULT_CELL_PX, emit.part(), cell)?;
+            if self.drawn.len() >= DRAW_CACHE_MAX {
+                self.drawn.clear();
+            }
+            self.drawn.insert(key, encode(&part));
+        }
+        self.drawn.get(&key).map(Vec::as_slice)
     }
 }
 
@@ -72,11 +141,17 @@ pub(crate) struct SixelFramePlan {
 /// ratatui writes only the cells that changed, so an image stays on the
 /// outer terminal until something is written over it, and writing it again
 /// every frame only made it flicker.  Nothing is written while the images
-/// and the screen size are what the last frame left (`None`).  Otherwise
-/// every image is drawn again, and the cells under the last frame's images
-/// are rewritten first, since an image that moved or went away leaves its
-/// pixels behind on cells whose text did not change.  After a resize ratatui
-/// has cleared the whole screen, so there is nothing to rewrite.
+/// and the screen size are what the last frame left (`None`).
+///
+/// Otherwise only what changed is written.  The cells under the parts that
+/// went away are rewritten from the frame just drawn, since a part that
+/// moved or went away leaves its pixels behind on cells whose text did not
+/// change.  Then the new parts are drawn, and any part still in place whose
+/// cells that rewrite covered, because the terminal erases an image under
+/// text written over it.  A line typed beside an image's partly erased last
+/// row changes one small part each key, and the rest of the image is left
+/// alone.  After a resize ratatui has cleared the whole screen, so every
+/// part is drawn and nothing is rewritten.
 pub(crate) fn plan_sixel_frame(
     last: &[SixelEmit],
     last_area: Rect,
@@ -86,37 +161,62 @@ pub(crate) fn plan_sixel_frame(
     if now == last && area == last_area {
         return None;
     }
-    let repaint = if area == last_area {
-        last.iter()
-            .map(|e| Rect::new(e.x, e.y, e.cw, e.ch).intersection(area))
-            .filter(|r| r.width > 0 && r.height > 0)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    Some(SixelFramePlan { repaint, draw: now.to_vec() })
+    if area != last_area {
+        return Some(SixelFramePlan { repaint: Vec::new(), draw: now.to_vec() });
+    }
+    let rect = |e: &SixelEmit| Rect::new(e.x, e.y, e.rx, e.ry);
+    let repaint: Vec<Rect> = last
+        .iter()
+        .filter(|e| !now.contains(e))
+        .map(|e| rect(e).intersection(area))
+        .filter(|r| r.width > 0 && r.height > 0)
+        .collect();
+    let draw: Vec<SixelEmit> = now
+        .iter()
+        .filter(|e| !last.contains(e) || repaint.iter().any(|r| r.intersects(rect(e))))
+        .cloned()
+        .collect();
+    Some(SixelFramePlan { repaint, draw })
 }
 
 /// Build the raw byte stream that overlays the collected sixel images on top of
 /// an already-drawn frame (#431). For each emit whose blob id is present in the
-/// cache: DECSC (save cursor); CUP to 1-based (y+1, x+1); the raw ESC P … ST
-/// sixel bytes verbatim; DECRC (restore cursor). Returns EMPTY when there is
-/// nothing to draw or no emit's id is cached — the caller gates emission on the
-/// `sixel` option separately. Bytes (not String) because the blob is arbitrary
-/// binary. Pure function so it can be unit-tested.
+/// cache: DECSC (save cursor); CUP to 1-based (y+1, x+1); the sixel; DECRC
+/// (restore cursor). Returns EMPTY when there is nothing to draw or no emit's
+/// id is cached — the caller gates emission on the `sixel` option separately.
+/// Bytes (not String) because the blob is arbitrary binary.
+///
+/// A whole image at the 10 by 20 pixel cell the pane laid it out in is the
+/// blob verbatim. Anything else is the visible part cut out and resampled to
+/// `cell`, the terminal's cell size, as tmux's `tty_cmd_sixelimage` draws
+/// every image (tty.c:2180-2227 in tmux 3.8): the image keeps its cells and
+/// only the pixels in a cell change.
 pub(crate) fn build_sixel_overlay(
     emits: &[SixelEmit],
-    cache: &std::collections::HashMap<u64, Vec<u8>>,
+    blobs: &HashMap<u64, Vec<u8>>,
+    cache: &mut SixelDrawCache,
+    cell: (u32, u32),
 ) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     for emit in emits {
-        let Some(blob) = cache.get(&emit.id) else {
+        let Some(blob) = blobs.get(&emit.id) else {
             continue; // blob not shipped/decoded yet; skip this frame
+        };
+        let as_laid_out = cell == vt100::image::DEFAULT_CELL_PX && emit.is_whole();
+        let sixel: &[u8] = if as_laid_out {
+            blob
+        } else {
+            match cache.redrawn(emit, blob, cell) {
+                Some(bytes) => bytes,
+                // A whole image that will not decode is still drawn as it came.
+                None if emit.is_whole() => blob,
+                None => continue,
+            }
         };
         out.extend_from_slice(b"\x1b7"); // DECSC: save cursor
         // CUP to 1-based (row;col).
         out.extend_from_slice(format!("\x1b[{};{}H", emit.y as u32 + 1, emit.x as u32 + 1).as_bytes());
-        out.extend_from_slice(blob); // raw ESC P … ST sixel bytes verbatim
+        out.extend_from_slice(sixel);
         out.extend_from_slice(b"\x1b8"); // DECRC: restore cursor
     }
     out

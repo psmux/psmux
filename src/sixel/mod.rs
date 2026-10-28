@@ -3,5 +3,8 @@
 //! `vt100::image` and `vt100::perform`, the server side in
 //! `server::helpers` (`visible_pane_images`, `visible_image_blobs`).
 
+pub(crate) mod decode;
 pub(crate) mod draw;
+pub(crate) mod encode;
 pub(crate) mod host;
+pub(crate) mod scale;

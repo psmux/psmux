@@ -250,7 +250,7 @@ fn sync_gate_keeps_paint_and_reports_held_until_a_real_query() {
     state.synchronized_output = gate.is_open();
     assert!(state.bracketed_paste);
     let replies: String = queries.into_iter().map(|q| device_reply(q, &state)).collect();
-    assert_eq!(replies, format!("{}\x1b[?1;2c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY));
+    assert_eq!(replies, format!("{}\x1b[?1;2;4c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY));
     assert_eq!(parser.screen().program_status().get("").unwrap().state, vt100::ProgramState::Done);
     assert!(!detector.scan(b""));
     assert!(parser.screen_mut().take_queries().is_empty());
@@ -303,7 +303,7 @@ fn parser_thread_answers_queries_before_an_open_update_times_out() {
     let start = Instant::now();
     send.send(cat(&[B, b"paint\x1b]7501;state=blocked\x07\x1b]7501;?\x07\x1b[c\x1b[?2026$p"])).unwrap();
     let mut reply = Vec::new();
-    let expected = format!("{}\x1b[?1;2c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY).into_bytes();
+    let expected = format!("{}\x1b[?1;2;4c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY).into_bytes();
     while reply.len() < expected.len() && start.elapsed() < SYNC_TIMEOUT / 2 {
         if let Some(bytes) = crate::types::take_device_replies(pane_id) { reply.extend(bytes); }
         thread::sleep(Duration::from_millis(1));

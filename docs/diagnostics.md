@@ -278,7 +278,7 @@ XTVERSION                     answered by psmux  answered by psmux
 
 A program in a pane can ask the terminal what it is and what modes it has on. psmux answers
 **DA1** (`ESC[c`), **DA2** (`ESC[>c`), **DSR** (`ESC[5n` and `ESC[6n`) and **DECRQM**
-(`ESC[?<mode>$p`) itself, with the same bytes tmux sends: `ESC[?1;2c`, `ESC[>84;0;0c`, `ESC[0n`,
+(`ESC[?<mode>$p`) itself, with the same bytes tmux built with sixel sends: `ESC[?1;2;4c`, `ESC[>84;0;0c`, `ESC[0n`,
 `ESC[<row>;<col>R` and `ESC[?<mode>;<value>$y` with 1 set, 2 reset, 0 not recognised
 (`input.c`, `INPUT_CSI_DA`, `INPUT_CSI_DA_TWO`, `INPUT_CSI_DSR`, `INPUT_CSI_QUERY_PRIVATE`).
 `ESC[>q` (XTVERSION) is answered too, and `ESC[1t` is ignored, again like tmux.
@@ -321,7 +321,27 @@ tmux does, which Windows Terminal 1.24 does. Where the client gets no reply it d
 inside another psmux, where it does not ask, on the pipe route (`ssh -T`, a Cygwin pty), and when
 `PSMUX_HOST_COLORS` is set, which skips the query. `set -g sixel on` draws there anyway, and
 `set -g sixel off` never draws. Programs that ask DA1 before sending sixel get psmux's answer under
-OpenConsole, `ESC[?1;2c`, which does not list sixel.
+OpenConsole, `ESC[?1;2;4c`, which lists sixel (4) as tmux built with sixel does, so a program such
+as yazi draws images with sixel rather than with text.
+
+A pane lays images out in cells of 10 by 20 pixels, the cell OpenConsole uses, and answers a
+program's `ESC[16t` with `ESC[6;20;10t` and `ESC[14t` with the pane's size in those pixels, so a
+program that sizes an image from the answer gets the cells it expects. It answers `ESC[18t` with the
+pane's rows and columns, `ESC[8;<rows>;<cols>t`, when the console host passes the question on
+(OpenConsole does; the inbox conhost answers it itself), so a program such as chafa fits its image
+to the pane rather than to 80 by 24. The client asks the terminal around it `ESC[16t` and `ESC[14t` when it attaches and draws each image at the cell size it reports,
+keeping the image's cells and changing only the pixels in them, as tmux does. Windows Terminal 1.24
+reports 10 by 20 whatever the font, since it scales sixel images itself, so there an image is written
+as the pane received it. A terminal that does not answer gets the image at 10 by 20. The client asks
+only when it attaches, so a font change in a terminal that reports real pixels takes effect on the
+next attach.
+
+An image is cut to the pane it is in: the rows scrolled up past the top of the pane and whatever lies
+past its right or bottom edge are left out, and the rest is drawn. It never draws over the
+neighbouring pane or the status line. The cells of an image that text or an erase is written over
+afterwards are left out too, as Windows Terminal erases them. This is what keeps a program's next
+line readable: the cursor stays on the image's last row, which the image often fills only partly,
+so the next line is written over that row.
 
 `PSMUX_NO_PASSTHROUGH=1` is independent of this and does not change either number.
 

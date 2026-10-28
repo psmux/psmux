@@ -730,6 +730,9 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         // not to what the user had. Measured on Windows Terminal:
         // `ESC P $ q SP q ESC \` is answered with `ESC P 1 $ r 0 SP q ESC \`.
         queries.push_str("\x1bP$q q\x1b\\");
+        // The cell size in pixels, to draw pane sixel images at
+        // (sixel::host::parse_cell_size).
+        queries.push_str("\x1b[16t\x1b[14t");
         queries.push_str("\x1b[c"); // DA1 sentinel: always answered, marks the end
         {
             let mut out = std::io::stdout();
@@ -814,6 +817,8 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         crate::rendering::note_host_blink_before(parse_decrqm_blink(&buf));
         crate::rendering::note_host_shape_before(parse_decrqss_cursor_style(&buf));
         crate::sixel::host::note_host_sixel(crate::sixel::host::parse_da1_sixel(&buf));
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((0, 0));
+        crate::sixel::host::note_host_cell_px(crate::sixel::host::parse_cell_size(&buf, cols, rows));
         let hc = parse_host_color_replies(&buf);
         if hc.has_any() || hc.dark.is_some() {
             Some(hc.to_spec())

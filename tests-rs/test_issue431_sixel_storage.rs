@@ -18,6 +18,7 @@ fn mk_image(px_w: u32, px_h: u32) -> SixelImage {
         anchor_line: 0,
         anchor_col: 0,
         on_alt: false,
+        erased: Vec::new(),
     }
 }
 

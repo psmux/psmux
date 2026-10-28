@@ -1299,6 +1299,36 @@ impl Screen {
         self.sixel_images.retain(|img| img.on_alt != on_alt);
     }
 
+    /// Text or an erase was written over columns `col0..col1` of the `lines`
+    /// absolute lines from `line`: mark those cells of the current grid's
+    /// images as written over (see [`crate::image::SixelImage::erase_cells`]),
+    /// and drop an image with no cell left.
+    fn erase_image_cells(&mut self, line: u64, lines: u64, col0: u16, col1: u16) {
+        if self.sixel_images.is_empty() || lines == 0 || col0 >= col1 {
+            return;
+        }
+        let on_alt = self.mode(MODE_ALTERNATE_SCREEN);
+        let end = line.saturating_add(lines);
+        let mut any_all = false;
+        for img in self.sixel_images.iter_mut().filter(|img| img.on_alt == on_alt) {
+            let top = img.anchor_line;
+            let bottom = top + u64::from(img.cell_height);
+            let left = img.anchor_col;
+            let right = left.saturating_add(img.cell_width);
+            if end <= top || line >= bottom || col1 <= left || col0 >= right {
+                continue;
+            }
+            let (c0, c1) = (col0.max(left) - left, col1.min(right) - left);
+            for abs in line.max(top)..end.min(bottom) {
+                img.erase_cells(u16::try_from(abs - top).unwrap_or(u16::MAX), c0, c1);
+            }
+            any_all |= img.is_all_erased();
+        }
+        if any_all {
+            self.sixel_images.retain(|img| !img.is_all_erased());
+        }
+    }
+
     /// Store an OSC 52 clipboard copy request emitted by the child.
     /// `selector` is the raw selector field (e.g. `b"c"`), `data` is the
     /// base64-encoded payload exactly as received.  Later writes overwrite
@@ -1908,6 +1938,8 @@ impl Screen {
         }
         self.grid_mut().col_wrap(width, wrap);
         let pos = self.grid().pos();
+        let line = self.grid().absolute_line_of_cursor();
+        self.erase_image_cells(line, 1, pos.col, pos.col + width);
 
         // After a resize, cells may be in inconsistent states (e.g.
         // a wide char at the last column without its continuation).
@@ -2115,9 +2147,21 @@ impl Screen {
         mut unhandled: impl FnMut(&mut Self),
     ) {
         let attrs = self.attrs;
+        let pos = self.grid().pos();
+        let size = self.grid().size();
+        let line = self.grid().absolute_line_of_cursor();
+        let top = line - u64::from(pos.row);
         match mode {
-            0 => self.grid_mut().erase_all_forward(attrs),
-            1 => self.grid_mut().erase_all_backward(attrs),
+            0 => {
+                self.grid_mut().erase_all_forward(attrs);
+                self.erase_image_cells(line, 1, pos.col, size.cols);
+                self.erase_image_cells(line + 1, u64::from(size.rows - 1 - pos.row), 0, size.cols);
+            }
+            1 => {
+                self.grid_mut().erase_all_backward(attrs);
+                self.erase_image_cells(top, u64::from(pos.row), 0, size.cols);
+                self.erase_image_cells(line, 1, 0, pos.col + 1);
+            }
             2 => {
                 self.grid_mut().erase_all(attrs);
                 self.drop_current_grid_images();
@@ -2148,10 +2192,22 @@ impl Screen {
         mut unhandled: impl FnMut(&mut Self),
     ) {
         let attrs = self.attrs;
+        let pos = self.grid().pos();
+        let cols = self.grid().size().cols;
+        let line = self.grid().absolute_line_of_cursor();
         match mode {
-            0 => self.grid_mut().erase_row_forward(attrs),
-            1 => self.grid_mut().erase_row_backward(attrs),
-            2 => self.grid_mut().erase_row(attrs),
+            0 => {
+                self.grid_mut().erase_row_forward(attrs);
+                self.erase_image_cells(line, 1, pos.col, cols);
+            }
+            1 => {
+                self.grid_mut().erase_row_backward(attrs);
+                self.erase_image_cells(line, 1, 0, pos.col + 1);
+            }
+            2 => {
+                self.grid_mut().erase_row(attrs);
+                self.erase_image_cells(line, 1, 0, cols);
+            }
             _ => unhandled(self),
         }
     }
@@ -2193,7 +2249,10 @@ impl Screen {
     // CSI X
     pub(crate) fn ech(&mut self, count: u16) {
         let attrs = self.attrs;
+        let pos = self.grid().pos();
+        let line = self.grid().absolute_line_of_cursor();
         self.grid_mut().erase_cells(count, attrs);
+        self.erase_image_cells(line, 1, pos.col, pos.col.saturating_add(count));
     }
 
     // CSI d
@@ -2509,4 +2568,8 @@ mod test_issue361_osc8_hyperlink;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue431_sixel_storage.rs"]
 mod test_issue431_sixel_storage;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_sixel_erased_cells.rs"]
+mod test_sixel_erased_cells;
 

@@ -41,6 +41,8 @@ fn image_scrolled_above_viewport_is_culled() {
     // survives scrolling) but must not be emitted once it leaves the viewport.
     let mut p = vt100::Parser::new(5, 80, 2000);
     p.process(SIXEL_20X40);
+    // Below the image first: text written over it erases its cells.
+    p.process(b"\r\n\r\n");
     for _ in 0..60 {
         p.process(b"line\r\n");
     }
@@ -62,6 +64,8 @@ fn scrolling_back_reveals_the_image_again() {
     // function of the offset (higher offset => image sits lower in the viewport).
     let mut p = vt100::Parser::new(5, 80, 2000);
     p.process(SIXEL_20X40);
+    // Below the image first: text written over it erases its cells.
+    p.process(b"\r\n\r\n");
     for _ in 0..20 {
         p.process(b"line\r\n");
     }

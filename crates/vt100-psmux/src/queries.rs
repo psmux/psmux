@@ -14,15 +14,15 @@ pub(crate) fn csi_query(
         ('n', [], 5) => Some(TerminalQuery::DsrStatus),
         ('p', [b'?', b'$'], mode) if mode > 0 => Some(TerminalQuery::DecrqmPrivate(mode)),
         ('p', [b'$'], mode) if mode > 0 => Some(TerminalQuery::DecrqmAnsi(mode)),
-        // XTWINOPS pixel size reports, which tmux answers in
-        // input_csi_dispatch_winops (input.c:2162-2176).  Issue #841: tmux
+        // XTWINOPS size reports, which tmux answers in
+        // input_csi_dispatch_winops (input.c:2163-2186).  Issue #841: tmux
         // 3.8 asks its outer terminal `CSI 18 t CSI 14 t` whenever the tty
         // has no pixel size (always the case under WSL) and holds every lone
-        // Escape for 500 ms until the `CSI 14 t` answer arrives.  The cell
-        // reports 18 and 19 stay with the console host, which answers them
-        // itself and does not forward them, so answering them here as well
-        // could hand the program two replies.
-        ('t', [], op @ (14 | 15 | 16)) => Some(TerminalQuery::WindowReport(op)),
+        // Escape for 500 ms until the `CSI 14 t` answer arrives.  The text
+        // area reports 18 and 19 reach psmux only from a host that does not
+        // answer them itself: the inbox console host answers them and does
+        // not forward them, an OpenConsole forwards them unanswered.
+        ('t', [], op @ (14 | 15 | 16 | 18 | 19)) => Some(TerminalQuery::WindowReport(op)),
         _ => None,
     }
 }

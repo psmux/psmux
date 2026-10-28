@@ -2,9 +2,9 @@
 
 /// Whether the terminal's DA1 reply, `CSI ? Ps ; ... c`, lists sixel.
 ///
-/// Read the way tmux reads it (`tty_keys_device_attributes`, tty-keys.c:1496):
-/// a first parameter of 61 to 65 names the conformance level and the rest
-/// are features, 4 being sixel.  Any other reply says no.  `None` when there
+/// Read the way tmux reads it (`tty_keys_device_attributes`,
+/// tty-keys.c:1519-1528 in tmux 3.8): a first parameter of 61 to 65 names
+/// the conformance level and the rest are features, 4 being sixel.  Any other reply says no.  `None` when there
 /// is no DA1 reply in `buf`.  Measured on Windows Terminal 1.24:
 /// `CSI ? 61;4;6;7;14;21;22;23;24;28;32;42;52 c`.
 pub(crate) fn parse_da1_sixel(buf: &[u8]) -> Option<bool> {
@@ -50,7 +50,7 @@ pub fn note_host_sixel(sixel: Option<bool>) {
 
 /// What the terminal's DA1 reply said about sixel, `None` when it did not
 /// answer or was not asked.
-fn host_sixel() -> Option<bool> {
+pub(crate) fn host_sixel() -> Option<bool> {
     match HOST_SIXEL.load(std::sync::atomic::Ordering::Relaxed) {
         1 => Some(true),
         2 => Some(false),
@@ -92,6 +92,68 @@ pub(crate) fn frame_sixel_mode(mode: Option<&str>, flag: bool) -> crate::types::
     }
 }
 
+/// The terminal's cell size in pixels from its replies at attach, the width
+/// in the high 16 bits and the height in the low ones; 0 when it did not say.
+static HOST_CELL_PX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Record the cell size the terminal reported.
+pub(crate) fn note_host_cell_px(px: Option<(u32, u32)>) {
+    let v = px
+        .filter(|&(w, h)| w > 0 && h > 0 && w <= u32::from(u16::MAX) && h <= u32::from(u16::MAX))
+        .map_or(0, |(w, h)| (w << 16) | h);
+    HOST_CELL_PX.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The cell size the terminal reported, `None` when it did not say.
+pub(crate) fn host_cell_px() -> Option<(u32, u32)> {
+    match HOST_CELL_PX.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        v => Some((v >> 16, v & 0xffff)),
+    }
+}
+
+/// The cell size images are drawn at: the terminal's, or the 10 by 20 pixels
+/// a pane lays them out in when it did not say.
+///
+/// tmux draws a placeholder instead when it knows no cell size
+/// (`tty_cmd_sixelimage`, tty.c:2194 in tmux 3.8). psmux draws the image as
+/// the pane laid it out, which is what Windows Terminal reports anyway.
+pub(crate) fn draw_cell_px() -> (u32, u32) {
+    host_cell_px().unwrap_or(vt100::image::DEFAULT_CELL_PX)
+}
+
+/// The cell size in pixels from the terminal's XTWINOPS replies: `CSI 6 ; h
+/// ; w t` to `CSI 16 t`, or else `CSI 4 ; h ; w t` to `CSI 14 t` divided by
+/// the terminal's `cols` by `rows`, which is what tmux reads
+/// (`tty_keys_winsz`, tty-keys.c:726-735 in tmux 3.8).  Measured on Windows
+/// Terminal 1.24 at 120 by 30: `CSI 6;20;10 t` and `CSI 4;600;1200 t`, the
+/// 10 by 20 cell it scales sixel images from, whatever the font.
+pub(crate) fn parse_cell_size(buf: &[u8], cols: u16, rows: u16) -> Option<(u32, u32)> {
+    let report = |op: &[u8]| -> Option<(u32, u32)> {
+        let needle = [b"\x1b[".as_slice(), op, b";"].concat();
+        let at = buf.windows(needle.len()).position(|w| w == needle.as_slice())?;
+        let rest = &buf[at + needle.len()..];
+        let end = rest.iter().position(|&b| b == b't')?;
+        let text = std::str::from_utf8(&rest[..end]).ok()?;
+        let mut fields = text.split(';').map(|f| f.parse::<u32>().ok());
+        let h = fields.next()??;
+        let w = fields.next()??;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some((w, h))
+    };
+    if let Some((w, h)) = report(b"6").filter(|&(w, h)| w > 0 && h > 0) {
+        return Some((w, h));
+    }
+    let (w, h) = report(b"4")?;
+    let (cols, rows) = (u32::from(cols), u32::from(rows));
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some((w / cols, h / rows)).filter(|&(w, h)| w > 0 && h > 0)
+}
+
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue431_host_sixel.rs"]
 mod test_issue431_host_sixel;
@@ -99,3 +161,7 @@ mod test_issue431_host_sixel;
 #[cfg(test)]
 #[path = "../../tests-rs/test_sixel_mode.rs"]
 mod test_sixel_mode;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_sixel_cell_size.rs"]
+mod test_sixel_cell_size;

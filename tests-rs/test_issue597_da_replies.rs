@@ -119,12 +119,11 @@ fn a_device_attributes_reply_is_not_mistaken_for_a_query() {
 }
 
 #[test]
-fn xtwinops_is_not_a_query() {
+fn xtwinops_1t_is_not_a_query() {
     // tmux's winops `case 1:` only breaks.  psmux leaves `ESC[1t` alone too,
     // and the three second stall still went away, which is what proves DA1 was
     // the sequence OpenConsole was waiting on.
     assert!(scan_device_queries(b"\x1b[1t").is_empty());
-    assert!(scan_device_queries(b"\x1b[18t").is_empty());
 }
 
 #[test]
@@ -158,8 +157,9 @@ fn decrqm_with_mode_zero_draws_no_reply() {
 
 #[test]
 fn da1_reply_is_tmux_byte_for_byte() {
-    // input.c:1589 input_reply(ictx, 1, "\033[?1;2c")
-    assert_eq!(reply_for(b"\x1b[c", &fresh()), "\x1b[?1;2c");
+    // input.c:1588 input_reply(ictx, 1, "\033[?1;2;4c"), tmux built with
+    // sixel (tmux 3.8)
+    assert_eq!(reply_for(b"\x1b[c", &fresh()), "\x1b[?1;2;4c");
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn several_queries_in_one_batch_answer_in_order() {
     let st = fresh();
     assert_eq!(
         reply_for(b"\x1b[c\x1b[>c\x1b[5n\x1b[?2004$p", &st),
-        "\x1b[?1;2c\x1b[>84;0;0c\x1b[0n\x1b[?2004;2$y"
+        "\x1b[?1;2;4c\x1b[>84;0;0c\x1b[0n\x1b[?2004;2$y"
     );
 }
 

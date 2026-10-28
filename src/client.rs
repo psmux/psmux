@@ -2349,31 +2349,33 @@ pub fn render_layout_json(
             // Reserve 1 row for the border label so it doesn't overlap content (#288).
             let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
             let inner = pane_content_inner(area, border_status, border_format);
-            // ── Sixel: collect fully-inside images for post-draw emit (#431) ──
+            // ── Sixel: collect the visible part of each image for post-draw emit (#431) ──
             // Mirror FRAME_HYPERLINKS: push geometry+id during render, defer the
             // blob-cache-presence check to emit time (the cache is not in scope
-            // here). A sixel cannot be partially clipped, so only push when the
-            // whole cell footprint lies inside the pane's inner content rect.
+            // here). An image that sticks out of the pane's inner content rect,
+            // scrolled up past its top or past its right or bottom edge, is cut
+            // to the cells inside it when it is drawn, and the cells text has
+            // been written over since are left out, as Windows Terminal erases
+            // them.
             for desc in images {
-                if desc.row < 0 {
-                    continue; // anchored above the viewport → not fully inside
+                let Some(part) = crate::sixel::scale::visible_cells(
+                    desc.row, desc.col, desc.cw, desc.ch, inner.width, inner.height,
+                ) else {
+                    continue;
+                };
+                for rect in crate::sixel::scale::drawn_rects(part, &desc.erased) {
+                    frame_sixels_push(SixelEmit {
+                        x: inner.x + rect.x,
+                        y: inner.y + rect.y,
+                        id: desc.id,
+                        cw: desc.cw,
+                        ch: desc.ch,
+                        i: rect.i,
+                        j: rect.j,
+                        rx: rect.rx,
+                        ry: rect.ry,
+                    });
                 }
-                if desc.row as i64 + desc.ch as i64 > inner.height as i64 {
-                    continue; // bottom edge past the pane
-                }
-                if desc.col as i64 + desc.cw as i64 > inner.width as i64 {
-                    continue; // right edge past the pane
-                }
-                // row >= 0 and both bounds checks passed, so out_x/out_y fit u16.
-                let out_x = inner.x as i32 + desc.col as i32;
-                let out_y = inner.y as i32 + desc.row;
-                frame_sixels_push(SixelEmit {
-                    x: out_x as u16,
-                    y: out_y as u16,
-                    id: desc.id,
-                    cw: desc.cw,
-                    ch: desc.ch,
-                });
             }
             let mut lines: Vec<Line> = Vec::new();
             let use_full_cells = *copy_mode && *active && !content.is_empty();
@@ -4358,6 +4360,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // M6 reads this cache to re-emit visible images each frame.
     let mut image_blob_cache: std::collections::HashMap<u64, Vec<u8>> =
         std::collections::HashMap::new();
+    // Images decoded from those blobs and the parts drawn of them, for an
+    // image the pane cuts or a terminal whose cells are not 10 by 20.
+    let mut sixel_draw_cache = crate::sixel::draw::SixelDrawCache::default();
     // Latest value of the server `sixel` option, refreshed each frame
     // (deferred init: assigned at the top of every frame before any read).
     // M6 gates its emit block on this (plus outer-terminal capability).
@@ -4765,7 +4770,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
         // Image blobs come off each frame in the drain as well, since the
         // server ships each one once and the frame kept may not be its own.
-        merge_image_blobs(&mut image_blob_cache, &drained_oneshots.image_blob_map());
+        for id in merge_image_blobs(&mut image_blob_cache, &drained_oneshots.image_blob_map()) {
+            sixel_draw_cache.forget(id);
+        }
         // ── OSC 52 and bell from the server, once each, now ─────────────
         // Not tied to drawing a frame: the frame they came in may be
         // identical to the last one drawn, or never be drawn at all. Neither
@@ -8897,7 +8904,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // (empty {} on steady frames). M6 consumes both. A frame from the
         // drain above has had its blobs taken already.
         sixel_mode = crate::sixel::host::frame_sixel_mode(state.sixel_mode.as_deref(), state.sixel);
-        merge_image_blobs(&mut image_blob_cache, &state.image_blobs);
+        for id in merge_image_blobs(&mut image_blob_cache, &state.image_blobs) {
+            sixel_draw_cache.forget(id);
+        }
         // `image_blob_cache` and `sixel_mode` are consumed by the post-draw
         // sixel emit block (M6) below.
         // Sync codepoint-widths into this process's width table, for the same
@@ -10405,13 +10414,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // ── Sixel images (#431) ──────────────────────────────────────
         // Only images whose blob has arrived can be drawn; the cells under
         // the last frame's images come from the frame just drawn.
-        let sixel_now: Vec<SixelEmit> = {
+        let (sixel_now, sixel_collected): (Vec<SixelEmit>, usize) = {
             let emits = frame_sixels_take();
-            if crate::sixel::host::sixel_draws(sixel_mode) {
+            let collected = emits.len();
+            let now = if crate::sixel::host::sixel_draws(sixel_mode) {
                 emits.into_iter().filter(|e| image_blob_cache.contains_key(&e.id)).collect()
             } else {
                 Vec::new()
-            }
+            };
+            (now, collected)
         };
         let frame_area = completed.area;
         let sixel_plan = plan_sixel_frame(&last_sixel_drawn, last_sixel_area, &sixel_now, frame_area);
@@ -10428,11 +10439,32 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 terminal.backend_mut(),
                 sixel_repaint.iter().map(|(x, y, c)| (*x, *y, c)),
             );
-            let overlay = build_sixel_overlay(&plan.draw, &image_blob_cache);
+            let overlay = build_sixel_overlay(
+                &plan.draw,
+                &image_blob_cache,
+                &mut sixel_draw_cache,
+                crate::sixel::host::draw_cell_px(),
+            );
             if !overlay.is_empty() {
                 let _ = terminal.backend_mut().queue_drawing(&overlay);
             }
-            last_sixel_drawn = plan.draw;
+            if client_log_enabled() {
+                // One line per frame that writes sixel: why it draws, at what
+                // cell, which parts of which images and how many bytes.
+                let parts: Vec<String> = plan.draw.iter().map(|e| format!(
+                    "{}@{},{} cells {},{} {}x{} of {}x{}",
+                    e.id, e.x, e.y, e.i, e.j, e.rx, e.ry, e.cw, e.ch,
+                )).collect();
+                client_log("sixel", &format!(
+                    "mode={} host={:?} cell={:?} collected={} repaint={} draw=[{}] bytes={}",
+                    sixel_mode.as_str(), crate::sixel::host::host_sixel(),
+                    crate::sixel::host::draw_cell_px(), sixel_collected,
+                    plan.repaint.len(), parts.join("; "), overlay.len(),
+                ));
+            }
+            // What is on the terminal now: every current part, drawn this
+            // frame or left in place.
+            last_sixel_drawn = sixel_now;
             last_sixel_area = frame_area;
         }
         if client_log_enabled() {

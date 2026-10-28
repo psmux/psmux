@@ -4159,7 +4159,10 @@ impl XtversionScanner {
 // parity rather than invention.  Citations, tmux next-3.8 `input.c` in
 // C:\Users\godwin\Documents\workspace\tmux:
 //
-//   input.c:1581-1595  INPUT_CSI_DA        -> input_reply(ictx, 1, "\033[?1;2c")
+//   input.c:1581-1595  INPUT_CSI_DA        -> input_reply(ictx, 1, "\033[?1;2c"),
+//                                             "\033[?1;2;4c" when built with
+//                                             sixel (ENABLE_SIXEL, 1587-1590
+//                                             in tmux 3.8), which psmux is
 //   input.c:1597-1608  INPUT_CSI_DA_TWO    -> input_reply(ictx, 1, "\033[>84;0;0c")
 //   input.c:1722-1737  INPUT_CSI_DSR       -> "\033[0n" for 5,
 //                                             "\033[%u;%uR" for 6
@@ -4258,7 +4261,11 @@ fn decrqm_ansi_value(_mode: u16) -> u8 { 0 }
 pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     match q {
         DeviceQuery::ProgramStatus => vt100::PROGRAM_STATUS_REPLY.to_string(),
-        DeviceQuery::Da1 => "\x1b[?1;2c".to_string(),
+        // tmux built with sixel lists it (input.c:1587-1590 in tmux 3.8). The
+        // answer reaches a pane only through an OpenConsole, which is also
+        // the only host that passes a pane's sixel on to psmux, and programs
+        // such as yazi pick sixel over text only when it is listed.
+        DeviceQuery::Da1 => "\x1b[?1;2;4c".to_string(),
         DeviceQuery::Da2 => "\x1b[>84;0;0c".to_string(),
         DeviceQuery::DsrStatus => "\x1b[0n".to_string(),
         DeviceQuery::DecrqmPrivate(m) if m > 0 => {
@@ -4272,34 +4279,41 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     }
 }
 
-/// tmux's cell size in pixels when the client never reported one
-/// (`DEFAULT_XPIXEL` / `DEFAULT_YPIXEL`, tmux.h:121-122).  psmux never learns
-/// the host terminal's pixel size either (every pane is opened with
-/// `pixel_width: 0`), so it answers with the same defaults tmux would.
-const DEFAULT_XPIXEL: u32 = 16;
-const DEFAULT_YPIXEL: u32 = 32;
-
-/// Issue #841: the XTWINOPS pixel size reports, exactly as tmux's
-/// `input_csi_dispatch_winops` (input.c:2162-2176) writes them.
+/// Issue #841: the XTWINOPS size reports, in the form tmux's
+/// `input_csi_dispatch_winops` (input.c:2163-2186 in tmux 3.8) writes them.
 ///
-/// The one that matters is `CSI 14 t`.  tmux 3.8 sends `CSI 18 t CSI 14 t` to
-/// its outer terminal whenever the tty reports no pixel size (tty.c:146-150,
-/// always the case for a pty under WSL) and keeps `TTY_WINSIZEQUERY` set until
-/// the `CSI 4 ; h ; w t` answer arrives (tty-keys.c:732).  While that flag is
+/// The cell is the one the pane lays sixel images out in,
+/// `vt100::image::DEFAULT_CELL_PX`, 10 by 20 pixels as the pane's
+/// OpenConsole lays them out.  tmux answers with the cell it parses images
+/// in too (`w->xpixel`, input.c:2654), so a program that sizes an image from
+/// this answer gets the cells it expects.
+///
+/// For tmux nested in a pane the one that matters is `CSI 14 t`.  tmux 3.8
+/// sends `CSI 18 t CSI 14 t` to its outer terminal whenever the tty reports
+/// no pixel size (tty.c:146-150, always the case for a pty under WSL) and
+/// keeps `TTY_WINSIZEQUERY` set until the `CSI 4 ; h ; w t` answer arrives
+/// (tty-keys.c:732).  While that flag is
 /// set every lone Escape is held for 500 ms whatever `escape-time` says
 /// (tty-keys.c:980-987).  The inbox console host answers `CSI 18 t` itself
 /// but forwards `CSI 14 t` to psmux, so with nobody answering it, tmux nested
 /// in a psmux pane delivered every Escape half a second late, forever.
 ///
-/// The cell reports `CSI 18 t` and `CSI 19 t` are not answered here: the
-/// console host answers them itself and does not forward them, so a second
-/// answer from psmux could only ever be a duplicate.
+/// The text area reports `CSI 18 t` and `CSI 19 t` are answered with the
+/// pane's rows and columns, as tmux does.  They reach psmux only when the
+/// host leaves them unanswered: the inbox console host answers them itself
+/// and does not forward them, but an OpenConsole forwards them with no
+/// answer.  chafa asks `CSI 18 t` before `CSI 14 t` and, with no answer,
+/// sizes its image for 80 by 24 cells, so in a smaller pane the image ran
+/// past the pane's edges.
 fn window_report(op: u16, rows: u16, cols: u16) -> String {
     let (rows, cols) = (u32::from(rows), u32::from(cols));
+    let (xpixel, ypixel) = vt100::image::DEFAULT_CELL_PX;
     match op {
-        14 => format!("\x1b[4;{};{}t", rows * DEFAULT_YPIXEL, cols * DEFAULT_XPIXEL),
-        15 => format!("\x1b[5;{};{}t", rows * DEFAULT_YPIXEL, cols * DEFAULT_XPIXEL),
-        16 => format!("\x1b[6;{};{}t", DEFAULT_YPIXEL, DEFAULT_XPIXEL),
+        14 => format!("\x1b[4;{};{}t", rows * ypixel, cols * xpixel),
+        15 => format!("\x1b[5;{};{}t", rows * ypixel, cols * xpixel),
+        16 => format!("\x1b[6;{};{}t", ypixel, xpixel),
+        18 => format!("\x1b[8;{};{}t", rows, cols),
+        19 => format!("\x1b[9;{};{}t", rows, cols),
         _ => String::new(),
     }
 }

@@ -214,6 +214,10 @@ pub struct ImageDescJson {
     pub cw: u16,
     /// Cell-grid height (rows) the image occupies.
     pub ch: u16,
+    /// Cells text has since been written over, `[row, col, len]` runs in the
+    /// image's own cells; not drawn.
+    #[serde(default)]
+    pub erased: Vec<[u16; 3]>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1327,9 +1331,18 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 for (ii, img) in snap.images.iter().enumerate() {
                     if ii > 0 { out.push(','); }
                     let _ = std::fmt::Write::write_fmt(out, format_args!(
-                        "{{\"id\":{},\"row\":{},\"col\":{},\"pw\":{},\"ph\":{},\"cw\":{},\"ch\":{}}}",
+                        "{{\"id\":{},\"row\":{},\"col\":{},\"pw\":{},\"ph\":{},\"cw\":{},\"ch\":{}",
                         img.id, img.row, img.col, img.pw, img.ph, img.cw, img.ch,
                     ));
+                    if !img.erased.is_empty() {
+                        out.push_str(",\"erased\":[");
+                        for (ri, r) in img.erased.iter().enumerate() {
+                            if ri > 0 { out.push(','); }
+                            let _ = std::fmt::Write::write_fmt(out, format_args!("[{},{},{}]", r[0], r[1], r[2]));
+                        }
+                        out.push(']');
+                    }
+                    out.push('}');
                 }
                 out.push(']');
 
