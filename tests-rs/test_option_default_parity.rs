@@ -197,6 +197,8 @@ fn window_option_listing_preserves_its_supported_surface() {
         "monitor-activity",
         "monitor-silence",
         "remain-on-exit",
+        // A window option in tmux (options-table.c:1694, #923).
+        "remain-on-exit-format",
         "window-status-format",
         "window-status-current-format",
         "window-status-separator",
