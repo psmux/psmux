@@ -246,7 +246,11 @@ pub fn check_server_start() -> Result<(), String> {
     // On the loop thread (a hook's new-session) the caller would wait for a
     // session only this same thread can make, so it stays refused.
     if server::in_shared_server() {
-        return if server::on_loop_thread() { Err(not_available_message()) } else { Ok(()) };
+        if server::on_loop_thread() {
+            return Err(not_available_message());
+        }
+        server::expect_forward();
+        return Ok(());
     }
     match resolve_for_this_process() {
         Ok(ServerMode::PerSession) => Ok(()),
