@@ -5,7 +5,7 @@
 // and draws no image without it (tty_cmd_sixelimage, tty.c:2191).  The client
 // reads the same reply from the colour query's drain, where DA1 is the
 // sentinel that ends it.
-use crate::platform::parse_da1_sixel;
+use crate::sixel::host::parse_da1_sixel;
 
 #[test]
 fn windows_terminal_lists_sixel() {
@@ -40,7 +40,7 @@ fn no_da1_reply_is_none() {
 
 #[test]
 fn under_auto_only_a_yes_draws() {
-    use crate::rendering::{note_host_sixel, sixel_draws};
+    use crate::sixel::host::{note_host_sixel, sixel_draws};
     use crate::types::SixelMode;
     note_host_sixel(Some(false));
     assert!(!sixel_draws(SixelMode::Auto), "the terminal said it has no sixel");

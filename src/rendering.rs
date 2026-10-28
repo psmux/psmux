@@ -154,64 +154,6 @@ pub fn note_host_shape_before(code: Option<u8>) {
     HOST_SHAPE_BEFORE.store(code.unwrap_or(255), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Whether the terminal said it draws sixel, from its DA1 reply at attach:
-/// 0 nobody said, 1 yes, 2 no.
-static HOST_SIXEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// Record what the terminal's DA1 reply said about sixel.
-pub fn note_host_sixel(sixel: Option<bool>) {
-    let v = match sixel {
-        None => 0,
-        Some(true) => 1,
-        Some(false) => 2,
-    };
-    HOST_SIXEL.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// What the terminal's DA1 reply said about sixel, `None` when it did not
-/// answer or was not asked.
-fn host_sixel() -> Option<bool> {
-    match HOST_SIXEL.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Some(true),
-        2 => Some(false),
-        _ => None,
-    }
-}
-
-/// Whether the client writes sixel images to the terminal under `mode`.
-pub(crate) fn sixel_draws(mode: crate::types::SixelMode) -> bool {
-    sixel_mode_draws(mode, host_sixel())
-}
-
-/// The `sixel` option against what the terminal said.
-///
-/// `auto` is tmux: it writes an image only to a terminal with the sixel
-/// feature (`tty_cmd_sixelimage`, tty.c:2191 in tmux 3.8), which a DA1 reply
-/// listing 4 turns on (`tty_keys_device_attributes`, tty-keys.c:1528).  So no
-/// reply writes no image, which is the case inside psmux, where the query is
-/// skipped, and for a stdin that is not a console.  `on` is for those, the
-/// way tmux takes `sixel` in `terminal-features` (tty-term.c:619).
-pub(crate) fn sixel_mode_draws(mode: crate::types::SixelMode, host: Option<bool>) -> bool {
-    use crate::types::SixelMode;
-    match mode {
-        SixelMode::Off => false,
-        SixelMode::On => true,
-        SixelMode::Auto => host == Some(true),
-    }
-}
-
-/// The `sixel` option a frame carries: `sixel_mode` from a server that has
-/// the three values, else the older on/off flag, whose on drew unless the
-/// terminal said no, which is nearest to auto.
-pub(crate) fn frame_sixel_mode(mode: Option<&str>, flag: bool) -> crate::types::SixelMode {
-    use crate::types::SixelMode;
-    match mode.and_then(SixelMode::parse) {
-        Some(mode) => mode,
-        None if flag => SixelMode::Auto,
-        None => SixelMode::Off,
-    }
-}
-
 /// The DECSCUSR code teardown should write to put the shape back, `None` when
 /// this client never asserted one.
 ///
@@ -575,14 +517,6 @@ pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue735_cursor_style_default.rs"]
 mod test_issue735_cursor_style_default;
-
-#[cfg(test)]
-#[path = "../tests-rs/test_issue431_host_sixel.rs"]
-mod test_issue431_host_sixel;
-
-#[cfg(test)]
-#[path = "../tests-rs/test_sixel_mode.rs"]
-mod test_sixel_mode;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_wide_char_background_residue.rs"]

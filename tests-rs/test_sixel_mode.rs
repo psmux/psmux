@@ -4,7 +4,7 @@
 // reply lists sixel (tty-keys.c:1528, tty.c:2191 in tmux 3.8), which is what
 // auto does. on draws whatever the terminal said, as tmux does when
 // `terminal-features` lists `sixel` (tty-term.c:619), and off never draws.
-use crate::rendering::{frame_sixel_mode, sixel_mode_draws};
+use crate::sixel::host::{frame_sixel_mode, sixel_mode_draws};
 use crate::server::option_catalog::{default_for, validate_option_value};
 use crate::types::SixelMode;
 

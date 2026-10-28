@@ -813,7 +813,7 @@ fn query_host_terminal_colors_impl() -> Option<String> {
 
         crate::rendering::note_host_blink_before(parse_decrqm_blink(&buf));
         crate::rendering::note_host_shape_before(parse_decrqss_cursor_style(&buf));
-        crate::rendering::note_host_sixel(parse_da1_sixel(&buf));
+        crate::sixel::host::note_host_sixel(crate::sixel::host::parse_da1_sixel(&buf));
         let hc = parse_host_color_replies(&buf);
         if hc.has_any() || hc.dark.is_some() {
             Some(hc.to_spec())
@@ -842,40 +842,6 @@ pub(crate) fn parse_decrqm_blink(buf: &[u8]) -> Option<bool> {
         "2" | "4" => Some(false),
         _ => None,
     }
-}
-
-/// Whether the terminal's DA1 reply, `CSI ? Ps ; ... c`, lists sixel.
-///
-/// Read the way tmux reads it (`tty_keys_device_attributes`, tty-keys.c:1496):
-/// a first parameter of 61 to 65 names the conformance level and the rest
-/// are features, 4 being sixel.  Any other reply says no.  `None` when there
-/// is no DA1 reply in `buf`.  Measured on Windows Terminal 1.24:
-/// `CSI ? 61;4;6;7;14;21;22;23;24;28;32;42;52 c`.
-pub(crate) fn parse_da1_sixel(buf: &[u8]) -> Option<bool> {
-    let needle = b"\x1b[?";
-    let mut from = 0;
-    while let Some(at) = buf[from..].windows(needle.len()).position(|w| w == needle) {
-        let start = from + at + needle.len();
-        from = start;
-        // Other replies in the drain share the opening (`CSI ? 12 ; 1 $ y`,
-        // `CSI ? 997 ; 1 n`), so only the one ending in c counts.
-        let Some(end) = buf[start..].iter().position(|b| b.is_ascii_alphabetic()) else {
-            continue;
-        };
-        if buf[start + end] != b'c' {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&buf[start..start + end]) else {
-            continue;
-        };
-        let params: Vec<u32> = text
-            .split(';')
-            .map(|p| p.parse().unwrap_or(0))
-            .collect();
-        let level = params.first().copied().unwrap_or(0);
-        return Some((61..=65).contains(&level) && params[1..].contains(&4));
-    }
-    None
 }
 
 /// What the terminal answered about its cursor shape in a DECRQSS reply:

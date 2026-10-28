@@ -37,6 +37,7 @@ mod help;
 mod server;
 mod preview;
 mod client;
+mod sixel;
 mod ssh_input;
 mod console_tap;
 mod confirm;

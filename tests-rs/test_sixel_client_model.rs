@@ -128,12 +128,12 @@ fn a_reshipped_id_replaces_the_cached_blob() {
     let ship = |raw: &[u8]| -> HashMap<String, String> {
         HashMap::from([("1".to_string(), base64::engine::general_purpose::STANDARD.encode(raw))])
     };
-    crate::client::merge_image_blobs(&mut cache, &ship(old));
-    crate::client::merge_image_blobs(&mut cache, &ship(new));
+    crate::sixel::draw::merge_image_blobs(&mut cache, &ship(old));
+    crate::sixel::draw::merge_image_blobs(&mut cache, &ship(new));
     assert_eq!(cache.get(&1).map(|v| v.as_slice()), Some(new));
 
     // Malformed entries are still skipped.
     let bad: HashMap<String, String> = serde_json::from_str(r#"{"x":"AAAA","2":"!!"}"#).unwrap();
-    crate::client::merge_image_blobs(&mut cache, &bad);
+    crate::sixel::draw::merge_image_blobs(&mut cache, &bad);
     assert_eq!(cache.len(), 1);
 }
