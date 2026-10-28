@@ -219,6 +219,10 @@ fn show_prints_array_lines_like_tmux() {
     assert_eq!(show(&a, "terminal-overrides", true), "a:smcup@\nb:rmcup@\ne:smcup@\n");
     assert_eq!(show(&a, "terminal-overrides[10]", false), "terminal-overrides[10] e:smcup@\n");
     assert_eq!(show(&a, "terminal-overrides[10]", true), "e:smcup@\n");
+    // An index with no element: tmux prints `terminal-overrides[99] ''`, and
+    // an empty line with -v.
+    assert_eq!(show(&a, "terminal-overrides[99]", false), "terminal-overrides[99] ''\n");
+    assert_eq!(show(&a, "terminal-overrides[99]", true), "\n");
     apply_set_option(&mut a, "terminal-overrides", "a:smcup@, b:rmcup@ ", false).unwrap();
     assert_eq!(
         show(&a, "terminal-overrides", false),

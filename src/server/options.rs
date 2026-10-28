@@ -145,7 +145,12 @@ pub(crate) fn array_option_show_lines(app: &AppState, name: &str, values_only: b
         Some(index) => match array.get(index) {
             Some(value) if values_only => format!("{}\n", value),
             Some(value) => format!("{}[{}] {}\n", base, index, crate::util::quote_arg_if_needed(value)),
-            None => String::new(),
+            // No such element: tmux still prints the line, its value the
+            // empty string options_to_string gives (options.c:729-730) as
+            // args_escape writes it (arguments.c:613-615), and with -v an
+            // empty line (cmd-show-options.c:192-194).
+            None if values_only => "\n".to_string(),
+            None => format!("{}[{}] ''\n", base, index),
         },
     }
 }
