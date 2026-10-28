@@ -512,6 +512,9 @@ pub static WINDOW_OPTION_NAMES: &[&str] = &[
     "monitor-activity",
     "monitor-silence",
     "remain-on-exit",
+    // A window option in tmux (options-table.c:1694): `set -w -t <window>`
+    // keeps it on that window, and `show -w` lists it there.
+    "remain-on-exit-format",
     "window-status-format",
     "window-status-current-format",
     "window-status-separator",

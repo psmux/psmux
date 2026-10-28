@@ -158,6 +158,17 @@ try {
     P set -p -t s:p remain-on-exit-format 'PANE #{pane_dead_status}' | Out-Null
     $null = WaitDead 's:p'; Start-Sleep -Milliseconds 500
     Check "a pane's own wins" (LastLine 's:p') 'PANE 4'
+    # A window's own text (tmux 3.8: set -w -t keeps it on that window, show
+    # -w lists it, the global and the other windows keep the default).
+    P new-window -d -n wf (Script 'wlate' "Start-Sleep 3; exit 3") | Out-Null
+    P new-window -d -n wg (Script 'glate' "Start-Sleep 3; exit 5") | Out-Null
+    P set -w -t s:wf remain-on-exit-format 'WIN #{pane_dead_status}' | Out-Null
+    Check "set -w is the window's own" ((P show -wv -t s:wf remain-on-exit-format) -join '') 'WIN #{pane_dead_status}'
+    CheckLike "show -w lists it" ((P show -w -t s:wf) -join '|') '(^|\|)remain-on-exit-format "?WIN '
+    CheckLike "the global keeps the default" ((P show -gv remain-on-exit-format) -join '') '^Pane is dead \('
+    $null = WaitDead 's:wf'; $null = WaitDead 's:wg'; Start-Sleep -Milliseconds 500
+    Check "the window's own text on its dead pane" (LastLine 's:wf') 'WIN 3'
+    CheckLike "another window keeps the default text" (LastLine 's:wg') ($DeadLine -f 5)
 
     Write-Host "`n[4] split-window -k and -m" -ForegroundColor Yellow
     P set -g remain-on-exit off | Out-Null

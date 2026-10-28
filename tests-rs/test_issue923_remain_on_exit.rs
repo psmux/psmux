@@ -187,3 +187,56 @@ fn a_style_turned_off_in_the_format_is_off_on_the_dead_line() {
         assert_eq!((b.contents(), b.bold()), ("B", false), "{format}");
     }
 }
+
+fn window(name: &str, id: usize) -> crate::types::Window {
+    crate::types::Window {
+        root: crate::types::Node::Split { kind: crate::types::LayoutKind::Horizontal, sizes: vec![], children: vec![] },
+        active_path: vec![],
+        name: name.to_string(),
+        id,
+        area: ratatui::layout::Rect::new(0, 0, 80, 24),
+        window_size: None,
+        window_options: Default::default(),
+        activity_flag: false,
+        bell_flag: false,
+        silence_flag: false,
+        last_output_time: std::time::Instant::now(),
+        last_seen_version: 0,
+        manual_rename: false,
+        layout_index: 0,
+        pane_mru: vec![],
+        zoom_saved: None,
+        linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
+    }
+}
+
+#[test]
+fn set_w_keeps_the_format_on_the_targeted_window() {
+    use crate::server::options::{
+        apply_set_window_option, get_window_option_value_for, is_window_scoped_write,
+        render_window_options_for, WindowListing,
+    };
+    // tmux 3.8, `set -w -t s:a remain-on-exit-format WIN`:
+    //   show -wv -t s:a -> WIN, show -wv -t s:0 -> "", show -gv -> the default,
+    //   show -w -t s:a lists `remain-on-exit-format WIN`.
+    // The name was missing from the window table, so the write went to the
+    // global store and every window wrote WIN on its dead panes.
+    let mut a = app();
+    a.window_base_index = 0;
+    a.windows.clear();
+    a.windows.push(window("zero", 0));
+    a.windows.push(window("a", 1));
+    assert!(is_window_scoped_write("remain-on-exit-format"));
+    let reply = apply_set_window_option(&mut a, "remain_key:a", "remain-on-exit-format", "WIN", false, false, false, false);
+    assert_eq!(reply, "");
+    assert_eq!(a.windows[1].window_options.get("remain-on-exit-format").map(String::as_str), Some("WIN"));
+    assert!(a.windows[0].window_options.get("remain-on-exit-format").is_none());
+    assert_eq!(get_option_value(&a, "remain-on-exit-format"), REMAIN_ON_EXIT_FORMAT_DEFAULT, "the global stays");
+    assert_eq!(get_window_option_value_for(&a, "remain-on-exit-format", Some(1)), "WIN");
+    let local = render_window_options_for(&a, Some(1), WindowListing::Local);
+    assert!(local.lines().any(|l| l == "remain-on-exit-format WIN"), "{local}");
+    let other = render_window_options_for(&a, Some(0), WindowListing::Local);
+    assert!(!other.contains("remain-on-exit-format"), "{other}");
+}
