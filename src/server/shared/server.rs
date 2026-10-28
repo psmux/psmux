@@ -55,6 +55,38 @@ pub(crate) fn on_loop_thread() -> bool {
     ON_LOOP.with(|c| c.get())
 }
 
+/// When this server let a connection thread start a session for a binding or
+/// the prompt (`check_server_start`): the `psmux server -s NAME` process that
+/// start spawns is accepted on the control listener only against one of these
+/// (`forwarded-session`), so any other per session server process started
+/// under the shared switch (a standby refill, a hand typed `psmux server`)
+/// is still refused at its own entry, as step 1 has it.
+static EXPECTED_FORWARDS: std::sync::Mutex<Vec<Instant>> = std::sync::Mutex::new(Vec::new());
+
+/// How long a start a connection thread was allowed waits for its process
+/// (the thread itself gives up on the session's files after 5 s).
+const FORWARD_TTL: Duration = Duration::from_secs(6);
+
+pub(crate) fn expect_forward() {
+    if let Ok(mut v) = EXPECTED_FORWARDS.lock() {
+        v.retain(|t| t.elapsed() < FORWARD_TTL);
+        v.push(Instant::now());
+    }
+}
+
+fn take_forward() -> bool {
+    let Ok(mut v) = EXPECTED_FORWARDS.lock() else { return false };
+    v.retain(|t| t.elapsed() < FORWARD_TTL);
+    if v.is_empty() {
+        return false;
+    }
+    v.remove(0);
+    true
+}
+
+/// The control reply to a `forwarded-session` nothing expected.
+pub(crate) const FORWARD_NOT_EXPECTED: &str = "no session start is expected";
+
 /// The session whose request is running, for the panic hook's report.
 static CURRENT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
@@ -1614,7 +1646,11 @@ fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>, 
     }
     let cmd = match line.trim() {
         "ping" => ControlCmd::Ping,
-        "new-session" => {
+        "new-session" | "forwarded-session" => {
+            if line.trim() == "forwarded-session" && !take_forward() {
+                let _ = w.write_all(reply::reply_text(&Outcome::Failed(FORWARD_NOT_EXPECTED.into())).as_bytes());
+                return;
+            }
             let mut fields: Vec<(String, String)> = Vec::new();
             loop {
                 line.clear();

@@ -334,11 +334,15 @@ pub(super) fn forward_server_start() {
     let Some(marker) = registry::live_marker(ns.as_deref()) else { return };
     let mut req = args.1;
     req.cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned());
-    let mut lines = vec!["new-session".to_string()];
+    // `forwarded-session`: the server makes it only when it let one of its
+    // own connection threads start a session just now; anything else is
+    // refused there, and then here as before.
+    let mut lines = vec!["forwarded-session".to_string()];
     lines.extend(router::new_session_fields(&req));
     lines.push("end".to_string());
     match control_request(&marker, &lines) {
         Ok(_) => std::process::exit(0),
+        Err(e) if e == super::server::FORWARD_NOT_EXPECTED => {}
         Err(e) => fail(&format!("psmux: {e}")),
     }
 }
