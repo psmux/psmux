@@ -2460,6 +2460,26 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
     execute_unaliased_command(app, cmd)
 }
 
+/// `refresh-client -l` on the in server route: a clipboard that opens is
+/// stored as a new buffer now (empty text stores nothing, as on the
+/// connection route).  Returns true when the clipboard was busy and the read
+/// must be handed to the server's waiting `refresh-client -l`.
+pub(crate) fn refresh_client_l_here(
+    app: &mut AppState,
+    read: impl FnOnce() -> Result<Option<String>, crate::clipboard::ClipboardBusy>,
+) -> bool {
+    match read() {
+        Ok(Some(text)) => {
+            if !text.is_empty() {
+                app.paste_add(text);
+            }
+            false
+        }
+        Ok(None) => false,
+        Err(crate::clipboard::ClipboardBusy) => true,
+    }
+}
+
 fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // Quotes group and are removed here, as tmux's command parser does and as
     // the server's own command line handler (connection.rs) already does. A
@@ -4162,6 +4182,21 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
             app.status_message = Some(("lock: not available on Windows".to_string(), Instant::now(), None));
         }
+        "refresh-client" | "refresh" if crate::cli::has_short_flag(&parts[1..], 'l') => {
+            // tmux runs -l from every route, a hook, a menu item or a
+            // confirm-before as much as the command line
+            // (cmd-refresh-client.c:237 tty_clipboard_query). This route
+            // forwarded a bare "refresh-client" and the -l was lost. A free
+            // clipboard is read here so a following command in the same list
+            // sees the buffer; a clipboard another window holds open is left
+            // to the server's own refresh-client -l, which waits for it on a
+            // connection thread, so this loop never does.
+            if refresh_client_l_here(app, crate::clipboard::try_read_from_system_clipboard) {
+                if let Some(port) = app.control_port {
+                    let _ = send_control_to_port(port, "refresh-client -l\n", &app.session_key);
+                }
+            }
+        }
         "refresh-client" | "refresh" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "refresh-client\n", &app.session_key);
@@ -4544,3 +4579,7 @@ mod tests_set_hook_cli_command_list;
 #[cfg(test)]
 #[path = "../tests-rs/test_unlink_window_focus.rs"]
 mod tests_unlink_window_focus;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_refresh_client_l_server_route.rs"]
+mod tests_refresh_client_l_server_route;
