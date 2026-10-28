@@ -1788,7 +1788,13 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     // (cmd-set-option.c:262-270). Nothing is stored (#846).
     if !crate::server::option_catalog::is_valid_option_name(key) {
         if !quiet {
-            warn_config(app, format!("unknown option '{}'", key));
+            // An array with an index that is no number keeps the
+            // `invalid option: NAME[x]` wording the set-option route gives.
+            let error = match crate::option_array::is_array_name(key).map(|_| crate::option_array::parse_name(key)) {
+                Some(Err(error)) => error,
+                _ => format!("unknown option '{}'", key),
+            };
+            warn_config(app, error);
         }
         return;
     }

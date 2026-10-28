@@ -198,6 +198,16 @@ fn runtime_index_append_and_unset_follow_tmux() {
     let error = crate::server::option_catalog::validate_option_value("terminal-overrides[x]", "z").unwrap_err();
     assert_eq!(error, "invalid option: terminal-overrides[x]");
     assert!(crate::server::option_catalog::validate_option_value("terminal-overrides[3]", "z").is_ok());
+    // `set -su terminal-overrides[x]` and `show -s terminal-overrides[x]` fail
+    // in tmux too (options_parse), not only a set with a value.
+    for args in [&["-su", "terminal-overrides[x]"][..], &["-su", "command-alias[x]"][..]] {
+        let error = crate::cli::parse_set_option_args(args).validate(false).unwrap_err();
+        assert!(error.starts_with("invalid option: "), "{args:?}: {error}");
+    }
+    assert!(crate::cli::parse_set_option_args(&["-su", "terminal-overrides[3]"]).validate(false).is_ok());
+    assert!(!crate::server::option_catalog::is_valid_option_name("terminal-overrides[x]"));
+    assert!(crate::server::option_catalog::is_valid_option_name("terminal-overrides[3]"));
+    assert!(crate::server::option_catalog::is_valid_option_name("status-format[1]"));
     reset_option_to_default(&mut a, "terminal-overrides");
     assert_eq!(values(&a), vec!["linux*:AX@"]);
 }

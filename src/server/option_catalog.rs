@@ -514,6 +514,16 @@ pub fn is_valid_option_name(name: &str) -> bool {
     if base.is_empty() {
         return false;
     }
+    // An array on crate::option_array whose index is no index
+    // (`terminal-overrides[x]`) is no option at all (options.c
+    // `options_parse`), so `set -u`, `show` and `set` all refuse it as tmux
+    // does, not only a set with a value.
+    if base.len() != name.len()
+        && crate::option_array::spec(base).is_some()
+        && crate::option_array::parse_name(name).is_err()
+    {
+        return false;
+    }
     is_known_option(base)
         || TMUX_OPTION_NAMES.contains(&base)
         || PSMUX_EXTRA_OPTION_NAMES.contains(&base)
