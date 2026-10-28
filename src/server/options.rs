@@ -537,8 +537,7 @@ pub(crate) fn apply_set_session_option(
         }
     }
     let new_value = if toggle {
-        let current = get_option_value(app, option);
-        if matches!(current.as_str(), "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
+        toggled_value(option, &get_option_value(app, option))
     } else if append {
         format!("{}{}", crate::format::lookup_option_pub(option, app).unwrap_or_default(), value)
     } else {
@@ -615,7 +614,7 @@ pub(crate) fn write_shadowed_global(app: &mut AppState, option: &str, op: Global
             if !is_boolean_option(option) {
                 return Err(format!("empty value for '{}'", option));
             }
-            if matches!(current.as_str(), "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
+            toggled_value(option, &current)
         }
     };
     crate::server::option_catalog::validate_option_value(option, &new_value)?;
@@ -773,7 +772,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "escape-time" => app.escape_time_ms.to_string(),
         "mouse" => if app.mouse_enabled { "on".into() } else { "off".into() },
         "bold-is-bright" => if app.bold_is_bright { "on".into() } else { "off".into() },
-        "sixel" => if app.sixel { "on".into() } else { "off".into() },
+        "sixel" => app.sixel.as_str().into(),
         "scroll-enter-copy-mode" => if app.scroll_enter_copy_mode { "on".into() } else { "off".into() },
         "mouse-drag-enter-copy-mode" => if app.mouse_drag_enter_copy_mode { "on".into() } else { "off".into() },
         "ctrl-wheel-zoom" => if app.ctrl_wheel_zoom { "on".into() } else { "off".into() },
@@ -1077,6 +1076,7 @@ pub(crate) fn is_boolean_option(name: &str) -> bool {
         name,
         "mouse"
             | "bold-is-bright"
+            // Also takes auto, which a toggle leaves alone (toggled_value).
             | "sixel"
             | "scroll-enter-copy-mode"
             | "mouse-drag-enter-copy-mode"
@@ -1134,9 +1134,20 @@ pub(crate) fn toggle_option(app: &mut AppState, option: &str) -> bool {
     if !is_boolean_option(option) {
         return false;
     }
-    let current = get_option_value(app, option);
-    let new_value = if current == "on" { "off" } else { "on" };
-    apply_set_option(app, option, new_value, false).is_ok()
+    let new_value = toggled_value(option, &get_option_value(app, option));
+    apply_set_option(app, option, &new_value, false).is_ok()
+}
+
+/// What a toggle (`set <option>` with no value) writes over `current`.
+///
+/// `sixel` is a choice in tmux's sense, and tmux toggles a choice only
+/// between its first two values, leaving `auto` where it is
+/// (options_from_string_choice in options.c).
+pub(crate) fn toggled_value(option: &str, current: &str) -> String {
+    if option == "sixel" && current == "auto" {
+        return current.to_string();
+    }
+    if matches!(current, "on" | "true" | "1" | "yes") { "off" } else { "on" }.to_string()
 }
 
 /// Restore one option to the value a freshly started server reports for it,
@@ -1289,7 +1300,11 @@ pub(crate) fn apply_set_option(
                 crate::platform::set_process_priority(&app.priority);
             }
         }
-        "sixel" => { app.sixel = matches!(value, "on" | "true" | "1" | "yes"); }
+        "sixel" => {
+            if let Some(mode) = crate::types::SixelMode::parse(value) {
+                app.sixel = mode;
+            }
+        }
         "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"); }
         "mouse-drag-enter-copy-mode" => { app.mouse_drag_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"); }
         "ctrl-wheel-zoom" => { app.ctrl_wheel_zoom = matches!(value, "on" | "true" | "1" | "yes"); }

@@ -316,8 +316,12 @@ the image. A pane's image is drawn again by the client whenever the images on sc
 psmux stores each one with a raster size of its own; without one, Windows Terminal fills the
 background from the image to the bottom right of the screen.
 
-The `sixel` option turns drawing off. Programs that ask DA1 before sending sixel get psmux's
-answer under OpenConsole, `ESC[?1;2c`, which does not list sixel.
+The client draws an image only when the terminal around it lists sixel (4) in its DA1 reply, as
+tmux does, which Windows Terminal 1.24 does. Where the client gets no reply it draws no image:
+inside another psmux, where it does not ask, on the pipe route (`ssh -T`, a Cygwin pty), and when
+`PSMUX_HOST_COLORS` is set, which skips the query. `set -g sixel on` draws there anyway, and
+`set -g sixel off` never draws. Programs that ask DA1 before sending sixel get psmux's answer under
+OpenConsole, `ESC[?1;2c`, which does not list sixel.
 
 `PSMUX_NO_PASSTHROUGH=1` is independent of this and does not change either number.
 

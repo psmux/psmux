@@ -627,7 +627,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("synchronize-panes",          "off"),
     ("set-titles",                 "off"),
     ("allow-passthrough",          "off"),
-    ("sixel",                      "on"),
+    ("sixel",                      "auto"),
     ("priority",                   "above-normal"),
     ("default-command",            "(system shell)"),
     ("word-separators",            "\"!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^`{|}~\""),

@@ -1,8 +1,8 @@
 // Issue #431: the client writes sixel only to a terminal that can draw it.
 //
 // tmux turns its sixel feature on from a DA1 reply listing 4 after a
-// conformance level of 61 to 65 (tty_keys_device_attributes, tty-keys.c:1496)
-// and draws no image without it (tty_cmd_sixelimage, tty.c:2183).  The client
+// conformance level of 61 to 65 (tty_keys_device_attributes, tty-keys.c:1528 in tmux 3.8)
+// and draws no image without it (tty_cmd_sixelimage, tty.c:2191).  The client
 // reads the same reply from the colour query's drain, where DA1 is the
 // sentinel that ends it.
 use crate::platform::parse_da1_sixel;
@@ -39,13 +39,15 @@ fn no_da1_reply_is_none() {
 }
 
 #[test]
-fn only_a_no_stops_the_images() {
-    use crate::rendering::{host_draws_sixel, note_host_sixel};
+fn under_auto_only_a_yes_draws() {
+    use crate::rendering::{note_host_sixel, sixel_draws};
+    use crate::types::SixelMode;
     note_host_sixel(Some(false));
-    assert!(!host_draws_sixel(), "the terminal said it has no sixel");
+    assert!(!sixel_draws(SixelMode::Auto), "the terminal said it has no sixel");
     note_host_sixel(Some(true));
-    assert!(host_draws_sixel());
-    // Not asked, or no answer: the `sixel` option decides.
+    assert!(sixel_draws(SixelMode::Auto));
+    // Not asked, or no answer: tmux writes no image, and neither does auto.
     note_host_sixel(None);
-    assert!(host_draws_sixel());
+    assert!(!sixel_draws(SixelMode::Auto));
+    assert!(sixel_draws(SixelMode::On), "on draws without a reply");
 }

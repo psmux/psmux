@@ -28,14 +28,21 @@ fn shared_frame_ships_the_blob_once_and_the_option() {
 
     let first = frame_json(&mut app, &mut cache);
     assert_eq!(first["sixel"], serde_json::Value::Bool(true), "the sixel option rides on the frame");
+    assert_eq!(first["sixel_mode"], "auto", "and so does its value");
     assert_eq!(blob_count(&first), 1, "the visible image's blob is shipped: {first}");
 
     let second = frame_json(&mut app, &mut cache);
     assert_eq!(blob_count(&second), 0, "an already shipped blob is not sent again");
 
-    app.sixel = false;
+    app.sixel = crate::types::SixelMode::Off;
     let third = frame_json(&mut app, &mut cache);
     assert_eq!(third["sixel"], serde_json::Value::Bool(false));
+    assert_eq!(third["sixel_mode"], "off");
+
+    app.sixel = crate::types::SixelMode::On;
+    let fourth = frame_json(&mut app, &mut cache);
+    assert_eq!(fourth["sixel"], serde_json::Value::Bool(true));
+    assert_eq!(fourth["sixel_mode"], "on");
 }
 
 // The server sends a blob in one frame only. The builder's text is followed

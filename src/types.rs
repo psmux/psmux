@@ -1511,6 +1511,43 @@ impl Mode {
     }
 }
 
+/// The `sixel` option: when the client writes pane images to the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SixelMode {
+    /// Never.
+    Off,
+    /// Always, whatever the terminal said. tmux gets the same override from
+    /// `terminal-features` listing `sixel` (tty-term.c:619).
+    On,
+    /// Only when the terminal's DA1 reply lists sixel, which is all tmux does
+    /// (tty-keys.c:1528, tty.c:2191).
+    Auto,
+}
+
+impl SixelMode {
+    /// The values in tmux's choice order: a toggle swaps the first two and
+    /// leaves `auto` alone (options_from_string_choice in options.c).
+    pub const CHOICES: &'static [&'static str] = &["off", "on", "auto"];
+
+    /// `on` and `off` keep the spellings the boolean option took.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "0" | "no" => Some(Self::Off),
+            "on" | "true" | "1" | "yes" => Some(Self::On),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SelectionMode { Char, Line, Rect }
 
@@ -1606,10 +1643,10 @@ pub struct AppState {
     /// which keeps explicit 256-indexed low colors byte-accurate at the cost of
     /// losing bold-is-bright on basic colors.
     pub bold_is_bright: bool,
-    /// sixel: when on (default), render sixel graphics emitted by panes on the
-    /// outer terminal.  Server always parses and stores sixel images; this flag
-    /// only gates the client-side emission (issue #431).
-    pub sixel: bool,
+    /// sixel: when the client writes the sixel images panes emit to the outer
+    /// terminal.  Server always parses and stores sixel images; this only
+    /// gates the client-side emission (issue #431).
+    pub sixel: SixelMode,
     /// Ids of sixel image blobs already shipped to attached clients this
     /// session.  The dump-state builder ships each blob's base64 bytes exactly
     /// once (in `image_blobs`) and records the id here; later frames carry only
@@ -3240,7 +3277,7 @@ impl AppState {
             last_window_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             mouse_enabled: true,
             bold_is_bright: true,
-            sixel: true,
+            sixel: SixelMode::Auto,
             shipped_image_ids: std::collections::HashSet::new(),
             host_colors: std::env::var("PSMUX_HOST_COLORS").ok()
                 .map(|s| HostColors::from_spec(&s))

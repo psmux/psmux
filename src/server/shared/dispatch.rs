@@ -1988,7 +1988,7 @@ pub(crate) fn dispatch(
                     output.push_str(&format!("status-right-length {}\n", app.status_right_length));
                     output.push_str(&format!("window-size {}\n", app.window_size));
                     output.push_str(&format!("allow-passthrough {}\n", app.allow_passthrough));
-                    output.push_str(&format!("sixel {}\n", if app.sixel { "on" } else { "off" }));
+                    output.push_str(&format!("sixel {}\n", app.sixel.as_str()));
                     output.push_str(&format!("set-clipboard {}\n", app.set_clipboard));
                     if !app.copy_command.is_empty() {
                         output.push_str(&format!("copy-command \"{}\"\n", app.copy_command));

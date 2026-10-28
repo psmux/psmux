@@ -4187,11 +4187,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// the server and pushed into the writer's atomic each frame.
         #[serde(default = "default_bold_is_bright")]
         bold_is_bright: bool,
-        /// Sixel option gate (#431): mirrors the server-side `sixel` option.
-        /// The client emits raw sixel bytes to its host terminal only when this
-        /// is true (M6). Defaults TRUE so an older server still attempts render.
+        /// Sixel option gate (#431): false when the server-side `sixel`
+        /// option is off. Defaults TRUE so an older server still attempts
+        /// render. A newer server sends the option itself in `sixel_mode`.
         #[serde(default = "default_sixel")]
         sixel: bool,
+        /// The server-side `sixel` option, off/on/auto.
+        #[serde(default)]
+        sixel_mode: Option<String>,
         /// One-shot-per-id sixel blob map (#431): stringified image id -> base64
         /// of the raw ESC P..ST bytes. Shipped ONCE per id (empty {} on steady
         /// frames), so the client accumulates these into a persistent cache.
@@ -4416,10 +4419,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // M6 reads this cache to re-emit visible images each frame.
     let mut image_blob_cache: std::collections::HashMap<u64, Vec<u8>> =
         std::collections::HashMap::new();
-    // Latest value of the server `sixel` option gate, refreshed each frame
+    // Latest value of the server `sixel` option, refreshed each frame
     // (deferred init: assigned at the top of every frame before any read).
     // M6 gates its emit block on this (plus outer-terminal capability).
-    let mut sixel_enabled: bool;
+    let mut sixel_mode: crate::types::SixelMode;
     // The images the last frame left on the outer terminal, and the screen
     // size it was drawn at (plan_sixel_frame).
     let mut last_sixel_drawn: Vec<SixelEmit> = Vec::new();
@@ -8952,9 +8955,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // blobs into the session-lifetime cache. Blobs arrive once per id
         // (empty {} on steady frames). M6 consumes both. A frame from the
         // drain above has had its blobs taken already.
-        sixel_enabled = state.sixel;
+        sixel_mode = crate::rendering::frame_sixel_mode(state.sixel_mode.as_deref(), state.sixel);
         merge_image_blobs(&mut image_blob_cache, &state.image_blobs);
-        // `image_blob_cache` and `sixel_enabled` are consumed by the post-draw
+        // `image_blob_cache` and `sixel_mode` are consumed by the post-draw
         // sixel emit block (M6) below.
         // Sync codepoint-widths into this process's width table, for the same
         // reason as bold-is-bright above: the status line, tab bar, pane
@@ -10463,7 +10466,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // the last frame's images come from the frame just drawn.
         let sixel_now: Vec<SixelEmit> = {
             let emits = frame_sixels_take();
-            if sixel_enabled && crate::rendering::host_draws_sixel() {
+            if crate::rendering::sixel_draws(sixel_mode) {
                 emits.into_iter().filter(|e| image_blob_cache.contains_key(&e.id)).collect()
             } else {
                 Vec::new()
