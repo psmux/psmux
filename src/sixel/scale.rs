@@ -137,6 +137,12 @@ pub(crate) fn crop_scale(
     if width == 0 || height == 0 || tsx == 0 || tsy == 0 {
         return None;
     }
+    // A cell size the terminal reported far larger than any real one would
+    // otherwise make a part of millions of pixels a side; such a part is not
+    // drawn rather than allocated.
+    if width > super::decode::MAX_SIDE || height > super::decode::MAX_SIDE {
+        return None;
+    }
     let mut pixels = Vec::with_capacity(width as usize * height as usize);
     for y in 0..height {
         let py = poy + (u64::from(y) * u64::from(psy) / u64::from(tsy)) as u32;

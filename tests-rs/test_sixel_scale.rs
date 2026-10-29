@@ -152,3 +152,13 @@ fn erased_cells_outside_the_visible_part_change_nothing() {
         ]
     );
 }
+
+// A terminal that reports an absurd cell would make the part millions of
+// pixels a side; it is not drawn rather than allocated.
+#[test]
+fn a_part_larger_than_the_largest_side_is_not_made() {
+    let src = SixelPixels { width: 400, height: 200, p2: 0, palette: vec![None], pixels: vec![1; 400 * 200] };
+    let whole = VisibleCells { i: 0, j: 0, x: 0, y: 0, rx: 40, ry: 10 };
+    assert!(crop_scale(&src, (10, 20), whole, (8, 16)).is_some());
+    assert_eq!(crop_scale(&src, (10, 20), whole, (60000, 60000)), None);
+}

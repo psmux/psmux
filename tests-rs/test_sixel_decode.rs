@@ -116,3 +116,21 @@ fn a_huge_repeat_is_held_to_the_largest_side() {
     assert_eq!(img.width, MAX_SIDE);
     assert_eq!(img.get(MAX_SIDE - 1, 0), 2);
 }
+
+// A raster command makes each sixel thousands of pixels tall and `$` draws
+// the same columns again, so each 7 bytes cost 16 million pixel writes.
+// Measured before the limit, release build: 10 of them took 59 ms, so the
+// 1 MiB a pane may write held the client for about 15 minutes.
+#[test]
+fn a_dcs_that_redraws_the_same_pixels_is_held_to_a_work_limit() {
+    let mut dcs = b"\x1bPq\"682;1;1;1#1".to_vec();
+    while dcs.len() < 1 << 20 {
+        dcs.extend_from_slice(b"!4096~$");
+    }
+    dcs.extend_from_slice(b"\x1b\\");
+    let t = std::time::Instant::now();
+    let img = decode(&dcs).expect("a sixel");
+    let took = t.elapsed();
+    assert_eq!((img.width, img.height), (MAX_SIDE, MAX_SIDE - MAX_SIDE % 6));
+    assert!(took < std::time::Duration::from_secs(20), "decode took {took:?}");
+}

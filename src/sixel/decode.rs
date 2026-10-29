@@ -57,6 +57,14 @@ pub(crate) const MAX_SIDE: u32 = 4096;
 /// The highest register kept. Higher ones are drawn with this one.
 const MAX_REGISTER: usize = 4095;
 
+/// The most pixel writes one decode does. A raster command can make every
+/// sixel up to `MAX_SIDE` pixels tall, and `$` lets a DCS draw the same
+/// columns again and again, so without a limit a few kilobytes written by a
+/// pane program kept the client busy for seconds, and a 1 MiB DCS for
+/// minutes, before the frame was drawn. Four times the largest image is far
+/// more than any image a program means to draw ever writes.
+pub(crate) const MAX_WORK: u64 = 4 * (MAX_SIDE as u64) * (MAX_SIDE as u64);
+
 /// The pixel aspect ratio a sixel introducer's first parameter selects, as
 /// `sixel_layout` reads it.
 fn intro_aspect(p1: u32) -> u32 {
@@ -107,8 +115,10 @@ pub(crate) fn decode(raw: &[u8]) -> Option<SixelPixels> {
         }
         fields
     };
-    // Six bits of one sixel, `n` columns wide, at the current position.
-    let draw = |rows: &mut Vec<Vec<u16>>, x: u32, y: u32, aspect: u32, bits: u8, n: u32, value: u16| {
+    // Six bits of one sixel, `n` columns wide, at the current position. Adds
+    // the pixels it writes, and at least one per pixel row it visits, to
+    // `work`.
+    let draw = |rows: &mut Vec<Vec<u16>>, work: &mut u64, x: u32, y: u32, aspect: u32, bits: u8, n: u32, value: u16| {
         if bits == 0 {
             return;
         }
@@ -126,6 +136,7 @@ pub(crate) fn decode(raw: &[u8]) -> Option<SixelPixels> {
                 }
                 let row = &mut rows[py as usize];
                 let end = (x.saturating_add(n)).min(MAX_SIDE);
+                *work += u64::from(end.saturating_sub(x).max(1));
                 if x >= end {
                     continue;
                 }
@@ -139,8 +150,9 @@ pub(crate) fn decode(raw: &[u8]) -> Option<SixelPixels> {
         }
     };
 
+    let mut work: u64 = 0;
     let mut i = 0usize;
-    while i < payload.len() {
+    while i < payload.len() && work <= MAX_WORK {
         match payload[i] {
             b'"' => {
                 i += 1;
@@ -177,7 +189,7 @@ pub(crate) fn decode(raw: &[u8]) -> Option<SixelPixels> {
                     if palette.len() <= colour {
                         palette.resize(colour + 1, None);
                     }
-                    draw(&mut rows, x, y, aspect, payload[i] - 0x3f, n, colour as u16 + 1);
+                    draw(&mut rows, &mut work, x, y, aspect, payload[i] - 0x3f, n, colour as u16 + 1);
                     x = x.saturating_add(n);
                     drawn_bottom = drawn_bottom.max(y.saturating_add(6 * aspect));
                     i += 1;
@@ -197,7 +209,7 @@ pub(crate) fn decode(raw: &[u8]) -> Option<SixelPixels> {
                 if palette.len() <= colour {
                     palette.resize(colour + 1, None);
                 }
-                draw(&mut rows, x, y, aspect, c - 0x3f, 1, colour as u16 + 1);
+                draw(&mut rows, &mut work, x, y, aspect, c - 0x3f, 1, colour as u16 + 1);
                 x = x.saturating_add(1);
                 drawn_bottom = drawn_bottom.max(y.saturating_add(6 * aspect));
             }

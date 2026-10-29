@@ -100,6 +100,10 @@ pub(crate) struct SixelDrawCache {
 /// Entries kept before a cache starts over.
 const DRAW_CACHE_MAX: usize = 64;
 
+/// Decoded pixels kept before the decoded images start over: two images of
+/// the largest size, 64 MiB.
+const DECODED_PIXELS_MAX: usize = 2 * (super::decode::MAX_SIDE as usize) * (super::decode::MAX_SIDE as usize);
+
 impl SixelDrawCache {
     /// Drop what was made from `id`'s blob, which a new blob replaced.
     pub(crate) fn forget(&mut self, id: u64) {
@@ -112,8 +116,14 @@ impl SixelDrawCache {
     fn redrawn(&mut self, emit: &SixelEmit, blob: &[u8], cell: (u32, u32)) -> Option<&[u8]> {
         let key = (emit.id, emit.part(), cell);
         if !self.drawn.contains_key(&key) {
-            if self.decoded.len() >= DRAW_CACHE_MAX && !self.decoded.contains_key(&emit.id) {
-                self.decoded.clear();
+            if !self.decoded.contains_key(&emit.id) {
+                // Each decoded image can be up to MAX_SIDE pixels a side, 32
+                // MiB, so the cache is held to a number of pixels as well as
+                // a number of images.
+                let pixels: usize = self.decoded.values().flatten().map(|p| p.pixels.len()).sum();
+                if self.decoded.len() >= DRAW_CACHE_MAX || pixels >= DECODED_PIXELS_MAX {
+                    self.decoded.clear();
+                }
             }
             let image = self.decoded.entry(emit.id).or_insert_with(|| decode(blob)).as_ref()?;
             let part = crop_scale(image, vt100::image::DEFAULT_CELL_PX, emit.part(), cell)?;
