@@ -1938,8 +1938,12 @@ impl Screen {
         }
         self.grid_mut().col_wrap(width, wrap);
         let pos = self.grid().pos();
-        let line = self.grid().absolute_line_of_cursor();
-        self.erase_image_cells(line, 1, pos.col, pos.col + width);
+        // The hot path for every printed character: skip the image check
+        // entirely when the pane holds no image.
+        if !self.sixel_images.is_empty() {
+            let line = self.grid().absolute_line_of_cursor();
+            self.erase_image_cells(line, 1, pos.col, pos.col + width);
+        }
 
         // After a resize, cells may be in inconsistent states (e.g.
         // a wide char at the last column without its continuation).
