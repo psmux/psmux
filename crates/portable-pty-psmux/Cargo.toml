@@ -92,7 +92,7 @@ version = "1.0.229"
 optional = true
 
 [dependencies.serial2]
-version = "0.2.38"
+version = "0.2.39"
 
 [dependencies.shell-words]
 version = "1.1.1"

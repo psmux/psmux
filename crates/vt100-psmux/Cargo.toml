@@ -125,7 +125,7 @@ version = "1.0.229"
 features = ["derive"]
 
 [dev-dependencies.serde_json]
-version = "1.0.151"
+version = "1.0.154"
 
 [dev-dependencies.terminal_size]
 version = "0.4.4"

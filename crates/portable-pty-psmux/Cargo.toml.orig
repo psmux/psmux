@@ -23,7 +23,7 @@ log = "0.4.34"
 nix = { version = "0.31.3", features = ["term", "fs"] }
 serde = { version = "1.0.229", optional = true }
 serde_derive = { version = "1.0.229", optional = true }
-serial2 = "0.2.38"
+serial2 = "0.2.39"
 shell-words = "1.1.1"
 
 [dev-dependencies]
