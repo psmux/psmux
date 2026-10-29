@@ -74,6 +74,12 @@ pub(crate) fn expect_forward() {
     }
 }
 
+/// How many session starts this process expects to be handed (tests only).
+#[cfg(test)]
+pub(crate) fn pending_forwards() -> usize {
+    EXPECTED_FORWARDS.lock().map(|v| v.len()).unwrap_or(0)
+}
+
 fn take_forward() -> bool {
     let Ok(mut v) = EXPECTED_FORWARDS.lock() else { return false };
     v.retain(|t| t.elapsed() < FORWARD_TTL);

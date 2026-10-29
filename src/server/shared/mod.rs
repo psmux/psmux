@@ -238,23 +238,28 @@ pub fn gate_server_start(ns: Option<&str>) {
 /// caller starts and claims nothing. With the switch at `per-session` the
 /// caller goes on exactly as before.
 pub fn check_server_start() -> Result<(), String> {
-    // #798 step 3: inside the shared server, a start asked for on a
-    // connection thread (a key binding's or the prompt's new-session, which
-    // the protocol handler runs there) goes on: the `psmux server -s NAME`
-    // process it spawns hands the session to this server (`gate_server_process`)
-    // and the thread waits for the session's files while the loop makes it.
-    // On the loop thread (a hook's new-session) the caller would wait for a
-    // session only this same thread can make, so it stays refused.
-    if server::in_shared_server() {
-        if server::on_loop_thread() {
-            return Err(not_available_message());
-        }
-        server::expect_forward();
-        return Ok(());
-    }
     match resolve_for_this_process() {
+        // The per session path runs exactly master's instructions: no shared
+        // check of any kind comes before this arm (owner ruling, #798).
         Ok(ServerMode::PerSession) => Ok(()),
-        Ok(ServerMode::Shared) => Err(not_available_message()),
+        Ok(ServerMode::Shared) => {
+            // #798 step 3: inside the shared server (started under the
+            // switch, so it resolves Shared here), a start asked for on a
+            // connection thread (a key binding's or the prompt's new-session,
+            // which the protocol handler runs there) goes on: the
+            // `psmux server -s NAME` process it spawns hands the session to
+            // this server (`gate_server_process`) and the thread waits for the
+            // session's files while the loop makes it. On the loop thread (a
+            // hook's new-session) the caller would wait for a session only
+            // this same thread can make, so it stays refused. Should the
+            // shared server ever resolve PerSession (the config flipped while
+            // it runs), the arm above answers Ok exactly as master does.
+            if server::in_shared_server() && !server::on_loop_thread() {
+                server::expect_forward();
+                return Ok(());
+            }
+            Err(not_available_message())
+        }
         Err(e) => Err(e),
     }
 }

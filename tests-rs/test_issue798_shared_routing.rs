@@ -156,3 +156,28 @@ fn server_start_args_of_a_binding_new_session() {
     let other: Vec<String> = ["psmux", "new-session", "-s", "x"].iter().map(|s| s.to_string()).collect();
     assert!(crate::server::shared::cli::server_start_args(&other).is_none());
 }
+
+/// check_server_start with the switch at per-session runs master's path:
+/// Ok, and nothing of the shared server (no expected forward) is touched. With
+/// the switch at shared outside a shared server it is refused, as in step 1.
+#[test]
+fn check_server_start_per_session_arm_is_masters() {
+    let _lock = crate::util::lock_test_env();
+    let saved = std::env::var("PSMUX_SERVER_MODE").ok();
+    assert!(!crate::server::shared::server::in_shared_server(), "a test process is no shared server");
+    let before = crate::server::shared::server::pending_forwards();
+
+    std::env::set_var("PSMUX_SERVER_MODE", "per-session");
+    assert_eq!(crate::server::shared::check_server_start(), Ok(()));
+    assert_eq!(crate::server::shared::server::pending_forwards(), before, "per session expects no forward");
+
+    std::env::set_var("PSMUX_SERVER_MODE", "shared");
+    let r = crate::server::shared::check_server_start();
+    assert_eq!(r, Err(crate::server::shared::not_available_message()));
+    assert_eq!(crate::server::shared::server::pending_forwards(), before, "outside the shared server no forward either");
+
+    match saved {
+        Some(v) => std::env::set_var("PSMUX_SERVER_MODE", v),
+        None => std::env::remove_var("PSMUX_SERVER_MODE"),
+    }
+}
