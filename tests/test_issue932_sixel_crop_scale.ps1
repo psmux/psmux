@@ -156,7 +156,10 @@ P new-session -d -s a -x 120 -y 30 | Out-Null
 P new-session -d -s b -x 120 -y 30 | Out-Null
 P new-session -d -s c -x 120 -y 30 | Out-Null
 P new-session -d -s d -x 120 -y 30 | Out-Null
-P new-session -d -s e -x 120 -y 30 | Out-Null
+# Part 6 needs the shell prompt, which lands on the image's last row, to be
+# shorter than the image's 40 cells, so session e starts in the drive root:
+# from a deep working directory `PS <cwd>> ` covers the whole row.
+P new-session -d -s e -x 120 -y 30 -c "$env:SystemDrive\" | Out-Null
 Remove-Item Env:\PSMUX_CONPTY_DIR
 if (-not ((WaitSession 'a') -and (WaitSession 'b') -and (WaitSession 'c') -and (WaitSession 'd') -and (WaitSession 'e'))) { Check 'sessions start on OpenConsole' $false ''; Cleanup; exit $script:TestsFailed }
 Start-Sleep -Seconds 2
@@ -274,6 +277,9 @@ $r14 = ProbeText 'XTWINOPS_14'
 Check '   CSI 14 t answered once with rows*20 and cols*10' ($r14 -eq "$e[4;$($rows * 20);$($cols * 10)t") "(got $(Show $r14))"
 $r16 = ProbeText 'XTWINOPS_16'
 Check '   CSI 16 t answered once with the 10x20 cell' ($r16 -eq "$e[6;20;10t") "(got $(Show $r16))"
+# tmux built with sixel lists 4 in its DA1 answer (input.c:1586-1590).
+$rda = ProbeText 'DA1'
+Check '8. DA1 lists sixel, as tmux built with sixel does' ($rda -eq "$e[?1;2;4c") "(got $(Show $rda))"
 
 Cleanup
 Write-Host "`n=== Results: $($script:TestsPassed) passed, $($script:TestsFailed) failed ===" -ForegroundColor Cyan
