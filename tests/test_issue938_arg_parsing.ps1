@@ -140,6 +140,20 @@ try {
     Check $msg "hook kill-session -t nosuch says can't find session: nosuch"
     Check (Alive ${function:P} A3) 'A3 survives a hook naming a missing session'
 
+    Write-Output "== hooks: session parts resolved as tmux's cmd_find_get_session"
+    Fresh ${function:P} mainx
+    P set-hook -t mainx after-split-window 'kill-session -t mai' | Out-Null
+    P split-window -t mainx | Out-Null
+    $ownGone = Wait-For { -not (Alive ${function:P} mainx) } 5000
+    Check $ownGone 'hook kill-session -t mai (unique prefix of its own name) ends its own session mainx'
+
+    Fresh ${function:P} workx
+    Fresh ${function:P} Q
+    P set-hook -t Q after-split-window 'set -t wor: @y 7' | Out-Null
+    P split-window -t Q | Out-Null
+    $onW = Wait-For { ((P show -v -t workx '@y') -join '') -eq '7' } 5000
+    Check $onW 'hook set -t wor: @y 7 in Q (unique prefix of workx) sets @y on workx'
+
     Write-Output "== namespaces: kill-session -t D stays in the server's namespace"
     Fresh ${function:P0} D
     Fresh ${function:P2} A

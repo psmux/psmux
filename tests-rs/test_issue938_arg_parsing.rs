@@ -215,7 +215,8 @@ fn hook_set_option_naming_another_session_reaches_that_server() {
     data.register("B", &other, "keyB");
     let mut app = session_a(&own);
     execute_command_string(&mut app, "set -t B @x 1").unwrap();
-    assert_eq!(lines_sent(&other), Some(vec!["AUTH keyB".to_string(), "set -t B @x 1".to_string()]));
+    // The bare name goes out as `B:`, so B's server never reads it as a window.
+    assert_eq!(lines_sent(&other), Some(vec!["AUTH keyB".to_string(), "set -t B: @x 1".to_string()]));
     assert_eq!(lines_sent(&own), None);
     assert!(app.user_options.get("@x").is_none(), "@x is not set on A");
 }
@@ -296,4 +297,102 @@ fn kill_session_a_is_not_forwarded_to_the_kept_session() {
     let mut app = session_a(&own);
     execute_command_string(&mut app, "kill-session -a -t B").unwrap();
     assert_eq!(lines_sent(&other), None);
+}
+
+// ---- a session part resolved as tmux's cmd_find_get_session ----------------
+// cmd-find.c:264-320: `$id`, the exact name, then (without `=`) a unique
+// prefix, then a unique fnmatch pattern, over this namespace's sessions.
+
+fn session_named(own: &std::net::TcpListener, name: &str) -> AppState {
+    let mut app = session_a(own);
+    app.session_name = name.to_string();
+    app
+}
+
+fn own_kill() -> Option<Vec<String>> {
+    Some(vec!["AUTH keyA".to_string(), "kill-session".to_string()])
+}
+
+#[test]
+fn own_session_id_kills_own_session() {
+    let _env = crate::util::lock_test_env();
+    let _data = DataDir::new("ownid");
+    let own = listener();
+    let mut app = session_a(&own);
+    app.session_id = 7;
+    execute_command_string(&mut app, "kill-session -t $7").unwrap();
+    assert_eq!(lines_sent(&own), own_kill());
+}
+
+#[test]
+fn own_unique_prefix_kills_own_session() {
+    let _env = crate::util::lock_test_env();
+    let data = DataDir::new("ownprefix");
+    let (own, other) = (listener(), listener());
+    data.register("work", &other, "keyW");
+    let mut app = session_named(&own, "main");
+    execute_command_string(&mut app, "kill-session -t ma").unwrap();
+    assert_eq!(lines_sent(&own), own_kill());
+    assert_eq!(lines_sent(&other), None);
+}
+
+#[test]
+fn own_pattern_kills_own_session() {
+    let _env = crate::util::lock_test_env();
+    let _data = DataDir::new("ownpattern");
+    let own = listener();
+    let mut app = session_named(&own, "main");
+    execute_command_string(&mut app, "kill-session -t m*n").unwrap();
+    assert_eq!(lines_sent(&own), own_kill());
+}
+
+#[test]
+fn ambiguous_prefix_is_an_error_and_ends_nothing() {
+    let _env = crate::util::lock_test_env();
+    let data = DataDir::new("ambiguous");
+    let (own, other) = (listener(), listener());
+    data.register("mab", &other, "keyM");
+    let mut app = session_named(&own, "main");
+    execute_command_string(&mut app, "kill-session -t ma").unwrap();
+    assert_eq!(status(&app), Some("can't find session: ma"));
+    assert_eq!(lines_sent(&own), None);
+    assert_eq!(lines_sent(&other), None);
+}
+
+#[test]
+fn exact_marker_turns_off_prefix_matching() {
+    let _env = crate::util::lock_test_env();
+    let _data = DataDir::new("exact");
+    let own = listener();
+    let mut app = session_named(&own, "main");
+    execute_command_string(&mut app, "kill-session -t =ma").unwrap();
+    assert_eq!(status(&app), Some("can't find session: ma"));
+    assert_eq!(lines_sent(&own), None);
+    execute_command_string(&mut app, "kill-session -t =main").unwrap();
+    assert_eq!(lines_sent(&own), own_kill());
+}
+
+#[test]
+fn unique_prefix_of_another_session_is_forwarded_by_its_name() {
+    let _env = crate::util::lock_test_env();
+    let data = DataDir::new("otherprefix");
+    let (own, other) = (listener(), listener());
+    data.register("main", &other, "keyM");
+    let mut app = session_named(&own, "B");
+    execute_command_string(&mut app, "set -t ma: @x 1").unwrap();
+    assert_eq!(lines_sent(&other), Some(vec!["AUTH keyM".to_string(), "set -t main: @x 1".to_string()]));
+    assert_eq!(lines_sent(&own), None);
+}
+
+#[test]
+fn another_sessions_id_is_forwarded_by_its_name() {
+    let _env = crate::util::lock_test_env();
+    let data = DataDir::new("otherid");
+    let (own, other) = (listener(), listener());
+    data.register("C", &other, "keyC");
+    std::fs::write(data.dir.join("C.sid"), "5").unwrap();
+    let mut app = session_a(&own);
+    execute_command_string(&mut app, "kill-session -t $5").unwrap();
+    assert_eq!(lines_sent(&other), Some(vec!["AUTH keyC".to_string(), "kill-session -t C".to_string()]));
+    assert_eq!(lines_sent(&own), None);
 }
