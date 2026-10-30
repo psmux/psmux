@@ -119,6 +119,16 @@ function Check-NotFound {
     Check (Session-Alive $Namespace 'D') "D is still alive after $Session's hook"
 }
 
+# #938 (owner ruling 2026-10-31): a hook naming another session that exists
+# runs on that session's server, as tmux and the CLI do, so D ends and the
+# hook's own session lives.
+function Check-OtherEnds {
+    param([string]$Namespace, [string]$Session, [string]$Other)
+    $ended = Wait-Until { -not (Session-Alive $Namespace $Other) }
+    Check $ended "$Session's hook ends $Other"
+    Check (Session-Alive $Namespace $Session) "$Session is still alive after its hook"
+}
+
 function Check-Ends {
     param([string]$Namespace, [string]$Session)
     $ended = Wait-Until { Session-Gone $Namespace $Session }
@@ -132,16 +142,18 @@ function Part-Default {
     New-TestSession $Namespace 'D'
     Check-DumpState $Namespace 'A' 'part1'
     Fire-Hook $Namespace 'A' 'kill-session -t D'
-    Check-NotFound $Namespace 'A' "can't find session: D" 'part1'
+    Check-OtherEnds $Namespace 'A' 'D'
     $fired = Wait-Until {
         $shown = P $Namespace @('show-options', '-v', '-t', 'A', '@fired')
         $shown.Code -eq 0 -and $shown.Text.Trim() -eq '1'
     }
     Check $fired "A's next hook command ran (@fired is 1)"
 
+    New-TestSession $Namespace 'D'
     New-TestSession $Namespace 'I'
-    Fire-Hook $Namespace 'I' 'kill-session -t D:1.'
-    Check-NotFound $Namespace 'I' "can't find session: D:1" 'part1'
+    # tmux names the session part only (cmd-find.c:1258).
+    Fire-Hook $Namespace 'I' 'kill-session -t Z:1.'
+    Check-NotFound $Namespace 'I' "can't find session: Z" 'part1'
 
     New-TestSession $Namespace 'E'
     Fire-Hook $Namespace 'E' 'kill-session'
@@ -169,7 +181,7 @@ function Part-Shared {
         New-TestSession $Namespace 'D'
         Check-DumpState $Namespace 'A' 'part2'
         Fire-Hook $Namespace 'A' 'kill-session -t D'
-        Check-NotFound $Namespace 'A' "can't find session: D" 'part2'
+        Check-OtherEnds $Namespace 'A' 'D'
     } finally {
         Remove-Item Env:PSMUX_SERVER_MODE -ErrorAction SilentlyContinue
     }
