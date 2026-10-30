@@ -2503,17 +2503,27 @@ fn keeps_other_session_target_local(command: &str) -> bool {
 /// first operand, a cluster is read letter by letter, and a value flag takes
 /// the rest of its word or the next word.
 fn own_target_flag<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
+    own_target_slot(command, args).map(|(i, at)| &args[i][at..])
+}
+
+/// Where [`own_target_flag`]'s value sits: the index of its token in `args`
+/// and the byte offset of the value in that token (0 for `-t VALUE`).
+fn own_target_slot(command: &str, args: &[&str]) -> Option<(usize, usize)> {
     let mut i = 0;
     while i < args.len() {
         let token = args[i];
         let rest = token.strip_prefix('-').filter(|r| !r.is_empty() && *r != "-")?;
         for (at, flag) in rest.char_indices() {
             if flag == 't' || crate::cli::flag_takes_value(command, flag) {
-                let tail = &rest[at + flag.len_utf8()..];
+                let end = at + flag.len_utf8();
                 if flag == 't' {
-                    return if tail.is_empty() { args.get(i + 1).copied() } else { Some(tail) };
+                    return if end == rest.len() {
+                        (i + 1 < args.len()).then_some((i + 1, 0))
+                    } else {
+                        Some((i, 1 + end))
+                    };
                 }
-                if tail.is_empty() {
+                if end == rest.len() {
                     i += 1;
                 }
                 break;
@@ -2522,6 +2532,71 @@ fn own_target_flag<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
         i += 1;
     }
     None
+}
+
+/// The session a `-t` session part names, read as tmux's
+/// `cmd_find_get_session` does (cmd-find.c:264-320) over the sessions of this
+/// server's namespace: a `$id`, then the exact name, then (unless the target
+/// had a leading `=`) a unique prefix, then a unique fnmatch pattern. An
+/// ambiguous prefix or pattern is no session, as in tmux.
+#[derive(Debug, PartialEq)]
+enum NamedSession {
+    Own,
+    Other(String),
+    Missing,
+}
+
+fn resolve_named_session(app: &AppState, spec: &str) -> NamedSession {
+    let (exact, spec) = match spec.strip_prefix('=') {
+        Some(rest) => (true, rest),
+        None => (false, spec),
+    };
+    let ns = app.socket_name.as_deref();
+    let to_name = |base: &str| -> Option<String> {
+        match ns {
+            Some(n) => base.strip_prefix(&format!("{}__", n)).map(str::to_string),
+            None => (!base.contains("__")).then(|| base.to_string()),
+        }
+    };
+    let pick = |name: &str| {
+        if name == app.session_name { NamedSession::Own } else { NamedSession::Other(name.to_string()) }
+    };
+    if let Some(id) = spec.strip_prefix('$') {
+        let Ok(id) = id.parse::<usize>() else { return NamedSession::Missing };
+        if id == app.session_id {
+            return NamedSession::Own;
+        }
+        return match crate::session::resolve_session_by_id(id).as_deref().and_then(to_name) {
+            Some(name) => pick(&name),
+            None => NamedSession::Missing,
+        };
+    }
+    let mut names: Vec<String> = crate::session::list_session_names_ns(ns)
+        .iter()
+        .filter_map(|base| to_name(base))
+        .filter(|name| *name != app.session_name)
+        .collect();
+    names.push(app.session_name.clone());
+    if names.iter().any(|name| name == spec) {
+        return pick(spec);
+    }
+    if exact || spec.is_empty() {
+        return NamedSession::Missing;
+    }
+    let prefixed: Vec<&String> = names.iter().filter(|name| name.starts_with(spec)).collect();
+    match prefixed.len() {
+        1 => return pick(prefixed[0]),
+        0 => {}
+        _ => return NamedSession::Missing,
+    }
+    let matched: Vec<&String> = names
+        .iter()
+        .filter(|name| crate::terminal_overrides::fnmatch(spec, name))
+        .collect();
+    match matched.as_slice() {
+        [one] => pick(one),
+        _ => NamedSession::Missing,
+    }
 }
 
 /// Whether the boolean flag `wanted` is set in the command's flag region,
@@ -2571,47 +2646,71 @@ fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bo
     let Some(target) = own_target_flag(command, &parts[1..]) else {
         return false;
     };
-    let target = crate::cli::coerce_bare_window_target(command, target);
-    let plain = crate::cli::strip_exact_match_prefix(&target);
-    if plain.is_empty() || plain.starts_with(['$', '@', '%']) {
+    let coerced = crate::cli::coerce_bare_window_target(command, target);
+    if coerced != target {
         return false;
     }
-    let bare = crate::cli::bare_target_token(&target);
+    let plain = crate::cli::strip_exact_match_prefix(target);
+    if plain.is_empty() || plain.starts_with(['@', '%']) {
+        return false;
+    }
     // `kill-session -a -t B` keeps B and ends the others: it is not B's to run.
     if matches!(command, "kill-session" | "kill-ses") && own_flag_set(command, &parts[1..], 'a') {
         return false;
     }
-    let session = match plain.find(':') {
-        Some(colon) if colon > 0 => &plain[..colon],
+    // The session part and what follows it (`:1.0`, or nothing). A bare name
+    // or `$id` is all session part; `w.p` without a colon is a window here.
+    let bare = crate::cli::bare_target_token(target) || (plain.starts_with('$') && !plain.contains(':'));
+    let (spec, rest) = match target.find(':') {
+        Some(colon) if !crate::cli::strip_exact_match_prefix(&target[..colon]).is_empty() => target.split_at(colon),
         Some(_) => return false,
-        None if bare => plain,
+        None if bare => (target, ""),
         None => return false,
     };
-    if session == app.session_name {
+    let name = match resolve_named_session(app, spec) {
+        NamedSession::Own => return false,
+        NamedSession::Other(name) => name,
+        // A bare word that is no session is a window or pane name of this
+        // session, or tmux's own error, which the arms below give.
+        NamedSession::Missing if bare && !plain.starts_with('$') => return false,
+        NamedSession::Missing => {
+            let shown = crate::cli::strip_exact_match_prefix(spec);
+            app.status_message = Some((format!("can't find session: {}", shown), Instant::now(), None));
+            return true;
+        }
+    };
+    if bare && !plain.starts_with('$') && app.resolve_window_target(plain).is_ok() {
         return false;
     }
-    let base = crate::session::namespaced_session_base(app.socket_name.as_deref(), session);
-    let port = if crate::session::registry_case_variant(&base).is_some() {
-        None
-    } else {
-        std::fs::read_to_string(crate::paths::port_file(&base))
-            .ok()
-            .and_then(|text| text.trim().parse::<u16>().ok())
-    };
-    let Some(port) = port else {
-        if bare {
-            // Not a session: a window or pane name of this session, or
-            // tmux's own error, which the arms below give.
-            return false;
-        }
-        app.status_message = Some((format!("can't find session: {}", session), Instant::now(), None));
+    let base = crate::session::session_name_base(app.socket_name.as_deref(), &name);
+    let Some(port) = std::fs::read_to_string(crate::paths::port_file(&base))
+        .ok()
+        .and_then(|text| text.trim().parse::<u16>().ok())
+    else {
+        app.status_message = Some((format!("can't find session: {}", name), Instant::now(), None));
         return true;
     };
-    if bare && app.resolve_window_target(plain).is_ok() {
-        return false;
-    }
+    // The receiving server reads the target again, by exact name: a prefix,
+    // pattern or `$id` resolved here is spelled out. A session command takes
+    // the bare name; the others get `name:` so it is never read as a window.
+    let resolved = if !rest.is_empty() {
+        format!("{}{}", name, rest)
+    } else if matches!(command, "kill-session" | "kill-ses" | "has-session" | "has" | "rename-session" | "rename") {
+        name.clone()
+    } else {
+        format!("{}:", name)
+    };
+    let line = match own_target_slot(command, &parts[1..]) {
+        Some((i, at)) if parts[1 + i][at..] != resolved => {
+            let mut rebuilt: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+            rebuilt[1 + i] = format!("{}{}", &parts[1 + i][..at], resolved);
+            let refs: Vec<&str> = rebuilt.iter().map(String::as_str).collect();
+            requote(&refs)
+        }
+        _ => cmd.to_string(),
+    };
     let key = crate::session::read_session_key(&base).unwrap_or_default();
-    let _ = send_control_to_port(port, &format!("{}\n", cmd), &key);
+    let _ = send_control_to_port(port, &format!("{}\n", line), &key);
     true
 }
 
@@ -3571,10 +3670,10 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             // session. `-a` is left as it was.
             if !own_flag_set(parts[0], &parts[1..], 'a') {
                 if let Some(target) = own_target_flag(parts[0], &parts[1..]) {
-                    let named = crate::cli::strip_exact_match_prefix(target);
-                    let session = named.split(':').next().unwrap_or(named);
-                    if session != app.session_name {
-                        app.status_message = Some((format!("can't find session: {}", session), Instant::now(), None));
+                    let spec = target.split(':').next().unwrap_or(target);
+                    if resolve_named_session(app, spec) != NamedSession::Own {
+                        let shown = crate::cli::strip_exact_match_prefix(spec);
+                        app.status_message = Some((format!("can't find session: {}", shown), Instant::now(), None));
                         return Ok(());
                     }
                 }
