@@ -4788,3 +4788,7 @@ mod tests_refresh_client_l_server_route;
 #[cfg(test)]
 #[path = "../tests-rs/test_hook_kill_session_target.rs"]
 mod tests_hook_kill_session_target;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue938_arg_parsing.rs"]
+mod tests_issue938_arg_parsing;
