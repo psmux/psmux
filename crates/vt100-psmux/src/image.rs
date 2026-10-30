@@ -30,6 +30,33 @@ pub fn cell_dims_from_px(px_width: u32, px_height: u32) -> (u16, u16) {
     )
 }
 
+/// The pixels of one cell an image sets: bit `y * 10 + x` for the pixel `x`
+/// columns and `y` rows from the cell's top left corner, in a cell of
+/// [`DEFAULT_CELL_PX`].
+pub type CellMask = [u64; 4];
+
+/// The mask of every pixel within `w` columns and `h` rows of a cell's top
+/// left corner.
+#[must_use]
+pub fn cell_mask_reaching(w: u32, h: u32) -> CellMask {
+    let (cell_px_w, cell_px_h) = DEFAULT_CELL_PX;
+    let mut mask = [0u64; 4];
+    for y in 0..h.min(cell_px_h) {
+        for x in 0..w.min(cell_px_w) {
+            set_cell_mask_bit(&mut mask, y * cell_px_w + x);
+        }
+    }
+    mask
+}
+
+/// Sets bit `bit` of a cell mask.
+pub(crate) fn set_cell_mask_bit(mask: &mut CellMask, bit: u32) {
+    let bit = usize::try_from(bit).unwrap_or(usize::MAX);
+    if let Some(word) = mask.get_mut(bit / 64) {
+        *word |= 1 << (bit % 64);
+    }
+}
+
 /// Source of image ids for every pane in the process.  The server ships each
 /// blob once per id and the client caches blobs by id, so an id must not be
 /// handed out twice: a counter per screen started every pane, and every RIS,
@@ -72,6 +99,12 @@ pub struct SixelImage {
     /// The image's cells that text or an erase has since been written over,
     /// row major, `cell_width * cell_height`; empty while there are none.
     pub erased: Vec<bool>,
+    /// Which pixels of each of its cells the image sets, row major,
+    /// `cell_width * cell_height`.  Empty when that is not known (tracing
+    /// the sixel cost too much, or the image was made elsewhere): the image
+    /// then hides nothing under it, and is taken to set every pixel it
+    /// reaches when a newer image is drawn over it.
+    pub cell_masks: Vec<CellMask>,
 }
 
 impl SixelImage {

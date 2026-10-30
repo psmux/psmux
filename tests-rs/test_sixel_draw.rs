@@ -240,6 +240,39 @@ fn plan_sixel_frame_draws_only_the_part_that_changed() {
 }
 
 #[test]
+fn plan_sixel_frame_draws_a_new_frame_over_the_old_one_without_rewriting() {
+    // chafa playing a GIF: each frame is a new image in the same place, and
+    // the pane drops the one it hides.  Rewriting the old frame's cells first
+    // blanked it until the new frame was drawn, a flicker on every frame.
+    use ratatui::layout::Rect;
+    let area = Rect::new(0, 0, 80, 24);
+    let old = SixelEmit::whole(0, 0, 1, 72, 23);
+    let new = SixelEmit::whole(0, 0, 2, 72, 23);
+    let plan = super::plan_sixel_frame(&[old], area, &[new.clone()], area).expect("a new frame");
+    assert!(plan.repaint.is_empty());
+    assert_eq!(plan.draw, vec![new]);
+
+    // A smaller image inside the new one is drawn over too; one the new image
+    // does not cover is rewritten as before.
+    let inner = SixelEmit::whole(2, 2, 3, 4, 4);
+    let outside = SixelEmit::whole(70, 20, 4, 4, 4);
+    let new = SixelEmit::whole(0, 0, 5, 72, 23);
+    let plan = super::plan_sixel_frame(&[inner, outside], area, &[new], area).expect("a new frame");
+    assert_eq!(plan.repaint, vec![Rect::new(70, 20, 4, 4)]);
+
+    // An image still there that moved inside its own new place, and an older
+    // image's part under a new part of an image older still, are rewritten.
+    let moved_from = SixelEmit::whole(0, 1, 6, 4, 2);
+    let moved_to = SixelEmit::whole(0, 0, 6, 4, 3);
+    let plan = super::plan_sixel_frame(&[moved_from], area, &[moved_to], area).expect("moved");
+    assert_eq!(plan.repaint, vec![Rect::new(0, 1, 4, 2)]);
+    let newer = SixelEmit::whole(0, 0, 8, 4, 4);
+    let older = SixelEmit::whole(0, 0, 7, 8, 8);
+    let plan = super::plan_sixel_frame(&[newer], area, &[older], area).expect("changed");
+    assert_eq!(plan.repaint, vec![Rect::new(0, 0, 4, 4)]);
+}
+
+#[test]
 fn plan_sixel_frame_redraws_a_part_whose_cells_are_rewritten() {
     // An image that went away overlapped one that stays: rewriting its cells
     // erases the other image there, so that one is drawn again.

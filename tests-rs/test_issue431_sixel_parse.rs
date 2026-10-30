@@ -92,9 +92,10 @@ fn the_aspect_ratio_follows_the_first_introducer_parameter() {
     let mut p: Parser = Parser::new(24, 80, 100);
     p.process(b"\x1bP9q~~$-~~\x1b\\");
     assert_eq!(p.screen().images()[0].px_height, 12);
-    // An omitted parameter is 2:1, as 0 is.
+    // An omitted parameter is 2:1, as 0 is.  Drawn in the same place with a
+    // filled background, it hides the first image, which is dropped.
     p.process(b"\x1bPq~~$-~~\x1b\\");
-    assert_eq!(p.screen().images()[1].px_height, 24);
+    assert_eq!(p.screen().images().last().unwrap().px_height, 24);
 }
 
 #[test]
@@ -133,7 +134,7 @@ fn the_stored_blob_bounds_the_background_to_the_image() {
     // A raster of the image's own comes after, so its ratio still wins, and
     // the size is the larger of the data and the raster.
     p.process(b"\x1bP9q\"1;1;30;40~~\x1b\\");
-    let raw = &p.screen().images()[1].raw;
+    let raw = &p.screen().images().last().unwrap().raw;
     assert!(raw.starts_with(b"\x1bP9q\"1;1;30;40\"1;1;30;40~~"));
 }
 

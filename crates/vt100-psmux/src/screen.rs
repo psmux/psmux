@@ -1187,12 +1187,24 @@ impl Screen {
     /// absolute-line anchor and current column, then pruned against the active
     /// grid.  Mirrors the `set_progress` side-channel; called by the parser
     /// from `unhook` once a full sixel DCS has been reconstructed.
+    ///
+    /// An image under it on the same grid is marked as written over in each
+    /// cell where the new one sets every pixel the older one sets there (see
+    /// [`crate::image::SixelImage::cell_masks`]), and an image with no cell
+    /// left is dropped: the pane's console host shows only the new image
+    /// there.  A program that draws frames in one place, as chafa plays a
+    /// GIF, left every frame stacked under the last until the cap of 64; from
+    /// then on each frame evicted the oldest, and the client drew the 63 left
+    /// again.
     pub fn add_image(&mut self, mut img: crate::image::SixelImage) -> u64 {
         let id = crate::image::next_image_id();
         img.id = id;
         img.on_alt = self.mode(MODE_ALTERNATE_SCREEN);
         img.anchor_line = self.grid().absolute_line_of_cursor();
         img.anchor_col = self.grid().pos().col;
+        if !img.cell_masks.is_empty() {
+            self.hide_images_under(&img);
+        }
         self.sixel_images.push(img);
         self.prune_images();
         id
@@ -1288,6 +1300,49 @@ impl Screen {
             } else {
                 break;
             }
+        }
+    }
+
+    /// Marks the cells of the images on `new`'s grid that `new` hides: those
+    /// where `new` sets every pixel the older image sets.  Both images start
+    /// at a cell's top left corner, so their cell masks line up.  An older
+    /// image with no mask is taken to set every pixel it reaches.
+    fn hide_images_under(&mut self, new: &crate::image::SixelImage) {
+        let (cell_px_w, cell_px_h) = crate::image::DEFAULT_CELL_PX;
+        // How far into its cell `cell` an image `px` pixels wide or tall reaches.
+        let reach = |px: u32, cell: u16, cell_px: u32| px.saturating_sub(u32::from(cell) * cell_px).min(cell_px);
+        let mut any_all = false;
+        for img in self.sixel_images.iter_mut().filter(|img| img.on_alt == new.on_alt) {
+            let top = img.anchor_line.max(new.anchor_line);
+            let bottom = (img.anchor_line + u64::from(img.cell_height))
+                .min(new.anchor_line + u64::from(new.cell_height));
+            let left = img.anchor_col.max(new.anchor_col);
+            let right = img.anchor_col.saturating_add(img.cell_width)
+                .min(new.anchor_col.saturating_add(new.cell_width));
+            for line in top..bottom {
+                let row_of = |anchor: u64| u16::try_from(line - anchor).unwrap_or(u16::MAX);
+                let (nr, or) = (row_of(new.anchor_line), row_of(img.anchor_line));
+                for col in left..right {
+                    let (nc, oc) = (col - new.anchor_col, col - img.anchor_col);
+                    let cell = |r: u16, c: u16, w: u16| usize::from(r) * usize::from(w) + usize::from(c);
+                    let Some(new_mask) = new.cell_masks.get(cell(nr, nc, new.cell_width)) else {
+                        continue;
+                    };
+                    let old_mask = img.cell_masks.get(cell(or, oc, img.cell_width)).copied().unwrap_or_else(|| {
+                        crate::image::cell_mask_reaching(
+                            reach(img.px_width, oc, cell_px_w),
+                            reach(img.px_height, or, cell_px_h),
+                        )
+                    });
+                    if old_mask.iter().zip(new_mask).all(|(o, n)| o & !n == 0) {
+                        img.erase_cells(or, oc, oc + 1);
+                    }
+                }
+            }
+            any_all |= img.is_all_erased();
+        }
+        if any_all {
+            self.sixel_images.retain(|img| !img.is_all_erased());
         }
     }
 
@@ -2576,4 +2631,8 @@ mod test_issue431_sixel_storage;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_sixel_erased_cells.rs"]
 mod test_sixel_erased_cells;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_sixel_hidden_images.rs"]
+mod test_sixel_hidden_images;
 
