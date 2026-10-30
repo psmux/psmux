@@ -192,6 +192,117 @@ $rows = @(P capture-pane -p -t d)
 $markRow = [array]::FindIndex([string[]]$rows, [Predicate[string]] { param($l) $l -match '^MARK_D' })
 Check '4. the image starts on the row below the marker line, which stays' ($img -and $markRow -ge 0 -and [int]$img.row -eq $markRow + 1) "(marker on row $markRow, image on row $(if ($img) { $img.row } else { '-' }))"
 
+$env:PSMUX_CONPTY_DIR = $conptyDir
+P new-session -d -s e -x 80 -y 20 | Out-Null
+P new-session -d -s f -x 120 -y 30 | Out-Null
+P new-session -d -s g -x 120 -y 30 | Out-Null
+Remove-Item Env:\PSMUX_CONPTY_DIR
+if (-not ((WaitSession 'e') -and (WaitSession 'f') -and (WaitSession 'g'))) { Check 'sessions e, f, g start on OpenConsole' $false ''; Cleanup; exit $script:TestsFailed }
+Start-Sleep -Seconds 2
+
+# Runs $script (written to a file) in $session with a client attached under the
+# host, and returns what the client wrote, as Latin-1 text.
+function WithClient($session, $script, $marker, $holdMs) {
+    $gen = Join-Path $data "gen_$session.ps1"
+    Set-Content -Path $gen -Value $script
+    $bin = Join-Path $data "client_$session.bin"
+    $env:CONPTY_DA1_HOST_CELL = '10x20'
+    $c = Start-Process -FilePath $hostExe -ArgumentList @((Join-Path $conptyDir 'conpty.dll'), $bin, 'yes', '8', "$holdMs", "`"$exe`" -L $ns attach -t $session") -PassThru -WindowStyle Hidden
+    Remove-Item Env:\CONPTY_DA1_HOST_CELL
+    Start-Sleep -Seconds 4
+    P send-keys -t $session "& '$gen'" Enter | Out-Null
+    $done = WaitMarker $session $marker 60
+    $c.WaitForExit($holdMs + 10000) | Out-Null
+    $text = if (Test-Path $bin) { [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($bin)) } else { '' }
+    return @{ done = $done; text = $text }
+}
+
+# ── 5: an image ESC [ 2 J took away is rewritten under a newer one ──────────
+Write-Host "`n--- 5: ESC [ 2 J, then a transparent frame in the same cells ---" -ForegroundColor Cyan
+# Frame A sets every pixel of 4 by 3 cells at row 8, column 11. Then, in one
+# write, ESC [ 2 J and frame B there setting only the left 20 pixel columns.
+# Windows Terminal erased A, so its right half must not stay on the terminal:
+# the client rewrites A's cells before it draws B. The pane did not hide A
+# under B (ED 2J dropped it), so B must not be drawn straight over it.
+$gen5 = @'
+$e = [char]27
+$o = [Console]::OpenStandardOutput()
+function W([string]$s) { $b = [Text.Encoding]::ASCII.GetBytes($s); $o.Write($b, 0, $b.Length); $o.Flush() }
+W ("$e[2J$e[8;11H" + "${e}P0;1;0q`"1;1;40;40#1;2;100;0;0#1!40~-!40~-!40~-!40~-!40~-!40~-!40~${e}\")
+Start-Sleep -Milliseconds 1500
+W ("$e[2J$e[8;11H" + "${e}P0;1;0q`"1;1;40;40#2;2;0;100;0#2!20~-!20~-!20~-!20~-!20~-!20~-!20~${e}\" + "$e[12;1H")
+'DONE' + '_E'
+'@
+$r5 = WithClient 'e' $gen5 'DONE_E' 12000
+$six = @([regex]::Matches($r5.text, "\x1bP[0-9;]*q.*?\x1b\\", 'Singleline'))
+$between = if ($six.Count -ge 2) { $r5.text.Substring($six[0].Index + $six[0].Length, $six[1].Index - ($six[0].Index + $six[0].Length)) } else { '' }
+Check '5. the client rewrites the cleared frame''s cells before the transparent frame' ($r5.done -and $six.Count -ge 2 -and $between -match "\x1b\[8;11H {4}") "($($six.Count) sixels, between them: $(($between -replace "`e", '^[').Substring(0, [math]::Min(120, $between.Length))))"
+
+# ── 6: a raster far past the pane costs no more than before ────────────────
+Write-Host "`n--- 6: 63 sixels with a 4097 pixel raster, then 20 transparent ones of 4096 ---" -ForegroundColor Cyan
+# A few bytes of raster command ask for 410 by 205 cells. Masks sized from
+# that took the parser 19 s for these 33 byte sixels, with the pane locked.
+$big = "[char]27 + '[H' + [char]27 + 'P0;0;0q`"1;1;4097;4097#0~' + [char]27 + '\'"
+$tiny = "[char]27 + '[H' + [char]27 + 'P0;1;0q`"1;1;4096;4096#0@' + [char]27 + '\'"
+$sw = [Diagnostics.Stopwatch]::StartNew()
+P send-keys -t f "cls; [Console]::Out.Write(($big) * 63 + ($tiny) * 20 + [char]27 + '[2J' + [char]27 + '[H'); 'DONE' + '_F'" Enter | Out-Null
+$ok6 = WaitMarker 'f' 'DONE_F' 60
+$sw.Stop()
+Check '6. the pane takes them in well within 5 s' ($ok6 -and $sw.ElapsedMilliseconds -lt 5000) "($($sw.ElapsedMilliseconds) ms)"
+
+# ── 7: perf, 130 chafa sized frames with a client attached ─────────────────
+Write-Host "`n--- 7: perf, 130 frames of 720 by 440 pixels at 80 ms ---" -ForegroundColor Cyan
+$gen7 = @'
+$e = [char]27
+$o = [Console]::OpenStandardOutput()
+function W([string]$s) { $b = [Text.Encoding]::ASCII.GetBytes($s); $o.Write($b, 0, $b.Length); $o.Flush() }
+function Frame($seed) {
+    $sb = [Text.StringBuilder]::new()
+    $sb.Append("${e}P0;1;0q`"1;1;720;440") | Out-Null
+    for ($c = 0; $c -lt 8; $c++) { $sb.Append("#$c;2;$((($c * 30 + $seed * 7) % 100));$((($c * 13) % 100));50") | Out-Null }
+    for ($b = 0; $b -lt 74; $b++) {
+        for ($k = 0; $k -lt 72; $k++) { $sb.Append("#$((($k + $b + $seed) % 8))!10~") | Out-Null }
+        if ($b -lt 73) { $sb.Append('-') | Out-Null }
+    }
+    $sb.Append("$e\") | Out-Null
+    $sb.ToString()
+}
+$frames = @(0..3 | ForEach-Object { Frame $_ })
+W ("$e[?8452l" + ("${e}D" * 22) + "$e[22A$e[s")
+$sw = [Diagnostics.Stopwatch]::StartNew()
+for ($i = 0; $i -lt 130; $i++) {
+    $t0 = $sw.Elapsed.TotalMilliseconds
+    W ("$e[u$e[s" + $frames[$i % 4] + "$e[u")
+    $rest = 80 - ($sw.Elapsed.TotalMilliseconds - $t0)
+    if ($rest -gt 0) { Start-Sleep -Milliseconds ([int]$rest) }
+}
+W ("$e[23B`r`n")
+'DONE' + '_G ' + [math]::Round($sw.Elapsed.TotalMilliseconds) + ' ' + $frames[0].Length
+'@
+$r7 = WithClient 'g' $gen7 'DONE_G' 26000
+$cap = (P capture-pane -p -t g | Out-String)
+$m = [regex]::Match($cap, 'DONE_G (\d+) (\d+)')
+$sixels = @([regex]::Matches($r7.text, "\x1bP[0-9;]*q`"\d+;\d+;720;")).Count
+$imgs7 = @(Images (Frame 'g').layout).Count
+$metrics = [ordered]@{
+    test = 'issue935_sixel_hidden_frames'
+    date = (Get-Date).ToString('o')
+    exe = "$(& $exe -V 2>$null | Select-Object -Last 1)"
+    frames = 130
+    frame_interval_ms = 80
+    frame_sixel_bytes = if ($m.Success) { [int]$m.Groups[2].Value } else { $null }
+    generator_total_ms = if ($m.Success) { [int]$m.Groups[1].Value } else { $null }
+    client_bytes = $r7.text.Length
+    client_bytes_per_frame = [math]::Round($r7.text.Length / 130)
+    client_sixels = $sixels
+    images_in_pane = $imgs7
+}
+$mdir = Join-Path $env:USERPROFILE '.psmux-test-data\metrics'
+New-Item -ItemType Directory -Force $mdir | Out-Null
+$metrics | ConvertTo-Json | Set-Content (Join-Path $mdir "issue935_sixel_frames-$(Get-Date -Format yyyyMMdd-HHmmss).json")
+Write-Host "  metrics: $($metrics | ConvertTo-Json -Compress)"
+Check '7. 130 frames: one image in the pane, the client draws each frame at most once' ($r7.done -and $imgs7 -eq 1 -and $sixels -ge 100 -and $sixels -le 132) "($sixels sixels, $([math]::Round($r7.text.Length / 1MB, 1)) MB, $imgs7 images)"
+
 Cleanup
 Write-Host "`n=== Results: $($script:TestsPassed) passed, $($script:TestsFailed) failed ===" -ForegroundColor Cyan
 exit $script:TestsFailed
