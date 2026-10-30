@@ -218,6 +218,10 @@ pub struct ImageDescJson {
     /// image's own cells; not drawn.
     #[serde(default)]
     pub erased: Vec<[u16; 3]>,
+    /// The ids of the older images this one hid whole when it was drawn; the
+    /// client draws it over them without rewriting their cells first.
+    #[serde(default)]
+    pub hid: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1339,6 +1343,14 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         for (ri, r) in img.erased.iter().enumerate() {
                             if ri > 0 { out.push(','); }
                             let _ = std::fmt::Write::write_fmt(out, format_args!("[{},{},{}]", r[0], r[1], r[2]));
+                        }
+                        out.push(']');
+                    }
+                    if !img.hid.is_empty() {
+                        out.push_str(",\"hid\":[");
+                        for (hi, h) in img.hid.iter().enumerate() {
+                            if hi > 0 { out.push(','); }
+                            let _ = std::fmt::Write::write_fmt(out, format_args!("{h}"));
                         }
                         out.push(']');
                     }

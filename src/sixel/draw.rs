@@ -51,6 +51,18 @@ thread_local! {
     /// time — the cache-presence check happens at emit time where it is in scope.
     static FRAME_SIXELS: std::cell::RefCell<Vec<SixelEmit>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// `(newer, older)` image ids of the frame: the pane dropped `older`
+    /// because `newer` hid every pixel of it (`SixelImage::hid`).
+    static FRAME_SIXEL_HID: std::cell::RefCell<Vec<(u64, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn frame_sixel_hid_push(newer: u64, older: u64) {
+    FRAME_SIXEL_HID.with(|h| h.borrow_mut().push((newer, older)));
+}
+
+pub(crate) fn frame_sixel_hid_take() -> Vec<(u64, u64)> {
+    FRAME_SIXEL_HID.with(|h| std::mem::take(&mut *h.borrow_mut()))
 }
 
 pub(crate) fn frame_sixels_clear() {
@@ -163,11 +175,14 @@ pub(crate) struct SixelFramePlan {
 /// alone.  After a resize ratatui has cleared the whole screen, so every
 /// part is drawn and nothing is rewritten.
 ///
-/// The part of an image that is gone, inside a new part of a newer image
-/// (ids only grow), is not rewritten: the newer image is drawn over it, as
-/// the pane's console host draws a newer sixel over an older one.  The pane
-/// drops an image under a newer one where the newer one sets every pixel the
-/// older one set, so nothing of it is left showing.  Rewriting its cells
+/// The part of an image that is gone because a newer image hid it (`hid`,
+/// pairs of `(newer, older)` ids), inside a new part of that newer image, is
+/// not rewritten: the newer image is drawn over it, as the pane's console host
+/// draws a newer sixel over an older one.  The pane drops an image under a
+/// newer one only where the newer one sets every pixel the older one set, so
+/// nothing of it is left showing.  An image that went away for any other
+/// reason (ED 2J, text over it, the cap) is rewritten even with a newer image
+/// in its place, since that one may leave pixels unset there.  Rewriting its cells
 /// first blanked the image until the new one was drawn, and a GIF chafa
 /// plays in one place flickered on every frame.  A part of an image still
 /// there, moved or cut, is rewritten as before.
@@ -176,6 +191,7 @@ pub(crate) fn plan_sixel_frame(
     last_area: Rect,
     now: &[SixelEmit],
     area: Rect,
+    hid: &[(u64, u64)],
 ) -> Option<SixelFramePlan> {
     if now == last && area == last_area {
         return None;
@@ -189,7 +205,9 @@ pub(crate) fn plan_sixel_frame(
     };
     let drawn_over = |gone: &SixelEmit| {
         !now.iter().any(|e| e.id == gone.id)
-            && now.iter().any(|e| e.id > gone.id && !last.contains(e) && inside(rect(gone), rect(e)))
+            && now.iter().any(|e| {
+                hid.contains(&(e.id, gone.id)) && !last.contains(e) && inside(rect(gone), rect(e))
+            })
     };
     let repaint: Vec<Rect> = last
         .iter()

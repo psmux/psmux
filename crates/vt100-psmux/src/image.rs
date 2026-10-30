@@ -117,6 +117,12 @@ pub struct SixelImage {
     /// then hides nothing under it, and is taken to set every pixel it
     /// reaches when a newer image is drawn over it.
     pub cell_masks: Vec<CellMask>,
+    /// The ids of the older images this one hid whole when it was drawn, and
+    /// the pane dropped for it.  The client draws this image straight over
+    /// what it drew of those, without rewriting their cells first; any other
+    /// image that went away (an erase, text, the cap) is rewritten, since
+    /// nothing says this one covers every pixel of it.
+    pub hid: Vec<u64>,
 }
 
 impl SixelImage {

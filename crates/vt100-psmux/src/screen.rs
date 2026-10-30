@@ -1203,7 +1203,7 @@ impl Screen {
         img.anchor_line = self.grid().absolute_line_of_cursor();
         img.anchor_col = self.grid().pos().col;
         if !img.cell_masks.is_empty() {
-            self.hide_images_under(&img);
+            img.hid = self.hide_images_under(&img);
         }
         self.sixel_images.push(img);
         self.prune_images();
@@ -1307,7 +1307,7 @@ impl Screen {
     /// where `new` sets every pixel the older image sets.  Both images start
     /// at a cell's top left corner, so their cell masks line up.  An older
     /// image with no mask is taken to set every pixel it reaches.
-    fn hide_images_under(&mut self, new: &crate::image::SixelImage) {
+    fn hide_images_under(&mut self, new: &crate::image::SixelImage) -> Vec<u64> {
         let (cell_px_w, cell_px_h) = crate::image::DEFAULT_CELL_PX;
         // How far into its cell `cell` an image `px` pixels wide or tall reaches.
         let reach = |px: u32, cell: u16, cell_px: u32| px.saturating_sub(u32::from(cell) * cell_px).min(cell_px);
@@ -1331,7 +1331,9 @@ impl Screen {
                     let Some(new_mask) = new.cell_masks.get(cell(nr, nc, new.cell_width)) else {
                         continue;
                     };
-                    if img.is_erased(or, oc) {
+                    // An older image with no mask sets a pixel in each of its
+                    // cells, which a cell the new image leaves empty cannot hide.
+                    if img.is_erased(or, oc) || (img.cell_masks.is_empty() && *new_mask == [0; 4]) {
                         continue;
                     }
                     let old_mask = img.cell_masks.get(cell(or, oc, img.cell_width)).copied().unwrap_or_else(|| {
@@ -1349,9 +1351,17 @@ impl Screen {
             }
             any_all |= img.is_all_erased();
         }
+        let mut hid = Vec::new();
         if any_all {
-            self.sixel_images.retain(|img| !img.is_all_erased());
+            self.sixel_images.retain(|img| {
+                let gone = img.is_all_erased();
+                if gone && img.on_alt == new.on_alt {
+                    hid.push(img.id);
+                }
+                !gone
+            });
         }
+        hid
     }
 
     /// Drops every image owned by the currently-active grid.  Used by CSI 2J /

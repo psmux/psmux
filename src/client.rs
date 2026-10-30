@@ -2358,6 +2358,9 @@ pub fn render_layout_json(
             // been written over since are left out, as Windows Terminal erases
             // them.
             for desc in images {
+                for &hidden in &desc.hid {
+                    crate::sixel::draw::frame_sixel_hid_push(desc.id, hidden);
+                }
                 let Some(part) = crate::sixel::scale::visible_cells(
                     desc.row, desc.col, desc.cw, desc.ch, inner.width, inner.height,
                 ) else {
@@ -9010,6 +9013,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         frame_hyperlinks_clear();
         // Reset sixel image emits collected during this frame's render (#431).
         frame_sixels_clear();
+        crate::sixel::draw::frame_sixel_hid_take();
         // What this draw is about to put on screen.  No input is handled until
         // this closure returns, so once it has run this is exactly what the
         // user saw — the value a release must re-report.
@@ -10425,7 +10429,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             (now, collected)
         };
         let frame_area = completed.area;
-        let sixel_plan = plan_sixel_frame(&last_sixel_drawn, last_sixel_area, &sixel_now, frame_area);
+        let sixel_hid = crate::sixel::draw::frame_sixel_hid_take();
+        let sixel_plan =
+            plan_sixel_frame(&last_sixel_drawn, last_sixel_area, &sixel_now, frame_area, &sixel_hid);
         let sixel_repaint: Vec<(u16, u16, ratatui::buffer::Cell)> = sixel_plan
             .iter()
             .flat_map(|plan| plan.repaint.iter())

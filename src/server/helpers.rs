@@ -906,6 +906,9 @@ pub(crate) struct ImageDesc {
     /// The image's cells text has since been written over, as runs of
     /// `[row, col, len]` in the image's own cells; the client leaves them out.
     pub erased: Vec<[u16; 3]>,
+    /// The ids of the older images this one hid whole when it was drawn
+    /// (`SixelImage::hid`).
+    pub hid: Vec<u64>,
 }
 
 /// The cells of `img` text has been written over, as `[row, col, len]` runs.
@@ -971,6 +974,7 @@ pub(crate) fn visible_pane_images(
             cw: img.cell_width,
             ch: img.cell_height,
             erased: erased_runs(img),
+            hid: img.hid.clone(),
         });
     }
     out

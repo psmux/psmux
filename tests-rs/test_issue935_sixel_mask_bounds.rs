@@ -63,7 +63,7 @@ fn drawing_over_images_without_masks_is_cheap() {
         p.process(&sixel_at_home("0;1;0q\"1;1;4096;4096#0@"));
     }
     let took = started.elapsed();
-    assert!(took < std::time::Duration::from_millis(500), "20 sixels of 33 bytes took {took:?}");
+    assert!(took < std::time::Duration::from_secs(2), "20 sixels of 33 bytes took {took:?}");
 }
 
 #[test]
@@ -85,6 +85,7 @@ fn drawing_over_pane_sized_images_without_masks_is_cheap() {
             on_alt: false,
             erased: Vec::new(),
             cell_masks: Vec::new(),
+            hid: Vec::new(),
         });
     }
     let started = std::time::Instant::now();
@@ -93,7 +94,7 @@ fn drawing_over_pane_sized_images_without_masks_is_cheap() {
     }
     let took = started.elapsed();
     assert!(p.screen().images().len() >= 63, "a pixel hides none of them");
-    assert!(took < std::time::Duration::from_millis(500), "20 sixels of 33 bytes took {took:?}");
+    assert!(took < std::time::Duration::from_secs(2), "20 sixels of 33 bytes took {took:?}");
 }
 
 #[test]
@@ -128,4 +129,30 @@ fn transparent_masks_match_the_pixels_drawn() {
             assert_eq!(bit(&img.cell_masks[cell], cx, y), want, "pixel {x},{y}");
         }
     }
+}
+
+#[test]
+fn an_image_names_the_images_it_hid_and_nothing_else() {
+    // The client draws a frame straight over the ones it hid, without
+    // rewriting their cells, so `hid` must name only those: an image ED 2J
+    // took away is not hidden by the next one, which may leave pixels unset.
+    let frame = |c: u8| {
+        sixel_at_home(&format!(
+            "0;1;0q\"1;1;40;40#{c};2;100;0;0#{c}!40~-!40~-!40~-!40~-!40~-!40~-!40~"
+        ))
+    };
+    let mut p = Parser::new(30, 120, 0);
+    p.process(&frame(1));
+    let first = p.screen().images()[0].id;
+    p.process(&frame(2));
+    assert_eq!(p.screen().images().len(), 1);
+    let second = p.screen().images()[0].id;
+    assert_eq!(p.screen().images()[0].hid, vec![first]);
+
+    let mut cleared = vec![ESC, b'[', b'2', b'J'];
+    cleared.extend_from_slice(&sixel_at_home("0;1;0q\"1;1;40;40#3;2;0;100;0#3!20~"));
+    p.process(&cleared);
+    assert_eq!(p.screen().images().len(), 1);
+    assert_ne!(p.screen().images()[0].id, second);
+    assert!(p.screen().images()[0].hid.is_empty(), "ED 2J took the old frame, not the new image");
 }

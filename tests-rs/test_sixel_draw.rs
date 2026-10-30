@@ -81,8 +81,8 @@ fn plan_sixel_frame_writes_nothing_while_nothing_changed() {
     use ratatui::layout::Rect;
     let area = Rect::new(0, 0, 80, 24);
     let imgs = vec![sixel_at(3, 4, 7)];
-    assert_eq!(super::plan_sixel_frame(&imgs, area, &imgs, area), None);
-    assert_eq!(super::plan_sixel_frame(&[], area, &[], area), None);
+    assert_eq!(super::plan_sixel_frame(&imgs, area, &imgs, area, &[]), None);
+    assert_eq!(super::plan_sixel_frame(&[], area, &[], area, &[]), None);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn plan_sixel_frame_draws_a_new_image() {
     use ratatui::layout::Rect;
     let area = Rect::new(0, 0, 80, 24);
     let now = vec![sixel_at(3, 4, 7)];
-    let plan = super::plan_sixel_frame(&[], area, &now, area).expect("a new image is drawn");
+    let plan = super::plan_sixel_frame(&[], area, &now, area, &[]).expect("a new image is drawn");
     assert!(plan.repaint.is_empty());
     assert_eq!(plan.draw, now);
 }
@@ -103,7 +103,7 @@ fn plan_sixel_frame_covers_where_a_moved_image_was() {
     let area = Rect::new(0, 0, 80, 24);
     let last = vec![sixel_at(3, 4, 7)];
     let now = vec![sixel_at(3, 3, 7)];
-    let plan = super::plan_sixel_frame(&last, area, &now, area).expect("a moved image is redrawn");
+    let plan = super::plan_sixel_frame(&last, area, &now, area, &[]).expect("a moved image is redrawn");
     assert_eq!(plan.repaint, vec![Rect::new(3, 4, 2, 1)]);
     assert_eq!(plan.draw, now);
 }
@@ -114,7 +114,7 @@ fn plan_sixel_frame_covers_a_removed_image() {
     use ratatui::layout::Rect;
     let area = Rect::new(0, 0, 80, 24);
     let last = vec![sixel_at(78, 23, 7)];
-    let plan = super::plan_sixel_frame(&last, area, &[], area).expect("a removed image is covered");
+    let plan = super::plan_sixel_frame(&last, area, &[], area, &[]).expect("a removed image is covered");
     assert_eq!(plan.repaint, vec![Rect::new(78, 23, 2, 1)]);
     assert!(plan.draw.is_empty());
 }
@@ -124,7 +124,7 @@ fn plan_sixel_frame_redraws_after_a_resize_without_repainting() {
     // ratatui clears the screen on a resize, which takes the images with it.
     use ratatui::layout::Rect;
     let last = vec![sixel_at(3, 4, 7)];
-    let plan = super::plan_sixel_frame(&last, Rect::new(0, 0, 80, 24), &last, Rect::new(0, 0, 100, 30))
+    let plan = super::plan_sixel_frame(&last, Rect::new(0, 0, 80, 24), &last, Rect::new(0, 0, 100, 30), &[])
         .expect("a resize redraws the images");
     assert!(plan.repaint.is_empty());
     assert_eq!(plan.draw, last);
@@ -211,7 +211,7 @@ fn plan_sixel_frame_covers_only_the_cells_a_cut_image_drew() {
     use ratatui::layout::Rect;
     let area = Rect::new(0, 0, 80, 24);
     let last = vec![SixelEmit { x: 3, y: 0, id: 7, cw: 4, ch: 3, i: 0, j: 1, rx: 4, ry: 2 }];
-    let plan = super::plan_sixel_frame(&last, area, &[], area).expect("a removed image is covered");
+    let plan = super::plan_sixel_frame(&last, area, &[], area, &[]).expect("a removed image is covered");
     assert_eq!(plan.repaint, vec![Rect::new(3, 0, 4, 2)]);
 }
 
@@ -221,7 +221,7 @@ fn plan_sixel_frame_redraws_when_the_visible_part_changes() {
     let area = Rect::new(0, 0, 80, 24);
     let last = vec![SixelEmit { x: 3, y: 0, id: 7, cw: 4, ch: 3, i: 0, j: 1, rx: 4, ry: 2 }];
     let now = vec![SixelEmit { x: 3, y: 0, id: 7, cw: 4, ch: 3, i: 0, j: 2, rx: 4, ry: 1 }];
-    assert!(super::plan_sixel_frame(&last, area, &now, area).is_some());
+    assert!(super::plan_sixel_frame(&last, area, &now, area, &[]).is_some());
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn plan_sixel_frame_draws_only_the_part_that_changed() {
     let top = SixelEmit { x: 0, y: 1, id: 1, cw: 36, ch: 24, i: 0, j: 0, rx: 36, ry: 23 };
     let old_row = SixelEmit { x: 19, y: 24, id: 1, cw: 36, ch: 24, i: 19, j: 23, rx: 17, ry: 1 };
     let new_row = SixelEmit { x: 20, y: 24, id: 1, cw: 36, ch: 24, i: 20, j: 23, rx: 16, ry: 1 };
-    let plan = super::plan_sixel_frame(&[top.clone(), old_row], area, &[top, new_row.clone()], area)
+    let plan = super::plan_sixel_frame(&[top.clone(), old_row], area, &[top, new_row.clone()], area, &[])
         .expect("the row changed");
     assert_eq!(plan.repaint, vec![Rect::new(19, 24, 17, 1)]);
     assert_eq!(plan.draw, vec![new_row], "the part above is left alone");
@@ -248,7 +248,7 @@ fn plan_sixel_frame_draws_a_new_frame_over_the_old_one_without_rewriting() {
     let area = Rect::new(0, 0, 80, 24);
     let old = SixelEmit::whole(0, 0, 1, 72, 23);
     let new = SixelEmit::whole(0, 0, 2, 72, 23);
-    let plan = super::plan_sixel_frame(&[old], area, &[new.clone()], area).expect("a new frame");
+    let plan = super::plan_sixel_frame(&[old], area, &[new.clone()], area, &[(2, 1)]).expect("a new frame");
     assert!(plan.repaint.is_empty());
     assert_eq!(plan.draw, vec![new]);
 
@@ -257,19 +257,38 @@ fn plan_sixel_frame_draws_a_new_frame_over_the_old_one_without_rewriting() {
     let inner = SixelEmit::whole(2, 2, 3, 4, 4);
     let outside = SixelEmit::whole(70, 20, 4, 4, 4);
     let new = SixelEmit::whole(0, 0, 5, 72, 23);
-    let plan = super::plan_sixel_frame(&[inner, outside], area, &[new], area).expect("a new frame");
+    let plan = super::plan_sixel_frame(&[inner, outside], area, &[new], area, &[(5, 3)]).expect("a new frame");
     assert_eq!(plan.repaint, vec![Rect::new(70, 20, 4, 4)]);
 
     // An image still there that moved inside its own new place, and an older
     // image's part under a new part of an image older still, are rewritten.
     let moved_from = SixelEmit::whole(0, 1, 6, 4, 2);
     let moved_to = SixelEmit::whole(0, 0, 6, 4, 3);
-    let plan = super::plan_sixel_frame(&[moved_from], area, &[moved_to], area).expect("moved");
+    let plan = super::plan_sixel_frame(&[moved_from], area, &[moved_to], area, &[]).expect("moved");
     assert_eq!(plan.repaint, vec![Rect::new(0, 1, 4, 2)]);
     let newer = SixelEmit::whole(0, 0, 8, 4, 4);
     let older = SixelEmit::whole(0, 0, 7, 8, 8);
-    let plan = super::plan_sixel_frame(&[newer], area, &[older], area).expect("changed");
+    let plan = super::plan_sixel_frame(&[newer], area, &[older], area, &[]).expect("changed");
     assert_eq!(plan.repaint, vec![Rect::new(0, 0, 4, 4)]);
+}
+
+#[test]
+fn plan_sixel_frame_rewrites_an_image_that_went_away_for_another_reason() {
+    // ESC [ 2 J (or text over it, or the cap) took the old frame away, and a
+    // newer image is drawn in its place in the same client frame.  The newer
+    // one may leave pixels unset (a transparent background), and the terminal
+    // erased the old one, so its cells are rewritten first unless the pane
+    // says the newer one hid it.
+    use ratatui::layout::Rect;
+    let area = Rect::new(0, 0, 80, 24);
+    let old = SixelEmit::whole(10, 7, 1, 4, 3);
+    let new = SixelEmit::whole(10, 7, 2, 4, 3);
+    let plan = super::plan_sixel_frame(&[old.clone()], area, &[new.clone()], area, &[]).expect("a new frame");
+    assert_eq!(plan.repaint, vec![Rect::new(10, 7, 4, 3)]);
+    assert_eq!(plan.draw, vec![new.clone()]);
+    // A hid pair for some other image does not count.
+    let plan = super::plan_sixel_frame(&[old], area, &[new], area, &[(2, 9)]).expect("a new frame");
+    assert_eq!(plan.repaint, vec![Rect::new(10, 7, 4, 3)]);
 }
 
 #[test]
@@ -286,6 +305,7 @@ fn plan_sixel_frame_redraws_a_part_whose_cells_are_rewritten() {
         area,
         &[stays.clone(), apart],
         area,
+        &[],
     )
     .expect("an image went away");
     assert_eq!(plan.repaint, vec![Rect::new(2, 2, 4, 4)]);

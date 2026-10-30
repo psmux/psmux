@@ -20,6 +20,7 @@ fn mk_image(px_w: u32, px_h: u32) -> SixelImage {
         on_alt: false,
         erased: Vec::new(),
         cell_masks: Vec::new(),
+        hid: Vec::new(),
     }
 }
 
