@@ -162,6 +162,15 @@ pub(crate) struct SixelFramePlan {
 /// row changes one small part each key, and the rest of the image is left
 /// alone.  After a resize ratatui has cleared the whole screen, so every
 /// part is drawn and nothing is rewritten.
+///
+/// The part of an image that is gone, inside a new part of a newer image
+/// (ids only grow), is not rewritten: the newer image is drawn over it, as
+/// the pane's console host draws a newer sixel over an older one.  The pane
+/// drops an image under a newer one where the newer one sets every pixel the
+/// older one set, so nothing of it is left showing.  Rewriting its cells
+/// first blanked the image until the new one was drawn, and a GIF chafa
+/// plays in one place flickered on every frame.  A part of an image still
+/// there, moved or cut, is rewritten as before.
 pub(crate) fn plan_sixel_frame(
     last: &[SixelEmit],
     last_area: Rect,
@@ -175,10 +184,18 @@ pub(crate) fn plan_sixel_frame(
         return Some(SixelFramePlan { repaint: Vec::new(), draw: now.to_vec() });
     }
     let rect = |e: &SixelEmit| Rect::new(e.x, e.y, e.rx, e.ry);
+    let inside = |r: Rect, outer: Rect| {
+        r.x >= outer.x && r.y >= outer.y && r.right() <= outer.right() && r.bottom() <= outer.bottom()
+    };
+    let drawn_over = |gone: &SixelEmit| {
+        !now.iter().any(|e| e.id == gone.id)
+            && now.iter().any(|e| e.id > gone.id && !last.contains(e) && inside(rect(gone), rect(e)))
+    };
     let repaint: Vec<Rect> = last
         .iter()
-        .filter(|e| !now.contains(e))
-        .map(|e| rect(e).intersection(area))
+        .filter(|e| !now.contains(e) && !drawn_over(e))
+        .map(rect)
+        .map(|r| r.intersection(area))
         .filter(|r| r.width > 0 && r.height > 0)
         .collect();
     let draw: Vec<SixelEmit> = now

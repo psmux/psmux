@@ -579,7 +579,8 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
         let (row, top, bottom) = self.screen.sixel_text_area();
         let (_, col) = self.screen.cursor_position();
-        let layout = sixel_layout(&self.dcs_buf, bottom + 1 - row, bottom + 1 - top);
+        let (layout, cell_masks) =
+            sixel_cell_masks(&self.dcs_buf, bottom + 1 - row, bottom + 1 - top);
         let (px_width, px_height) = (layout.px_width, layout.px_height);
         let (cell_width, cell_height) =
             crate::image::cell_dims_from_px(px_width, px_height);
@@ -595,6 +596,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             anchor_col: 0,     // filled by add_image
             on_alt: false,     // filled by add_image
             erased: Vec::new(),
+            cell_masks,
         };
         self.screen.add_image(img);
 
@@ -684,6 +686,18 @@ fn bound_background(buf: &[u8], layout: &SixelLayout) -> Vec<u8> {
 /// - The cursor ends on the row holding the top of the last band
 ///   (`_updateTextCursor`).
 pub(crate) fn sixel_layout(buf: &[u8], avail_rows: u16, margin_rows: u16) -> SixelLayout {
+    sixel_layout_painting(buf, avail_rows, margin_rows, &mut |_, _, _, _, _| {})
+}
+
+/// [`sixel_layout`], calling `paint(x, y, aspect, bits, n)` for each sixel
+/// that draws: the six `bits` at pixel column `x`, `n` columns wide, the top
+/// bit on pixel row `y` and each bit `aspect` rows tall.
+fn sixel_layout_painting(
+    buf: &[u8],
+    avail_rows: u16,
+    margin_rows: u16,
+    paint: &mut dyn FnMut(u32, i64, i64, u8, u32),
+) -> SixelLayout {
     let cell_h = i64::from(crate::image::DEFAULT_CELL_PX.1);
 
     // The introducer sits between ESC P and the first 'q'.
@@ -769,6 +783,7 @@ pub(crate) fn sixel_layout(buf: &[u8], avail_rows: u16, margin_rows: u16) -> Six
                 i += 1;
                 let n = read_fields(&mut i).first().copied().unwrap_or(0).max(1);
                 if i < payload.len() && (0x3f..=0x7e).contains(&payload[i]) {
+                    paint(cur_x, y, aspect, payload[i] - 0x3f, n);
                     cur_x = cur_x.saturating_add(n);
                     drawn_bottom = drawn_bottom.max(y + sixel_h);
                     i += 1;
@@ -789,7 +804,8 @@ pub(crate) fn sixel_layout(buf: &[u8], avail_rows: u16, margin_rows: u16) -> Six
                     avail -= sixel_h;
                 }
             }
-            0x3f..=0x7e => {
+            c @ 0x3f..=0x7e => {
+                paint(cur_x, y, aspect, c - 0x3f, 1);
                 cur_x = cur_x.saturating_add(1);
                 drawn_bottom = drawn_bottom.max(y + sixel_h);
             }
@@ -810,6 +826,142 @@ pub(crate) fn sixel_layout(buf: &[u8], avail_rows: u16, margin_rows: u16) -> Six
         scroll_rows: to_u16(scroll),
         aspect: intro_aspect,
     }
+}
+
+/// The most work [`sixel_cell_masks`] does for one sixel, in pixel rows
+/// visited plus bitset words written.  A raster command can make every sixel
+/// thousands of pixels tall and `$` draws the same columns again, so a few
+/// bytes could otherwise cost millions of writes.  Past this the sixel's
+/// pixels are taken as unknown, which only keeps the images under it.
+const PAINT_MAX_WORK: u64 = 1 << 24;
+
+/// The widest and tallest sixel [`sixel_cell_masks`] traces, in pixels.
+const PAINT_MAX_SIDE: u32 = 4096;
+
+/// The pixels a sixel sets, one bitset per pixel row.
+#[derive(Default)]
+struct PaintedPixels {
+    rows: Vec<Vec<u64>>,
+    work: u64,
+}
+
+impl PaintedPixels {
+    /// Sets the pixels of one sixel, as `sixel_layout_painting` reports it.
+    fn paint(&mut self, x: u32, y: i64, aspect: i64, bits: u8, n: u32) {
+        let x1 = x.saturating_add(n).min(PAINT_MAX_SIDE);
+        if bits == 0 || x >= x1 {
+            return;
+        }
+        let to_usize = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
+        let (x0, x1) = (to_usize(x), to_usize(x1));
+        let words = (x1 + 63) / 64;
+        for k in 0..6 {
+            if bits & (1 << k) == 0 {
+                continue;
+            }
+            let top = y + i64::from(k) * aspect;
+            for r in top.max(0)..(top + aspect).min(i64::from(PAINT_MAX_SIDE)) {
+                if self.work > PAINT_MAX_WORK {
+                    return;
+                }
+                let r = usize::try_from(r).unwrap_or(usize::MAX);
+                if self.rows.len() <= r {
+                    self.rows.resize_with(r + 1, Vec::new);
+                }
+                let row = &mut self.rows[r];
+                if row.len() < words {
+                    row.resize(words, 0);
+                }
+                for (w, word) in row.iter_mut().enumerate().take(words).skip(x0 / 64) {
+                    let lo = (w * 64).max(x0) - w * 64;
+                    let hi = ((w + 1) * 64).min(x1) - w * 64;
+                    *word |= if hi - lo == 64 { u64::MAX } else { ((1u64 << (hi - lo)) - 1) << lo };
+                }
+                self.work = self
+                    .work
+                    .saturating_add(u64::try_from(words - x0 / 64).unwrap_or(u64::MAX))
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    /// Whether pixel `x` of pixel row `y` is set.
+    fn is_set(&self, x: u32, y: u32) -> bool {
+        let to_usize = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
+        let (x, y) = (to_usize(x), to_usize(y));
+        self.rows
+            .get(y)
+            .and_then(|row| row.get(x / 64))
+            .is_some_and(|w| (w >> (x % 64)) & 1 == 1)
+    }
+}
+
+/// The introducer's background select, its second parameter, 0 when absent.
+fn background_select(buf: &[u8]) -> u32 {
+    let q = buf.iter().position(|&b| b == b'q').unwrap_or(buf.len());
+    buf.get(2..q)
+        .unwrap_or(&[])
+        .split(|&b| b == b';')
+        .nth(1)
+        .and_then(|p| std::str::from_utf8(p).ok())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Lays a sixel out as [`sixel_layout`] does, and also tells which pixels of
+/// each of its cells it sets (see [`crate::image::SixelImage::cell_masks`]),
+/// or nothing when that is not known.
+///
+/// Windows Terminal draws a sixel into each row's `ImageSlice` pixel by pixel
+/// and leaves a pixel the sixel does not set as it was
+/// (`_maybeFlushImageBuffer`, src/terminal/adapter/SixelParser.cpp), so an
+/// older image under a newer one stays visible only where the newer one
+/// leaves a pixel unset.  With background select 0 or 2 the background fill
+/// sets every pixel of the image (`_initRasterAttributes`,
+/// `_fillImageBackground`; the raster is the one [`bound_background`] puts
+/// in), and with 1 only the sixels drawn do.
+pub(crate) fn sixel_cell_masks(
+    buf: &[u8],
+    avail_rows: u16,
+    margin_rows: u16,
+) -> (SixelLayout, Vec<crate::image::CellMask>) {
+    let transparent = background_select(buf) == 1;
+    let mut pixels = PaintedPixels::default();
+    let layout = if transparent {
+        sixel_layout_painting(buf, avail_rows, margin_rows, &mut |x, y, aspect, bits, n| {
+            pixels.paint(x, y, aspect, bits, n);
+        })
+    } else {
+        sixel_layout(buf, avail_rows, margin_rows)
+    };
+    if layout.px_width > PAINT_MAX_SIDE
+        || layout.px_height > PAINT_MAX_SIDE
+        || (transparent && pixels.work > PAINT_MAX_WORK)
+    {
+        return (layout, Vec::new());
+    }
+    let (cell_px_w, cell_px_h) = crate::image::DEFAULT_CELL_PX;
+    let (cells_w, cells_h) = crate::image::cell_dims_from_px(layout.px_width, layout.px_height);
+    let mut masks = vec![[0u64; 4]; usize::from(cells_w) * usize::from(cells_h)];
+    for (i, mask) in masks.iter_mut().enumerate() {
+        let to_u32 = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        let (r, c) = (to_u32(i / usize::from(cells_w)), to_u32(i % usize::from(cells_w)));
+        let (x0, y0) = (c * cell_px_w, r * cell_px_h);
+        let reach_w = layout.px_width.saturating_sub(x0).min(cell_px_w);
+        let reach_h = layout.px_height.saturating_sub(y0).min(cell_px_h);
+        if !transparent {
+            *mask = crate::image::cell_mask_reaching(reach_w, reach_h);
+            continue;
+        }
+        for y in 0..reach_h {
+            for x in 0..reach_w {
+                if pixels.is_set(x0 + x, y0 + y) {
+                    crate::image::set_cell_mask_bit(mask, y * cell_px_w + x);
+                }
+            }
+        }
+    }
+    (layout, masks)
 }
 
 // ---------------------------------------------------------------------------
