@@ -1311,6 +1311,9 @@ impl Screen {
         let (cell_px_w, cell_px_h) = crate::image::DEFAULT_CELL_PX;
         // How far into its cell `cell` an image `px` pixels wide or tall reaches.
         let reach = |px: u32, cell: u16, cell_px: u32| px.saturating_sub(u32::from(cell) * cell_px).min(cell_px);
+        // The mask of a whole cell, worked out once: an older image with no
+        // mask is compared cell by cell with every image drawn over it.
+        let full = crate::image::cell_mask_reaching(cell_px_w, cell_px_h);
         let mut any_all = false;
         for img in self.sixel_images.iter_mut().filter(|img| img.on_alt == new.on_alt) {
             let top = img.anchor_line.max(new.anchor_line);
@@ -1328,11 +1331,16 @@ impl Screen {
                     let Some(new_mask) = new.cell_masks.get(cell(nr, nc, new.cell_width)) else {
                         continue;
                     };
+                    if img.is_erased(or, oc) {
+                        continue;
+                    }
                     let old_mask = img.cell_masks.get(cell(or, oc, img.cell_width)).copied().unwrap_or_else(|| {
-                        crate::image::cell_mask_reaching(
-                            reach(img.px_width, oc, cell_px_w),
-                            reach(img.px_height, or, cell_px_h),
-                        )
+                        let (w, h) = (reach(img.px_width, oc, cell_px_w), reach(img.px_height, or, cell_px_h));
+                        if (w, h) == (cell_px_w, cell_px_h) {
+                            full
+                        } else {
+                            crate::image::cell_mask_reaching(w, h)
+                        }
                     });
                     if old_mask.iter().zip(new_mask).all(|(o, n)| o & !n == 0) {
                         img.erase_cells(or, oc, oc + 1);
@@ -2655,4 +2663,8 @@ mod test_sixel_hidden_images;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_esc_ind_nel.rs"]
 mod test_esc_ind_nel;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue935_sixel_mask_bounds.rs"]
+mod test_issue935_sixel_mask_bounds;
 

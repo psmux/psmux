@@ -120,7 +120,7 @@ fn a_sixel_too_costly_to_trace_hides_nothing() {
     }
     dcs.extend_from_slice(b"\x1b\\");
     let started = std::time::Instant::now();
-    let (layout, masks) = crate::perform::sixel_cell_masks(&dcs, 24, 24);
+    let (layout, masks) = crate::perform::sixel_cell_masks(&dcs, 24, 24, (80, 24));
     assert!(masks.is_empty());
     assert_eq!(layout, crate::perform::sixel_layout(&dcs, 24, 24));
     assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());

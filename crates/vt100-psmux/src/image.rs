@@ -40,20 +40,32 @@ pub type CellMask = [u64; 4];
 #[must_use]
 pub fn cell_mask_reaching(w: u32, h: u32) -> CellMask {
     let (cell_px_w, cell_px_h) = DEFAULT_CELL_PX;
+    let w = w.min(cell_px_w);
     let mut mask = [0u64; 4];
+    if w == 0 {
+        return mask;
+    }
+    let bits = (1u64 << w) - 1;
     for y in 0..h.min(cell_px_h) {
-        for x in 0..w.min(cell_px_w) {
-            set_cell_mask_bit(&mut mask, y * cell_px_w + x);
-        }
+        or_cell_mask_row(&mut mask, y, bits);
     }
     mask
 }
 
-/// Sets bit `bit` of a cell mask.
-pub(crate) fn set_cell_mask_bit(mask: &mut CellMask, bit: u32) {
-    let bit = usize::try_from(bit).unwrap_or(usize::MAX);
-    if let Some(word) = mask.get_mut(bit / 64) {
-        *word |= 1 << (bit % 64);
+/// Sets, in row `y` of a cell mask, the pixels whose bits are set in `bits`
+/// (bit `x` for pixel column `x`, at most a cell wide).
+pub(crate) fn or_cell_mask_row(mask: &mut CellMask, y: u32, bits: u64) {
+    let (cell_px_w, _) = DEFAULT_CELL_PX;
+    let bits = bits & ((1u64 << cell_px_w) - 1);
+    let bit = usize::try_from(y * cell_px_w).unwrap_or(usize::MAX);
+    let (word, off) = (bit / 64, bit % 64);
+    if let Some(w) = mask.get_mut(word) {
+        *w |= bits << off;
+    }
+    if off > 0 {
+        if let Some(w) = mask.get_mut(word + 1) {
+            *w |= bits >> (64 - off);
+        }
     }
 }
 

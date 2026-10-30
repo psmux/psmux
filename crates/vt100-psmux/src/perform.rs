@@ -581,8 +581,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
         let (row, top, bottom) = self.screen.sixel_text_area();
         let (_, col) = self.screen.cursor_position();
+        let (rows, cols) = self.screen.size();
         let (layout, cell_masks) =
-            sixel_cell_masks(&self.dcs_buf, bottom + 1 - row, bottom + 1 - top);
+            sixel_cell_masks(&self.dcs_buf, bottom + 1 - row, bottom + 1 - top, (cols, rows));
         let (px_width, px_height) = (layout.px_width, layout.px_height);
         let (cell_width, cell_height) =
             crate::image::cell_dims_from_px(px_width, px_height);
@@ -886,16 +887,6 @@ impl PaintedPixels {
             }
         }
     }
-
-    /// Whether pixel `x` of pixel row `y` is set.
-    fn is_set(&self, x: u32, y: u32) -> bool {
-        let to_usize = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
-        let (x, y) = (to_usize(x), to_usize(y));
-        self.rows
-            .get(y)
-            .and_then(|row| row.get(x / 64))
-            .is_some_and(|w| (w >> (x % 64)) & 1 == 1)
-    }
 }
 
 /// The introducer's background select, its second parameter, 0 when absent.
@@ -926,6 +917,7 @@ pub(crate) fn sixel_cell_masks(
     buf: &[u8],
     avail_rows: u16,
     margin_rows: u16,
+    pane_cells: (u16, u16),
 ) -> (SixelLayout, Vec<crate::image::CellMask>) {
     let transparent = background_select(buf) == 1;
     let mut pixels = PaintedPixels::default();
@@ -936,34 +928,71 @@ pub(crate) fn sixel_cell_masks(
     } else {
         sixel_layout(buf, avail_rows, margin_rows)
     };
+    let (cell_px_w, cell_px_h) = crate::image::DEFAULT_CELL_PX;
+    let (cells_w, cells_h) = crate::image::cell_dims_from_px(layout.px_width, layout.px_height);
+    // The masks are sized from the image, and a raster command sets that from
+    // a few bytes: `"1;1;4096;4096` asks for 410 by 205 cells in any pane, 2.7
+    // MB of masks for 34 bytes of output, and every later image compared
+    // itself with all of them.  An image bigger than the pane is no animation
+    // frame drawn in one place, so it gets no mask and hides nothing.
+    let (pane_cols, pane_rows) = pane_cells;
     if layout.px_width > PAINT_MAX_SIDE
         || layout.px_height > PAINT_MAX_SIDE
+        || cells_w > pane_cols
+        || cells_h > pane_rows
         || (transparent && pixels.work > PAINT_MAX_WORK)
     {
         return (layout, Vec::new());
     }
-    let (cell_px_w, cell_px_h) = crate::image::DEFAULT_CELL_PX;
-    let (cells_w, cells_h) = crate::image::cell_dims_from_px(layout.px_width, layout.px_height);
-    let mut masks = vec![[0u64; 4]; usize::from(cells_w) * usize::from(cells_h)];
-    for (i, mask) in masks.iter_mut().enumerate() {
-        let to_u32 = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
-        let (r, c) = (to_u32(i / usize::from(cells_w)), to_u32(i % usize::from(cells_w)));
-        let (x0, y0) = (c * cell_px_w, r * cell_px_h);
-        let reach_w = layout.px_width.saturating_sub(x0).min(cell_px_w);
-        let reach_h = layout.px_height.saturating_sub(y0).min(cell_px_h);
-        if !transparent {
-            *mask = crate::image::cell_mask_reaching(reach_w, reach_h);
+    let cw = usize::from(cells_w);
+    let mut masks = vec![[0u64; 4]; cw * usize::from(cells_h)];
+    let to_u32 = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+    // How far into its cell `cell` an image `px` pixels wide or tall reaches.
+    let reach = |px: u32, cell: usize, cell_px: u32| {
+        px.saturating_sub(to_u32(cell).saturating_mul(cell_px)).min(cell_px)
+    };
+    if !transparent {
+        for (i, mask) in masks.iter_mut().enumerate() {
+            *mask = crate::image::cell_mask_reaching(
+                reach(layout.px_width, i % cw, cell_px_w),
+                reach(layout.px_height, i / cw, cell_px_h),
+            );
+        }
+        return (layout, masks);
+    }
+    // One pass over the pixel rows the sixel painted, ten bits a cell at a
+    // time, rather than one lookup per pixel of the image.
+    let to_usize = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
+    let px_h = to_usize(layout.px_height);
+    let (cpw, cph) = (to_usize(cell_px_w), to_usize(cell_px_h));
+    for (y, row) in pixels.rows.iter().enumerate().take(px_h) {
+        if row.is_empty() {
             continue;
         }
-        for y in 0..reach_h {
-            for x in 0..reach_w {
-                if pixels.is_set(x0 + x, y0 + y) {
-                    crate::image::set_cell_mask_bit(mask, y * cell_px_w + x);
-                }
+        let first = (y / cph) * cw;
+        for c in 0..cw {
+            let bits = row_bits(row, c * cpw, reach(layout.px_width, c, cell_px_w));
+            if bits == 0 {
+                continue;
+            }
+            if let Some(mask) = masks.get_mut(first + c) {
+                crate::image::or_cell_mask_row(mask, to_u32(y % cph), bits);
             }
         }
     }
     (layout, masks)
+}
+
+/// The `w` bits (at most 64) of a pixel row bitset from bit `x0` on.
+fn row_bits(row: &[u64], x0: usize, w: u32) -> u64 {
+    if w == 0 {
+        return 0;
+    }
+    let (word, off) = (x0 / 64, x0 % 64);
+    let lo = row.get(word).copied().unwrap_or(0) >> off;
+    let hi = if off == 0 { 0 } else { row.get(word + 1).copied().unwrap_or(0) << (64 - off) };
+    let keep = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+    (lo | hi) & keep
 }
 
 // ---------------------------------------------------------------------------
