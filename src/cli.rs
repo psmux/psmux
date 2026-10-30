@@ -576,6 +576,33 @@ pub fn first_operand<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
 /// next argument; `--` and the first non-option end the flags, and what follows
 /// is passed through untouched.  Only for commands whose templates have no
 /// OPTIONAL (`::`) values, which both callers satisfy.
+/// Commands whose arms (CLI, server handler and the in server route of hooks
+/// and bindings) read flags as exact tokens, so a cluster has to be split
+/// before them (#938): `new-window -dt :1` ran `:1` as the shell command,
+/// `kill-window -at :1` killed the ACTIVE window and `list-windows -aF`
+/// dropped its format.  The other commands keep reading what they read.
+pub fn splits_flag_clusters(command: &str) -> bool {
+    matches!(
+        canonical_command(command),
+        "select-pane" | "selectp" | "last-pane" | "lastp"
+            | "new-window" | "neww" | "split-window" | "splitw"
+            | "select-window" | "selectw" | "kill-window" | "killw"
+            | "list-windows" | "lsw"
+    )
+}
+
+/// [`expand_flag_clusters`] for a command [`splits_flag_clusters`] names;
+/// `None` when the command is another one or nothing changes.
+pub fn split_command_flag_clusters<S: AsRef<str>>(command: &str, args: &[S]) -> Option<Vec<String>> {
+    if !splits_flag_clusters(command) {
+        return None;
+    }
+    let split = expand_flag_clusters(command, args);
+    let same = split.len() == args.len()
+        && split.iter().zip(args).all(|(a, b)| a == b.as_ref());
+    (!same).then_some(split)
+}
+
 pub fn expand_flag_clusters<S: AsRef<str>>(command: &str, args: &[S]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut i = 0;

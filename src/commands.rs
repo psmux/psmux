@@ -2480,6 +2480,163 @@ pub(crate) fn refresh_client_l_here(
     }
 }
 
+/// Commands whose `-t` is not a session, window or pane to run the command
+/// in: a client (switch-client, detach-client, the prompts, menus and popups),
+/// a session group or attach target, or a command that runs other commands
+/// and resolves their targets itself. Those keep their own arms.
+fn keeps_other_session_target_local(command: &str) -> bool {
+    matches!(
+        command,
+        "switch-client" | "switchc" | "detach-client" | "detach" | "attach-session" | "attach"
+            | "new-session" | "new" | "command-prompt" | "confirm-before" | "confirm"
+            | "show-messages" | "showmsgs" | "refresh-client" | "refresh" | "lock-client" | "lockc"
+            | "suspend-client" | "suspendc" | "display-panes" | "displayp" | "display-menu" | "menu"
+            | "display-popup" | "popup" | "set-buffer" | "setb" | "load-buffer" | "loadb"
+            | "run-shell" | "run" | "if-shell" | "if" | "source-file" | "source"
+            | "choose-tree" | "choose-session" | "choose-window" | "choose-client" | "choose-buffer"
+            | "kill-server"
+    )
+}
+
+/// The command's own `-t` value, read in its flag region the way tmux's
+/// getopt reads it (arguments.c:207-252): flags end at `--`, a bare `-` or the
+/// first operand, a cluster is read letter by letter, and a value flag takes
+/// the rest of its word or the next word.
+fn own_target_flag<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i];
+        let rest = token.strip_prefix('-').filter(|r| !r.is_empty() && *r != "-")?;
+        for (at, flag) in rest.char_indices() {
+            if flag == 't' || crate::cli::flag_takes_value(command, flag) {
+                let tail = &rest[at + flag.len_utf8()..];
+                if flag == 't' {
+                    return if tail.is_empty() { args.get(i + 1).copied() } else { Some(tail) };
+                }
+                if tail.is_empty() {
+                    i += 1;
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether the boolean flag `wanted` is set in the command's flag region,
+/// read with the same getopt walk as [`own_target_flag`].
+fn own_flag_set(command: &str, args: &[&str], wanted: char) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let Some(rest) = args[i].strip_prefix('-').filter(|r| !r.is_empty() && *r != "-") else {
+            return false;
+        };
+        for (at, flag) in rest.char_indices() {
+            if flag == wanted {
+                return true;
+            }
+            if flag == 't' || crate::cli::flag_takes_value(command, flag) {
+                if at + flag.len_utf8() == rest.len() {
+                    i += 1;
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Run a line whose `-t` names ANOTHER session on that session's server, and
+/// report a session that does not exist (#938, owner ruling 2026-10-31).
+///
+/// psmux runs one server per session, so a hook, binding, menu or prompt line
+/// in A that names B used to run on A: `kill-session -t D` ended A, and
+/// `set -t B @x 1` set @x on A. tmux resolves the target on its one server
+/// before the command runs (cmd-queue.c:524, cmd_find_target), and the CLI
+/// already routes such a line to B's server; this does the same from inside
+/// a server, in this server's own `-L` namespace.
+///
+/// Only an explicit session part (`B:`, `B:1`, `=B:1.0`) is forwarded, plus a
+/// bare name when a session of that name exists and nothing in this session
+/// answers to it (tmux reads a bare window or pane target here first,
+/// cmd-find.c:1093-1110). Ids (`$`, `@`, `%`) and `window.pane` forms stay
+/// with the arms below. Returns true when the line was handled here.
+fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bool {
+    let command = parts[0];
+    if keeps_other_session_target_local(command) {
+        return false;
+    }
+    let Some(target) = own_target_flag(command, &parts[1..]) else {
+        return false;
+    };
+    let target = crate::cli::coerce_bare_window_target(command, target);
+    let plain = crate::cli::strip_exact_match_prefix(&target);
+    if plain.is_empty() || plain.starts_with(['$', '@', '%']) {
+        return false;
+    }
+    let bare = crate::cli::bare_target_token(&target);
+    // `kill-session -a -t B` keeps B and ends the others: it is not B's to run.
+    if matches!(command, "kill-session" | "kill-ses") && own_flag_set(command, &parts[1..], 'a') {
+        return false;
+    }
+    let session = match plain.find(':') {
+        Some(colon) if colon > 0 => &plain[..colon],
+        Some(_) => return false,
+        None if bare => plain,
+        None => return false,
+    };
+    if session == app.session_name {
+        return false;
+    }
+    let base = crate::session::namespaced_session_base(app.socket_name.as_deref(), session);
+    let port = if crate::session::registry_case_variant(&base).is_some() {
+        None
+    } else {
+        std::fs::read_to_string(crate::paths::port_file(&base))
+            .ok()
+            .and_then(|text| text.trim().parse::<u16>().ok())
+    };
+    let Some(port) = port else {
+        if bare {
+            // Not a session: a window or pane name of this session, or
+            // tmux's own error, which the arms below give.
+            return false;
+        }
+        app.status_message = Some((format!("can't find session: {}", session), Instant::now(), None));
+        return true;
+    };
+    if bare && app.resolve_window_target(plain).is_ok() {
+        return false;
+    }
+    let key = crate::session::read_session_key(&base).unwrap_or_default();
+    let _ = send_control_to_port(port, &format!("{}\n", cmd), &key);
+    true
+}
+
+/// Kill every window but the one at `keep`, as tmux's `kill-window -a`
+/// (cmd-kill-window.c:95-127, cmd_kill_window_all). A lone window is left
+/// alone. Returns how many windows went.
+pub(crate) fn kill_windows_except(app: &mut AppState, keep: usize) -> usize {
+    if keep >= app.windows.len() {
+        return 0;
+    }
+    let mut killed = 0;
+    for pos in (0..app.windows.len()).rev() {
+        if pos == keep {
+            continue;
+        }
+        let mut win = app.windows.remove(pos);
+        kill_all_children(&mut win.root);
+        app.on_window_removed(pos);
+        killed += 1;
+    }
+    // Only the kept window is left, and it is the current one.
+    app.active_idx = 0;
+    killed
+}
+
 fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // Quotes group and are removed here, as tmux's command parser does and as
     // the server's own command line handler (connection.rs) already does. A
@@ -2492,6 +2649,14 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     if crate::cli::canonicalize_target_values(&mut tokens) {
         return execute_unaliased_command(app, &crate::command_alias::command_line(&tokens));
     }
+    // The arms below read flags as exact tokens: split a cluster first, so a
+    // hook's `kill-window -at :1` is `-a -t :1` and not a kill of the active
+    // window (#938). The line is rebuilt for the arms that forward it whole.
+    if let Some(split) = tokens.first().and_then(|c| crate::cli::split_command_flag_clusters(c, &tokens[1..])) {
+        tokens.truncate(1);
+        tokens.extend(split);
+        return execute_unaliased_command(app, &crate::command_alias::command_line(&tokens));
+    }
     let parts: Vec<&str> = tokens.iter().map(String::as_str).collect();
     if parts.is_empty() { return Ok(()); }
 
@@ -2501,6 +2666,11 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // to a key used to kill the current window silently.
     if let Err(flag_error) = crate::cli::validate_command_line_flags(&parts) {
         app.status_message = Some((flag_error, std::time::Instant::now(), None));
+        return Ok(());
+    }
+
+    // A `-t` naming another session runs on that session's server (#938).
+    if forward_to_other_session(app, &parts, cmd) {
         return Ok(());
     }
 
@@ -2595,6 +2765,14 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     };
                 }
             }
+            // -a keeps the target and kills every other window (tmux
+            // cmd-kill-window.c:85); it was read as nothing (#938).
+            if parts.contains(&"-a") {
+                if let Some(pos) = removed_pos {
+                    kill_windows_except(app, pos);
+                }
+                return Ok(());
+            }
             if let Some(pos) = removed_pos {
                 if app.windows.len() > 1 && pos < app.windows.len() {
                     let mut win = app.windows.remove(pos);
@@ -2637,6 +2815,14 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
         }
         "select-window" | "selectw" => {
+            // -l, -n and -p move within the target's session and ignore its
+            // window (cmd-select-window.c:96-112); on this route they were
+            // dropped and `-l -t :0` selected window 0 (#938).
+            for (flag, equivalent) in [("-l", "last-window"), ("-n", "next-window"), ("-p", "previous-window")] {
+                if parts.contains(&flag) {
+                    return execute_unaliased_command(app, equivalent);
+                }
+            }
             // -T on the current window selects the last window, and with no
             // last window is the error "no last window" (tmux 3.8,
             // cmd-select-window.c:131-138). With no -t the target is the
@@ -3378,11 +3564,19 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
         }
         "kill-session" | "kill-ses" => {
-            if parts.len() == 3 && parts[1] == "-t" {
-                let named = crate::cli::strip_exact_match_prefix(parts[2]);
-                if named != app.session_name {
-                    app.status_message = Some((format!("can't find session: {}", named), Instant::now(), None));
-                    return Ok(());
+            // Another session that exists was forwarded to its own server
+            // above; one that does not is tmux's error, read from the same
+            // getopt walk so `-tD` and `D:1` are covered (#938). tmux names
+            // only the session part (cmd-find.c:1258), and `A:1` is this
+            // session. `-a` is left as it was.
+            if !own_flag_set(parts[0], &parts[1..], 'a') {
+                if let Some(target) = own_target_flag(parts[0], &parts[1..]) {
+                    let named = crate::cli::strip_exact_match_prefix(target);
+                    let session = named.split(':').next().unwrap_or(named);
+                    if session != app.session_name {
+                        app.status_message = Some((format!("can't find session: {}", session), Instant::now(), None));
+                        return Ok(());
+                    }
                 }
             }
             if let Some(port) = app.control_port {

@@ -4123,6 +4123,10 @@ pub enum CtrlReq {
         win: Option<usize>,
         win_is_id: bool,
         name: Option<String>,
+        /// `-a`: kill every OTHER window and keep the target (tmux
+        /// cmd-kill-window.c:85, cmd_kill_window_all). With no window in
+        /// `win` or `name` the target is the active window.
+        all: bool,
         resp: mpsc::Sender<Result<(), String>>,
     },
     KillSession,

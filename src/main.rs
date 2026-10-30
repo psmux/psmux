@@ -1277,6 +1277,13 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     // target checks below and the line sent to the server all see one form.
     // A list's later commands are canonicalized by the server.
     if let Some(index) = process_command_index(&args) {
+        // A command whose arm reads flags as exact tokens gets its clusters
+        // split first, so `new-window -dt :1` and `kill-window -at :1` reach
+        // routing, the arm and the server as `-d -t :1` and `-a -t :1` (#938).
+        if let Some(split) = crate::cli::split_command_flag_clusters(&args[index], &args[index + 1..]) {
+            args.truncate(index + 1);
+            args.extend(split);
+        }
         crate::cli::canonicalize_target_values(&mut args[index..]);
         let mut i = 1;
         while i + 1 < index {

@@ -2517,7 +2517,7 @@ if control_echo || control_quiet || control_noecho {
             (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect());
         // Clustered select-pane / last-pane flags, as in the one-shot route.
         let ctrl_cluster_split: Vec<String>;
-        let cmd_args: Vec<&str> = if matches!(cmd_name, "select-pane" | "selectp" | "last-pane" | "lastp") {
+        let cmd_args: Vec<&str> = if crate::cli::splits_flag_clusters(cmd_name) {
             ctrl_cluster_split = crate::cli::expand_flag_clusters(cmd_name, &cmd_args);
             ctrl_cluster_split.iter().map(|s| s.as_str()).collect()
         } else {
@@ -3130,7 +3130,9 @@ loop {
     // the -l/-m/-T arms), so a clustered `-dt %2` lost its target and fenced
     // the ACTIVE pane.  Split clusters the way tmux's getopt reads them.
     let cluster_split: Vec<String>;
-    let args: Vec<&str> = if matches!(cmd, "select-pane" | "selectp" | "last-pane" | "lastp") {
+    // #938: the same for the window commands whose arms read `-d`, `-a`,
+    // `-l`, `-F` and `-t` as exact tokens (crate::cli::splits_flag_clusters).
+    let args: Vec<&str> = if crate::cli::splits_flag_clusters(cmd) {
         cluster_split = crate::cli::expand_flag_clusters(cmd, &args);
         cluster_split.iter().map(|s| s.as_str()).collect()
     } else {
@@ -4074,12 +4076,16 @@ match cmd {
         // that fails to resolve silently left the PREVIOUS window focused and
         // the bare KillWindow then killed it — `kill-window -t sess:typo`
         // destroyed whatever was active (tmux: "can't find window", no kill).
-        if target_win.is_some() || target_win_name.is_some() {
+        // `-a` kills the other windows and keeps the target (#938); it was
+        // never read, so `kill-window -a -t :1` killed window 1 itself.
+        let all = args.iter().any(|a| *a == "-a");
+        if target_win.is_some() || target_win_name.is_some() || all {
             let (resp_s, resp_r) = mpsc::channel();
             let _ = tx.send(CtrlReq::KillWindowTarget {
                 win: target_win,
                 win_is_id: target_win_is_id,
                 name: target_win_name.clone(),
+                all,
                 resp: resp_s,
             });
             if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
@@ -4100,16 +4106,23 @@ match cmd {
         // path is missing we ask our own server for its session name and
         // fall through to KillSession when raw_target matches us.
         if let Some(ref tgt) = raw_target {
-            let port_path = crate::paths::port_file(tgt);
+            // The registry entry of `tgt` in THIS server's namespace (#938):
+            // the bare name is the default namespace's file, so under `-L ns`
+            // `kill-session -t D` used to end the default namespace's D when
+            // both share a data dir, and ns's own D lived. tmux looks a
+            // session up only on the server the command runs on.
+            let base = crate::session::namespaced_session_base(
+                crate::server::server_namespace().as_deref(), tgt);
+            let port_path = crate::paths::port_file(&base);
             let mut handled = false;
             // A differently spelled registry entry is another session: never
             // kill `repro-case` for `-t REPRO-CASE` (issue #774).
-            let case_variant = crate::session::registry_case_variant(tgt).is_some();
+            let case_variant = crate::session::registry_case_variant(&base).is_some();
             if case_variant {
                 // fall through to the exact self-name comparison below
             } else if let Ok(port_str) = std::fs::read_to_string(&port_path) {
                 if let Ok(port) = port_str.trim().parse::<u16>() {
-                    let key = crate::session::read_session_key(tgt).unwrap_or_default();
+                    let key = crate::session::read_session_key(&base).unwrap_or_default();
                     let _ = crate::session::send_control_to_port(port, "kill-session\n", &key);
                     handled = true;
                 }
@@ -7260,12 +7273,14 @@ fn dispatch_control_command(
                 Some(pt) => (pt.window, pt.window_is_id, pt.window_name),
                 None => (None, false, None),
             };
-            if t_win.is_some() || t_name.is_some() {
+            let all = args.iter().any(|a| *a == "-a");
+            if t_win.is_some() || t_name.is_some() || all {
                 let (resp_s, resp_r) = mpsc::channel();
                 let _ = tx.send(CtrlReq::KillWindowTarget {
                     win: t_win,
                     win_is_id: t_win_is_id,
                     name: t_name,
+                    all,
                     resp: resp_s,
                 });
                 match resp_r.recv_timeout(Duration::from_secs(5)) {

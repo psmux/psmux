@@ -5386,7 +5386,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     notify_events.push("window-unlinked");
                     hook_event = Some("window-closed");
                 }
-                CtrlReq::KillWindowTarget { win, win_is_id, name, resp } => {
+                CtrlReq::KillWindowTarget { win, win_is_id, name, all, resp } => {
                     // Resolve the target here, on live state. An unresolvable
                     // target must be an error, never a fallback to the active
                     // window: the old temp-focus-then-kill dance silently
@@ -5406,6 +5406,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Some(app.active_idx)
                     };
                     match resolved {
+                        Some(pos) if all => {
+                            // tmux cmd_kill_window_all: every window but the
+                            // target goes, and a lone window is left alone.
+                            let killed = crate::commands::kill_windows_except(&mut app, pos);
+                            if killed > 0 {
+                                resize_all_panes(&mut app);
+                                meta_dirty = true;
+                                state_dirty = true;
+                                for _ in 0..killed { notify_events.push("window-unlinked"); }
+                                hook_event = Some("window-closed");
+                            }
+                            let _ = resp.send(Ok(()));
+                        }
                         Some(pos) => {
                             kill_window_at(&mut app, pos);
                             resize_all_panes(&mut app);
