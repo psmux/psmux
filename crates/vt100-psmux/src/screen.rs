@@ -2126,6 +2126,22 @@ impl Screen {
         self.clear_mode(MODE_APPLICATION_KEYPAD);
     }
 
+    // ESC D: down a line, scrolling at the bottom margin, as a line feed
+    // does (tmux's INPUT_ESC_IND, input.c:1413-1415 in tmux 3.8).  chafa
+    // makes room for an image with a run of these and then moves back up, so
+    // with IND ignored its image and the cursor after it sat higher than the
+    // pane's console host had them, over the line it was started from.
+    pub(crate) fn ind(&mut self) {
+        self.lf();
+    }
+
+    // ESC E: a carriage return and a line feed (INPUT_ESC_NEL,
+    // input.c:1416-1418).
+    pub(crate) fn nel(&mut self) {
+        self.cr();
+        self.lf();
+    }
+
     // ESC M
     pub(crate) fn ri(&mut self) {
         self.grid_mut().row_dec_scroll(1);
@@ -2635,4 +2651,8 @@ mod test_sixel_erased_cells;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_sixel_hidden_images.rs"]
 mod test_sixel_hidden_images;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_esc_ind_nel.rs"]
+mod test_esc_ind_nel;
 
