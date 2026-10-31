@@ -2103,3 +2103,7 @@ mod tests_issue923_remain_on_exit;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue919_input_buffer_size.rs"]
 mod tests_issue919_input_buffer_size;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_codepoint_widths_array.rs"]
+mod tests_codepoint_widths_array;
