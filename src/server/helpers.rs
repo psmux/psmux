@@ -459,10 +459,12 @@ pub(crate) fn expand_status_formats(
             pane_border_indicators: Some(pane_border_indicators),
             // Only travels when the user actually set the option, so the
             // default configuration adds nothing to every render frame.
+            // In index order, the order the width table is built in, so the
+            // client lets the same element win as the server.
             codepoint_widths: if app.codepoint_widths.is_empty() {
                 None
             } else {
-                Some(app.codepoint_widths.clone())
+                Some(app.codepoint_widths.iter().map(|(_, entry)| entry.to_string()).collect())
             },
             // The elements in index order, the order tmux applies them in
             // (tty-term.c tty_term_apply_overrides).

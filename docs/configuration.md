@@ -234,7 +234,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `update-environment` | Str | *(tmux defaults)* | Space-separated glob patterns; at new-session and on every attach each matching variable of the client's environment is copied into the session environment, and a pattern nothing matches is recorded as a `-NAME` removal (tmux environ_update) |
 | `warm` | Bool | `on` | Pre-spawn shells for instant window/pane creation (see [warm-sessions.md](warm-sessions.md)) |
 | `copy-command` | Str | | Shell command for clipboard pipe |
-| `codepoint-widths` | Str | | Comma separated overrides for how many columns Unicode codepoints occupy (see [Codepoint widths](#codepoint-widths)) |
+| `codepoint-widths` | Str | | Array of overrides for how many columns Unicode codepoints occupy, comma separated or one element with `codepoint-widths[N]` (see [Codepoint widths](#codepoint-widths)) |
 | `terminal-overrides` | Str | `linux*:AX@` | Array of `pattern:cap:cap` entries matched against the client's `TERM`. `smcup@` and `rmcup@` keep the attached client off the host terminal's alternate screen (see [Terminal overrides](#terminal-overrides)) |
 | `set-clipboard` | Str | `external` | Clipboard interaction (`on`/`off`/`external`). A copy mode yank reaches the Windows clipboard on every value, with OSC 52 to the outer terminal unless `off`. An application's own OSC 52 creates a paste buffer only on `on`, as in tmux; on `external` psmux still forwards it to the outer terminal and the Windows clipboard, where tmux ignores it; `off` ignores it |
 | `main-pane-width` | String | `80` | Main pane width in the main-vertical layout, in cells or a percentage such as `30%` |
@@ -1414,13 +1414,26 @@ The width must be `0`, `1` or `2`. An entry that is malformed, out of range, or
 names a codepoint that does not exist is ignored, and the remaining entries
 still apply.
 
-Because it is an array option, `-a` appends rather than replaces:
+An override tells psmux how many columns your terminal draws a character in;
+it does not change how the terminal draws it. Set a width your terminal does
+not use, and psmux and the terminal disagree about where the rest of the line
+begins.
+
+It is an array option, as in tmux, and each entry is an element with its own
+index, `codepoint-widths[N]`:
 
 ```tmux
-set -s codepoint-widths "U+2500-U+257F=2"
-set -sa codepoint-widths "U+25CF=2"     # both entries now apply
-set -su codepoint-widths                # back to the default (no overrides)
+set -s codepoint-widths "U+2500-U+257F=2"   # replaces the whole array: [0]
+set -sa codepoint-widths "U+25CF=2"         # adds at the lowest free index: [1]
+set -s codepoint-widths[5] "U+2603=2"       # sets one element
+set -su codepoint-widths[0]                 # removes one; the others keep their index
+set -su codepoint-widths                    # back to the default (no overrides)
 ```
+
+The elements are applied in index order, so when two of them name the same
+codepoint, the one with the higher index wins. A value is split on `,`, and
+psmux trims the spaces around each entry, so `"U+2502=2, U+25CF=2"` keeps both
+(tmux keeps the space, and its second entry then sets nothing).
 
 A change takes effect immediately, for text drawn after it. Text already on
 screen keeps the width it was drawn with, so redraw the pane or restart the
@@ -1431,6 +1444,9 @@ Read the current value back with:
 ```powershell
 psmux show-options -s codepoint-widths
 ```
+
+It prints one `codepoint-widths[N] entry` line per element, `-v` prints the
+entries alone, one a line, and `#{codepoint-widths}` joins them with a space.
 
 If you are unsure whether your terminal treats a character as one column or
 two, print a row of them and see where it wraps: in an 80 column window, 80 of

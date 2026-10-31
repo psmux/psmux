@@ -255,8 +255,9 @@ fn clearing_restores_the_default() {
 
 #[test]
 fn appending_keeps_the_existing_entries() {
-    // `set -sa codepoint-widths ...` appends an ITEM to the array. Modelled
-    // here as the concatenated value the append path produces.
+    // `set -sa codepoint-widths ...` appends an ITEM to the array, and the
+    // width table is then built from every element in index order. Modelled
+    // here as those elements written as one value.
     let guard = WidthGuard::new();
     guard.set("U+2502=2");
     guard.set("U+2502=2,U+4E2D=1");

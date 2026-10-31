@@ -83,7 +83,7 @@ impl CommandAliases {
     /// array option ([`OptionArray::apply_set`]).
     pub fn set(&mut self, name: &str, value: &str, append: bool) -> Result<(), String> {
         let index = option_index(name)?;
-        self.array.apply_set(index, value, append, spec().separator);
+        self.array.apply_set(index, value, append, spec());
         Ok(())
     }
 

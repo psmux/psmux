@@ -19,7 +19,7 @@ fn app() -> AppState {
 /// `options_array_assign` splits it (crate::option_array).
 fn elements(value: &str) -> Vec<String> {
     let mut array = crate::option_array::OptionArray::default();
-    array.assign(value, ",");
+    array.assign(value, crate::option_array::spec("terminal-overrides").unwrap());
     array.iter().map(|(_, entry)| entry.to_string()).collect()
 }
 
@@ -254,7 +254,7 @@ fn render_options_carry_overrides_only_when_set() {
     a.terminal_overrides.clear();
     let json = serde_json::to_string(&crate::server::helpers::expand_status_formats(&a, "").client_render_options).unwrap();
     assert!(!json.contains("\"tov\""), "an empty array adds nothing to the frame: {json}");
-    a.terminal_overrides.apply_set(None, "*:smcup@:rmcup@", false, ",");
+    a.terminal_overrides.apply_set(None, "*:smcup@:rmcup@", false, crate::option_array::spec("terminal-overrides").unwrap());
     let json = serde_json::to_string(&crate::server::helpers::expand_status_formats(&a, "").client_render_options).unwrap();
     assert!(json.contains("\"tov\":[\"*:smcup@:rmcup@\"]"), "{json}");
     let back: crate::render_state::ClientRenderOptions = serde_json::from_str(&json).unwrap();

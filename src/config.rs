@@ -2031,15 +2031,7 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     // Handle -a (append to current value)
     let final_value = if append_mode {
         let current = crate::format::lookup_option_pub(key, app).unwrap_or_default();
-        if key == "codepoint-widths" {
-            // ARRAY option: `-a` adds elements, it does not glue characters
-            // onto the last one (tmux options_array_assign), so
-            // `set -ga codepoint-widths 'U+2500=2'` without a leading comma
-            // still lands as its own element.
-            format!("{},{}", current, value)
-        } else {
-            format!("{}{}", current, value)
-        }
+        format!("{}{}", current, value)
     } else {
         value
     };
@@ -2326,9 +2318,9 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "allow-set-title" => {
             app.allow_set_title = matches!(value, "on" | "true" | "1" | "yes");
         }
-        // terminal-overrides and `terminal-overrides[N]` (issue #700): an
-        // array option, whose smcup/rmcup decide whether the attach client
-        // uses the host's alternate screen.
+        // The array options and their elements: codepoint-widths and
+        // terminal-overrides, whose smcup/rmcup decide whether the attach
+        // client uses the host's alternate screen (issue #700).
         name if crate::server::options::is_stored_array_option(name) => {
             if let Err(error) = crate::server::options::set_array_option(app, name, value, false) {
                 warn_config(app, error);
@@ -2423,9 +2415,6 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         }
         "warm-pool-size" => {
             crate::server::options::set_warm_pool_size(app, value);
-        }
-        "codepoint-widths" => {
-            crate::server::options::set_codepoint_widths(app, value);
         }
         // `command-alias[N]`, tmux's own spelling, as well as the bare name.
         name if crate::command_alias::is_alias_option(name) => {

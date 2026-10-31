@@ -236,7 +236,8 @@ if ($shape -eq "10,5") {
 Write-Test "show-options -s reports the value"
 & $PSMUX -L $SOCK set -s codepoint-widths "U+2502=2" 2>&1 | Out-Null
 $shown = (& $PSMUX -L $SOCK show-options -s codepoint-widths 2>&1 | Out-String).Trim()
-if ($shown -match "codepoint-widths\s+U\+2502=2") {
+# An array option: one `name[N] value` line per element, as tmux prints it.
+if ($shown -eq "codepoint-widths[0] U+2502=2") {
     Write-Pass "show-options -s: $shown"
 } else {
     Write-Fail "show-options -s did not report the value, got '$shown'"
@@ -247,11 +248,11 @@ if ($shown -match "codepoint-widths\s+U\+2502=2") {
 # teardown where a restarted server would report an empty option and make the
 # message lie about what happened.
 & $PSMUX -L $SOCK set -sa codepoint-widths "U+4E2D=1" 2>&1 | Out-Null
-$shown = (& $PSMUX -L $SOCK show-options -s -v codepoint-widths 2>&1 | Out-String).Trim()
-if ($shown -eq "U+2502=2,U+4E2D=1") {
+$shown = (@(& $PSMUX -L $SOCK show-options -s -v codepoint-widths 2>&1) -join '|').Trim()
+if ($shown -eq "U+2502=2|U+4E2D=1") {
     Write-Pass "set -sa appended an array ITEM rather than concatenating: '$shown'"
 } else {
-    Write-Fail "expected 'U+2502=2,U+4E2D=1' after append, got '$shown'"
+    Write-Fail "expected 'U+2502=2|U+4E2D=1' (one value a line) after append, got '$shown'"
 }
 & $PSMUX -L $SOCK set -su codepoint-widths 2>&1 | Out-Null
 $shown = (& $PSMUX -L $SOCK show-options -s -v codepoint-widths 2>&1 | Out-String).Trim()

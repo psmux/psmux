@@ -264,7 +264,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "default-shell", scope: Server, option_type: OptionType::String, default: "", description: "Default shell for new panes" },
     OptionDef { name: "default-terminal", scope: Server, option_type: OptionType::String, default: "xterm-256color", description: "TERM value for new panes" },
     OptionDef { name: "copy-command", scope: Server, option_type: OptionType::String, default: "", description: "External copy command (pipe selection)" },
-    OptionDef { name: "codepoint-widths", scope: Server, option_type: OptionType::String, default: "", description: "Array of override widths for Unicode codepoints, e.g. U+2500-U+257F=2 (comma separated; widths 0, 1 or 2)" },
+    OptionDef { name: "codepoint-widths", scope: Server, option_type: OptionType::String, default: "", description: "Array of override widths for Unicode codepoints, e.g. U+2500-U+257F=2 (comma separated, or one element with codepoint-widths[N]; widths 0, 1 or 2)" },
     OptionDef { name: "terminal-overrides", scope: Server, option_type: OptionType::String, default: "linux*:AX@", description: "Array of pattern:cap overrides matched against the client TERM; smcup@/rmcup@ keep the attached client off the host's alternate screen (#700)" },
     // The default array (option_array::ARRAY_OPTIONS) as `#{command-alias}`
     // reads it, the elements joined with a space.
