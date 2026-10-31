@@ -2609,6 +2609,17 @@ pub mod mouse_inject {
         ));
     }
 
+    /// Log a batch of a pane's output that asked more queries than the pane
+    /// captures between two drains (`vt100::MAX_PENDING_QUERIES`): the ones
+    /// past the bound were left unanswered.  No real program asks that many,
+    /// so a missing reply with this line next to it was dropped on purpose.
+    pub fn log_query_bound(pane_id: usize, bound: usize) {
+        debug_log(&format!(
+            "pane {} asked {} or more queries in one batch; any past {} were not answered",
+            pane_id, bound, bound
+        ));
+    }
+
     /// Send a CTRL_C_EVENT to all processes on the child's console.
     ///
     /// TUI applications (pstop, btop, etc.) often disable ENABLE_PROCESSED_INPUT
@@ -3458,6 +3469,7 @@ pub mod mouse_inject {
     }
     pub fn send_vt_reply(_pid: u32, _text: &str) -> bool { false }
     pub fn log_lost_reply(_pid: Option<u32>, _kind: &str, _len: usize) {}
+    pub fn log_query_bound(_pane_id: usize, _bound: usize) {}
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
     pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }
     pub fn send_modified_enter_event(_pid: u32, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }

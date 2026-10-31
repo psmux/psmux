@@ -5147,17 +5147,17 @@ pub static PIPE_PANE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::
 pub static PIPE_WRITERS: Mutex<Vec<(usize, Box<dyn std::io::Write + Send>)>> = Mutex::new(Vec::new());
 
 /// Issue #685: the low sixteen OSC 4 palette entries of every pane that has
-/// set any, mirrored out of the pane's `vt100::Screen` so the colour query
-/// responder can read them without taking the parser lock.
+/// set any, mirrored out of the pane's `vt100::Screen` so the server loop's
+/// colour path can read them without taking the parser lock.
 ///
 /// tmux answers an `OSC 4;<i>;?` query from the pane's own palette first
 /// (`input.c:2947` `colour_palette_get`) and only asks the real terminal when
 /// the pane has no entry of its own (`input_add_request`,
-/// `INPUT_REQUEST_PALETTE`).  psmux's responder lives in the pane READER
-/// thread (`pane.rs` `scan_color_queries` plus
-/// `server::helpers::color_replies_text`, issues #473 and #556), which
-/// runs ahead of the parser thread and must not block on it, so the parser
-/// thread publishes here after each batch that changed the palette.
+/// `INPUT_REQUEST_PALETTE`).  The pane's parser thread answers from the
+/// palette it has in hand (`pane::pane_replies`); this mirror is for the
+/// server loop, which answers instead when that injection fails (issue #473),
+/// so the parser thread publishes here after each batch that changed the
+/// palette.
 ///
 /// `PANE_PALETTE_ANY` is the same cheap gate `PIPE_PANE_COUNT` is: while no
 /// pane in this server has ever set a palette entry, the responder never takes

@@ -1391,57 +1391,53 @@ pub(crate) fn build_color_replies_for_pane(
     colors: &crate::types::HostColors,
     pane_palette: Option<[Option<(u8, u8, u8)>; 16]>,
 ) -> (Option<String>, String) {
-    // Light/dark scheme query: CSI ?996n → CSI ?997;1n (dark) / ?997;2n (light).
     let scheme = if bits & crate::types::COLOR_QUERY_SCHEME != 0 {
-        Some(format!("\x1b[?997;{}n", if colors.is_dark() { 1 } else { 2 }))
+        Some(scheme_reply(colors))
     } else {
         None
     };
     let mut osc = String::new();
     let burst = bits & 1 != 0; // palette index 0 queried → full-burst app
-    if (bits & crate::types::COLOR_QUERY_FG != 0 || burst) && colors.fg.is_some() {
-        osc.push_str(&format!("\x1b]10;{}\x1b\\", x11_rgb(colors.fg.unwrap())));
+    if bits & crate::types::COLOR_QUERY_FG != 0 || burst {
+        osc.push_str(&foreground_reply(colors).unwrap_or_default());
     }
-    if (bits & crate::types::COLOR_QUERY_BG != 0 || burst) && colors.bg.is_some() {
-        osc.push_str(&format!("\x1b]11;{}\x1b\\", x11_rgb(colors.bg.unwrap())));
+    if bits & crate::types::COLOR_QUERY_BG != 0 || burst {
+        osc.push_str(&background_reply(colors).unwrap_or_default());
     }
     for i in 0..16usize {
         if bits & (1u32 << i) != 0 {
-            // The pane's own entry wins; the host's is the fallback.
             let own = pane_palette.and_then(|p| p[i]);
-            if let Some(rgb) = own.or(colors.palette[i]) {
-                osc.push_str(&format!("\x1b]4;{};{}\x1b\\", i, x11_rgb(rgb)));
-            }
+            osc.push_str(&palette_reply(i, colors, own).unwrap_or_default());
         }
     }
     (scheme, osc)
 }
 
-/// Issue #556: the text of the colour replies the pane READER thread injects
-/// the moment a colour query is detected in the ConPTY output stream.
-///
-/// The server-loop path adds a coalescing wait (1-8ms) plus a loop tick on
-/// top of ConPTY's forward latency; on hosts whose conhost forwards OSC
-/// 10;?/11;? to us (older builds), that total lands the reply AFTER the
-/// app's startup probe window has closed, and yazi then re-parses the reply
-/// as an interactive `shell` action (issue #556).  Answering straight off
-/// the read is the earliest point psmux can physically respond.
-///
-/// This only builds the text (scheme reply first, then the OSC replies).
-/// Since #930 the reader joins it with the XTVERSION reply in query order
-/// (`pane::injected_replies`) and injects both in one `WriteConsoleInputW`
-/// batch before it hands the read to the parser thread; when that injection
-/// fails the reader falls back to the pending bits and the server loop pipe
-/// path.  An empty string means nothing needs answering.
-pub(crate) fn color_replies_text(
-    bits: u32,
+/// The light or dark scheme reply to `CSI ? 996 n`: `CSI ? 997 ; 1 n` for a
+/// dark background, `CSI ? 997 ; 2 n` for a light one.
+pub(crate) fn scheme_reply(colors: &crate::types::HostColors) -> String {
+    format!("\x1b[?997;{}n", if colors.is_dark() { 1 } else { 2 })
+}
+
+/// The `OSC 10` reply, when the outer terminal's foreground is known.
+pub(crate) fn foreground_reply(colors: &crate::types::HostColors) -> Option<String> {
+    colors.fg.map(|rgb| format!("\x1b]10;{}\x1b\\", x11_rgb(rgb)))
+}
+
+/// The `OSC 11` reply, when the outer terminal's background is known.
+pub(crate) fn background_reply(colors: &crate::types::HostColors) -> Option<String> {
+    colors.bg.map(|rgb| format!("\x1b]11;{}\x1b\\", x11_rgb(rgb)))
+}
+
+/// The `OSC 4` reply for palette index `i`.  The pane's own entry (`own`)
+/// wins, the outer terminal's is the fallback (issue #685).
+pub(crate) fn palette_reply(
+    i: usize,
     colors: &crate::types::HostColors,
-    pane_id: usize,
-) -> String {
-    if bits == 0 { return String::new(); }
-    let (scheme, osc) =
-        build_color_replies_for_pane(bits, colors, crate::types::pane_palette(pane_id));
-    format!("{}{}", scheme.as_deref().unwrap_or(""), osc)
+    own: Option<(u8, u8, u8)>,
+) -> Option<String> {
+    own.or(*colors.palette.get(i)?)
+        .map(|rgb| format!("\x1b]4;{};{}\x1b\\", i, x11_rgb(rgb)))
 }
 
 /// Issue #473: walk a pane tree and answer any pending terminal color queries.

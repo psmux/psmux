@@ -2,7 +2,7 @@
 // answered inside psmux, so pane applications (GitHub Copilot CLI) cannot
 // detect the terminal palette and fall back to wrong themes.
 //
-// These tests cover the detection scanner (pane.rs), the HostColors
+// These tests cover the detection (the pane's vt100 parser), the HostColors
 // model/wire format (types.rs), the host-reply parser (platform.rs), and the
 // response builder (server/helpers.rs, exercised through the pipe-fallback
 // path by passing child_pid=None).
@@ -10,84 +10,79 @@
 use super::*;
 use crate::types::{HostColors, COLOR_QUERY_BG, COLOR_QUERY_FG, COLOR_QUERY_SCHEME};
 
-// ── Detection scanner ────────────────────────────────────────────────────
+// ── Detection (the pane's vt100 parser, in stream order) ─────────────────
+
+use vt100::TerminalQuery as Q;
 
 #[test]
 fn scan_detects_each_palette_index() {
-    for i in 0..16u32 {
+    for i in 0..16u8 {
         let q = format!("\x1b]4;{};?\x1b\\", i);
-        let bits = scan_color_queries(q.as_bytes(), 0);
-        assert_eq!(bits, 1 << i, "index {} should set bit {}", i, i);
+        assert_eq!(scan_device_queries(q.as_bytes()), vec![Q::PaletteColour { index: i, own: None }], "index {}", i);
     }
 }
 
 #[test]
 fn scan_detects_fg_bg_and_scheme() {
-    assert_eq!(scan_color_queries(b"\x1b]10;?\x1b\\", 0), COLOR_QUERY_FG);
-    assert_eq!(scan_color_queries(b"\x1b]11;?\x1b\\", 0), COLOR_QUERY_BG);
-    assert_eq!(scan_color_queries(b"\x1b[?996n", 0), COLOR_QUERY_SCHEME);
+    assert_eq!(scan_device_queries(b"\x1b]10;?\x1b\\"), vec![Q::ForegroundColour]);
+    assert_eq!(scan_device_queries(b"\x1b]11;?\x1b\\"), vec![Q::BackgroundColour]);
+    assert_eq!(scan_device_queries(b"\x1b[?996n"), vec![Q::ColourScheme]);
 }
 
 #[test]
 fn scan_detects_copilot_burst() {
-    // The exact batch Copilot CLI sends at startup (issue #473 probe).
+    // The exact batch Copilot CLI sends at startup (issue #473 probe), every
+    // query in the order it was asked.
     let mut burst = String::from("\x1b[?996n\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
     for i in 0..16 {
         burst.push_str(&format!("\x1b]4;{};?\x1b\\", i));
     }
-    let bits = scan_color_queries(burst.as_bytes(), 0);
-    assert_eq!(bits & 0xFFFF, 0xFFFF, "all 16 palette bits set");
-    assert_ne!(bits & COLOR_QUERY_FG, 0);
-    assert_ne!(bits & COLOR_QUERY_BG, 0);
-    assert_ne!(bits & COLOR_QUERY_SCHEME, 0);
+    let mut expected = vec![Q::ColourScheme, Q::ForegroundColour, Q::BackgroundColour];
+    expected.extend((0..16u8).map(|index| Q::PaletteColour { index, own: None }));
+    assert_eq!(scan_device_queries(burst.as_bytes()), expected);
 }
 
 #[test]
 fn scan_ignores_out_of_range_index_and_non_queries() {
-    // Index 255 is out of palette range.
-    assert_eq!(scan_color_queries(b"\x1b]4;255;?\x1b\\", 0), 0);
+    // Index 255 is outside the sixteen colours psmux answers.
+    assert!(scan_device_queries(b"\x1b]4;255;?\x1b\\").is_empty());
     // A color SET (no `?`) is not a query.
-    assert_eq!(scan_color_queries(b"\x1b]4;1;rgb:ff/00/00\x1b\\", 0), 0);
-    assert_eq!(scan_color_queries(b"\x1b]11;rgb:ff/00/00\x1b\\", 0), 0);
+    assert!(scan_device_queries(b"\x1b]4;1;rgb:ff/00/00\x1b\\").is_empty());
+    assert!(scan_device_queries(b"\x1b]11;rgb:ff/00/00\x1b\\").is_empty());
     // Plain output with escapes.
-    assert_eq!(scan_color_queries(b"\x1b[31mred\x1b[0m", 0), 0);
-    assert_eq!(scan_color_queries(b"no escapes at all", 0), 0);
+    assert!(scan_device_queries(b"\x1b[31mred\x1b[0m").is_empty());
+    assert!(scan_device_queries(b"no escapes at all").is_empty());
 }
 
 #[test]
 fn scanner_detects_query_split_across_batches() {
-    // The parser thread hands the scanner coalesced batches; a query split
-    // across two batches must still be detected (same rationale as the
-    // CprScanner carry-over).
-    let q = b"\x1b]4;7;?";
+    // The parser thread hands the parser coalesced batches; a query split
+    // across two of them is found once, when its last byte arrives.
+    let q = b"\x1b]4;7;?\x07";
     for split in 1..q.len() {
-        let mut s = ColorQueryScanner::new();
-        let first = s.scan(&q[..split]);
-        let second = s.scan(&q[split..]);
-        assert_eq!(first | second, 1 << 7, "split at {} must detect index 7", split);
-        assert_eq!(first & second, 0, "split at {} must not double-count", split);
+        let mut s = DeviceQueryScanner::new();
+        assert!(s.scan(&q[..split]).is_empty(), "split at {}", split);
+        assert_eq!(s.scan(&q[split..]), vec![Q::PaletteColour { index: 7, own: None }], "split at {}", split);
     }
 }
 
 #[test]
 fn scanner_does_not_double_count_completed_query() {
-    // A query fully contained in batch N must not be re-reported when batch
-    // N+1 rescans the carried boundary tail (that would re-answer after the
-    // first response was drained).
-    let mut s = ColorQueryScanner::new();
-    let first = s.scan(b"\x1b]4;3;?"); // 7 bytes, entirely inside KEEP=8 tail
-    assert_eq!(first, 1 << 3);
-    let second = s.scan(b"more output");
-    assert_eq!(second, 0, "boundary rescan must not re-report the tail-only match");
+    // A query answered in batch N must not come back in batch N+1, which
+    // would answer it twice.
+    let mut s = DeviceQueryScanner::new();
+    assert_eq!(s.scan(b"\x1b]4;3;?\x07"), vec![Q::PaletteColour { index: 3, own: None }]);
+    assert!(s.scan(b"more output").is_empty());
 }
 
 #[test]
 fn scanner_split_scheme_query() {
     let q = b"\x1b[?996n";
     for split in 1..q.len() {
-        let mut s = ColorQueryScanner::new();
-        let bits = s.scan(&q[..split]) | s.scan(&q[split..]);
-        assert_eq!(bits, COLOR_QUERY_SCHEME, "split at {}", split);
+        let mut s = DeviceQueryScanner::new();
+        let mut found = s.scan(&q[..split]);
+        found.extend(s.scan(&q[split..]));
+        assert_eq!(found, vec![Q::ColourScheme], "split at {}", split);
     }
 }
 
