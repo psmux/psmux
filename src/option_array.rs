@@ -7,8 +7,8 @@
 //! per element (cmd-show-options.c). Line numbers below are tag 3.7c.
 //!
 //! [`ARRAY_OPTIONS`] lists the options built on this so far. tmux 3.7c has
-//! more, and they move here one at a time: codepoint-widths,
-//! terminal-features and user-keys split on `,`; status-format,
+//! more, and they move here one at a time: terminal-features and user-keys
+//! split on `,`; status-format,
 //! update-environment and pane-colours on space and `,`; every hook is an
 //! array of commands that does not split at all.
 
@@ -18,11 +18,16 @@ use std::collections::BTreeMap;
 /// on (options-table.c `.separator`; tmux uses `" ,"` when an option names
 /// none, options.c:518-519), and its default (`.default_str`), which is split
 /// the same way.
+///
+/// `trim` is psmux's own: each element is kept without the spaces around it.
+/// tmux keeps them (options.c:531, `strsep`), so a space after a `,` becomes
+/// part of the next element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArraySpec {
     pub name: &'static str,
     pub separator: &'static str,
     pub default: &'static str,
+    pub trim: bool,
 }
 
 pub static ARRAY_OPTIONS: &[ArraySpec] = &[
@@ -36,12 +41,24 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
                   info=show-messages -JT,\
                   choose-window=choose-tree -w,\
                   choose-session=choose-tree -s",
+        trim: false,
+    },
+    // options-table.c:337-344 at tag 3.8. The spaces are trimmed, as psmux
+    // did before this was an array, so `U+2500=2, U+25CF=2` keeps both
+    // entries; in tmux the second one, ` U+25CF=2`, is no codepoint and is
+    // skipped (utf8.c, utf8_add_to_width_cache).
+    ArraySpec {
+        name: "codepoint-widths",
+        separator: ",",
+        default: "",
+        trim: true,
     },
     // options-table.c:518-525
     ArraySpec {
         name: "terminal-overrides",
         separator: ",",
         default: "linux*:AX@",
+        trim: false,
     },
 ];
 
@@ -95,7 +112,7 @@ impl OptionArray {
     /// `options_default`): its default assigned like any value.
     pub fn with_default(spec: &ArraySpec) -> Self {
         let mut array = Self::default();
-        array.assign(spec.default, spec.separator);
+        array.assign(spec.default, spec);
         array
     }
 
@@ -119,6 +136,8 @@ impl OptionArray {
 
     /// One element (options.c:434-509, `options_array_set`, the string case).
     /// `None` removes it; `append` adds `value` to the end of its text.
+    /// `value` is stored as given; [`OptionArray::apply_set`] trims it first
+    /// for an option whose spec says so.
     pub fn set(&mut self, index: u32, value: Option<&str>, append: bool) {
         match value {
             None => {
@@ -147,17 +166,21 @@ impl OptionArray {
     /// A value given without an index (options.c:511-550,
     /// `options_array_assign`). With no separator the value is one element;
     /// otherwise it is split on any of the separator characters, empty pieces
-    /// are skipped, and each piece takes the lowest free index.
-    pub fn assign(&mut self, value: &str, separator: &str) {
+    /// are skipped, and each piece takes the lowest free index. With
+    /// `spec.trim` each piece loses its surrounding spaces first, so a piece
+    /// of spaces only is skipped too.
+    pub fn assign(&mut self, value: &str, spec: &ArraySpec) {
+        let value = if spec.trim { value.trim() } else { value };
         if value.is_empty() {
             return;
         }
-        if separator.is_empty() {
+        if spec.separator.is_empty() {
             let index = self.first_free();
             self.set(index, Some(value), false);
             return;
         }
-        for piece in value.split(|c| separator.contains(c)) {
+        for piece in value.split(|c| spec.separator.contains(c)) {
+            let piece = if spec.trim { piece.trim() } else { piece };
             if piece.is_empty() {
                 continue;
             }
@@ -168,16 +191,19 @@ impl OptionArray {
 
     /// `set-option NAME VALUE` (cmd-set-option.c:194-225): without an index
     /// the array is cleared, unless `-a`, and the value assigned; with one,
-    /// that element is set.
-    pub fn apply_set(&mut self, index: Option<u32>, value: &str, append: bool, separator: &str) {
+    /// that element is set, its value trimmed when `spec.trim` says so.
+    pub fn apply_set(&mut self, index: Option<u32>, value: &str, append: bool, spec: &ArraySpec) {
         match index {
             None => {
                 if !append {
                     self.clear();
                 }
-                self.assign(value, separator);
+                self.assign(value, spec);
             }
-            Some(index) => self.set(index, Some(value), append),
+            Some(index) => {
+                let value = if spec.trim { value.trim() } else { value };
+                self.set(index, Some(value), append);
+            }
         }
     }
 

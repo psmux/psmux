@@ -9,6 +9,11 @@ fn items(array: &OptionArray) -> Vec<(u32, &str)> {
     array.iter().collect()
 }
 
+/// A spec that splits on `separator` and keeps the spaces, as tmux does.
+fn sep(separator: &'static str) -> ArraySpec {
+    ArraySpec { name: "test", separator, default: "", trim: false }
+}
+
 #[test]
 fn parse_name_splits_the_index_off() {
     assert_eq!(parse_name("command-alias"), Ok(("command-alias", None)));
@@ -38,8 +43,8 @@ fn set_with_an_index_and_append_extends_that_element() {
     // `set -s command-alias[4] a=list-keys`, then
     // `set -as command-alias[4] ' -T root'`: "a=list-keys -T root".
     let mut a = OptionArray::default();
-    a.apply_set(Some(4), "a=list-keys", false, ",");
-    a.apply_set(Some(4), " -T root", true, ",");
+    a.apply_set(Some(4), "a=list-keys", false, &sep(","));
+    a.apply_set(Some(4), " -T root", true, &sep(","));
     assert_eq!(items(&a), vec![(4, "a=list-keys -T root")]);
 }
 
@@ -47,10 +52,10 @@ fn set_with_an_index_and_append_extends_that_element() {
 fn append_without_an_index_takes_the_lowest_free_index() {
     // `[4]` set, then `set -as command-alias b=list-buffers` lands at [0].
     let mut a = OptionArray::default();
-    a.apply_set(Some(4), "a=list-keys", false, ",");
-    a.apply_set(None, "b=list-buffers", true, ",");
+    a.apply_set(Some(4), "a=list-keys", false, &sep(","));
+    a.apply_set(None, "b=list-buffers", true, &sep(","));
     assert_eq!(items(&a), vec![(0, "b=list-buffers"), (4, "a=list-keys")]);
-    a.apply_set(None, "c=kill-pane", true, ",");
+    a.apply_set(None, "c=kill-pane", true, &sep(","));
     assert_eq!(items(&a), vec![(0, "b=list-buffers"), (1, "c=kill-pane"), (4, "a=list-keys")]);
 }
 
@@ -59,9 +64,9 @@ fn a_value_without_an_index_replaces_the_array() {
     // `set -s command-alias 'c=new-window,d=split-window -h'` after [0] and
     // [4] leaves [0] and [1] only.
     let mut a = OptionArray::default();
-    a.apply_set(Some(0), "b=list-buffers", false, ",");
-    a.apply_set(Some(4), "a=list-keys", false, ",");
-    a.apply_set(None, "c=new-window,d=split-window -h", false, ",");
+    a.apply_set(Some(0), "b=list-buffers", false, &sep(","));
+    a.apply_set(Some(4), "a=list-keys", false, &sep(","));
+    a.apply_set(None, "c=new-window,d=split-window -h", false, &sep(","));
     assert_eq!(items(&a), vec![(0, "c=new-window"), (1, "d=split-window -h")]);
 }
 
@@ -70,10 +75,10 @@ fn assign_splits_on_any_separator_character_and_skips_empty_pieces() {
     // status-format names no separator: `set -g status-format "a b,c"` makes
     // three elements.
     let mut a = OptionArray::default();
-    a.apply_set(None, "a b,c", false, " ,");
+    a.apply_set(None, "a b,c", false, &sep(" ,"));
     assert_eq!(items(&a), vec![(0, "a"), (1, "b"), (2, "c")]);
     let mut a = OptionArray::default();
-    a.apply_set(None, ",x,,y,", false, ",");
+    a.apply_set(None, ",x,,y,", false, &sep(","));
     assert_eq!(items(&a), vec![(0, "x"), (1, "y")]);
 }
 
@@ -82,16 +87,16 @@ fn an_empty_separator_keeps_the_value_whole() {
     // A hook: `set-hook -g h[3] ...` then `set-hook -ga h 'display two'`
     // puts the second at [0], unsplit.
     let mut a = OptionArray::default();
-    a.apply_set(Some(3), "display hi", false, "");
-    a.apply_set(None, "display two", true, "");
+    a.apply_set(Some(3), "display hi", false, &sep(""));
+    a.apply_set(None, "display two", true, &sep(""));
     assert_eq!(items(&a), vec![(0, "display two"), (3, "display hi")]);
 }
 
 #[test]
 fn an_empty_value_without_an_index_empties_the_array() {
     let mut a = OptionArray::default();
-    a.apply_set(Some(2), "x=y", false, ",");
-    a.apply_set(None, "", false, ",");
+    a.apply_set(Some(2), "x=y", false, &sep(","));
+    a.apply_set(None, "", false, &sep(","));
     assert!(a.is_empty());
 }
 
@@ -100,7 +105,7 @@ fn unset_with_an_index_keeps_the_other_indexes() {
     // `set -su command-alias[1]` after [0] [1] [2] leaves [0] and [2].
     let spec = spec("command-alias").unwrap();
     let mut a = OptionArray::default();
-    a.apply_set(None, "c=new-window,d=split-window -h,e=kill-pane", false, ",");
+    a.apply_set(None, "c=new-window,d=split-window -h,e=kill-pane", false, &sep(","));
     a.apply_unset(Some(1), spec);
     assert_eq!(items(&a), vec![(0, "c=new-window"), (2, "e=kill-pane")]);
 }
@@ -136,7 +141,7 @@ fn unset_without_an_index_puts_the_default_back() {
     // come back, as options_remove_or_default does for a global option.
     let spec = spec("command-alias").unwrap();
     let mut a = OptionArray::with_default(spec);
-    a.apply_set(None, "x=list-keys", false, ",");
+    a.apply_set(None, "x=list-keys", false, &sep(","));
     assert_eq!(items(&a), vec![(0, "x=list-keys")]);
     a.apply_unset(None, spec);
     assert_eq!(items(&a), COMMAND_ALIAS_DEFAULTS.to_vec());
@@ -146,8 +151,8 @@ fn unset_without_an_index_puts_the_default_back() {
 fn joined_uses_spaces() {
     // `display -p '#{command-alias}'` printed "c=new-window e=kill-pane".
     let mut a = OptionArray::default();
-    a.apply_set(Some(0), "c=new-window", false, ",");
-    a.apply_set(Some(2), "e=kill-pane", false, ",");
+    a.apply_set(Some(0), "c=new-window", false, &sep(","));
+    a.apply_set(Some(2), "e=kill-pane", false, &sep(","));
     assert_eq!(a.joined(), "c=new-window e=kill-pane");
 }
 
@@ -156,8 +161,8 @@ fn show_lines_prints_as_show_options_does() {
     let mut a = OptionArray::default();
     assert_eq!(a.show_lines("command-alias", false), "command-alias\n");
     assert_eq!(a.show_lines("command-alias", true), "");
-    a.apply_set(Some(0), "c=new-window", false, ",");
-    a.apply_set(Some(1), "d=split-window -h", false, ",");
+    a.apply_set(Some(0), "c=new-window", false, &sep(","));
+    a.apply_set(Some(1), "d=split-window -h", false, &sep(","));
     assert_eq!(
         a.show_lines("command-alias", false),
         "command-alias[0] c=new-window\ncommand-alias[1] \"d=split-window -h\"\n"
@@ -187,4 +192,34 @@ fn terminal_overrides_starts_as_tmux_default() {
     assert_eq!(spec.separator, ",");
     let array = OptionArray::with_default(spec);
     assert_eq!(items(&array), vec![(0, "linux*:AX@")]);
+}
+
+#[test]
+fn a_trimming_spec_keeps_each_element_without_its_spaces() {
+    // codepoint-widths: `set -s codepoint-widths "U+2502=2, U+4E2D=1"` keeps
+    // two working entries. tmux 3.8 keeps the space, `[1] " U+4E2D=1"`.
+    let trim = ArraySpec { trim: true, ..sep(",") };
+    let mut a = OptionArray::default();
+    a.apply_set(None, " U+2502=2, U+4E2D=1 ,  ,", false, &trim);
+    assert_eq!(items(&a), vec![(0, "U+2502=2"), (1, "U+4E2D=1")]);
+    a.apply_set(Some(5), "  U+25CF=2 ", false, &trim);
+    assert_eq!(a.get(5), Some("U+25CF=2"));
+    a.apply_set(None, "   ", false, &trim);
+    assert!(a.is_empty(), "a value of spaces only is an empty value");
+    let mut a = OptionArray::default();
+    a.apply_set(None, "U+2502=2, U+4E2D=1", false, &sep(","));
+    assert_eq!(items(&a), vec![(0, "U+2502=2"), (1, " U+4E2D=1")]);
+}
+
+#[test]
+fn codepoint_widths_is_an_array_with_no_default() {
+    // options-table.c:337-344 at tag 3.8: `.default_str = ""`,
+    // `.separator = ","`; tmux 3.8 `show -s codepoint-widths` on a new
+    // server prints the name alone.
+    let spec = spec("codepoint-widths[2]").unwrap();
+    assert_eq!((spec.name, spec.separator, spec.default, spec.trim), ("codepoint-widths", ",", "", true));
+    let array = OptionArray::with_default(spec);
+    assert!(array.is_empty());
+    assert_eq!(array.show_lines("codepoint-widths", false), "codepoint-widths
+");
 }

@@ -1723,9 +1723,6 @@ pub(crate) fn dispatch(
                             name if crate::command_alias::is_alias_option(name) => {
                                 let _ = crate::command_alias::write(&app.command_aliases).set(name, &value, true);
                             }
-                            "codepoint-widths" => {
-                                crate::server::options::append_codepoint_widths(&mut app, &value);
-                            }
                             name if crate::server::options::is_stored_array_option(name) => {
                                 let _ = crate::server::options::set_array_option(&mut app, name, &value, true);
                             }

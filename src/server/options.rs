@@ -7,33 +7,25 @@ use crate::server::option_catalog::WINDOW_OPTION_NAMES;
 /// refuses anything outside that range on every route (#606).
 pub(crate) const REPEAT_TIME_MAX_MS: i64 = 2_000_000;
 
-/// Split a `codepoint-widths` option value into its array entries.
-///
-/// tmux declares the option `OPTIONS_TABLE_IS_ARRAY` with `.separator = ","`,
-/// so a value written as one string is split on commas into array items
-/// (`options_array_assign` in options.c). Empty items are dropped, matching
-/// tmux's own skip of an empty element.
-pub(crate) fn split_codepoint_widths(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 /// Push the stored `codepoint-widths` array into the process-global width
-/// table that every width decision reads.
+/// table that every width decision reads, its elements in index order so a
+/// later element wins (utf8.c:412-436 at tag 3.8, `utf8_update_width_cache`,
+/// walks the array from the first element).
 ///
-/// This is tmux's `utf8_update_width_cache()`, which `options.c` calls from
-/// the option-changed hook (`if (strcmp(name, "codepoint-widths") == 0)`) so a
-/// live `set -s codepoint-widths ...` affects the very next character drawn
-/// rather than waiting for a server restart.
-pub(crate) fn sync_codepoint_widths(app: &AppState) {
-    vt100::set_codepoint_widths(&app.codepoint_widths);
+/// tmux calls it from `options_push_changes` (options.c:1460-1461) so a live
+/// `set -s codepoint-widths ...` affects the very next character drawn rather
+/// than waiting for a server restart. [`set_array_option`] and
+/// [`unset_array_option`] call it the same way.
+fn sync_codepoint_widths(app: &AppState) {
+    vt100::set_codepoint_widths(&codepoint_width_entries(app));
 }
 
-/// Replace the whole `codepoint-widths` array and rebuild the width table.
+/// The `codepoint-widths` elements in index order, as the width table is
+/// built from them.
+pub(crate) fn codepoint_width_entries(app: &AppState) -> Vec<&str> {
+    app.codepoint_widths.iter().map(|(_, entry)| entry).collect()
+}
+
 /// `warm-pool-size N`: how many spare shells to keep pre spawned.
 ///
 /// The number that matters is not "is there a spare" but "has the spare
@@ -59,17 +51,6 @@ pub(crate) fn set_warm_pool_size(app: &mut AppState, value: &str) {
     crate::warm_trace!("pool: target set to {} (depth={})", n, app.warm_pane.len());
 }
 
-pub(crate) fn set_codepoint_widths(app: &mut AppState, value: &str) {
-    app.codepoint_widths = split_codepoint_widths(value);
-    sync_codepoint_widths(app);
-}
-
-/// Append entries to the `codepoint-widths` array (`set -sa`) and rebuild.
-pub(crate) fn append_codepoint_widths(app: &mut AppState, value: &str) {
-    app.codepoint_widths.extend(split_codepoint_widths(value));
-    sync_codepoint_widths(app);
-}
-
 /// The array option `base` names, where the server keeps it. command-alias is
 /// not here: the connection threads read it too, so it lives behind its own
 /// lock (crate::command_alias). Every other array option that has moved onto
@@ -77,6 +58,7 @@ pub(crate) fn append_codepoint_widths(app: &mut AppState, value: &str) {
 /// through the functions below on every route.
 fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut OptionArray> {
     match base {
+        "codepoint-widths" => Some(&mut app.codepoint_widths),
         "terminal-overrides" => Some(&mut app.terminal_overrides),
         _ => None,
     }
@@ -84,6 +66,7 @@ fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut Opt
 
 fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
     match base {
+        "codepoint-widths" => Some(&app.codepoint_widths),
         "terminal-overrides" => Some(&app.terminal_overrides),
         _ => None,
     }
@@ -101,7 +84,8 @@ pub(crate) fn set_array_option(app: &mut AppState, name: &str, value: &str, appe
     let (base, index) = crate::option_array::parse_name(name)?;
     let spec = crate::option_array::spec(base).ok_or_else(|| format!("invalid option: {}", name))?;
     let array = array_option_mut(app, base).ok_or_else(|| format!("invalid option: {}", name))?;
-    array.apply_set(index, value, append, spec.separator);
+    array.apply_set(index, value, append, spec);
+    array_option_changed(app, base);
     Ok(())
 }
 
@@ -112,7 +96,16 @@ pub(crate) fn unset_array_option(app: &mut AppState, name: &str) -> Result<(), S
     let spec = crate::option_array::spec(base).ok_or_else(|| format!("invalid option: {}", name))?;
     let array = array_option_mut(app, base).ok_or_else(|| format!("invalid option: {}", name))?;
     array.apply_unset(index, spec);
+    array_option_changed(app, base);
     Ok(())
+}
+
+/// What a change to the array `base` sets off, as tmux's
+/// `options_push_changes` (options.c:1460-1461 at tag 3.8) does.
+fn array_option_changed(app: &AppState, base: &str) {
+    if base == "codepoint-widths" {
+        sync_codepoint_widths(app);
+    }
 }
 
 /// The value as `#{NAME}` and `show -v NAME[N]` give it: one element, or the
@@ -987,7 +980,6 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "main-pane-height" => app.main_pane_height.clone(),
         // tmux options-table.c default "0" (the main pane decides).
         "other-pane-width" | "other-pane-height" => app.user_options.get(name).cloned().unwrap_or_else(|| "0".to_string()),
-        "codepoint-widths" => app.codepoint_widths.join(","),
         n if is_stored_array_option(n) => array_option_value(app, n),
         n if crate::command_alias::is_alias_option(n) => {
             crate::command_alias::read(&app.command_aliases).value(n)
@@ -1419,9 +1411,8 @@ pub(crate) fn apply_set_option(
                 app.pane_base_index = idx;
             }
         }
-        "codepoint-widths" => { set_codepoint_widths(app, value); }
-        // terminal-overrides and its elements (`terminal-overrides[N]`), as
-        // for any array option.
+        // codepoint-widths, terminal-overrides and their elements
+        // (`terminal-overrides[N]`), as for any array option.
         name if is_stored_array_option(name) => {
             set_array_option(app, name, value, false)?;
         }

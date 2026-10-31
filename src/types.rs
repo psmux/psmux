@@ -2174,12 +2174,12 @@ pub struct AppState {
     /// threads, which expand aliases without a round trip to the main loop.
     /// Written in place, never replaced, so every holder sees the change.
     pub command_aliases: crate::command_alias::SharedAliases,
-    /// codepoint-widths: server-scope ARRAY of Unicode width overrides, one
-    /// entry per element in tmux order (later entries win). Stored as the raw
-    /// entry strings so `show-options` can echo them back verbatim; the parsed
-    /// lookup table lives in the vt100 crate, which is where every width
-    /// decision is made.
-    pub codepoint_widths: Vec<String>,
+    /// codepoint-widths: server-scope ARRAY of Unicode width overrides by
+    /// index (crate::option_array), applied in index order so a later element
+    /// wins. Stored as the entry strings so `show-options` can echo them
+    /// back; the parsed lookup table lives in the vt100 crate, which is where
+    /// every width decision is made.
+    pub codepoint_widths: crate::option_array::OptionArray,
     /// terminal-overrides: server-scope ARRAY of `pattern:cap...` entries by
     /// index, starting as tmux's default `linux*:AX@` (crate::option_array).
     /// The attach client honours smcup/rmcup from it (issue #700, see
@@ -3542,7 +3542,9 @@ impl AppState {
             command_aliases: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::command_alias::CommandAliases::with_defaults(),
             )),
-            codepoint_widths: Vec::new(),
+            codepoint_widths: crate::option_array::OptionArray::with_default(
+                crate::option_array::spec("codepoint-widths").expect("codepoint-widths is in ARRAY_OPTIONS"),
+            ),
             terminal_overrides: crate::option_array::OptionArray::with_default(
                 crate::option_array::spec("terminal-overrides").expect("terminal-overrides is in ARRAY_OPTIONS"),
             ),
