@@ -40,6 +40,12 @@
 //!    as a Ctrl+Alt chord. It is decoded here as the plain letter, with no
 //!    modifiers. This is a policy on the console route: such a record is
 //!    treated as text, and any other Ctrl+Alt shape stays a chord.
+//! 5. Misread on a non Latin layout: Ctrl (no Alt) on a letter key whose
+//!    uChar is non ASCII, or a control character the active layout maps to a
+//!    non ASCII letter. crossterm turns it into that letter (Ctrl+V on Russian
+//!    is Ctrl+м), which has no control code, so the key was lost. It is decoded
+//!    here as Ctrl plus the Latin letter the virtual key names. A Latin layout
+//!    stays crossterm's.
 //!
 //! The seam: every read on the console route goes through
 //! `crossterm::event::poll(Duration::ZERO)`, and with a zero timeout crossterm
@@ -85,6 +91,7 @@ const LEFT_ALT_PRESSED: u32 = 0x0002;
 const RIGHT_CTRL_PRESSED: u32 = 0x0004;
 const LEFT_CTRL_PRESSED: u32 = 0x0008;
 const SHIFT_PRESSED: u32 = 0x0010;
+const CAPSLOCK_ON: u32 = 0x0080;
 
 /// Surrogate pairing state carried between records and between reads, so a
 /// pair split across two `ReadConsoleInputW` batches still decodes.
@@ -148,13 +155,53 @@ fn altgr_ascii_letter(rec: &KeyRec) -> bool {
         && (b'a' as u16..=b'z' as u16).contains(&rec.u_char)
 }
 
+/// Ctrl held without Alt on a letter key (VK_A to VK_Z) that crossterm would
+/// turn into a non ASCII character: a non ASCII uChar, or a control character
+/// (or none) the active layout maps to a non ASCII letter (`layout_char` is
+/// crossterm's ToUnicodeEx lookup). Gives the press or release of Ctrl plus the
+/// Latin letter the virtual key names, cased the way crossterm cases it (Shift
+/// XOR Caps Lock). A Latin layout stays crossterm's.
+fn ctrl_letter(rec: &KeyRec, layout_char: impl Fn(&KeyRec) -> Option<char>) -> Option<Event> {
+    let ctrl = rec.ctrl_state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED) != 0;
+    let alt = rec.ctrl_state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED) != 0;
+    if !ctrl || alt || !(0x41..=0x5A).contains(&rec.vk) {
+        return None;
+    }
+    let u = rec.u_char;
+    let misread = match u {
+        0x80.. => true,
+        0x00..=0x1F => layout_char(rec).is_some_and(|c| !c.is_ascii()),
+        _ => false,
+    };
+    if !misread {
+        return None;
+    }
+    let upper = (rec.ctrl_state & SHIFT_PRESSED != 0) ^ (rec.ctrl_state & CAPSLOCK_ON != 0);
+    let letter = rec.vk as u8 as char;
+    let letter = if upper { letter } else { letter.to_ascii_lowercase() };
+    Some(Event::Key(KeyEvent {
+        code: KeyCode::Char(letter),
+        modifiers: modifiers(rec.ctrl_state),
+        kind: if rec.key_down { KeyEventKind::Press } else { KeyEventKind::Release },
+        state: KeyEventState::empty(),
+    }))
+}
+
 impl ConsoleTap {
     pub fn new() -> Self { Self::default() }
 
     /// Decide on the record at the head of the buffer. `None` is a record that
     /// is not a `KEY_EVENT` (mouse, resize, focus, menu): never ours, and it
-    /// leaves a pending high surrogate alone.
+    /// leaves a pending high surrogate alone. With no layout lookup, every
+    /// layout is taken for Latin.
     pub fn classify(&mut self, rec: Option<KeyRec>) -> Verdict {
+        self.classify_with(rec, |_| None)
+    }
+
+    /// [`Self::classify`] with the active layout's character for a key record
+    /// passed in (crossterm's ToUnicodeEx lookup), so the Ctrl+letter rule can
+    /// be tested without the layouts of the machine it runs on.
+    pub fn classify_with(&mut self, rec: Option<KeyRec>, layout_char: impl Fn(&KeyRec) -> Option<char>) -> Verdict {
         let rec = match rec {
             Some(r) => r,
             None => return Verdict::NotOurs,
@@ -245,6 +292,21 @@ impl ConsoleTap {
             })));
         }
 
+        // Ctrl + a letter key on a non Latin layout. crossterm maps the
+        // control character in uChar back to a letter with ToUnicodeEx on the
+        // active layout, so Ctrl+V on Russian or Ukrainian arrives as Ctrl+м,
+        // which has no control code and never reaches the pane. The virtual
+        // key names the Latin letter in every layout (VK_A is 0x41), so the
+        // letter comes from it. On a Latin layout the result is what crossterm
+        // gives, and an ASCII letter in uChar (a layout that types it) stays
+        // crossterm's.
+        if let Some(ev) = ctrl_letter(&rec, layout_char) {
+            if rec.key_down {
+                self.high = None;
+            }
+            return Verdict::Consumed(Some(ev));
+        }
+
         // Anything else is crossterm's. A character key arriving between two
         // halves breaks the pair, which is what crossterm itself does with its
         // buffer when any other key event comes first.
@@ -287,6 +349,33 @@ mod win {
     }
 }
 
+/// The character the foreground window's layout types on `vk` with no
+/// modifier held: the lookup crossterm 0.29 makes for a Ctrl+letter record
+/// (`get_char_for_key`), so the tap takes exactly the records crossterm would
+/// turn into a non ASCII letter.
+#[cfg(windows)]
+fn layout_char(vk: u16) -> Option<char> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn GetKeyboardLayout(thread: u32) -> isize;
+        fn ToUnicodeEx(vk: u32, scan: u32, state: *const u8, buf: *mut u16, len: i32, flags: u32, hkl: isize) -> i32;
+    }
+    let state = [0u8; 256];
+    let mut buf = [0u16; 4];
+    // 0x4: do not change the kernel keyboard state (dead keys stay pending).
+    let n = unsafe {
+        let hwnd = GetForegroundWindow();
+        let hkl = GetKeyboardLayout(GetWindowThreadProcessId(hwnd, std::ptr::null_mut()));
+        ToUnicodeEx(vk as u32, 0, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 0x4, hkl)
+    };
+    if n != 1 {
+        return None;
+    }
+    char::from_u32(buf[0] as u32)
+}
+
 #[cfg(windows)]
 thread_local! {
     static TAP: std::cell::RefCell<ConsoleTap> = std::cell::RefCell::new(ConsoleTap::new());
@@ -323,7 +412,7 @@ pub(crate) fn take_head() -> Option<Event> {
             } else {
                 None
             };
-            match tap.classify(key) {
+            match tap.classify_with(key, |r| layout_char(r.vk)) {
                 Verdict::NotOurs => return None,
                 Verdict::Consumed(ev) => {
                     // Remove exactly the record just peeked. This thread is the
@@ -363,3 +452,7 @@ mod tests_issue766_alt_code_char;
 #[cfg(test)]
 #[path = "../tests-rs/test_altgr_letter_console_tap.rs"]
 mod tests_altgr_letter_console_tap;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_ctrl_letter_non_latin_layout.rs"]
+mod tests_ctrl_letter_non_latin_layout;
