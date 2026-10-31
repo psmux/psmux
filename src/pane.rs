@@ -4027,115 +4027,6 @@ pub fn xtversion_reply() -> String {
     format!("\x1bP>|{} {}\x1b\\", name.trim(), crate::types::VERSION)
 }
 
-/// The colour and XTVERSION replies to the queries of one read, as one text
-/// for one injection, in the order their queries came.
-///
-/// A terminal answers queries in the order they are asked, and tmux does,
-/// since it answers each as its parser meets it.  When both kinds are in the
-/// read, the XTVERSION reply goes first if its query comes before the first
-/// colour query.  A query split across two reads is not found here, and the
-/// colour replies then go first.
-pub(crate) fn injected_replies(batch: &[u8], colour: &str, xtversion: &str) -> String {
-    let find = |needle: &[u8]| batch.windows(needle.len()).position(|w| w == needle);
-    let xt_at = [&b"\x1b[>q"[..], &b"\x1b[>0q"[..]].iter().filter_map(|n| find(n)).min();
-    let colour_at = [&b"\x1b]10;"[..], &b"\x1b]11;"[..], &b"\x1b]4;"[..], &b"\x1b[?996n"[..]]
-        .iter()
-        .filter_map(|n| find(n))
-        .min();
-    match (xt_at, colour_at) {
-        (Some(x), Some(c)) if x < c => format!("{}{}", xtversion, colour),
-        _ => format!("{}{}", colour, xtversion),
-    }
-}
-
-/// Returns true if `data` contains an XTVERSION query that deserves a reply.
-///
-/// The query is `CSI > Ps q`, and xterm only treats `Ps` of 0 (or an omitted
-/// `Ps`) as "report your version"; other values are cursor-style requests that
-/// must stay unanswered.  tmux applies the same rule -- `input_get(ictx, 0, 0,
-/// 0)` defaults an absent parameter to 0 and replies only for 0.
-///
-/// ConPTY answers DA1, DA2, DSR and DECRQM itself and never forwards them, but
-/// it does not know XTVERSION, so the query arrives in the pane's output stream
-/// verbatim and psmux is the only thing that can answer it.
-///
-/// Only matches whose final `q` lands at offset >= `min_end` count, so the
-/// boundary rescan below can ignore a query it already reported last batch.
-fn scan_xtversion_query_from(data: &[u8], min_end: usize) -> bool {
-    if !data.contains(&0x1b) { return false; }
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        if data[i] != 0x1b || data[i + 1] != b'[' || data[i + 2] != b'>' {
-            i += 1;
-            continue;
-        }
-        let params_start = i + 3;
-        let mut j = params_start;
-        while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
-            j += 1;
-        }
-        if j < data.len() && data[j] == b'q' && j >= min_end {
-            let params = &data[params_start..j];
-            let first = match params.iter().position(|&c| c == b';') {
-                Some(p) => &params[..p],
-                None => params,
-            };
-            if first.is_empty() || first.iter().all(|&c| c == b'0') {
-                return true;
-            }
-        }
-        i = params_start;
-    }
-    false
-}
-
-/// `scan_xtversion_query_from` over a whole batch.
-fn scan_xtversion_query(data: &[u8]) -> bool {
-    scan_xtversion_query_from(data, 0)
-}
-
-/// Detects an XTVERSION query split across two reads, the same way
-/// `CprScanner` does for ESC[6n.  The reader thread hands the scanner whatever
-/// one `read()` returned, so a query that straddles the boundary would
-/// otherwise go unanswered and the asking program would sit through its whole
-/// timeout.
-struct XtversionScanner {
-    tail: Vec<u8>,
-}
-
-impl XtversionScanner {
-    /// One less than the longest query worth carrying: `ESC [ > 0 q` is five
-    /// bytes, and a few more cover a parameter list such as `ESC [ > 0 ; 0 q`.
-    const KEEP: usize = 15;
-
-    fn new() -> Self {
-        Self { tail: Vec::with_capacity(Self::KEEP) }
-    }
-
-    fn scan(&mut self, batch: &[u8]) -> bool {
-        let mut hit = scan_xtversion_query(batch);
-        if !hit && !self.tail.is_empty() {
-            let mut boundary = self.tail.clone();
-            let tail_len = boundary.len();
-            boundary.extend_from_slice(&batch[..batch.len().min(Self::KEEP)]);
-            // Only a query whose final `q` lands in the new batch is new; one
-            // sitting entirely in the carried tail was answered last batch, and
-            // answering it twice would hand the asking program a second reply
-            // it never asked for.
-            hit = scan_xtversion_query_from(&boundary, tail_len);
-        }
-        if batch.len() >= Self::KEEP {
-            self.tail.clear();
-            self.tail.extend_from_slice(&batch[batch.len() - Self::KEEP..]);
-        } else {
-            self.tail.extend_from_slice(batch);
-            let excess = self.tail.len().saturating_sub(Self::KEEP);
-            self.tail.drain(..excess);
-        }
-        hit
-    }
-}
-
 // ─── Issue #597: DA1, DA2, DSR and DECRQM, answered by psmux like tmux ───
 //
 // The inbox Windows console host answers these four itself and never forwards
@@ -4318,6 +4209,152 @@ fn window_report(op: u16, rows: u16, cols: u16) -> String {
     }
 }
 
+/// The sixteen ANSI colours of a pane's own palette (OSC 4, issue #685).
+fn palette16(screen: &vt100::Screen) -> [Option<(u8, u8, u8)>; 16] {
+    let mut entries: [Option<(u8, u8, u8)>; 16] = [None; 16];
+    for (i, slot) in entries.iter_mut().enumerate() {
+        *slot = screen.palette_entry(u8::try_from(i).unwrap_or(0));
+    }
+    entries
+}
+
+/// Where a reply goes when it cannot be injected into the child's console:
+/// the way it went before every reply was injected in query order, so a
+/// failed injection loses nothing it did not lose before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplyFallback {
+    /// Down the pane's PTY input, written by the server loop
+    /// (`types::push_device_reply`).  A CSI reply arrives intact that way.
+    Pipe,
+    /// To the server loop's colour path (issue #473) as this
+    /// `color_query_pending` bit, which writes the scheme reply down the PTY
+    /// and tries the OSC replies again.
+    Colour(u32),
+    /// Nothing else carries it, so it is logged as lost: a DCS written to a
+    /// pane's input pipe arrives as a bare ESC with its body eaten (#597).
+    Lost(&'static str),
+}
+
+/// One reply to one query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneReply {
+    pub text: String,
+    pub fallback: ReplyFallback,
+    /// The console host asked, not the child, so the reply goes down the
+    /// PTY and never into the child's console.  The console host is the
+    /// conhost or OpenConsole between psmux and the child, not the outer
+    /// terminal that `HostColors` describes.
+    pub console_host: bool,
+}
+
+/// The replies to one batch's queries, one per query in the order they were
+/// asked, the way tmux answers each query as its parser meets it
+/// (`input_reply`, input.c:1176-1193 in tmux 3.8).  `colours` are the outer
+/// terminal's, as its client reported them; a palette query carries the
+/// pane's own entry as it stood at the query, which wins (issue #685).
+///
+/// The first DA1 a pane sees is the console host's own, and
+/// `console_host_da1_open` says it is still to come.  OpenConsole opens every
+/// pane by writing `ESC[1t ESC[c` and parks the child in its console connect
+/// until the DA1 answer arrives on the input pipe, so that answer has to go
+/// down the PTY; trying the child's console first never succeeded, as the
+/// injection is refused (the console is not reading VT input yet) or the
+/// attach fails, and only put the answer off.  The child cannot ask anything
+/// before it is connected, so its own DA1 is never the first one, and the
+/// inbox console host answers a program's DA1 itself and never passes one on.
+///
+/// The one reply nobody asked for is the Copilot CLI colour burst's (issue
+/// #473): it asks `?996n`, OSC 10, OSC 11 and OSC 4 for 0 to 15 together and
+/// waits for all of them, but the inbox console host drops the OSC 10 and 11
+/// queries.  So when index 0 is asked and the batch did not ask for the
+/// foreground or the background itself, that reply goes in just before the
+/// index 0 one, where the burst asked for it.
+pub(crate) fn pane_replies(
+    queries: &[DeviceQuery],
+    st: &DecrqmState,
+    colours: &crate::types::HostColors,
+    console_host_da1_open: &mut bool,
+) -> Vec<PaneReply> {
+    use crate::server::helpers::{background_reply, foreground_reply, palette_reply, scheme_reply};
+    use crate::types::{COLOR_QUERY_BG, COLOR_QUERY_FG, COLOR_QUERY_SCHEME};
+    let colour = |text: Option<String>, bit: u32| {
+        text.map(|text| PaneReply { text, fallback: ReplyFallback::Colour(bit), console_host: false })
+    };
+    let fg = || colour(foreground_reply(colours), COLOR_QUERY_FG);
+    let bg = || colour(background_reply(colours), COLOR_QUERY_BG);
+    let mut burst = !queries.contains(&DeviceQuery::ForegroundColour)
+        || !queries.contains(&DeviceQuery::BackgroundColour);
+    let mut out = Vec::with_capacity(queries.len());
+    for &q in queries {
+        let reply = match q {
+            DeviceQuery::Xtversion => Some(PaneReply {
+                text: xtversion_reply(),
+                fallback: ReplyFallback::Lost("XTVERSION"),
+                console_host: false,
+            }),
+            DeviceQuery::ColourScheme => colour(Some(scheme_reply(colours)), COLOR_QUERY_SCHEME),
+            DeviceQuery::ForegroundColour => fg(),
+            DeviceQuery::BackgroundColour => bg(),
+            DeviceQuery::PaletteColour { index, own } => {
+                let i = usize::from(index);
+                if i == 0 && burst {
+                    burst = false;
+                    if !queries.contains(&DeviceQuery::ForegroundColour) { out.extend(fg()); }
+                    if !queries.contains(&DeviceQuery::BackgroundColour) { out.extend(bg()); }
+                }
+                colour(palette_reply(i, colours, own), 1 << i)
+            }
+            _ => {
+                let console_host = q == DeviceQuery::Da1 && std::mem::take(console_host_da1_open);
+                Some(device_reply(q, st))
+                    .filter(|text| !text.is_empty())
+                    .map(|text| PaneReply { text, fallback: ReplyFallback::Pipe, console_host })
+            }
+        };
+        out.extend(reply);
+    }
+    out
+}
+
+/// Deliver one batch's replies: the child's with one injection, in order,
+/// and the console host's down the PTY.  When the injection fails, or there
+/// is no child pid to inject into, each of the child's replies goes its
+/// `ReplyFallback` way, the PTY ones in order with the console host's; the caller's
+/// pass then wakes the server loop to write them.
+fn deliver_replies(
+    pane_id: usize,
+    child_pid: Option<u32>,
+    replies: &[PaneReply],
+    color_query_pending: &std::sync::atomic::AtomicU32,
+) {
+    let text: String = replies.iter().filter(|r| !r.console_host).map(|r| r.text.as_str()).collect();
+    let delivered = !text.is_empty() && match child_pid {
+        Some(pid) => crate::platform::mouse_inject::send_vt_reply(pid, &text),
+        None => false,
+    };
+    let mut pipe: Vec<u8> = Vec::new();
+    let mut bits: u32 = 0;
+    for r in replies {
+        if r.console_host {
+            pipe.extend_from_slice(r.text.as_bytes());
+            continue;
+        }
+        if delivered { continue; }
+        match r.fallback {
+            ReplyFallback::Pipe => pipe.extend_from_slice(r.text.as_bytes()),
+            ReplyFallback::Colour(bit) => bits |= bit,
+            ReplyFallback::Lost(kind) => {
+                crate::platform::mouse_inject::log_lost_reply(child_pid, kind, r.text.len());
+            }
+        }
+    }
+    crate::types::push_device_reply(pane_id, pipe);
+    if bits != 0 {
+        color_query_pending.fetch_or(bits, Ordering::AcqRel);
+        crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
+    }
+}
+
 // Test adapter exercises the same query capture used by the parser thread.
 #[cfg(test)]
 pub(crate) fn scan_device_queries(data: &[u8]) -> Vec<DeviceQuery> {
@@ -4389,101 +4426,6 @@ impl CprScanner {
             self.tail.drain(..excess);
         }
         hit
-    }
-}
-
-/// Issue #473: scan a byte region for terminal color queries emitted by the
-/// pane's child and return the matching `color_query_pending` bitmask.
-/// Recognized queries (all observed passing through ConPTY's output pipe):
-///   OSC 4;<i>;?  → bit i (0-15)      palette entry query
-///   OSC 10;?     → COLOR_QUERY_FG    foreground query
-///   OSC 11;?     → COLOR_QUERY_BG    background query
-///   CSI ?996n    → COLOR_QUERY_SCHEME light/dark query
-/// Only matches whose final byte lands at offset >= `min_end` are counted —
-/// the boundary rescan uses this so a match fully inside the carried tail
-/// (already reported last batch) is not double-counted, which would trigger
-/// a duplicate response after the first one was drained.
-fn scan_color_queries(data: &[u8], min_end: usize) -> u32 {
-    if !data.contains(&0x1b) { return 0; }
-    let mut bits: u32 = 0;
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] != 0x1b { i += 1; continue; }
-        let rest = &data[i..];
-        // CSI ?996n  (light/dark scheme query)
-        const SCHEME: &[u8] = b"\x1b[?996n";
-        if rest.starts_with(SCHEME) {
-            if i + SCHEME.len() > min_end { bits |= crate::types::COLOR_QUERY_SCHEME; }
-            i += SCHEME.len();
-            continue;
-        }
-        // OSC 10;? / OSC 11;?  (fg/bg query)
-        for (pat, bit) in [(&b"\x1b]10;?"[..], crate::types::COLOR_QUERY_FG),
-                           (&b"\x1b]11;?"[..], crate::types::COLOR_QUERY_BG)] {
-            if rest.starts_with(pat) && i + pat.len() > min_end {
-                bits |= bit;
-            }
-        }
-        // OSC 4;<index>;?  (palette query)
-        const OSC4: &[u8] = b"\x1b]4;";
-        if rest.starts_with(OSC4) {
-            let mut j = OSC4.len();
-            let mut idx: u32 = 0;
-            let mut digits = 0;
-            while j < rest.len() && rest[j].is_ascii_digit() && digits < 3 {
-                idx = idx * 10 + (rest[j] - b'0') as u32;
-                j += 1;
-                digits += 1;
-            }
-            if digits > 0 && j + 1 < rest.len() && rest[j] == b';' && rest[j + 1] == b'?' {
-                if idx < 16 && i + j + 2 > min_end {
-                    bits |= 1 << idx;
-                }
-                i += j + 2;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    bits
-}
-
-/// Cross-batch detector for color queries, same rationale as `CprScanner`:
-/// a query split across two coalesced batches is invisible to a per-batch
-/// scan.  Carries the last KEEP bytes and rescans the boundary, counting only
-/// matches that end inside the new batch.
-struct ColorQueryScanner {
-    tail: Vec<u8>,
-}
-
-impl ColorQueryScanner {
-    /// One less than the longest query (`\x1b]4;15;?` = 9 bytes).
-    const KEEP: usize = 8;
-
-    fn new() -> Self {
-        Self { tail: Vec::with_capacity(Self::KEEP) }
-    }
-
-    fn scan(&mut self, batch: &[u8]) -> u32 {
-        let mut bits = scan_color_queries(batch, 0);
-        if !self.tail.is_empty() {
-            let mut boundary = self.tail.clone();
-            let tail_len = boundary.len();
-            boundary.extend_from_slice(&batch[..batch.len().min(Self::KEEP)]);
-            // Only count matches that END past the carried tail — anything
-            // fully inside the tail was already reported last batch.  A match
-            // ends past the tail when its exclusive end exceeds tail_len.
-            bits |= scan_color_queries(&boundary, tail_len);
-        }
-        if batch.len() >= Self::KEEP {
-            self.tail.clear();
-            self.tail.extend_from_slice(&batch[batch.len() - Self::KEEP..]);
-        } else {
-            self.tail.extend_from_slice(batch);
-            let excess = self.tail.len().saturating_sub(Self::KEEP);
-            self.tail.drain(..excess);
-        }
-        bits
     }
 }
 
@@ -4564,91 +4506,20 @@ pub fn spawn_reader_thread(
         }
         let mut local = vec![0u8; 65536];
         let mut zero_reads: u32 = 0;
-        let mut color_scanner = ColorQueryScanner::new();
-        let mut xtversion_scanner = XtversionScanner::new();
         loop {
             match reader.read(&mut local) {
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
                     crate::pty_trace::mark("r", pane_id, &local[..n]);
-                    // Issue #556: answer terminal color queries (OSC 4/10/11,
-                    // CSI ?996n, issue #473) HERE, straight off the read,
-                    // rather than signaling the server loop.  The old
-                    // parser-thread detection + server-loop answer added
-                    // 1-8ms of coalescing plus a loop tick, landing the
-                    // reply after a startup probe's read window (closed by
-                    // ConPTY's own DA1 auto-answer) — yazi then re-parsed
-                    // the late reply as an interactive `shell` action.  The
-                    // scan is one `memchr` for ESC when no query is present.
-                    // Issue #597: answer XTVERSION (`CSI > q`) here too, for the
-                    // same reason the colour queries are answered off the read:
-                    // the asking program (Claude Code sends it three times at
-                    // startup, WezTerm and others send it once) gives the
-                    // terminal a short window and then decides it is talking to
-                    // something featureless.  The reply goes in as console
-                    // input rather than down the PTY writer because the ConPTY
-                    // is created with PSEUDOCONSOLE_WIN32_INPUT_MODE, where a
-                    // raw VT response wedges the Win32 input parser (issue
-                    // #313, see conpty_preemptive_dsr_response).
-                    //
-                    // No pipe fallback here, decided by measurement rather
-                    // than by symmetry with the colour path (issue #597): a
-                    // DCS written to a live pane's input pipe on build 26200
-                    // arrives as a bare ESC with its body eaten, so a fallback
-                    // would deliver no reply AND hand the pane a spurious
-                    // Escape keypress.  A failed injection is logged instead.
-                    //
-                    // Both go in with one injection, the replies in the order
-                    // their queries came (`injected_replies`).  Two injections
-                    // attached to the child's console twice, and the second,
-                    // the XTVERSION answer, was now and then lost.
-                    let color_query_bits = color_scanner.scan(&local[..n]);
-                    let xtversion = xtversion_scanner.scan(&local[..n]);
-                    if color_query_bits != 0 || xtversion {
-                        let colors = crate::types::shared_host_colors();
-                        let colour = crate::server::helpers::color_replies_text(
-                            color_query_bits, &colors, pane_id,
-                        );
-                        let xt = if xtversion { xtversion_reply() } else { String::new() };
-                        let text = injected_replies(&local[..n], &colour, &xt);
-                        let delivered = text.is_empty() || match child_pid {
-                            Some(pid) => crate::platform::mouse_inject::send_vt_reply(pid, &text),
-                            None => false,
-                        };
-                        if !delivered && color_query_bits != 0 {
-                            // Injection unavailable (no child pid, or a
-                            // non-Windows build): keep the #473 server-loop
-                            // pipe path as delivery of record.
-                            color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
-                            crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
-                            // The server loop drains these bits only on a pass
-                            // that saw pane data, and the parser thread has
-                            // usually announced THIS read already: it wakes the
-                            // loop within its coalescing wait, while a refused
-                            // attach above can take longer than that.  The loop
-                            // then finds nothing pending, and a program blocked
-                            // on the reply prints nothing more to trigger
-                            // another pass, so the pipe reply never went out
-                            // (issue #597).  Ask for the pass ourselves.
-                            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
-                            crate::types::wake_server_loop();
-                        }
-                        if !delivered && xtversion {
-                            crate::platform::mouse_inject::log_lost_reply(
-                                child_pid, "XTVERSION", xt.len(),
-                            );
-                        }
-                    }
-                    // Push raw bytes into staging (no parser lock involved)
-                    // only now, after the colour and XTVERSION answers above
-                    // are in the console's input.  The parser thread finds
-                    // DA1, DSR and DECRQM in these bytes and the server loop
-                    // writes their answers down the PTY, a path that can beat
-                    // the injection above: with a client attached it did on
-                    // every probe, and a program that takes the DA1 answer
-                    // as the end of its replies (yazi) gave up on the rest.
-                    // Handing the bytes over after the injection answers the
-                    // queries of one read in the order they were asked.
+                    // Push raw bytes into staging (no parser lock involved).
+                    // Every query in them, the colour and XTVERSION ones
+                    // included, is found and answered by the parser thread,
+                    // in the order the queries were asked (`pane_replies`).
+                    // They used to be answered here, straight off the read,
+                    // while DA1, DSR and DECRQM went down the PTY from the
+                    // server loop, so the two kinds raced (issue #930); one
+                    // place answering them all costs nothing measurable, as
+                    // the time goes on the injection itself.
                     let (lock, cv) = &*staging_r;
                     if let Ok(mut buf) = lock.lock() {
                         buf.extend_from_slice(&local[..n]);
@@ -4717,14 +4588,14 @@ pub fn spawn_reader_thread(
     thread::spawn(move || {
         let mut cpr_scanner = CprScanner::new();
         let mut query_detector = vt100::QueryDetector::default();
-        // Issue #597: DA1/DA2/DSR/DECRQM are answered from THIS thread, not
-        // the reader thread the XTVERSION and colour answers live on, because
-        // a DECRQM answer has to report the pane's mode state as of the bytes
-        // that carried the query.  Here the state is one lock away and already
-        // up to date; in the reader thread it would be a batch stale.  The
-        // latency that pushed XTVERSION into the reader thread does not bite
-        // either: a console host's opening `ESC[1t ESC[c` is 31 bytes, far
-        // under ECHO_CHUNK_MAX, so it skips the coalescing wait entirely.
+        // Every query a pane asks is answered from THIS thread, in the order
+        // the parser meets them (`pane_replies`), as tmux answers each one
+        // from its parser.  A DECRQM answer has to report the pane's mode
+        // state as of the bytes that carried the query, and here the state is
+        // one lock away and already up to date.  Answering here costs no
+        // latency worth having back: a probe is far under ECHO_CHUNK_MAX, so
+        // it skips the coalescing wait, and measured from the read the
+        // injection was done in 2 to 3 ms here and in the reader thread alike.
         // Query capture is armed per batch below, not once here: clear-history
         // swaps a fresh `vt100::Parser` into this same mutex, and a flag set
         // once would leave the pane unanswered for the rest of its life.
@@ -4735,6 +4606,9 @@ pub fn spawn_reader_thread(
         let mut published_palette_gen: u64 = u64::MAX;
         // DECSET 2026: output held back between `ESC[?2026h` and `ESC[?2026l`.
         let mut sync_gate = SyncGate::new();
+        // The first DA1 of a pane is the console host's own, answered down
+        // the PTY (`pane_replies`).
+        let mut console_host_da1_open = true;
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -4865,21 +4739,15 @@ pub fn spawn_reader_thread(
                     bell_pending.store(true, Ordering::Release);
                 }
                 // Issue #685: mirror the low sixteen OSC 4 entries out for the
-                // colour query responder, which runs in the reader thread and
-                // cannot take this lock.  The generation check makes this free
-                // for every pane that never sets a palette, and near free for
-                // one that sets it once at startup the way conhost does.
+                // server loop's colour path, which answers when an injection
+                // fails and cannot take this lock.  The generation check makes
+                // this free for every pane that never sets a palette, and near
+                // free for one that sets it once at startup the way conhost
+                // does.
                 let gen = parser.screen().palette_generation();
                 if gen != published_palette_gen {
                     published_palette_gen = gen;
-                    let screen = parser.screen();
-                    let mut entries: [Option<(u8, u8, u8)>; 16] = [None; 16];
-                    for (i, slot) in entries.iter_mut().enumerate() {
-                        *slot = screen.palette_entry(
-                            u8::try_from(i).unwrap_or(0),
-                        );
-                    }
-                    crate::types::publish_pane_palette(pane_id, entries);
+                    crate::types::publish_pane_palette(pane_id, palette16(parser.screen()));
                 }
             }
             // When TUI sends RMCUP, reset cursor shape so it doesn't
@@ -4894,24 +4762,23 @@ pub fn spawn_reader_thread(
                 cpr_pending.store(true, Ordering::Release);
                 crate::types::CPR_DATA_PENDING.store(true, Ordering::Release);
             }
-            // Issue #597: hand the composed DA1/DA2/DSR/DECRQM answers to the
-            // server loop, which owns this pane's PTY writer.  The wake at the
-            // bottom of this pass is what gets them written; on a pane launch
-            // that is the difference between a prompt at 0.7 s and one at
-            // 3.8 s, because OpenConsole parks the child's console connect
-            // until its own `ESC[c` is answered.
+            // Answer this batch's queries in the order they were asked, with
+            // one injection.  Anything that cannot be injected goes the way it
+            // went before (`ReplyFallback`), to the server loop this pass wakes
+            // below.  So does the console host's own first DA1, which on a pane
+            // launch is the difference between a prompt at 0.7 s and one at
+            // 3.8 s (issue #597).
             if !device_queries.is_empty() {
-                let st = decrqm_state.unwrap_or_default();
-                let mut reply: Vec<u8> = Vec::new();
-                for q in &device_queries {
-                    reply.extend_from_slice(device_reply(*q, &st).as_bytes());
+                if device_queries.len() >= vt100::MAX_PENDING_QUERIES {
+                    crate::platform::mouse_inject::log_query_bound(pane_id, vt100::MAX_PENDING_QUERIES);
                 }
-                crate::types::push_device_reply(pane_id, reply);
+                let st = decrqm_state.unwrap_or_default();
+                let colours = crate::types::shared_host_colors();
+                let replies = pane_replies(
+                    &device_queries, &st, &colours, &mut console_host_da1_open,
+                );
+                deliver_replies(pane_id, child_pid, &replies, &color_query_pending);
             }
-            // Issue #473 color queries are scanned and answered in the READER
-            // thread above (issue #556): the coalescing wait this thread runs
-            // before parsing is exactly the latency that made replies miss
-            // startup probe windows.
             dv_writer.fetch_add(1, Ordering::Release);
             crate::types::PTY_DATA_READY.store(true, Ordering::Release);
             crate::pty_trace::mark("p", pane_id, &bytes);

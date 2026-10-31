@@ -1,15 +1,23 @@
-// reply_order_probe.exe <outFile>
+// reply_order_probe.exe <outFile> [queries]
 //
 // Asks the console what a terminal probe asks (yazi sends these at start up)
 // in one write: XTVERSION `ESC [ > q`, OSC 11 `ESC ] 11 ; ? ESC \`, the cell
 // size `ESC [ 16 t` and DA1 `ESC [ c`, the last being what such programs take
-// as the end of the replies.  Reads console input for two seconds and writes
-// the replies in the order they arrived, one name per line:
+// as the end of the replies.  `queries`, when given, is written instead, with
+// `\e` standing for ESC and `\a` for BEL.  Reads console input for two
+// seconds and writes the replies in the order they arrived, one name per
+// line:
 //
 //   XTVERSION  ESC P > | ... ESC \
+//   OSC10      ESC ] 10 ; ... ESC \
 //   OSC11      ESC ] 11 ; ... ESC \
+//   OSC4:n     ESC ] 4 ; n ; ... ESC \
+//   SCHEME     ESC [ ? 997 ; n n
 //   CELL       ESC [ 6 ; h ; w t
+//   AREA       ESC [ 4 ; h ; w t
 //   DA1        ESC [ ? ... c
+//
+// Anything else is written as it came, with ESC shown as `\e`.
 //
 // Compile: csc /nologo /optimize /out:reply_order_probe.exe reply_order_probe.cs
 using System;
@@ -42,7 +50,10 @@ class ReplyOrderProbe
         // Raw, with VT input, as a program that reads replies sets it.
         SetConsoleMode(hin, (orig & ~0x7u) | 0x200);
         uint om; GetConsoleMode(hout, out om); SetConsoleMode(hout, om | 0x4);
-        byte[] q = Encoding.ASCII.GetBytes("\x1b[>q\x1b]11;?\x1b\\\x1b[16t\x1b[c");
+        string queries = args.Length > 1
+            ? args[1].Replace("\\e", "\x1b").Replace("\\a", "\x07")
+            : "\x1b[>q\x1b]11;?\x1b\\\x1b[16t\x1b[c";
+        byte[] q = Encoding.ASCII.GetBytes(queries);
         uint w; WriteFile(hout, q, (uint)q.Length, out w, IntPtr.Zero);
         var got = new StringBuilder();
         var recs = new INPUT_RECORD[64];
@@ -57,10 +68,20 @@ class ReplyOrderProbe
         }
         SetConsoleMode(hin, orig);
         var names = new List<string>();
-        foreach (Match m in Regex.Matches(got.ToString(), "\x1bP>\\|[^\x1b]*\x1b\\\\|\x1b\\]11;[^\x1b\x07]*(\x1b\\\\|\x07)|\x1b\\[6;\\d+;\\d+t|\x1b\\[\\?[\\d;]*c"))
+        foreach (Match m in Regex.Matches(got.ToString(), "\x1bP[^\x1b]*\x1b\\\\|\x1b\\][^\x1b\x07]*(\x1b\\\\|\x07)|\x1b\\[[0-?]*[ -/]*[@-~]"))
         {
             string v = m.Value;
-            names.Add(v.StartsWith("\x1bP") ? "XTVERSION" : v.StartsWith("\x1b]") ? "OSC11" : v.EndsWith("t") ? "CELL" : "DA1");
+            Match osc4 = Regex.Match(v, "^\x1b\\]4;(\\d+);");
+            names.Add(
+                v.StartsWith("\x1bP>|") ? "XTVERSION"
+                : v.StartsWith("\x1b]10;") ? "OSC10"
+                : v.StartsWith("\x1b]11;") ? "OSC11"
+                : osc4.Success ? "OSC4:" + osc4.Groups[1].Value
+                : v.StartsWith("\x1b[?997;") ? "SCHEME"
+                : Regex.IsMatch(v, "^\x1b\\[6;\\d+;\\d+t$") ? "CELL"
+                : Regex.IsMatch(v, "^\x1b\\[4;\\d+;\\d+t$") ? "AREA"
+                : Regex.IsMatch(v, "^\x1b\\[\\?[\\d;]*c$") ? "DA1"
+                : v.Replace("\x1b", "\\e"));
         }
         File.WriteAllText(args[0], string.Join("\n", names) + "\n");
     }

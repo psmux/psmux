@@ -302,22 +302,20 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // ---- OSC 4 : set one or more palette entries (issue #685) ----
             // `\e]4;<i>;<colour>[;<i>;<colour>]*\e\\`.  vte splits on ';', so
             // the pairs arrive as flat params.  tmux parses exactly the same
-            // shape in `input_osc_4` (input.c:2927).  A `?` spec is a QUERY,
-            // which psmux answers on the raw output scan in the pane reader
-            // thread (pane.rs `scan_color_queries`, issue #473), preferring
-            // this pane's own entry when it has one; nothing to do here.
+            // shape in `input_osc_4` (input.c:2927), and so does
+            // `palette_pairs`, which stops at a bad index (input.c:2941
+            // `bad = 1; break;`).  A `?` for one of the sixteen ANSI colours
+            // is a QUERY, taken in the order written with the pane's own entry
+            // as it stands at that pair, so a set before it in the same OSC
+            // is what it reports, as in tmux.  psmux answers it in stream
+            // order with the other queries (issue #473).
             [b"4", rest @ ..] if !rest.is_empty() => {
-                let mut i = 0usize;
-                while i + 1 < rest.len() {
-                    let Some(idx) = crate::palette::parse_palette_index(rest[i])
-                    else {
-                        // tmux stops the whole sequence on a bad index
-                        // (input.c:2941 `bad = 1; break;`).
-                        break;
-                    };
-                    let spec = rest[i + 1];
-                    i += 2;
+                for (idx, spec) in crate::queries::palette_pairs(rest) {
                     if spec == b"?" {
+                        if crate::queries::is_palette_query(idx, spec) {
+                            let own = self.screen.palette_entry(idx);
+                            self.screen.query(crate::TerminalQuery::PaletteColour { index: idx, own });
+                        }
                         continue;
                     }
                     if let Some(rgb) = crate::palette::parse_x11_colour(spec) {

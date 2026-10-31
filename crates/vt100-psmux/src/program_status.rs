@@ -322,6 +322,24 @@ pub enum TerminalQuery {
     DecrqmAnsi(u16),
     /// XTWINOPS pixel size report request (`CSI 14 t`, `15`, `16`).
     WindowReport(u16),
+    /// XTVERSION (`CSI > q`, `CSI > 0 q`).
+    Xtversion,
+    /// Light or dark colour scheme (`CSI ? 996 n`).
+    ColourScheme,
+    /// Default foreground colour (`OSC 10 ; ?`).
+    ForegroundColour,
+    /// Default background colour (`OSC 11 ; ?`).
+    BackgroundColour,
+    /// One of the sixteen ANSI palette colours (an `index ; ?` pair of an
+    /// `OSC 4`).
+    PaletteColour {
+        /// The palette index asked for, 0 to 15.
+        index: u8,
+        /// The pane's own entry for it when the query was met, set by an
+        /// earlier `OSC 4`, so the reply is the colour at that point of the
+        /// stream, as tmux's `input_osc_4` answers it.
+        own: Option<(u8, u8, u8)>,
+    },
 }
 
 /// The fixed capability reply contains no application-controlled text.

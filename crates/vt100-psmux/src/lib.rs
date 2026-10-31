@@ -74,7 +74,7 @@ pub use image::SixelImage;
 pub use palette::{parse_palette_index, parse_x11_colour, ColourPalette};
 pub use parser::Parser;
 pub use perform::{input_buffer_size, set_input_buffer_size, DEFAULT_INPUT_BUFFER_SIZE};
-pub use queries::QueryDetector;
+pub use queries::{QueryDetector, MAX_PENDING_QUERIES};
 pub use program_status::{ProgramKind, ProgramRecord, ProgramState, ProgramStatus, ProgramStatuses, TerminalQuery, PROGRAM_STATUS_REPLY};
 pub use screen::{extended_keys_option, set_extended_keys_option, xtmodkeys_off_mode, xtmodkeys_set_mode, MouseProtocolEncoding, MouseProtocolMode, Screen};
 pub use width::{
