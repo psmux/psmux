@@ -1160,8 +1160,13 @@ impl Screen {
         std::mem::take(&mut self.pending_queries)
     }
 
+    /// Queries past [`crate::MAX_PENDING_QUERIES`] before the host drains them
+    /// are not captured, so pane output cannot make the host build and send
+    /// replies without bound.
     pub(crate) fn query(&mut self, query: crate::TerminalQuery) {
-        if self.capture_queries { self.pending_queries.push(query); }
+        if self.capture_queries && self.pending_queries.len() < crate::MAX_PENDING_QUERIES {
+            self.pending_queries.push(query);
+        }
     }
 
     /// Returns the most recent OSC 9;4 progress indicator state, if any.

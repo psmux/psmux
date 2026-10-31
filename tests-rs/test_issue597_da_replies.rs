@@ -97,8 +97,9 @@ fn dsr_six_is_left_to_the_cpr_responder() {
 }
 
 #[test]
-fn csi_996n_is_left_to_the_colour_responder() {
-    assert!(scan_device_queries(b"\x1b[?996n").is_empty());
+fn csi_996n_is_the_colour_scheme_query() {
+    // Found here with the device queries, so it is answered in their order.
+    assert_eq!(scan_device_queries(b"\x1b[?996n"), vec![DeviceQuery::ColourScheme]);
 }
 
 #[test]
@@ -140,9 +141,10 @@ fn a_decset_is_not_a_decrqm() {
 }
 
 #[test]
-fn xtversion_is_not_swept_up_by_this_scanner() {
-    // `CSI > 0 q` belongs to the XTVERSION responder in the reader thread.
-    assert!(scan_device_queries(b"\x1b[>0q").is_empty());
+fn xtversion_is_found_with_the_device_queries() {
+    // Found here, not by a scanner of its own, so it is answered in order
+    // with DA1 and the rest.
+    assert_eq!(scan_device_queries(b"\x1b[c\x1b[>0q"), vec![DeviceQuery::Da1, DeviceQuery::Xtversion]);
 }
 
 #[test]

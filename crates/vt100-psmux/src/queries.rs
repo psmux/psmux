@@ -1,5 +1,12 @@
 use crate::TerminalQuery;
 
+/// The most queries a screen captures between two drains
+/// ([`crate::Screen::take_queries`]).  Each is answered, so without a bound a
+/// few bytes of pane output each (`ESC [ c` is three) would have the host
+/// build and deliver replies without limit.  A real probe asks far fewer:
+/// Copilot CLI's colour burst is 19.
+pub const MAX_PENDING_QUERIES: usize = 256;
+
 pub(crate) fn csi_query(
     params: &vte::Params,
     intermediates: &[u8],
@@ -23,6 +30,11 @@ pub(crate) fn csi_query(
         // answer them itself: the inbox console host answers them and does
         // not forward them, an OpenConsole forwards them unanswered.
         ('t', [], op @ (14 | 15 | 16 | 18 | 19)) => Some(TerminalQuery::WindowReport(op)),
+        // XTVERSION, which tmux answers only for a first parameter of 0 or
+        // none (INPUT_CSI_XDA, input.c:1884 in tmux 3.8): `CSI > 1 q` is not
+        // a version request.
+        ('q', [b'>'], 0) => Some(TerminalQuery::Xtversion),
+        ('n', [b'?'], 996) => Some(TerminalQuery::ColourScheme),
         _ => None,
     }
 }
@@ -30,7 +42,36 @@ pub(crate) fn csi_query(
 pub(crate) fn osc_query(params: &[&[u8]], program_status: bool) -> Option<TerminalQuery> {
     match params {
         [b"7501", b"?"] if program_status => Some(TerminalQuery::ProgramStatus),
+        [b"10", b"?"] => Some(TerminalQuery::ForegroundColour),
+        [b"11", b"?"] => Some(TerminalQuery::BackgroundColour),
+        // OSC 4 can hold several queries among its sets, so the live parser
+        // takes them pair by pair (`palette_pairs`), not here.
         _ => None,
+    }
+}
+
+/// The `index ; colour` pairs of an `OSC 4` after the `4`, in the order
+/// written, read as tmux's `input_osc_4` reads them (input.c:2935-2963 in
+/// tmux 3.8): a bad index, or an index with no colour after it, ends them.
+pub(crate) fn palette_pairs<'a>(
+    rest: &'a [&'a [u8]],
+) -> impl Iterator<Item = (u8, &'a [u8])> + 'a {
+    rest.chunks_exact(2)
+        .map_while(|pair| crate::palette::parse_palette_index(pair[0]).map(|i| (i, pair[1])))
+}
+
+/// Whether an `OSC 4` pair asks for a colour psmux answers: a `?` for one
+/// of the sixteen ANSI colours, the ones it knows the outer terminal's
+/// values for.
+pub(crate) fn is_palette_query(index: u8, spec: &[u8]) -> bool {
+    spec == b"?" && index < 16
+}
+
+/// Whether an OSC asks for any palette colour psmux answers.
+fn asks_palette(params: &[&[u8]]) -> bool {
+    match params {
+        [b"4", rest @ ..] => palette_pairs(rest).any(|(i, spec)| is_palette_query(i, spec)),
+        _ => false,
     }
 }
 
@@ -77,6 +118,6 @@ impl vte::Perform for ReplyRequests {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.pending |= osc_query(params, self.program_status).is_some();
+        self.pending |= osc_query(params, self.program_status).is_some() || asks_palette(params);
     }
 }
