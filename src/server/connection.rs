@@ -3019,7 +3019,11 @@ loop {
     if write_stream.take_error() && !persistent {
         pending_chain.clear();
     }
-    // Check pending chained commands before reading from socket
+    // Check pending chained commands before reading from socket. A line
+    // still in `line` here is run again, so every arm that ends with
+    // `continue` clears it first; one that does not runs its command again
+    // on every turn and never reads the client's next line (an error popup
+    // reopened for ever on a persistent connection, #943).
     let mut from_list = false;
     if !pending_chain.is_empty() {
         line = pending_chain.remove(0);
@@ -4397,6 +4401,7 @@ match cmd {
                 let _ = write!(write_stream, "ERROR: {}\n", error);
                 let _ = write_stream.flush();
                 if !persistent && pending_chain.is_empty() { break; }
+                line.clear();
                 continue;
             }
         };
@@ -5296,6 +5301,7 @@ match cmd {
                 }
             }
             if !persistent && pending_chain.is_empty() { break; }
+            line.clear();
             continue;
         }
         // The operand read the way tmux's getopt reads it, so the `-t`
@@ -5326,6 +5332,7 @@ match cmd {
                 }
             }
             if !persistent && pending_chain.is_empty() { break; }
+            line.clear();
             continue;
         }
         // A user option is answered from the table the flags pick, and one
@@ -5363,6 +5370,7 @@ match cmd {
                 }
             }
             if !persistent && pending_chain.is_empty() { break; }
+            line.clear();
             continue;
         }
         // #803: a session listing answers for the table the flags pick: `-g`
