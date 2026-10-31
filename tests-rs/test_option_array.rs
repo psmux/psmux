@@ -220,6 +220,5 @@ fn codepoint_widths_is_an_array_with_no_default() {
     assert_eq!((spec.name, spec.separator, spec.default, spec.trim), ("codepoint-widths", ",", "", true));
     let array = OptionArray::with_default(spec);
     assert!(array.is_empty());
-    assert_eq!(array.show_lines("codepoint-widths", false), "codepoint-widths
-");
+    assert_eq!(array.show_lines("codepoint-widths", false), "codepoint-widths\n");
 }
