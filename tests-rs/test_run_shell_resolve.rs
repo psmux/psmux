@@ -122,7 +122,7 @@ fn resolve_shell_binary_full_path_passthrough() {
 fn build_run_shell_command_pwsh_prefix_creates_valid_command() {
     // Simulates what PPM plugin.conf does:
     // bind-key I run-shell 'pwsh -NoProfile -ExecutionPolicy Bypass -File "~/.psmux/plugins/ppm/scripts/install_plugins.ps1"'
-    let cmd = build_run_shell_command("pwsh -NoProfile -Command echo hello");
+    let cmd = build_run_shell_command("pwsh -NoProfile -Command echo hello", None);
     let prog = cmd.get_program().to_string_lossy().to_lowercase();
     assert!(
         prog.contains("pwsh") || prog.contains("powershell"),
@@ -134,7 +134,7 @@ fn build_run_shell_command_pwsh_prefix_creates_valid_command() {
 #[test]
 #[cfg(windows)]
 fn build_run_shell_command_powershell_prefix_creates_valid_command() {
-    let cmd = build_run_shell_command("powershell.exe -ExecutionPolicy Bypass -File test.ps1");
+    let cmd = build_run_shell_command("powershell.exe -ExecutionPolicy Bypass -File test.ps1", None);
     let prog = cmd.get_program().to_string_lossy().to_lowercase();
     assert!(
         prog.contains("pwsh") || prog.contains("powershell"),
@@ -146,7 +146,7 @@ fn build_run_shell_command_powershell_prefix_creates_valid_command() {
 #[test]
 #[cfg(windows)]
 fn build_run_shell_command_cmd_prefix_passes_through() {
-    let cmd = build_run_shell_command("cmd /c echo hello");
+    let cmd = build_run_shell_command("cmd /c echo hello", None);
     let prog = cmd.get_program().to_string_lossy().to_lowercase();
     assert!(
         prog.contains("cmd"),
@@ -158,7 +158,7 @@ fn build_run_shell_command_cmd_prefix_passes_through() {
 #[test]
 #[cfg(windows)]
 fn build_run_shell_command_generic_command_uses_shell_wrapper() {
-    let cmd = build_run_shell_command("echo hello");
+    let cmd = build_run_shell_command("echo hello", None);
     let prog = cmd.get_program().to_string_lossy().to_lowercase();
     // Generic commands get wrapped in a shell (Case 3)
     assert!(
@@ -171,7 +171,7 @@ fn build_run_shell_command_generic_command_uses_shell_wrapper() {
 #[test]
 #[cfg(windows)]
 fn build_run_shell_command_preserves_args() {
-    let cmd = build_run_shell_command("pwsh -NoProfile -Command echo hello world");
+    let cmd = build_run_shell_command("pwsh -NoProfile -Command echo hello world", None);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
     assert!(args.contains(&"-NoProfile".to_string()), "Should preserve -NoProfile arg");
     assert!(args.contains(&"-Command".to_string()), "Should preserve -Command arg");
@@ -188,7 +188,7 @@ fn build_run_shell_command_runs_an_existing_exe_directly() {
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("helper.exe");
         std::fs::write(&exe, b"").unwrap();
-        let cmd = build_run_shell_command(&format!("{} --quiet", exe.display()));
+        let cmd = build_run_shell_command(&format!("{} --quiet", exe.display()), None);
         assert_eq!(std::path::Path::new(cmd.get_program()), exe);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, vec!["--quiet".to_string()]);
@@ -210,7 +210,7 @@ fn build_run_shell_command_keeps_the_shell_for_shell_syntax_after_an_exe() {
         std::fs::write(&exe, b"").unwrap();
         for rest in ["hi > out.txt", "hi | Out-File x.txt", "one; two", "$env:USERNAME", "a && b", "%USERNAME%"] {
             let line = format!("{} {}", exe.display(), rest);
-            let cmd = build_run_shell_command(&line);
+            let cmd = build_run_shell_command(&line, None);
             let prog = std::path::Path::new(cmd.get_program()).to_path_buf();
             assert_ne!(prog, exe, "{:?} ran the exe without a shell", line);
             let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -590,10 +590,84 @@ fn a_tmux_script_runs_with_git_bash() {
     let script = tmp.join("p.tmux");
     std::fs::write(&script, "tmux set -g @p on\n").unwrap();
 
-    let cmd = build_run_shell_command(&format!("'{}'", script.display()));
+    let cmd = build_run_shell_command(&format!("'{}'", script.display()), None);
     assert_eq!(std::path::Path::new(cmd.get_program()), bash);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     assert_eq!(args, vec![script.to_string_lossy().replace('\\', "/")]);
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+#[cfg(windows)]
+fn file_probing_uses_job_cwd_without_changing_process_cwd() {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
+    }
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let cwd = std::env::temp_dir().join(format!("psmux probe cwd {} {}", std::process::id(), nonce));
+    std::fs::create_dir(&cwd).unwrap();
+    let _cleanup = Cleanup(cwd.clone());
+    let process_cwd = std::env::current_dir().unwrap();
+    assert_ne!(cwd, process_cwd);
+    for name in ["relative script.ps1", "relative entry.tmux", "invalid.exe", "invalid exe.exe"] {
+        let file = cwd.join(name);
+        assert!(!std::path::Path::new(name).is_file());
+        std::fs::write(&file, b"not an executable").unwrap();
+        let cmd = build_run_shell_command(name, Some(&cwd));
+        assert_eq!(cmd.get_current_dir(), Some(cwd.as_path()));
+        if name.ends_with(".exe") {
+            assert_eq!(std::path::Path::new(cmd.get_program()), file);
+        } else {
+            let args = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ").replace('\\', "/");
+            assert!(args.contains(&file.to_string_lossy().replace('\\', "/")), "{args}");
+        }
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn non_spaced_native_commands_keep_shell_evaluation_for_operators() {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
+    }
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let cwd = std::env::temp_dir().join(format!("psmux shell cwd {} {}", std::process::id(), nonce));
+    std::fs::create_dir(&cwd).unwrap();
+    let _cleanup = Cleanup(cwd.clone());
+    let process_cwd = std::env::current_dir().unwrap();
+    assert_ne!(cwd, process_cwd);
+    assert!(cwd.to_string_lossy().contains(' '));
+    let (shell, shell_args) = resolve_run_shell();
+    for ext in ["exe", "com"] {
+        let name = format!("probe.{}", ext);
+        let file = cwd.join(&name);
+        assert!(!file.exists());
+        std::fs::write(&file, b"not an executable").unwrap();
+        assert!(file.is_file());
+        for operand in [name.clone(), format!(".\\{}", name)] {
+            assert!(!operand.contains(' '));
+            assert!(!std::path::Path::new(&operand).is_file());
+            for tail in ["", " > result.txt", " | Write-Output", " ; Write-Output tail"] {
+                let command = format!("{}{}", operand, tail);
+                let (matched, _) = find_file_in_command(&command, Some(&cwd)).unwrap();
+                assert_eq!(matched, operand, "probing must preserve the matched operand spelling");
+                let cmd = build_run_shell_command(&command, Some(&cwd));
+                if tail.is_empty() {
+                    assert_eq!(std::path::Path::new(cmd.get_program()), cwd.join(&operand));
+                    assert_eq!(cmd.get_args().count(), 0);
+                } else {
+                    let mut args = shell_args.clone();
+                    args.push(command);
+                    assert_eq!(cmd.get_program(), std::ffi::OsStr::new(&shell));
+                    assert_eq!(cmd.get_args().collect::<Vec<_>>(), args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>());
+                }
+                assert_eq!(cmd.get_current_dir(), Some(cwd.as_path()));
+                assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+            }
+        }
+    }
 }

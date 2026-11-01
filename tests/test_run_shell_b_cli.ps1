@@ -7,7 +7,7 @@
 #
 # Isolated: a unique -L namespace and a private PSMUX_DATA_DIR. Cleanup only
 # through `-L <ns> kill-server`; nothing is killed by name.
-param([string]$Exe, [string]$OldServerExe)
+param([string]$Exe)
 
 $ErrorActionPreference = 'Continue'
 if (-not $Exe) { $Exe = (Get-Command psmux -EA Stop).Source }
@@ -67,20 +67,15 @@ try {
     cmd /c "`"$Exe`" -L $ns run-shell -b `"$probe $work piped 1500`" | exit 0"
     if ((WaitFile "$work\piped.start") -and (WaitFile "$work\piped.done")) { Pass 'job survived the closed pipe' } else { Fail 'job did not survive the closed pipe' }
 
-    Write-Host "`n[3] -b without -c runs where the server runs it, and the CLI sends no -c" -ForegroundColor Yellow
-    # Known deviation: tmux uses the sessionless client's directory
-    # (server-client.c:2955). psmux sends -c only when the user gave one, so
-    # an older server still running after an upgrade reads the line as before.
+    Write-Host "`n[3] -b without -c uses the caller's directory" -ForegroundColor Yellow
     $here = Join-Path $work 'here dir'
     New-Item -ItemType Directory $here -Force | Out-Null
-    $serverDir = (& $Exe -L $ns display -p -t t '#{pane_current_path}' 2>&1 | Out-String).Trim()
     Push-Location $here
     & $Exe -L $ns run-shell -b "$probe $work cwd 10" 2>&1 | Out-Null
     Pop-Location
     if (WaitFile "$work\cwd.start") {
         $got = (Get-Content "$work\cwd.start" -Raw).Trim()
-        if ($got -ne $here) { Pass "job did not take the CLI's directory ('$got')" } else { Fail "CLI directory was sent: '$got'" }
-        if ($got -eq $serverDir) { Pass "job ran in the server's directory" } else { Fail "cwd '$got', server '$serverDir'" }
+        if ($got -eq $here) { Pass "job ran in the caller's directory" } else { Fail "cwd '$got', caller '$here'" }
     } else { Fail 'cwd job never started' }
 
     Write-Host "`n[4] -c start-directory on the CLI, the server route and a binding" -ForegroundColor Yellow
@@ -104,28 +99,7 @@ try {
     if ($out.Contains('PROBE_STDOUT_fg')) { Pass 'foreground output printed' } else { Fail "foreground output missing: $out" }
     if (Test-Path "$work\fg.done") { Pass 'foreground waited for the job' } else { Fail 'foreground did not wait' }
 
-    if ($OldServerExe) {
-        # An older server still running after an upgrade: the new CLI's -b
-        # line must read to it as a line it already knew.
-        Write-Host "`n[6] new CLI -b against a server from $OldServerExe" -ForegroundColor Yellow
-        $oldNs = "${ns}_old"
-        & $OldServerExe -L $oldNs new-session -d -s o
-        Start-Sleep -Milliseconds 1500
-        try {
-            $ver = (& $OldServerExe -V 2>&1 | Out-String).Trim() -replace "`r?`n", ' '
-            Write-Host "    old server: $ver"
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $out = & $Exe -L $oldNs run-shell -b "$probe $work old 1500" 2>&1
-            $ms = $sw.ElapsedMilliseconds
-            if ($ms -lt 1000) { Pass "returned in $ms ms" } else { Fail "waited $ms ms" }
-            if (-not ($out | Out-String).Contains('PROBE_STDOUT')) { Pass 'no job output on the CLI' } else { Fail "output: $out" }
-            if ((WaitFile "$work\old.start") -and (WaitFile "$work\old.done")) { Pass 'old server ran the -b job to the end' } else { Fail 'old server did not run the -b job' }
-            $out = (& $Exe -L $oldNs run-shell "$probe $work oldfmt 10 #{session_name}" 2>&1 | Out-String)
-            if ((WaitFile "$work\oldfmt.start") -and $out.Contains('PROBE_STDOUT_oldfmt')) { Pass 'old server ran a format run-shell' } else { Fail "format run-shell on the old server: $out" }
-        } finally {
-            & $OldServerExe -L $oldNs kill-server 2>&1 | Out-Null
-        }
-    }
+
 }
 finally {
     & $Exe -L $ns kill-server 2>&1 | Out-Null

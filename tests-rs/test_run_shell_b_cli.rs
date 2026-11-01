@@ -1,16 +1,7 @@
-// run-shell -b from the CLI ran the job as the CLI's own child, holding the
-// CLI's stdout: `psmux run-shell -b "helper.exe 2"` took the job's whole 2 s
-// and printed its output when the caller read that pipe. In tmux the job is
-// the server's and the command returns at once (cmd-run-shell.c:187), so the
-// CLI now hands every -b to the server. It sends -c only when the user gave
-// one: a line without it reads the same to a server from an older psmux.
-// Known deviation: without -c the job runs in the server's directory, where
-// tmux runs a sessionless client's job in the client's (server-client.c:2955).
-//
-// tmux's `-c start-directory` (cmd-run-shell.c:167) was not read at all: the
-// word ended the flags and `-c dir` went to the shell as text. It is a flag
-// now on every route, with job_run's fallback to home (job.c:143 to :147).
-// End to end checks are in tests/test_run_shell_b_cli.ps1.
+// run-shell flag parsing, opaque CLI command lines, and start-directory
+// selection with tmux's HOME fallback (job.c:143 to :147).
+// End to end checks are in tests/test_run_shell_b_cli.ps1 and
+// tests/test_run_shell_server_jobs.ps1.
 
 use super::*;
 
@@ -63,16 +54,6 @@ fn c_after_the_command_is_the_commands_own_flag() {
 }
 
 #[test]
-fn background_goes_to_the_server_with_or_without_a_format() {
-    assert!(cli_run_shell_goes_to_server("helper.exe 2", true));
-    assert!(cli_run_shell_goes_to_server("helper.exe #{pane_id}", true));
-    assert!(cli_run_shell_goes_to_server("helper.exe #{pane_id}", false));
-    // A plain foreground command still runs in the CLI, which prints its
-    // output and takes its exit code.
-    assert!(!cli_run_shell_goes_to_server("helper.exe 2", false));
-}
-
-#[test]
 fn server_line_carries_the_directory_and_one_quoted_command() {
     let line = cli_run_shell_server_line(
         true,
@@ -92,13 +73,15 @@ fn server_line_carries_the_directory_and_one_quoted_command() {
 #[test]
 fn server_line_without_a_directory_sends_no_c() {
     let line = cli_run_shell_server_line(false, Some(std::time::Duration::from_millis(1500)), None, "x");
-    assert_eq!(line, "run-shell -d 1.5 \"x\"\n");
+    assert_eq!(line, "run-shell -d 1.5 -- \"x\"\n");
 }
 
 fn cwd_of(cwd: Option<&str>) -> String {
     let mut c = std::process::Command::new("cmd.exe");
     c.args(["/d", "/c", "cd"]);
-    apply_run_shell_cwd(&mut c, cwd);
+    if let Some(cwd) = resolve_run_shell_cwd(cwd) {
+        c.current_dir(cwd);
+    }
     let out = c.output().expect("cmd.exe runs");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }

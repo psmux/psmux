@@ -1953,21 +1953,6 @@ fn is_read_retry(e: &io::Error) -> bool {
     ) || matches!(e.raw_os_error(), Some(997) | Some(10004) | Some(10060))
 }
 
-/// Merge a run-shell child's stdout and stderr the way both the persistent and
-/// the one-shot path render it: stdout first, a newline between the two when
-/// neither already provides one.
-pub(crate) fn run_shell_output_text(out: &std::process::Output) -> String {
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr_text = String::from_utf8_lossy(&out.stderr);
-    if !stderr_text.is_empty() {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(&stderr_text);
-    }
-    text
-}
-
 /// Handle a single TCP connection from a client.
 /// Parses auth, optional TARGET/PERSISTENT flags, then dispatches commands
 /// to the main server event loop via the `tx` channel.
@@ -2016,6 +2001,9 @@ if !auth_line.starts_with("AUTH ") {
     return;
 }
 let provided_key = auth_line.strip_prefix("AUTH ").unwrap_or("");
+let suffix = format!(" {}", crate::run_shell::AUTH_CAPABILITY);
+let run_shell_negotiated = provided_key.ends_with(&suffix);
+let provided_key = provided_key.strip_suffix(&suffix).unwrap_or(provided_key);
 if provided_key != session_key {
     auth_debug(&format!(
         "client_id={} reject: key mismatch provided={:?} expected={:?}",
@@ -2024,8 +2012,9 @@ if provided_key != session_key {
     refuse_auth(&mut write_stream, &mut r, b"ERROR: Invalid session key\n");
     return;
 }
-// Auth successful - send OK and flush immediately
-let _ = write_stream.write_all(b"OK\n");
+// Ordinary AUTH retains its shipped acknowledgement.
+let ack = if run_shell_negotiated { crate::run_shell::NEGOTIATION_ACK.as_bytes() } else { b"OK\n" };
+let _ = write_stream.write_all(ack);
 let _ = write_stream.flush();
 
 // Use a reasonable timeout for the first command after AUTH.
@@ -2987,6 +2976,24 @@ if line.trim().starts_with("TARGET ") {
     if r.read_line(&mut line).is_err() {
         return;
     }
+}
+
+// An unattached CLI supplies its cwd separately from the shell operand.
+// Attached and source-job commands retain the session start cwd.
+let mut caller_cwd = None;
+if let Some(encoded) = line.trim().strip_prefix("CLIENT_CWD ").filter(|_| run_shell_negotiated) {
+    use base64::Engine;
+    caller_cwd = base64::engine::general_purpose::STANDARD.decode(encoded)
+        .ok().and_then(|bytes| String::from_utf8(bytes).ok());
+    line.clear();
+    if r.read_line(&mut line).is_err() {
+        return;
+    }
+}
+
+if run_shell_negotiated && caller_cwd.is_none() {
+    let _ = crate::run_shell::write_reply(&mut write_stream, 1, &[], b"run-shell: invalid caller cwd metadata\n");
+    return;
 }
 
 // Set short read timeout for batched command processing
@@ -6289,25 +6296,22 @@ match cmd {
         // quoted (e.g. `psmux new-window -c 'C:\path'` or `pwsh -Command "..."`),
         // producing an unterminated-string parse error in the spawned shell so the
         // command silently never ran. Only unwrap when both ends match the same quote.
-        let parsed = run_shell_command_text(&args);
-        let parse_failed = parsed.is_err();
-        let (background, delay, shell_cmd, cwd) = match parsed {
+        let native = run_shell_negotiated && !persistent;
+        let (background, delay, shell_cmd, cwd) = match run_shell_command_text(&args) {
             Ok(parsed) => parsed,
             Err(e) => {
-                // `invalid delay time: x`, as tmux's cmdq_error.
-                if persistent {
+                if native {
+                    let _ = crate::run_shell::write_reply(&mut write_stream, 1, &[], e.as_bytes());
+                } else if persistent {
                     let _ = tx.send(CtrlReq::StatusMessage(e));
                 } else {
-                    let _ = write!(write_stream, "ERROR: {}\n", e);
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
                     let _ = write_stream.flush();
                 }
-                (false, None, String::new(), None)
+                if !persistent { break; }
+                line.clear();
+                continue;
             }
-        };
-        let build = |shell_cmd: &str| {
-            let mut c = crate::commands::build_run_shell_command(shell_cmd);
-            crate::commands::apply_run_shell_cwd(&mut c, cwd.as_deref());
-            c
         };
         // Expand formats against live server state (tmux parity). Without
         // this, `run-shell "helper '#{pane_id}'"` passed the helper the
@@ -6315,123 +6319,93 @@ match cmd {
         // bind then failed completely silently. Every `#` sequence counts, not
         // only `#{`: tmux turns `##` into `#` and `#S` into the session name.
         let shell_cmd = expand_shell_command_for(tx, shell_cmd, target_failed);
-        // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
-        if shell_cmd.is_empty() && delay.is_some() {
-            // `-d` with no command only waits (cmd-run-shell.c:125), and the
-            // commands after it wait with it unless `-b` is given.
-            let delay = delay.unwrap_or_default();
-            if !background && persistent {
-                let (done, done_rx) = mpsc::channel::<()>();
-                if !pending_chain.is_empty() {
-                    deferred_chains.push((done_rx, std::mem::take(&mut pending_chain)));
-                }
-                std::thread::spawn(move || {
-                    let _done = done;
+        if shell_cmd.is_empty() {
+            if let Some(delay) = delay {
+                if !background && persistent {
+                    let (done, done_rx) = mpsc::channel::<()>();
+                    if !pending_chain.is_empty() {
+                        deferred_chains.push((done_rx, std::mem::take(&mut pending_chain)));
+                    }
+                    std::thread::spawn(move || { let _done = done; std::thread::sleep(delay); });
+                } else if !background {
                     std::thread::sleep(delay);
-                });
-            } else if !background {
-                std::thread::sleep(delay);
-            }
-        } else if shell_cmd.is_empty() {
-            if !persistent && !parse_failed {
-                let _ = write!(write_stream, "usage: run-shell [-b] [-d delay] shell-command\n");
+                }
+                if native { let _ = crate::run_shell::write_reply(&mut write_stream, 0, &[], &[]); }
+            } else if native {
+                let _ = crate::run_shell::write_reply(&mut write_stream, 1, &[], b"usage: run-shell [-b] [-d delay] shell-command\n");
+            } else if !persistent {
+                let _ = writeln!(write_stream, "usage: run-shell [-b] [-d delay] shell-command");
                 let _ = write_stream.flush();
             }
         } else {
-            if background {
-                let mut c = build(&shell_cmd);
-                crate::commands::null_job_output(&mut c);
-                if let Some(delay) = delay {
-                    // `-b -d N`: start it after the delay, without waiting
-                    // for either (cmd-run-shell.c:178).
-                    let inner = tx.inner.clone();
-                    let target = tx.target.clone();
-                    let shown = shell_cmd.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(delay);
-                        if let Err(e) = c.spawn() {
-                            let tx = TargetedSender::new(&inner, target);
-                            let _ = tx.send(CtrlReq::StatusMessage(format!("run-shell: {}: {}", shown, e)));
-                        }
-                    });
-                }
-                // `-b` means "don't wait for it", not "don't tell me it never
-                // started". Swallowing this made a broken background bind
-                // indistinguishable from an unbound key.
-                else if let Err(e) = c.spawn() {
-                    // No trailing newline in the message itself: StatusMessage is
-                    // stored verbatim in app.status_message and rendered in the
-                    // status bar, where a stray newline corrupts the line. The
-                    // newline belongs only on the stream write.
-                    let err_msg = format!("run-shell: {}: {}", shell_cmd, e);
-                    if persistent {
-                        let _ = tx.send(CtrlReq::StatusMessage(err_msg));
-                    } else {
-                        let _ = write!(write_stream, "{}\n", err_msg);
-                        let _ = write_stream.flush();
-                    }
-                }
-            } else if persistent {
-                // Do NOT run the shell on this thread. It is the reader for an
-                // attached client, and a prefix binding arrives as two lines:
-                // the command, then the client's `prefix-end`. Blocking on
-                // c.output() here withholds that prefix-end - so #{client_prefix}
-                // (the PREFIX status indicator) stays on - and every keystroke
-                // behind it until the command exits. Run it on a thread and post
-                // the result back through the server loop, the way commands.rs
-                // already does for the in-process path.
-                let mut c = build(&shell_cmd);
-                // The thread needs an owned sender + target: `tx` here borrows
-                // the per-command TargetedSender, which does not outlive the
-                // command loop.
+            // Resolve file operands against the job cwd before probing, without
+            // changing the server process cwd.
+            let cwd = crate::commands::resolve_run_shell_cwd(cwd.as_deref()).or_else(|| if !persistent {
+                caller_cwd.as_ref().map(std::path::PathBuf::from)
+            } else { None }).or_else(|| std::env::current_dir().ok());
+            let mut c = crate::commands::build_run_shell_command(&shell_cmd, cwd.as_deref());
+            if background || persistent {
+                // The attached reader must keep accepting input. Foreground
+                // chains wait for completion; one-shot -b replies wait for spawn.
                 let inner = tx.inner.clone();
                 let target = tx.target.clone();
-                // Whatever follows in this command list waits for the shell,
-                // as in tmux. `done` is dropped when the thread ends, which
-                // is what releases it at the top of the loop.
                 let (done, done_rx) = mpsc::channel::<()>();
-                if !pending_chain.is_empty() {
+                if !background && !pending_chain.is_empty() {
                     deferred_chains.push((done_rx, std::mem::take(&mut pending_chain)));
                 }
+                let (launch, launched) = mpsc::channel();
                 std::thread::spawn(move || {
                     let _done = done;
-                    if let Some(delay) = delay {
-                        std::thread::sleep(delay);
-                    }
+                    if let Some(delay) = delay { std::thread::sleep(delay); }
                     let tx = TargetedSender::new(&inner, target);
-                    match c.output() {
+                    c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                    let child = match c.spawn() {
+                        Ok(child) => { let _ = launch.send(Ok(())); child }
+                        Err(e) => {
+                            let message = format!("run-shell: {}", e);
+                            let _ = launch.send(Err(message.clone()));
+                            let _ = tx.send(CtrlReq::StatusMessage(message));
+                            return;
+                        }
+                    };
+                    match child.wait_with_output() {
                         Ok(out) => {
-                            let text = run_shell_output_text(&out);
+                            let text = crate::run_shell::output_text(&shell_cmd, &out);
                             if !text.is_empty() {
                                 let _ = tx.send(CtrlReq::ShowTextPopup("run-shell".to_string(), text));
                             }
                         }
-                        Err(e) => {
-                            let _ = tx.send(CtrlReq::StatusMessage(format!("run-shell: {}", e)));
-                        }
+                        Err(e) => { let _ = tx.send(CtrlReq::StatusMessage(format!("run-shell: {}", e))); }
                     }
                 });
-            } else {
-                // A one-shot connection (the CLI, a source job) has a thread
-                // of its own, so the wait happens here and the reply, which
-                // ends the command, comes after the delay and the shell.
-                if let Some(delay) = delay {
-                    std::thread::sleep(delay);
-                }
-                let mut c = build(&shell_cmd);
-                match c.output() {
-                    Ok(out) => {
-                        let text = run_shell_output_text(&out);
-                        if !text.is_empty() {
-                            let _ = write!(write_stream, "{}", text);
-                            let _ = write_stream.flush();
-                        }
+                if !persistent && delay.is_some() {
+                    // A background delay acknowledges scheduling, not a future spawn.
+                    if native { let _ = crate::run_shell::write_reply(&mut write_stream, 0, &[], &[]); }
+                } else if !persistent {
+                    let result = launched.recv().unwrap_or_else(|_| Err("run-shell: launch worker disconnected".to_string()));
+                    match result {
+                        Ok(()) if native => { let _ = crate::run_shell::write_reply(&mut write_stream, 0, &[], &[]); }
+                        Err(e) if native => { let _ = crate::run_shell::write_reply(&mut write_stream, 1, &[], e.as_bytes()); }
+                        Err(e) => { let _ = writeln!(write_stream, "{}", e); let _ = write_stream.flush(); }
+                        Ok(()) => {}
                     }
-                    Err(e) => {
-                        let _ = write!(write_stream, "run-shell: {}\n", e);
+                }
+            } else {
+                if let Some(delay) = delay { std::thread::sleep(delay); }
+                match c.output() {
+                    Ok(out) if native => {
+                        let _ = crate::run_shell::write_reply(&mut write_stream, out.status.code().unwrap_or(1), &out.stdout, &out.stderr);
+                    }
+                    Ok(out) => {
+                        let text = crate::run_shell::output_text(&shell_cmd, &out);
+                        let _ = write!(write_stream, "{}", text);
                         let _ = write_stream.flush();
                     }
+                    Err(e) if native => {
+                        let _ = crate::run_shell::write_reply(&mut write_stream, 1, &[], format!("run-shell: {}\n", e).as_bytes());
+                    }
+                    Err(e) => { let _ = writeln!(write_stream, "run-shell: {}", e); let _ = write_stream.flush(); }
                 }
             }
         }
@@ -8461,30 +8435,51 @@ fn dispatch_control_command(
                 }
                 return true;
             }
-            let mut c = crate::commands::build_run_shell_command(&shell_cmd);
-            crate::commands::apply_run_shell_cwd(&mut c, cwd.as_deref());
+            let cwd = crate::commands::resolve_run_shell_cwd(cwd.as_deref())
+                .or_else(|| std::env::current_dir().ok());
+            let mut c = crate::commands::build_run_shell_command(&shell_cmd, cwd.as_deref());
             if background {
-                // -b does not wait; only a spawn failure is reported.
-                crate::commands::null_job_output(&mut c);
-                if let Some(delay) = delay {
-                    // Started after the delay; the block ends now.
-                    std::thread::spawn(move || {
-                        std::thread::sleep(delay);
-                        let _ = c.spawn();
-                    });
+                let inner = tx.inner.clone();
+                let target = tx.target.clone();
+                let (launch, launched) = mpsc::channel();
+                std::thread::spawn(move || {
+                    if let Some(delay) = delay { std::thread::sleep(delay); }
+                    let tx = TargetedSender::new(&inner, target);
+                    c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                    let child = match c.spawn() {
+                        Ok(child) => { let _ = launch.send(Ok(())); child }
+                        Err(e) => {
+                            let message = format!("run-shell: {}", e);
+                            let _ = launch.send(Err(message.clone()));
+                            let _ = tx.send(CtrlReq::StatusMessage(message));
+                            return;
+                        }
+                    };
+                    match child.wait_with_output() {
+                        Ok(out) => {
+                            let text = crate::run_shell::output_text(&shell_cmd, &out);
+                            if !text.is_empty() {
+                                let _ = tx.send(CtrlReq::ShowTextPopup("run-shell".to_string(), text));
+                            }
+                        }
+                        Err(e) => { let _ = tx.send(CtrlReq::StatusMessage(format!("run-shell: {}", e))); }
+                    }
+                });
+                if delay.is_some() {
                     let _ = resp_tx.send(String::new());
                     return true;
                 }
-                match c.spawn() {
-                    Ok(_) => { let _ = resp_tx.send(String::new()); }
-                    Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}: {}", shell_cmd, e)); }
+                match launched.recv() {
+                    Ok(Ok(())) => { let _ = resp_tx.send(String::new()); }
+                    Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                    Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}", e)); }
                 }
             } else {
                 if let Some(delay) = delay {
                     std::thread::sleep(delay);
                 }
                 match c.output() {
-                    Ok(out) => { let _ = resp_tx.send(run_shell_output_text(&out)); }
+                    Ok(out) => { let _ = resp_tx.send(crate::run_shell::output_text(&shell_cmd, &out)); }
                     Err(e) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}run-shell: {}", e)); }
                 }
             }

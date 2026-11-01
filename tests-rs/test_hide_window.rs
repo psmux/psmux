@@ -194,7 +194,7 @@ fn hide_window_powershell_exit_codes() {
 fn build_run_shell_command_applies_hide_window() {
     // build_run_shell_command is the central chokepoint for run-shell.
     // Verify it produces a working command that runs hidden.
-    let mut cmd = build_run_shell_command("echo build_test_sentinel");
+    let mut cmd = build_run_shell_command("echo build_test_sentinel", None);
     let output = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -217,7 +217,7 @@ fn build_run_shell_command_explicit_pwsh() {
     // still apply hide_window and run correctly
     let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
     let cmd_str = format!("{} -NoProfile -Command \"Write-Output 'explicit_shell_test'\"", shell);
-    let mut cmd = build_run_shell_command(&cmd_str);
+    let mut cmd = build_run_shell_command(&cmd_str, None);
     let output = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -237,7 +237,7 @@ fn build_run_shell_command_explicit_pwsh() {
 #[test]
 fn build_run_shell_command_cmd_exe() {
     // When shell_cmd starts with "cmd", verify it works hidden
-    let mut cmd = build_run_shell_command("cmd /C echo cmd_exe_hidden_test");
+    let mut cmd = build_run_shell_command("cmd /C echo cmd_exe_hidden_test", None);
     let output = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

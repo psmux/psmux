@@ -17,6 +17,7 @@ mod render_state;
 mod rendering;
 mod config;
 mod commands;
+mod run_shell;
 mod pane;
 mod warm_pane_sync;
 mod warm_trace;
@@ -4455,103 +4456,18 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         std::process::exit(1);
                     }
                 };
-                let background = parsed.background;
-                let delay = parsed.delay;
-                // Only the user's own `-c` goes to the server. tmux runs a
-                // sessionless client's job in the client's directory
-                // (server_client_get_cwd, server-client.c:2955), but sending
-                // that unasked would put `-c` on every line, and a server
-                // from an older psmux still running after an upgrade hands
-                // `-c dir` to the shell as text. So a job the server runs
-                // without `-c` takes the server's directory, as a `#`
-                // command always has.
-                let cwd = parsed.cwd.clone();
-                let shell_cmd_str = parsed.command.join(" ");
-                if shell_cmd_str.trim().is_empty() {
-                    // `-d` with no command only waits (cmd-run-shell.c:125).
-                    if let Some(delay) = delay {
-                        if !background {
-                            std::thread::sleep(delay);
-                        }
-                        return Ok(());
-                    }
+                let shell_cmd = parsed.command.join(" ");
+                if shell_cmd.trim().is_empty() && parsed.delay.is_none() {
                     eprintln!("usage: run-shell [-b] [-d delay] shell-command");
                     std::process::exit(1);
                 }
-                // `#{...}` can only be resolved against live server state, which
-                // this process does not have — the CLI path runs the command
-                // itself rather than going through the server. So when the
-                // command references a format variable, hand the whole thing to
-                // the server and let it run there (connection.rs expands, then
-                // executes). Without this, `psmux run-shell "x #{pane_id}"`
-                // passed the helper that literal text, exactly as the bind path
-                // used to.
-                //
-                // Any `#` counts, not only `#{`: tmux expands `##` and `#S`
-                // too. The command goes over as ONE quoted argument. Joined
-                // raw, the server split it again and dropped its quotes, so
-                // `run-shell "Write-Output ('x' + '#{pid}')"` reached the shell
-                // as `Write-Output (x + 1234)`.
-                // `-b` goes to the server too (cli_run_shell_goes_to_server).
-                if crate::commands::cli_run_shell_goes_to_server(&shell_cmd_str, background) {
-                    let line = crate::commands::cli_run_shell_server_line(
-                        background, delay, cwd.as_deref(), &shell_cmd_str);
-                    // Waits for the server to finish the command (#734 follow
-                    // up): with a read bound, a body slower than 3 s came back
-                    // as "no response" and then ran AGAIN here.
-                    match crate::session::send_control_with_response_wait(line) {
-                        Ok(resp) => {
-                            if !resp.is_empty() {
-                                io::stdout().write_all(resp.as_bytes())?;
-                            }
-                            return Ok(());
-                        }
-                        // No server reachable: fall through and run locally with
-                        // the format text unexpanded. That is the pre-existing
-                        // behaviour, and it beats refusing to run at all.
-                        Err(e) => {
-                            eprintln!("run-shell: {} (running without format expansion)", e);
-                        }
-                    }
-                }
-                let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd_str);
-                // tmux runs the job in the server, with the server's
-                // environment and $TMUX (#804); this one runs here, so it
-                // takes the server's job environment instead of this CLI's.
-                let job_env = crate::commands::fetch_server_job_environment();
-                let build = |cmd: &str| {
-                    let mut c = crate::commands::build_run_shell_command(cmd);
-                    crate::commands::apply_run_shell_cwd(&mut c, parsed.cwd.as_deref());
-                    if let Some(env) = &job_env {
-                        crate::commands::apply_server_job_environment(&mut c, env);
-                    }
-                    c
-                };
-                // `-d`: wait before starting it. With `-b` this is only the
-                // fallback for a server that could not be reached above.
-                if let Some(delay) = delay {
-                    std::thread::sleep(delay);
-                }
-                // Run the command using the resolved shell
-                if background {
-                    let mut c = build(&shell_cmd);
-                    // Nobody reads a `-b` job's output, and inheriting this
-                    // client's handles ties the job to whoever reads them.
-                    crate::commands::null_job_output(&mut c);
-                    // Report a failure to START the command. `-b` waives the
-                    // output, not the error.
-                    if let Err(e) = c.spawn() {
-                        eprintln!("run-shell: {}: {}", shell_cmd, e);
-                        std::process::exit(1);
-                    }
-                } else {
-                    let mut c = build(&shell_cmd);
-                    let output = c.output()?;
-                    write_shell_output(io::stdout(), -11, &output.stdout)?;
-                    write_shell_output(io::stderr(), -12, &output.stderr)?;
-                    std::process::exit(output.status.code().unwrap_or(0));
-                }
-                return Ok(());
+                let line = crate::commands::cli_run_shell_server_line(
+                    parsed.background, parsed.delay, parsed.cwd.as_deref(), &shell_cmd);
+                let cwd = env::current_dir()?;
+                let reply = crate::session::send_run_shell_with_response(&line, &cwd)?;
+                write_shell_output(io::stdout(), -11, &reply.stdout)?;
+                write_shell_output(io::stderr(), -12, &reply.stderr)?;
+                std::process::exit(reply.code);
             }
             // respawn-pane - Restart the pane's process
             "respawn-pane" | "respawnp" | "resp" => {
