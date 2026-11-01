@@ -5040,3 +5040,7 @@ mod tests_hook_kill_session_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue938_arg_parsing.rs"]
 mod tests_issue938_arg_parsing;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue964_kill_pane_all.rs"]
+mod tests_issue964_kill_pane_all;
