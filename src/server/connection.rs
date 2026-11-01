@@ -169,6 +169,12 @@ impl ReplyStream {
         std::mem::take(&mut self.1)
     }
 
+    /// The command failed with an error the server has already shown, so
+    /// nothing is written, but the rest of its list must not run (#954).
+    fn mark_error(&mut self) {
+        self.1 = true;
+    }
+
     fn send_reply(&mut self, text: &str) -> io::Result<()> {
         if is_error_reply(text) {
             self.1 = true;
@@ -248,6 +254,28 @@ fn refuse_auth(write_stream: &mut ReplyStream, r: &mut io::BufReader<TcpStream>,
 /// `ERROR <message>` as the switch-client handlers answer.
 pub(crate) fn is_error_reply(text: &str) -> bool {
     text.starts_with("ERROR")
+}
+
+/// Queued after the commands of an if-shell branch, so the queue knows where
+/// that list ends. Never a command: a line is read from the client or the
+/// CLI, and none of them can hold a NUL.
+pub(crate) const LIST_END: &str = "\0list-end";
+
+/// Drops what is left of the failing command's list (#954), as tmux's
+/// cmdq_remove_group removes the items after a failed one that share its
+/// group (cmd-queue.c:443-456, called at :750-754). A line read from the
+/// connection is one list (cmd-parse.y:895-904 gives each line its own
+/// group) and an if-shell branch is another, queued ahead of the rest of
+/// the outer list (cmd-if-shell.c:99-100, a cmd_list_new of its own,
+/// cmd.c:602): a failure in the branch ends the branch only, at its
+/// [`LIST_END`], and the outer list goes on.
+pub(crate) fn drop_failed_list(pending: &mut Vec<String>) {
+    match pending.iter().position(|l| l == LIST_END) {
+        Some(end) => {
+            pending.drain(..=end);
+        }
+        None => pending.clear(),
+    }
 }
 
 /// split-window `-k` and `-m message` (cmd-split-window.c:256-262):
@@ -3090,9 +3118,11 @@ loop {
             pending_chain = deferred_chains.remove(i).1;
         }
     }
-    // A failed command ends the rest of its list (see ReplyStream::take_error).
-    if write_stream.take_error() && !persistent {
-        pending_chain.clear();
+    // A failed command ends the rest of its list (see ReplyStream::take_error),
+    // on a persistent connection too: the command prompt and key bindings
+    // send a list there as one line (#954).
+    if write_stream.take_error() {
+        drop_failed_list(&mut pending_chain);
     }
     // Check pending chained commands before reading from socket. A line
     // still in `line` here is run again, so every arm that ends with
@@ -3103,6 +3133,12 @@ loop {
     if !pending_chain.is_empty() {
         line = pending_chain.remove(0);
         from_list = true;
+        // The end of an if-shell branch that ran to its end: nothing to run.
+        if line == LIST_END {
+            line.clear();
+            if !persistent && pending_chain.is_empty() { break; }
+            continue;
+        }
     } else if line.trim().is_empty() {
         // Try to read another command with timeout
         line.clear();
@@ -3728,12 +3764,10 @@ match cmd {
         let captured = match capture_pane_special(&args, &tx, start, end, capture_pane_id) {
             Some(Ok(text)) => Some(if text.is_empty() && print_stdout { "\n".to_string() } else { text }),
             Some(Err(e)) => {
-                if persistent {
-                    let _ = tx.send(CtrlReq::ShowTextPopup("capture-pane".to_string(), format!("ERROR: {}", e)));
-                } else {
-                    let _ = write!(write_stream, "ERROR: {}\n", e);
-                    let _ = write_stream.flush();
-                }
+                // An error reply (#954): it ends the rest of the list, and at
+                // the prompt it goes to the status line.
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
                 None
             }
             None => {
@@ -4358,12 +4392,10 @@ match cmd {
             None => Ok(()),
         });
         if let Err(err) = result {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("set-buffer".to_string(), format!("ERROR: {}", err)));
-            } else {
-                let _ = write!(write_stream, "ERROR: {}\n", err);
-                let _ = write_stream.flush();
-            }
+            // An error reply (#954): it ends the rest of the list, and at the
+            // prompt it goes to the status line.
+            let _ = writeln!(write_stream, "ERROR: {}", err);
+            let _ = write_stream.flush();
         }
     }
     "paste-buffer" | "pasteb" => {
@@ -4388,12 +4420,10 @@ match cmd {
         let (rtx, rrx) = mpsc::channel::<Option<String>>();
         let _ = tx.send(CtrlReq::PasteBuffer(pb_args, rtx));
         if let Ok(Some(msg)) = rrx.recv() {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("paste-buffer".to_string(), format!("ERROR: {}", msg)));
-            } else {
-                let _ = write!(write_stream, "ERROR: {}\n", msg);
-                let _ = write_stream.flush();
-            }
+            // An error reply (#954): it ends the rest of the list, and at the
+            // prompt it goes to the status line.
+            let _ = writeln!(write_stream, "ERROR: {}", msg);
+            let _ = write_stream.flush();
         }
     }
     "list-buffers" | "lsb" => {
@@ -4417,19 +4447,28 @@ match cmd {
         let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
         // By name only (paste_get_name): `-b 1` is the buffer named 1, and a
         // name no buffer has is an error (cmd-save-buffer.c:92).
-        let text: String = if let Some(name) = buf_name {
+        let text: Option<String> = if let Some(name) = buf_name {
             let (rtx, rrx) = mpsc::channel::<Option<String>>();
             let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
-            rrx.recv().ok().flatten().unwrap_or_else(|| format!("ERROR: no buffer {}", name))
+            let found = rrx.recv().ok().flatten();
+            if found.is_none() {
+                // An error reply, so the rest of the list does not run
+                // (#954); at the prompt it goes to the status line.
+                let _ = writeln!(write_stream, "ERROR: no buffer {}", name);
+                let _ = write_stream.flush();
+            }
+            found
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowBuffer(rtx));
-            rrx.recv().unwrap_or_default()
+            Some(rrx.recv().unwrap_or_default())
         };
-        if persistent {
-            let _ = tx.send(CtrlReq::ShowTextPopup("show-buffer".to_string(), text));
-        } else {
-            let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+        if let Some(text) = text {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-buffer".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
@@ -4442,12 +4481,10 @@ match cmd {
             let _ = tx.send(CtrlReq::DeleteNamedBuffer(name.clone(), Some(rtx)));
             if rrx.recv() == Ok(false) {
                 let err = format!("unknown buffer: {}", name);
-                if persistent {
-                    let _ = tx.send(CtrlReq::ShowTextPopup("delete-buffer".to_string(), format!("ERROR: {}", err)));
-                } else {
-                    let _ = write!(write_stream, "ERROR: {}\n", err);
-                    let _ = write_stream.flush();
-                }
+                // An error reply (#954): it ends the rest of the list, and at
+                // the prompt it goes to the status line.
+                let _ = writeln!(write_stream, "ERROR: {}", err);
+                let _ = write_stream.flush();
             }
         } else {
             let _ = tx.send(CtrlReq::DeleteBuffer);
@@ -5409,7 +5446,11 @@ match cmd {
                 } else {
                     crate::server::options::render_pane_options(&reply, has_a, inherited)
                 };
-                if !out.is_empty() {
+                if is_error_reply(&out) {
+                    // Ends the rest of the list (#954).
+                    let _ = write!(write_stream, "{}", out);
+                    let _ = write_stream.flush();
+                } else if !out.is_empty() {
                     let _ = write_stream.write_all(out.as_bytes());
                     let _ = write_stream.flush();
                 }
@@ -5437,13 +5478,10 @@ match cmd {
             !crate::server::option_catalog::is_valid_option_name(n)
         }) {
             if !has_q {
-                let output = format!("ERROR: invalid option: {}\n", name);
-                if persistent {
-                    let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
-                } else {
-                    let _ = write_stream.write_all(output.as_bytes());
-                    let _ = write_stream.flush();
-                }
+                // An error reply, so the rest of the list does not run
+                // (#954); at the prompt it goes to the status line.
+                let _ = writeln!(write_stream, "ERROR: invalid option: {}", name);
+                let _ = write_stream.flush();
             }
             if !persistent && pending_chain.is_empty() { break; }
             line.clear();
@@ -5475,7 +5513,12 @@ match cmd {
                 Ok(None) if has_q => String::new(),
                 Ok(None) => format!("ERROR: invalid option: {}\n", name),
             };
-            if !output.is_empty() {
+            if is_error_reply(&output) {
+                // An error reply, so the rest of the list does not run
+                // (#954); at the prompt it goes to the status line.
+                let _ = write!(write_stream, "{}", output);
+                let _ = write_stream.flush();
+            } else if !output.is_empty() {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
                 } else {
@@ -5901,6 +5944,8 @@ match cmd {
             if !persistent {
                 let _ = write!(write_stream, "{}\n", resp);
                 let _ = write_stream.flush();
+            } else if is_error_reply(&resp) {
+                write_stream.mark_error();
             }
         } else {
             // -t <target> was already extracted into raw_target by the global -t
@@ -5916,6 +5961,10 @@ match cmd {
             if !persistent {
                 let _ = write!(write_stream, "{}\n", resp);
                 let _ = write_stream.flush();
+            } else if is_error_reply(&resp) {
+                // The server has put the error on the status line; the rest
+                // of the list must not run (#954).
+                write_stream.mark_error();
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -6555,8 +6604,10 @@ match cmd {
                     // (cmd-if-shell.c:100 and :169, cmdq_insert_after). Put in
                     // `line`, the top of the loop took the next queued command
                     // over it, so `if-shell C 'a ; b' ; c` ran only c (#734
-                    // follow up).
-                    pending_chain.insert(0, chosen.to_string());
+                    // follow up). The branch is a list of its own: a
+                    // failure in it ends it at LIST_END and the outer list
+                    // goes on (#954, cmd-if-shell.c:99-100).
+                    pending_chain.splice(0..0, [chosen.to_string(), LIST_END.to_string()]);
                     line.clear();
                     continue;
                 }
@@ -6990,8 +7041,8 @@ match cmd {
     // Process pending chained commands before reading from socket. A command
     // that answered with an error ends the list there, as tmux's cmd-queue.c
     // removes the rest of a command list after CMD_RETURN_ERROR.
-    if write_stream.take_error() && !persistent {
-        pending_chain.clear();
+    if write_stream.take_error() {
+        drop_failed_list(&mut pending_chain);
     }
     // The next command is taken at the top of the loop. Taking it here as
     // well skipped every other command of a list of three or more: this one
@@ -8904,3 +8955,7 @@ mod tests_issue943_prompt_error_spin;
 #[cfg(test)]
 #[path = "../../tests-rs/test_prompt_error_status_line.rs"]
 mod tests_prompt_error_status_line;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue954_command_list_stops.rs"]
+mod tests_issue954_command_list_stops;
