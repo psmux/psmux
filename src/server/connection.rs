@@ -3311,6 +3311,8 @@ let args: Vec<&str> = match bare_target_rewrite(cmd, probe_args, &tx) {
             let _ = write_stream.flush();
             break;
         }
+        // The command failed: the rest of its list must not run (#954).
+        write_stream.mark_error();
         line.clear();
         continue;
     }
