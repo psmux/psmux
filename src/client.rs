@@ -126,28 +126,21 @@ pub enum BindingDispatch {
     Commands { cmds: Vec<String>, latch: Option<String> },
 }
 
-/// The lines a binding's command list goes out as (PR #740).
+/// The line a binding's or the command prompt's command list goes out as.
 ///
-/// Each command is normally its own line. The server runs a foreground
-/// `run-shell` (no `-b`) on a thread so the client's reader keeps reading, and
-/// separate lines would then run before the shell had finished. tmux runs the
-/// rest of the list only after it: the run-shell item waits in the client's
-/// queue (cmd-run-shell.c returns CMD_RETURN_WAIT, cmd-queue.c CMDQ_WAITING).
-/// So a list in which a foreground run-shell is followed by more commands goes
-/// out as one `\;` joined line, which the server splits again and holds the
-/// tail of until the shell exits. Every other list is unchanged on the wire.
+/// One `\;` joined line, which the server splits again, so it knows which
+/// commands are one list: tmux removes the rest of a list after a command in
+/// it fails (cmd-queue.c:750-754, cmdq_remove_group), and the next line the
+/// client sends is a list of its own (#954). Sent one command per line, the
+/// rest ran after the failure. It also keeps the order of a foreground
+/// `run-shell` (PR #740): the server holds the tail of the line until the
+/// shell exits, as tmux's run-shell item waits in the queue
+/// (cmd-run-shell.c returns CMD_RETURN_WAIT, cmd-queue.c CMDQ_WAITING).
 pub(crate) fn binding_wire_lines(cmds: &[String]) -> Vec<String> {
-    let waits = |sub: &str| {
-        let argv = crate::commands::parse_command_line(sub);
-        matches!(argv.first().map(|s| s.as_str()), Some("run-shell") | Some("run"))
-            && !argv.iter().skip(1).any(|a| a == "-b")
-    };
-    let n = cmds.len();
-    if n > 1 && cmds[..n - 1].iter().any(|c| waits(c)) {
-        vec![format!("{}\n", cmds.join(" \\; "))]
-    } else {
-        cmds.iter().map(|c| format!("{}\n", c)).collect()
+    if cmds.is_empty() {
+        return Vec::new();
     }
+    vec![format!("{}\n", cmds.join(" \\; "))]
 }
 
 /// Split a binding into the command list tmux would dispatch and report the key

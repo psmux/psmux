@@ -91,16 +91,17 @@ fn wire_single_command_is_one_line() {
     assert_eq!(wire(&["run-shell 'sleep 4'"]), vec!["run-shell 'sleep 4'\n"]);
 }
 
+/// #954: every list is one line now, so the server knows which commands are
+/// one list and drops its rest after a failure, as tmux does.
 #[test]
-fn wire_lists_without_a_waiting_run_shell_are_unchanged() {
+fn wire_lists_without_a_waiting_run_shell_are_one_line_too() {
     assert_eq!(wire(&["select-pane -L", "switch-client -T MOVE"]),
-               vec!["select-pane -L\n", "switch-client -T MOVE\n"]);
-    // -b does not wait in tmux either.
+               vec!["select-pane -L \\; switch-client -T MOVE\n"]);
     assert_eq!(wire(&["run-shell -b 'x'", "set -g @a 1"]),
-               vec!["run-shell -b 'x'\n", "set -g @a 1\n"]);
-    // A run-shell that ends the list has nothing to hold.
+               vec!["run-shell -b 'x' \\; set -g @a 1\n"]);
     assert_eq!(wire(&["set -g @a 1", "run-shell 'x'"]),
-               vec!["set -g @a 1\n", "run-shell 'x'\n"]);
+               vec!["set -g @a 1 \\; run-shell 'x'\n"]);
+    assert!(wire(&[]).is_empty());
 }
 
 #[test]
