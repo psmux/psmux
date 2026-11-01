@@ -74,7 +74,7 @@ pub(crate) fn dispatch(
         match req {
                 // shared: session and server lifetime
                 CtrlReq::KillSession => {
-                    if let Some(cmds) = app.hooks.get("session-closed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("session-closed") { let cmds = cmds.clone(); crate::commands::run_hook_commands(app, &cmds); }
                     flow = Flow::EndSession;
                 }
                 CtrlReq::KillServer => {
@@ -112,7 +112,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 3223 at 86a78100)
                 CtrlReq::NewWindow(cmd, name, detached, start_dir, title, empty, env_sets, placement, outcome) => {
-                    if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     // Expand format variables like #{pane_current_path} (#111)
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     // Issue #630: do NOT chdir the server process into the start
@@ -155,7 +155,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 3265 at 86a78100)
                 CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty, env_sets, placement) => {
-                    if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     // No server chdir here: the pane's start directory is handed to the
                     // shell alone, never to the ConPTY host. See the #630 note on
@@ -189,7 +189,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 3298 at 86a78100)
                 CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title, env_sets, zoom_after_split) => {
-                    if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
                     // tmux: split-window INSIDE a floating pane creates ANOTHER
@@ -299,7 +299,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 3402 at 86a78100)
                 CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title, env_sets, zoom_after_split) => {
-                    if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     // No server chdir here: the pane's start directory is handed to the
@@ -366,7 +366,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 3463 at 86a78100)
                 CtrlReq::KillPane => {
-                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     // A focused floating pane is closed by kill-pane instead of a
                     // tiled pane. The child is dropped with the FloatingPane.
                     let closed_float = {
@@ -393,7 +393,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 3489 at 86a78100)
                 CtrlReq::KillPaneById(pid) => {
-                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     // A floating %id closes that float, as `kill-pane` does
                     // for the focused one. kill_pane_by_id walks the tiled
                     // tree only, so `kill-pane -t <float>` used to do nothing
@@ -416,6 +416,34 @@ pub(crate) fn dispatch(
                         unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
                         if let Some((win_id, killed_active)) = win { control::emit_pane_closed(&app, win_id, killed_active); }
                     }
+                }
+                // copied from server/mod.rs run_server (line 3812, #964)
+                CtrlReq::KillPanesExcept { pane } => {
+                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
+                    // tmux cmd_kill_pane_all (#964), as in run_server.
+                    let target = match pane {
+                        Some(pid) => crate::tree::find_floating_by_id(&app, pid).map(|(wi, _)| (wi, pid))
+                            .or_else(|| app.windows.iter().position(|w| crate::tree::find_path_by_id(&w.root, pid).is_some()).map(|wi| (wi, pid))),
+                        None => {
+                            let win = &app.windows[app.active_idx];
+                            win.floating_focus.and_then(|f| win.floating.get(f)).map(|fp| fp.id)
+                                .or_else(|| crate::tree::get_active_pane_id(&win.root, &win.active_path))
+                                .map(|pid| (app.active_idx, pid))
+                        }
+                    };
+                    if let Some((wi, keep)) = target {
+                        let win_id = app.windows[wi].id;
+                        let keep_tiled = crate::tree::find_path_by_id(&app.windows[wi].root, keep).is_some();
+                        let killed_active = keep_tiled && !temp_target::is_real_active_pane(&app, &temp_focus_restore, wi, keep);
+                        // An unzoom alone changes the window flags too.
+                        let unzoomed = app.windows[wi].zoom_saved.is_some();
+                        let killed = crate::pane::kill_panes_except(&mut app, wi, keep);
+                        if killed > 0 || unzoomed {
+                            resize_all_panes(&mut app); meta_dirty = true; state_dirty = true;
+                            control::emit_panes_closed(&app, win_id, killed_active, killed + unzoomed as usize);
+                        }
+                    }
+                    hook_event = Some("after-kill-pane");
                 }
                 // copied from server/mod.rs run_server (line 3514 at 86a78100)
                 CtrlReq::CapturePane(resp, pane_id, preserve_trailing) => {
@@ -1066,7 +1094,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 4825 at 86a78100)
                 CtrlReq::SelectPane(dir, keep_zoom) => {
-                    if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     let _pane_before = active_pane_identity(&app);
                     // Auto-unzoom when navigating to another pane (tmux behavior).
                     // For directional nav: unzoom first so compute_rects uses
@@ -1498,12 +1526,12 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 4374 at 86a78100)
                 CtrlReq::NextWindow => {
-                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
                 }
                 // copied from server/mod.rs run_server (line 4378 at 86a78100)
                 CtrlReq::PrevWindow => {
-                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
                 }
                 // copied from server/mod.rs run_server (line 5820 at 86a78100)
@@ -1552,7 +1580,7 @@ pub(crate) fn dispatch(
                 }
                 // copied from server/mod.rs run_server (line 4382 at 86a78100)
                 CtrlReq::RenameWindow(name) => {
-                    if let Some(cmds) = app.hooks.get("before-rename-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-rename-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     // tmux parity (#552): the argument is a format, expanded
                     // against the target window (cmd-rename-window.c runs it
                     // through format_single_from_target). The temporary -t
@@ -1659,7 +1687,7 @@ pub(crate) fn dispatch(
                 CtrlReq::SplitResizeDone(cid) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_resize_done(&mut app); state_dirty = true; meta_dirty = true; } }
                 // copied from server/mod.rs run_server (line 4982 at 86a78100)
                 CtrlReq::SelectWindow(idx) => {
-                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     if let Some(internal_idx) = app.win_pos(idx) {
                         if internal_idx != app.active_idx {
                             switch_with_copy_save(&mut app, |app| {
@@ -2579,7 +2607,7 @@ pub(crate) fn dispatch(
                         Err(msg) => Err(msg),
                         Ok(_) => {
                             if relative != Some(crate::types::RelativeWindow::Last) {
-                                if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                                if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                             }
                             temp_target::select_window_target_pos(&app, spec, pane.as_deref())
                         }
@@ -2769,7 +2797,7 @@ pub(crate) fn dispatch(
                 // copied from server/mod.rs run_server (line 4266 at 86a78100)
                 CtrlReq::CopyYank => {
                     let _ = yank_selection(&mut app);
-                    if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); crate::commands::run_hook_commands(&mut app, &cmds); }
                     exit_copy_mode(&mut app);
                     hook_event = Some("pane-mode-changed");
                 }
@@ -3253,15 +3281,11 @@ pub(crate) fn dispatch(
         // notification hooks, the after-<command> hook, the focus restore.
         for event in std::mem::take(&mut notify_events) {
             let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
-            for cmd in cmds {
-                let _ = execute_command_string(&mut app, &cmd);
-            }
+            crate::commands::run_hook_commands(&mut app, &cmds);
         }
         if let Some(event) = hook_event {
             let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
-            for cmd in cmds {
-                let _ = execute_command_string(&mut app, &cmd);
-            }
+            crate::commands::run_hook_commands(&mut app, &cmds);
         }
         temp_target::restore_temp_focus(&mut app, &mut temp_focus_restore);
         control::sync_window_changes(&mut app);

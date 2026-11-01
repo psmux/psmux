@@ -3322,7 +3322,11 @@ let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "mov
             | "command-prompt"
             // So is set-buffer's (cmd-set-buffer.c:40).
             | "set-buffer" | "setb");
-let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
+// kill-pane -a keeps its target, so its -t %N is the temporary focus and the
+// kill-pane hooks run there (#964), as with any other target.
+let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id
+    && !crate::commands::own_flag_set(cmd, &args, 'a')
+{
     target_pane
 } else {
     None
@@ -3598,7 +3602,12 @@ match cmd {
         }
     }
     "kill-pane" | "killp" => {
-        if let Some(pid) = targeted_kill_pane_id {
+        // -a kills the target window's other panes (cmd-kill-pane.c:61, #964);
+        // its target, an id too, is already the temporary focus. -a is read
+        // where getopt reads it, never after `--` or an operand.
+        if crate::commands::own_flag_set(cmd, &args, 'a') {
+            let _ = tx.send(CtrlReq::KillPanesExcept { pane: None });
+        } else if let Some(pid) = targeted_kill_pane_id {
             let _ = tx.send(CtrlReq::KillPaneById(pid));
         } else {
             let _ = tx.send(CtrlReq::KillPane);
@@ -7263,7 +7272,11 @@ fn dispatch_control_command(
             true
         }
         "kill-pane" | "killp" => {
-            if pane_is_id {
+            if crate::commands::own_flag_set(cmd, args, 'a') {
+                // cmd-kill-pane.c:61 (#964), as in the one-shot route.
+                let pane = if pane_is_id { target_pane } else { None };
+                let _ = tx.send(CtrlReq::KillPanesExcept { pane });
+            } else if pane_is_id {
                 if let Some(pid) = target_pane {
                     let _ = tx.send(CtrlReq::KillPaneById(pid));
                 }

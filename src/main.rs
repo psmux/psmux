@@ -3190,7 +3190,12 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             "kill-pane" | "killp" => {
                 // A -t naming nothing is the server's "can't find pane" (exit 1
                 // in tmux); the fire-and-forget send dropped it and exited 0.
-                let resp = send_control_with_response("kill-pane\n".to_string())?;
+                // -a keeps the target and kills the window's other panes
+                // (cmd-kill-pane.c:61); it was dropped here (#964).
+                // Read as getopt reads it: `kill-pane -- -a` has no -a.
+                let rest: Vec<&str> = cmd_args.iter().skip(1).map(|a| a.as_str()).collect();
+                let all = crate::commands::own_flag_set("kill-pane", &rest, 'a');
+                let resp = send_control_with_response(if all { "kill-pane -a\n" } else { "kill-pane\n" }.to_string())?;
                 if let Some(msg) = resp.trim_start().strip_prefix("ERROR: ") {
                     eprintln!("psmux: {}", msg.trim_end());
                     std::process::exit(1);

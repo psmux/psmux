@@ -221,9 +221,7 @@ pub(crate) fn dump_state(
     for event in &alerts.hooks {
         if let Some(cmds) = app.hooks.get(*event) {
             let cmds = cmds.clone();
-            for cmd in &cmds {
-                let _ = execute_command_string(app, cmd);
-            }
+            crate::commands::run_hook_commands(app, &cmds);
         }
     }
     if helpers::propagate_osc_titles(app) {

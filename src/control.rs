@@ -122,6 +122,22 @@ pub fn emit_pane_closed(app: &AppState, window_id: usize, killed_active: bool) {
     }
 }
 
+/// `emit_pane_closed` for a command that changed the layout `changes` times
+/// at once (kill-pane -a, #964). tmux notifies window-layout-changed from
+/// window_unzoom and from each layout_close_pane, and every notification
+/// prints the layout as the command left it, so the lines repeat.
+pub fn emit_panes_closed(app: &AppState, window_id: usize, killed_active: bool, changes: usize) {
+    for i in 0..changes {
+        if i == 0 {
+            emit_pane_closed(app, window_id, killed_active);
+        } else if let Some(idx) = app.windows.iter().position(|w| w.id == window_id) {
+            if let Some(n) = layout_change(app, idx, app.windows[idx].area) {
+                emit_notification(app, n);
+            }
+        }
+    }
+}
+
 /// Format a control mode notification as a tmux wire-compatible line.
 pub fn format_notification(notif: &ControlNotification) -> String {
     match notif {

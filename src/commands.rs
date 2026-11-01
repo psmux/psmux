@@ -1702,11 +1702,24 @@ pub fn hook_debug_trace(event: &str) {
 pub fn fire_hooks(app: &mut AppState, event: &str) {
     hook_debug_trace(event);
     if let Some(commands) = app.hooks.get(event).cloned() {
+        app.hook_depth += 1;
         for cmd in commands {
             let bg_cmd = ensure_background(&cmd);
             let _ = execute_command_string(app, &bg_cmd);
         }
+        app.hook_depth -= 1;
     }
+}
+
+/// Run a hook's commands. tmux runs them with CMDQ_STATE_NOHOOKS, so the
+/// commands among them that fire hooks on the in server route fire none
+/// (#964).
+pub(crate) fn run_hook_commands(app: &mut AppState, cmds: &[String]) {
+    app.hook_depth += 1;
+    for cmd in cmds {
+        let _ = execute_command_string(app, cmd);
+    }
+    app.hook_depth -= 1;
 }
 
 /// Execute an Action (from key bindings)
@@ -1826,6 +1839,11 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
             if zoom_after_split {
                 toggle_zoom(app);
             }
+        }
+        // -a: cmd-kill-pane.c:61 (#964). The in server route reads the -t
+        // and a focused float.
+        "kill-pane" | "killp" if own_flag_set(parts[0], &parts[1..], 'a') => {
+            execute_command_string(app, &cmdline)?;
         }
         "kill-pane" | "killp" => { kill_active_pane(app)?; }
         "capture-pane" | "capturep" => { capture_active_pane(app)?; }
@@ -2601,7 +2619,7 @@ fn resolve_named_session(app: &AppState, spec: &str) -> NamedSession {
 
 /// Whether the boolean flag `wanted` is set in the command's flag region,
 /// read with the same getopt walk as [`own_target_flag`].
-fn own_flag_set(command: &str, args: &[&str], wanted: char) -> bool {
+pub(crate) fn own_flag_set(command: &str, args: &[&str], wanted: char) -> bool {
     let mut i = 0;
     while i < args.len() {
         let Some(rest) = args[i].strip_prefix('-').filter(|r| !r.is_empty() && *r != "-") else {
@@ -2736,6 +2754,126 @@ pub(crate) fn kill_windows_except(app: &mut AppState, keep: usize) -> usize {
     killed
 }
 
+/// `kill-pane -a [-t target]` on the in server route (#964). No target is the
+/// current pane, a focused float included; a target naming nothing is tmux's
+/// error and nothing is killed.
+fn kill_pane_all_here(app: &mut AppState, target: Option<&str>) {
+    if app.windows.is_empty() {
+        return;
+    }
+    let found = match target {
+        None => {
+            let wi = app.active_idx.min(app.windows.len() - 1);
+            let win = &app.windows[wi];
+            win.floating_focus.and_then(|f| win.floating.get(f)).map(|fp| fp.id)
+                .or_else(|| get_active_pane_id(&win.root, &win.active_path))
+                .map(|id| (wi, id))
+                .ok_or_else(|| "no active pane".to_string())
+        }
+        Some(t) => kill_pane_all_target(app, t),
+    };
+    match found {
+        Ok((wi, keep)) => {
+            // The command and its hooks run with the target as the current
+            // pane, as the server's temporary focus does (cmd-queue.c
+            // cmdq_fire_command gives the hooks the target's state): a bare
+            // kill-pane -a in a hook acts on the target's window.
+            let target_win = app.windows[wi].id;
+            let target_win_active = get_active_pane_id(&app.windows[wi].root, &app.windows[wi].active_path);
+            let mut saved = None;
+            let tt = crate::types::TempTarget {
+                win: Some(target_win), win_is_id: true,
+                pane: Some(keep), pane_is_id: true,
+                ..Default::default()
+            };
+            if let Err(e) = crate::server::temp_target::apply_temp_target(app, &mut saved, &tt) {
+                app.status_message = Some((e, Instant::now(), None));
+                return;
+            }
+            // CMD_AFTERHOOK, and the before- hook every command gets; none
+            // inside a hook's own commands.
+            let hooks = app.hook_depth == 0;
+            if hooks {
+                fire_kill_pane_hook(app, "before-kill-pane");
+            }
+            // The before- hook may have moved or closed the target.
+            if let Some(wi) = app.windows.iter().position(|w| {
+                crate::tree::find_path_by_id(&w.root, keep).is_some() || w.floating.iter().any(|fp| fp.id == keep)
+            }) {
+                let win = &app.windows[wi];
+                let win_id = win.id;
+                let keep_tiled = crate::tree::find_path_by_id(&win.root, keep).is_some();
+                // The focus moved to `keep` for the command; the window's own
+                // active pane is the one it had before.
+                let was_active = if win_id == target_win { target_win_active == Some(keep) }
+                    else { crate::server::temp_target::is_real_active_pane(app, &saved, wi, keep) };
+                let killed_active = keep_tiled && !was_active;
+                // An unzoom alone changes the window flags too.
+                let unzoomed = win.zoom_saved.is_some();
+                let killed = crate::pane::kill_panes_except(app, wi, keep);
+                crate::control::emit_panes_closed(app, win_id, killed_active, killed + unzoomed as usize);
+                if hooks {
+                    fire_kill_pane_hook(app, "after-kill-pane");
+                }
+            }
+            crate::server::temp_target::restore_temp_focus(app, &mut saved);
+        }
+        Err(e) => app.status_message = Some((e, Instant::now(), None)),
+    }
+}
+
+fn fire_kill_pane_hook(app: &mut AppState, event: &str) {
+    if let Some(cmds) = app.hooks.get(event).cloned() {
+        run_hook_commands(app, &cmds);
+    }
+}
+
+/// The pane a `kill-pane -a -t` keeps, as the server's temporary focus reads
+/// the target: a window with no pane part is its current pane, a focused
+/// float included, and a pane index counts the floats after the tiled panes
+/// (#767). `{position}` and the other tokens go to `resolve_pane_spec`.
+fn kill_pane_all_target(app: &AppState, t: &str) -> Result<(usize, usize), String> {
+    let plain = crate::cli::strip_exact_match_prefix(t.trim());
+    let miss = || format!("can't find pane: {}", plain);
+    let at_index = |wi: usize, idx: usize| -> Option<usize> {
+        let win = &app.windows[wi];
+        let pos = idx.checked_sub(app.pane_base_index_of(wi))?;
+        let paths = crate::tree::pane_paths(&win.root);
+        match paths.get(pos) {
+            Some(path) => get_active_pane_id(&win.root, path),
+            None => win.floating.get(pos - paths.len()).map(|fp| fp.id),
+        }
+    };
+    if let Some(id) = plain.strip_prefix('%').and_then(|n| n.parse::<usize>().ok()) {
+        if let Some((wi, _)) = crate::tree::find_floating_by_id(app, id) {
+            return Ok((wi, id));
+        }
+    } else if !plain.is_empty() && plain.chars().all(|c| c.is_ascii_digit()) {
+        // A bare index is a pane of the current window before it is a window
+        // (cmd-find.c:575 to :600), as resolve_in_server_target reads it.
+        let wi = app.active_idx.min(app.windows.len() - 1);
+        if let Some(id) = plain.parse::<usize>().ok().and_then(|i| at_index(wi, i)) {
+            return Ok((wi, id));
+        }
+    }
+    let positional = plain.starts_with('{');
+    let pt = crate::cli::parse_target(plain);
+    if !positional && !pt.pane_is_id {
+        if let (Some(idx), Some(dot)) = (pt.pane, plain.rfind('.')) {
+            let (wi, _) = crate::window_ops::resolve_pane_spec(app, &plain[..dot])?;
+            return at_index(wi, idx).map(|id| (wi, id)).ok_or_else(miss);
+        }
+    }
+    let (wi, path) = crate::window_ops::resolve_pane_spec(app, t)?;
+    let win = &app.windows[wi];
+    if pt.pane.is_none() && !positional {
+        if let Some(fp) = win.floating_focus.and_then(|f| win.floating.get(f)) {
+            return Ok((wi, fp.id));
+        }
+    }
+    get_active_pane_id(&win.root, &path).map(|id| (wi, id)).ok_or_else(miss)
+}
+
 fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // Quotes group and are removed here, as tmux's command parser does and as
     // the server's own command line handler (connection.rs) already does. A
@@ -2770,6 +2908,17 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
 
     // A `-t` naming another session runs on that session's server (#938).
     if forward_to_other_session(app, &parts, cmd) {
+        return Ok(());
+    }
+
+    // -a keeps the target and kills the other panes of its window
+    // (cmd-kill-pane.c:61, #964). It runs here, against the focus this line
+    // runs with: forwarded to the server, a hook's line ran after the hook's
+    // target was put back. It reads its own -t, before the rewrite below,
+    // which knows the tiled panes only. Its hooks fire here, and not inside
+    // a hook's own commands (tmux CMDQ_STATE_NOHOOKS).
+    if matches!(parts[0], "kill-pane" | "killp") && own_flag_set(parts[0], &parts[1..], 'a') {
+        kill_pane_all_here(app, own_target_flag(parts[0], &parts[1..]));
         return Ok(());
     }
 

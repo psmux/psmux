@@ -2439,6 +2439,64 @@ pub fn kill_pane_by_id(app: &mut AppState, pane_id: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// Kill every pane of window `win_idx` but `keep`, as tmux's `kill-pane -a`
+/// (cmd-kill-pane.c:72-93, cmd_kill_pane_all): the window is unzoomed first
+/// and a one-pane window is left alone (#964). Floats count as panes of the
+/// window (#767), so they go too. A floating `keep` closes the other floats
+/// only: the tiled tree cannot be emptied. Returns how many panes went.
+pub fn kill_panes_except(app: &mut AppState, win_idx: usize, keep: usize) -> usize {
+    let Some(win) = app.windows.get(win_idx) else { return 0 };
+    let keep_is_float = win.floating.iter().any(|fp| fp.id == keep);
+    if !keep_is_float && crate::tree::find_path_by_id(&win.root, keep).is_none() {
+        return 0;
+    }
+    let prev_pane = crate::copy_mode::active_pane_id(app);
+    let win = &mut app.windows[win_idx];
+    let unzoomed = win.zoom_saved.is_some();
+    // server_unzoom_window: the saved sizes go back before the tree changes.
+    if let Some(saved) = win.zoom_saved.take() {
+        for (p, sz) in saved.into_iter() {
+            if let Some(Node::Split { sizes, .. }) = crate::tree::get_split_mut(&mut win.root, &p) { *sizes = sz; }
+        }
+    }
+    let keep_focused = win.floating_focus.and_then(|f| win.floating.get(f)).map(|fp| fp.id) == Some(keep);
+    let mut killed = 0;
+    for mut fp in std::mem::take(&mut win.floating) {
+        if fp.id == keep {
+            win.floating.push(fp);
+        } else {
+            // The whole tree, as a tiled pane's goes (kill_pane_at_path):
+            // child.kill() left the shell's descendants running.
+            crate::platform::process_kill::kill_process_tree(&mut fp.pane.child);
+            killed += 1;
+        }
+    }
+    win.floating_focus = if keep_focused { Some(0) } else { None };
+    if !keep_is_float {
+        for id in crate::tree::collect_pane_ids(&win.root) {
+            if id == keep {
+                continue;
+            }
+            if let Some(path) = crate::tree::find_path_by_id(&win.root, id) {
+                kill_pane_at_path(win, &path);
+                killed += 1;
+            }
+        }
+        if let Some(path) = crate::tree::find_path_by_id(&win.root, keep) {
+            win.active_path = path;
+        }
+    }
+    crate::copy_mode::retarget_mode_to_active_pane(app, prev_pane);
+    // The window's own PTYs take their new cells, current window or not
+    // (resize_all_panes resizes the current one only). An unzoom alone
+    // changes their sizes too.
+    if killed > 0 || unzoomed {
+        let area = app.windows[win_idx].area;
+        crate::tree::resize_window_panes(app, win_idx, area);
+    }
+    killed
+}
+
 pub fn detect_shell() -> CommandBuilder {
     build_command(None, false, false)
 }

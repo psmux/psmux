@@ -539,7 +539,7 @@ const CLI_COMMANDS: &[(&str, &str, &str)] = &[
     ("capture-pane",      "capturep", "Capture pane contents to buffer"),
     ("display-panes",     "displayp", "Show pane numbers"),
     ("join-pane",         "joinp",    "Move a pane into another window"),
-    ("kill-pane",         "killp",    "Kill the active pane"),
+    ("kill-pane",         "killp",    "Kill the active pane (-a: all others)"),
     ("last-pane",         "lastp",    "Select the previously active pane"),
     ("move-pane",         "movep",    "Move a pane to another window"),
     ("pipe-pane",         "pipep",    "Pipe pane output to a command"),

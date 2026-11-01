@@ -1693,6 +1693,9 @@ pub struct AppState {
     /// is only *temporarily* focused to serve the request. None when no
     /// temporary focus is in effect.
     pub temp_focus_saved_active: Option<usize>,
+    /// How many hook bodies are running. tmux runs a hook's commands with
+    /// CMDQ_STATE_NOHOOKS, so a command among them fires no hooks (#964).
+    pub hook_depth: usize,
     pub mode: Mode,
     /// Ids of panes in clock mode while another pane holds focus (#828).
     /// Clock mode belongs to one pane in tmux (`window_pane_set_mode`), but
@@ -3349,6 +3352,7 @@ impl AppState {
             windows: Vec::new(),
             active_idx: 0,
             temp_focus_saved_active: None,
+            hook_depth: 0,
             mode: Mode::Passthrough,
             clock_panes: Vec::new(),
             escape_time_ms: DEFAULT_ESCAPE_TIME_MS,
@@ -3877,6 +3881,11 @@ pub enum CtrlReq {
     },
     KillPane,
     KillPaneById(usize),
+    /// `kill-pane -a`: kill every OTHER pane of the target's window and keep
+    /// the target (tmux cmd-kill-pane.c:72-93, cmd_kill_pane_all, #964).
+    /// `None` is the active pane (after any temporary focus), `Some` a `%id`
+    /// in any window, floats included.
+    KillPanesExcept { pane: Option<usize> },
     /// Capture a pane's plain text. Fields: resp, target pane id
     /// (`-t %N`, None = active pane), the `-N` / `-J` line flags.
     CapturePane(mpsc::Sender<String>, Option<usize>, crate::copy_mode::CaptureOpts),

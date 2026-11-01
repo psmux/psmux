@@ -580,14 +580,15 @@ pub fn first_operand<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
 /// and bindings) read flags as exact tokens, so a cluster has to be split
 /// before them (#938): `new-window -dt :1` ran `:1` as the shell command,
 /// `kill-window -at :1` killed the ACTIVE window and `list-windows -aF`
-/// dropped its format.  The other commands keep reading what they read.
+/// dropped its format.  `kill-pane -at %4` is `-a -t %4` (#964).  The other
+/// commands keep reading what they read.
 pub fn splits_flag_clusters(command: &str) -> bool {
     matches!(
         canonical_command(command),
         "select-pane" | "selectp" | "last-pane" | "lastp"
             | "new-window" | "neww" | "split-window" | "splitw"
             | "select-window" | "selectw" | "kill-window" | "killw"
-            | "list-windows" | "lsw"
+            | "list-windows" | "lsw" | "kill-pane" | "killp"
     )
 }
 
@@ -1333,6 +1334,7 @@ PANE COMMANDS:
         -p <percent>        Size as percentage
         -c <dir>            Start directory
     kill-pane, killp        Close the current pane
+        -a                  Close every other pane of the window instead
     select-pane, selectp    Select a pane
         -U / -D / -L / -R  Direction (up/down/left/right)
         -t <id>             Target pane (e.g. %3)
