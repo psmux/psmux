@@ -53,7 +53,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `has-session` | `has` | `t:` | CLI, SRV, CFG, CTL |
 | `if-shell` | `if` | `bFt:` | CLI, SRV, CFG |
 | `join-pane` | `joinp` | `dhvs:t:` | CLI, SRV, CFG |
-| `kill-pane` | `killp` | `t:` | CLI, SRV, CFG, CTL |
+| `kill-pane` | `killp` | `at:` | CLI, SRV, CFG, CTL |
 | `kill-server` | *(none)* | `a` (psmux extension) | CLI, SRV, CFG, CTL |
 | `kill-session` | `kill-ses` | `t:` | CLI, SRV, CFG |
 | `kill-window` | `killw` | `at:` | CLI, SRV, CFG, CTL |
@@ -309,8 +309,9 @@ A psmux extension that creates a pane floating above the tiled layout.
 - `-d` / `-e` disable and enable the last pane's input without selecting it, as `select-pane -l -d` / `-e` (tmux runs last-pane through the same code); `-e` wins when both are given, and `-t` names the window. Before this, both flags were dropped and `last-pane -d` selected the last pane.
 
 **kill-pane** (`killp`)
+- Boolean: `-a` keeps the target pane and kills every other pane of its window (cmd-kill-pane.c:72-93). The window is unzoomed first, a one-pane window is left alone, and with no `-t` the target is the current pane. Floating panes count as panes of the window: a tiled target closes all of them, and a floating target closes the other floats but leaves the tiled panes, since the tiled layout cannot be emptied. Clusters such as `-at %4` are split. Before #964, `-a` was ignored and the target itself was killed.
 - Value: `-t` (target pane, via the global `-t` handler)
-- Not accepted: `-a`
+- Not accepted: `-f`
 
 **resize-pane** (`resizep`)
 - Boolean: `-U`, `-D`, `-L`, `-R` (directional), `-Z` (toggle zoom)
