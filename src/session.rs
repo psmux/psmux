@@ -3045,24 +3045,51 @@ pub fn send_control_with_response_wait(line: String) -> io::Result<String> {
     send_control_with_response_bounded(line, None)
 }
 
-fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
+fn control_endpoint(line: &str) -> io::Result<(u16, String, Option<String>)> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
     if env::var("PSMUX_ROUTE_DEBUG").is_ok() {
         eprintln!("[route] send_control_with_response target={:?} full={:?} argv={:?} line={:?}",
             target, env::var("PSMUX_TARGET_FULL").ok(),
             env::args().collect::<Vec<_>>(), line.trim());
     }
-    // Never target a warm (standby) session, resolve to a real session instead,
-    // unless it is the namespace's held empty server (issue #734).
     if is_warm_session(&target) && !warm_target_addressable(&target) {
         let ns = target.strip_suffix("____warm__").map(|s| s.to_string());
         target = resolve_last_session_name_ns(ns.as_deref()).unwrap_or_else(|| "default".to_string());
     }
-    let full_target = env::var("PSMUX_TARGET_FULL").ok();
     let path = crate::paths::port_file(&target);
-    let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
-    let session_key = read_session_key(&target).unwrap_or_default();
-    exchange_on_port(port, &session_key, full_target.as_deref(), &line, read_timeout)
+    let contents = std::fs::read_to_string(&path).map_err(|e| {
+        io::Error::new(e.kind(), format!("no server running on session '{}': {}", target, e))
+    })?;
+    let port = contents.trim().parse::<u16>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid server port"))?;
+    Ok((port, read_session_key(&target).unwrap_or_default(), env::var("PSMUX_TARGET_FULL").ok()))
+}
+
+fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
+    let (port, key, target) = control_endpoint(&line)?;
+    exchange_on_port(port, &key, target.as_deref(), &line, read_timeout)
+}
+
+/// Require native AUTH acknowledgement before submitting the shell command.
+/// Every transport or framing failure is an error, never a retry.
+pub(crate) fn send_run_shell_with_response(line: &str, cwd: &std::path::Path) -> io::Result<crate::run_shell::CliReply> {
+    use base64::Engine;
+    let (port, key, target) = control_endpoint(line)?;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    crate::run_shell::negotiate(&mut reader, &mut stream, &key)?;
+    reader.get_ref().set_read_timeout(None)?;
+    if let Some(target) = target { writeln!(stream, "TARGET {}", target)?; }
+    let cwd = base64::engine::general_purpose::STANDARD.encode(cwd.to_string_lossy().as_bytes());
+    // The only command submission point in this native path.
+    writeln!(stream, "CLIENT_CWD {}", cwd)?;
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    crate::run_shell::read_reply(&mut reader)
 }
 
 /// One request to the server on `port` and its whole reply: AUTH, an optional

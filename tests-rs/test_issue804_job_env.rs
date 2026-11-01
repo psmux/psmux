@@ -56,7 +56,7 @@ fn job_env_has_no_tmux_pane_and_no_pane_marker() {
 #[test]
 fn client_process_builds_run_shell_without_tmux() {
     let _l = JOB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let c = build_run_shell_command("echo hi");
+    let c = build_run_shell_command("echo hi", None);
     assert!(env_of(&c, "TMUX").is_none());
 }
 
@@ -66,7 +66,7 @@ fn server_run_shell_child_gets_tmux() {
     let _p = Published::new(40804, Some("ns804"));
     let want = crate::pane::tmux_env_value(Some(40804), Some("ns804"));
     for cmd in ["echo hi", "pwsh -NoProfile -Command Write-Output hi", "cmd /c echo hi"] {
-        let c = build_run_shell_command(cmd);
+        let c = build_run_shell_command(cmd, None);
         assert_eq!(env_of(&c, "TMUX"), Some(Some(OsStr::new(&want))), "{cmd}");
         assert!(env_of(&c, "TMUX_PANE").is_none(), "{cmd}");
         // The -S path env is replaced by TMUX, as for panes.
@@ -110,7 +110,7 @@ fn cli_job_takes_the_server_environment() {
         ("I804_G".into(), "gval".into()),
         ("PATH".into(), r"C:\server\bin".into()),
     ];
-    let mut c = build_run_shell_command("echo hi");
+    let mut c = build_run_shell_command("echo hi", None);
     apply_server_job_environment(&mut c, &server_env);
     assert_eq!(env_of(&c, "TMUX"), Some(Some(OsStr::new("/tmp/psmux-1/ns,2,0"))));
     assert_eq!(env_of(&c, "I804_G"), Some(Some(OsStr::new("gval"))));

@@ -7,7 +7,7 @@
 //    foreground run-shell is followed by more commands goes out as one line, so
 //    the server can hold the tail until the shell exits.
 
-use crate::server::connection::run_shell_output_text;
+use crate::run_shell::output_text as run_shell_output_text;
 
 #[cfg(windows)]
 fn status_ok() -> std::process::ExitStatus {
@@ -39,30 +39,30 @@ fn previous_inline(o: &std::process::Output) -> String {
 
 #[test]
 fn output_text_empty_is_empty_so_no_popup() {
-    assert_eq!(run_shell_output_text(&out(b"", b"")), "");
+    assert_eq!(run_shell_output_text("command", &out(b"", b"")), "");
 }
 
 #[test]
 fn output_text_stdout_only_is_verbatim() {
-    assert_eq!(run_shell_output_text(&out(b"hello\r\n", b"")), "hello\r\n");
-    assert_eq!(run_shell_output_text(&out(b"no newline", b"")), "no newline");
+    assert_eq!(run_shell_output_text("command", &out(b"hello\r\n", b"")), "hello\r\n");
+    assert_eq!(run_shell_output_text("command", &out(b"no newline", b"")), "no newline");
 }
 
 #[test]
 fn output_text_stderr_only_gets_no_leading_newline() {
-    assert_eq!(run_shell_output_text(&out(b"", b"boom\n")), "boom\n");
+    assert_eq!(run_shell_output_text("command", &out(b"", b"boom\n")), "boom\n");
 }
 
 #[test]
 fn output_text_both_inserts_one_newline_only_when_missing() {
-    assert_eq!(run_shell_output_text(&out(b"out", b"err")), "out\nerr");
-    assert_eq!(run_shell_output_text(&out(b"out\n", b"err\n")), "out\nerr\n");
+    assert_eq!(run_shell_output_text("command", &out(b"out", b"err")), "out\nerr");
+    assert_eq!(run_shell_output_text("command", &out(b"out\n", b"err\n")), "out\nerr\n");
 }
 
 #[test]
 fn output_text_trailing_newline_is_kept() {
-    assert!(run_shell_output_text(&out(b"a\n", b"")).ends_with('\n'));
-    assert!(!run_shell_output_text(&out(b"a", b"")).ends_with('\n'));
+    assert!(run_shell_output_text("command", &out(b"a\n", b"")).ends_with('\n'));
+    assert!(!run_shell_output_text("command", &out(b"a", b"")).ends_with('\n'));
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn output_text_matches_previous_inline_code() {
     ];
     for (so, se) in cases {
         let o = out(so, se);
-        assert_eq!(run_shell_output_text(&o), previous_inline(&o), "stdout={so:?} stderr={se:?}");
+        assert_eq!(run_shell_output_text("command", &o), previous_inline(&o), "stdout={so:?} stderr={se:?}");
     }
 }
 

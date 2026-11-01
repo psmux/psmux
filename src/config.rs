@@ -4062,24 +4062,28 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
     // (especially important when using -L socket namespaces like in tppanel preview).
     let target_session = app.port_file_base();
-    let mut cmd = crate::commands::build_run_shell_command(&shell_cmd);
-    crate::commands::apply_run_shell_cwd(&mut cmd, parsed.cwd.as_deref());
-    crate::commands::null_job_output(&mut cmd);
+    let cwd = crate::commands::resolve_run_shell_cwd(parsed.cwd.as_deref())
+        .or_else(|| std::env::current_dir().ok());
+    let mut cmd = crate::commands::build_run_shell_command(&shell_cmd, cwd.as_deref());
     if !target_session.is_empty() {
         cmd.env("PSMUX_TARGET_SESSION", &target_session);
     }
-    match delay {
-        // `-d`: started after the delay, on a thread so nothing here waits.
-        Some(delay) => {
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                let _ = cmd.spawn();
-            });
-        }
-        None => {
-            let _ = cmd.spawn();
-        }
+    if app.run_shell_tx.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_shell_tx = Some(tx);
+        app.run_shell_rx = Some(rx);
     }
+    let tx = app.run_shell_tx.as_ref().unwrap().clone();
+    std::thread::spawn(move || {
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+        let text = match cmd.output() {
+            Ok(out) => crate::run_shell::output_text(&shell_cmd, &out),
+            Err(e) => format!("run-shell: {}", e),
+        };
+        let _ = tx.send(("run-shell".to_string(), text));
+    });
 }
 
 /// How a run-shell line in a runtime source or the startup config runs: None

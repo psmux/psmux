@@ -118,7 +118,8 @@ fn has_shell_syntax(args: &str) -> bool {
         | '{' | '}' | '[' | ']' | '*' | '?' | '~' | '#' | '!' | '@'))
 }
 
-fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
+#[cfg(windows)]
+fn find_file_in_command(cmd: &str, cwd: Option<&std::path::Path>) -> Option<(String, String)> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() { return None; }
     let bytes = trimmed.as_bytes();
@@ -129,7 +130,8 @@ fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
             end += 1;
         }
         let candidate = &trimmed[..end];
-        if std::path::Path::new(candidate).is_file() {
+        let path = cwd.map(|cwd| cwd.join(candidate)).unwrap_or_else(|| candidate.into());
+        if path.is_file() {
             let rest = trimmed[end..].trim_start().to_string();
             return Some((candidate.to_string(), rest));
         }
@@ -367,7 +369,7 @@ pub(crate) fn parse_run_shell_args<S: AsRef<str>>(args: &[S]) -> Result<RunShell
 /// Wrapper around `build_run_shell_command_inner` that also makes the psmux
 /// binary reachable from the child process (`ensure_psmux_on_path`). Every
 /// run-shell path funnels through here: hooks, key bindings, `run` config
-/// lines, client-forwarded commands and the CLI fallback.
+/// lines and client-forwarded commands.
 ///
 /// stdin is the null device. A job never reads the server's stdin in tmux
 /// (job.c:156 gives it the job socket), and in psmux that slot holds a dead
@@ -375,8 +377,13 @@ pub(crate) fn parse_run_shell_args<S: AsRef<str>>(args: &[S]) -> Result<RunShell
 /// it fails CreateProcess with os error 6 (#819). Callers that spawn
 /// without capturing output must null stdout and stderr too
 /// ([`null_job_output`]).
-pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
-    let mut c = build_run_shell_command_inner(shell_cmd);
+pub fn build_run_shell_command(shell_cmd: &str, cwd: Option<&std::path::Path>) -> std::process::Command {
+    let mut c = build_run_shell_command_inner(shell_cmd, cwd);
+    if let Some(cwd) = cwd {
+        c.current_dir(cwd);
+        // tmux job.c sets PWD after selecting the job directory.
+        c.env("PWD", cwd);
+    }
     #[cfg(windows)]
     ensure_psmux_on_path(&mut c);
     apply_job_env(&mut c);
@@ -384,23 +391,7 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
     c
 }
 
-/// Whether the CLI hands a run-shell to the server instead of running it
-/// itself: a command with a format in it, which only the server can expand,
-/// and any `-b`. In tmux a `-b` job is the server's and the command returns
-/// at once (cmd-run-shell.c:187). Spawned by the CLI, the job was the CLI's
-/// child holding its stdout, so a caller reading that pipe waited for the
-/// whole job and got its output, and a job writing after the reader closed
-/// hit a broken pipe. The server also waits out a `-b -d N` delay.
-pub(crate) fn cli_run_shell_goes_to_server(shell_cmd: &str, background: bool) -> bool {
-    shell_cmd.contains('#') || background
-}
-
-/// The line the CLI sends for [`cli_run_shell_goes_to_server`], newline
-/// ended. The command goes over as ONE quoted argument: joined raw, the
-/// server split it again and dropped its quotes, so
-/// `run-shell "Write-Output ('x' + '#{pid}')"` reached the shell as
-/// `Write-Output (x + 1234)`. `cwd` is the user's `-c` and nothing else, so
-/// a line without one reads the same to a server from an older psmux.
+/// The CLI command line, with the shell command kept as one opaque argument.
 pub(crate) fn cli_run_shell_server_line(
     background: bool,
     delay: Option<std::time::Duration>,
@@ -418,7 +409,7 @@ pub(crate) fn cli_run_shell_server_line(
         line.push_str(" -c ");
         line.push_str(&crate::util::quote_arg(cwd));
     }
-    line.push(' ');
+    line.push_str(" -- ");
     line.push_str(&crate::util::quote_arg(shell_cmd));
     line.push('\n');
     line
@@ -428,21 +419,23 @@ pub(crate) fn cli_run_shell_server_line(
 /// directory when it is not one, as tmux's job_run does when its chdir fails
 /// (job.c:143 to :147). Spawning in a directory that does not exist would
 /// fail the whole command instead.
-pub(crate) fn apply_run_shell_cwd(c: &mut std::process::Command, cwd: Option<&str>) {
-    let Some(cwd) = cwd.filter(|d| !d.is_empty()) else { return };
+pub(crate) fn resolve_run_shell_cwd(cwd: Option<&str>) -> Option<PathBuf> {
+    let Some(cwd) = cwd.filter(|d| !d.is_empty()) else { return None };
     let home = crate::paths::home_dir();
     let dir = match cwd.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => format!("{}{}", home, rest),
         _ => cwd.to_string(),
     };
     if std::path::Path::new(&dir).is_dir() {
-        c.current_dir(dir);
+        Some(std::env::current_dir().ok()?.join(dir))
     } else if !home.is_empty() {
-        c.current_dir(home);
+        Some(PathBuf::from(home))
+    } else {
+        None
     }
 }
 
-/// stdout and stderr for a job whose output nobody reads (`run-shell -b`, an
+/// stdout and stderr for a job whose output nobody reads (an
 /// if-shell condition). Inheriting the server's would fail after a C-c relay
 /// for the reason in [`build_run_shell_command`] (#819); `output()` callers
 /// need nothing, it pipes both itself.
@@ -506,9 +499,8 @@ pub fn apply_job_env(c: &mut std::process::Command) {
 }
 
 /// The whole environment a job of this server runs with: the server process
-/// environment plus [`JOB_ENV`]. The server answers `job-environ` with it, so
-/// a run-shell or if-shell the CLI runs in its own process gets the same
-/// environment as one the server runs (tmux runs every job in the server).
+/// environment plus [`JOB_ENV`]. The server answers `job-environ` with it for
+/// shell conditions the CLI runs in its own process.
 pub fn job_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     let extra = job_env();
     let mut out: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
@@ -558,7 +550,7 @@ pub fn fetch_server_job_environment() -> Option<Vec<(std::ffi::OsString, std::ff
 /// (including those with spaces) and uses the appropriate execution strategy:
 /// `-File` for `.ps1`, direct `Command::new` for `.exe`/`.cmd`/`.bat`,
 /// and PowerShell call operator `& 'path'` for other files with spaces.
-fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
+fn build_run_shell_command_inner(shell_cmd: &str, cwd: Option<&std::path::Path>) -> std::process::Command {
     #[cfg(windows)]
     {
         use crate::platform::HideWindowCommandExt;
@@ -596,7 +588,10 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
         } else {
             trimmed
         };
-        if let Some((file_path, rest_args)) = find_file_in_command(trimmed) {
+        if let Some((file_path, rest_args)) = find_file_in_command(trimmed, cwd) {
+            let has_spaces = file_path.contains(' ');
+            let path = cwd.map(|cwd| cwd.join(&file_path)).unwrap_or_else(|| file_path.into());
+            let file_path = path.to_string_lossy().into_owned();
             let lower_path = file_path.to_lowercase();
 
             // A tmux plugin's .tmux entry script is a bash script: run it with
@@ -648,7 +643,7 @@ fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
 
             // For other file types with spaces in the path, we must avoid
             // the Case 3 shell wrapping which breaks on spaces.
-            if file_path.contains(' ') {
+            if has_spaces {
                 match ext.as_deref() {
                     // Batch files: run via cmd.exe /c with the path as a separate arg
                     // so CreateProcess quotes just the path, not path+args together
@@ -4749,96 +4744,49 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     None,
                 ));
             } else {
-                // Expand #{...} format variables (tmux parity: run-shell's
-                // command is format-expanded before it runs).
-                //
-                // This was missing entirely, and it silently broke every bind of
-                // the shape `run-shell "helper --path '#{pane_current_path}'"`:
-                // the helper received the literal string `#{pane_current_path}`.
-                // Combined with `-b` discarding the spawn result below, such a
-                // bind did nothing at all and reported nothing — no output, no
-                // status message, no log line. Only `-c`/`-d` start-dirs were
-                // being expanded (in server/mod.rs), which is why `popup -d
-                // "#{pane_current_path}"` worked and this did not.
-                //
-                // Untimed, like tmux's format_expand: a `%` in a shell
-                // command (cmd's %VAR%, PowerShell's `%`) is not strftime.
+                // Resolve pane/window formats against server state before launch.
+                // Untimed expansion preserves literal % in shell commands
+                // (cmd's %VAR%, PowerShell's %), rather than applying strftime.
                 let shell_cmd = crate::format::expand_format_untimed(&shell_cmd, app);
                 // Expand ~ to home directory + XDG fallback for plugin paths
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
                 let target_session = app.port_file_base();
 
-                if background {
-                    // -b flag: fire and forget, no output capture
-                    let mut c = build_run_shell_command(&shell_cmd);
-                    apply_run_shell_cwd(&mut c, cwd.as_deref());
-                    null_job_output(&mut c);
-                    if !target_session.is_empty() {
-                        c.env("PSMUX_TARGET_SESSION", &target_session);
-                    }
+                // Both foreground and background jobs collect their result.
+                // Spawn async to avoid blocking the UI thread.
+                // Interactive commands (htop, vim, etc.) would freeze psmux
+                // if we used synchronous .output() on the main thread.
+                // Lazily create the channel pair on first use.
+                if app.run_shell_tx.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    app.run_shell_tx = Some(tx);
+                    app.run_shell_rx = Some(rx);
+                }
+                let tx = app.run_shell_tx.as_ref().unwrap().clone();
+                let shell_cmd_display = shell_cmd.clone();
+                let cwd = resolve_run_shell_cwd(cwd.as_deref()).or_else(|| std::env::current_dir().ok());
+                let mut c = build_run_shell_command(&shell_cmd, cwd.as_deref());
+                if !target_session.is_empty() {
+                    c.env("PSMUX_TARGET_SESSION", &target_session);
+                }
+                std::thread::spawn(move || {
                     if let Some(delay) = delay {
-                        // `-b -d N`: started after the delay, nothing waits.
-                        std::thread::spawn(move || {
-                            std::thread::sleep(delay);
-                            let _ = c.spawn();
-                        });
+                        std::thread::sleep(delay);
                     }
-                    // Report a spawn failure. `-b` means "don't wait for the
-                    // command", not "don't tell me it never started" — the old
-                    // `let _ = c.spawn();` made a broken background bind
-                    // indistinguishable from an unbound key.
-                    else if let Err(e) = c.spawn() {
-                        app.status_message = Some((
-                            format!("run-shell: {}: {}", shell_cmd, e),
-                            Instant::now(),
-                            None,
-                        ));
+                    match c.output() {
+                        Ok(output) => {
+                            let text = crate::run_shell::output_text(&shell_cmd, &output);
+                            // Send result back; empty output is also sent so
+                            // the status message "running..." can be cleared.
+                            let _ = tx.send(("run-shell".to_string(), text));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(("run-shell".to_string(), format!("run-shell: {}", e)));
+                        }
                     }
-                } else {
-                    // No -b: spawn async to avoid blocking the UI thread.
-                    // Interactive commands (htop, vim, etc.) would freeze psmux
-                    // if we used synchronous .output() on the main thread.
-                    // Lazily create the channel pair on first use.
-                    if app.run_shell_tx.is_none() {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        app.run_shell_tx = Some(tx);
-                        app.run_shell_rx = Some(rx);
-                    }
-                    let tx = app.run_shell_tx.as_ref().unwrap().clone();
-                    let shell_cmd = shell_cmd.clone();
-                    let shell_cmd_display = shell_cmd.clone();
-                    let target_session = target_session.clone();
-                    std::thread::spawn(move || {
-                        if let Some(delay) = delay {
-                            std::thread::sleep(delay);
-                        }
-                        let mut c = build_run_shell_command(&shell_cmd);
-                        apply_run_shell_cwd(&mut c, cwd.as_deref());
-                        if !target_session.is_empty() {
-                            c.env("PSMUX_TARGET_SESSION", &target_session);
-                        }
-                        // Detach stdin so interactive programs exit immediately
-                        c.stdin(std::process::Stdio::null());
-                        match c.output() {
-                            Ok(output) => {
-                                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                if !stderr.is_empty() {
-                                    if !text.is_empty() && !text.ends_with('\n') {
-                                        text.push('\n');
-                                    }
-                                    text.push_str(&stderr);
-                                }
-                                // Send result back; empty output is also sent so
-                                // the status message "running..." can be cleared.
-                                let _ = tx.send(("run-shell".to_string(), text));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(("run-shell".to_string(), format!("run-shell: {}", e)));
-                            }
-                        }
-                    });
+                });
+                if !background {
                     app.status_message = Some((
                         format!("running: {}", shell_cmd_display),
                         Instant::now(),
