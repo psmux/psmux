@@ -110,6 +110,14 @@ try {
     $fa = Opt '@fa'; $fc = Opt '@fc'
     Check "config: the line after a failing line still loads (@fc)" ($fa -eq '1' -and $fc -eq '1') "(@fa='$fa', @fc='$fc')"
     Write-Host "    (config line's own rest: @fb='$(Opt '@fb')'; tmux leaves it unset, psmux's config loader is not part of #954)"
+    # #951 follow up: a table that exists with a key it does not bind is
+    # "unknown key" (cmd-list-keys.c:226-227), not a missing table.
+    P bind -T mytbl x display hi | Out-Null
+    $lk = (P list-keys -T mytbl y) -join ' '
+    $lkRc = $LASTEXITCODE
+    Check "list-keys -T mytbl y: exit 1, unknown key: y" ($lkRc -eq 1 -and $lk -match 'unknown key: y') "(exit $lkRc, '$lk')"
+    $lk = (P list-keys -T nosuchtbl) -join ' '
+    Check "list-keys -T nosuchtbl: table nosuchtbl doesn't exist" ($lk -match "table nosuchtbl doesn't exist") "('$lk')"
     Stop-Server
 
     # ------------------------------------------------- raw PERSISTENT line
