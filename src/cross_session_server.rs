@@ -133,7 +133,7 @@ pub fn handle_pane_forward_extract(
             match stream.try_clone() {
                 Ok(tcp_writer) => {
                     if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                        writers.push((pane_local_id, Box::new(tcp_writer)));
+                        writers.push((pane_local_id, Arc::new(std::sync::Mutex::new(Box::new(tcp_writer)))));
                         crate::types::PIPE_PANE_COUNT
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }

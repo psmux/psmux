@@ -920,7 +920,7 @@ pub fn normalize_attached_target_flag(args: Vec<String>) -> Vec<String> {
 pub fn deferred_command_start<S: AsRef<str>>(command: &str, args: &[S]) -> Option<usize> {
     let value_options: &[&str] = match command {
         "bind-key" | "bind" => &["-T", "-N"],
-        "set-hook" => &["-t"],
+        "set-hook" | "pipe-pane" | "pipep" => &["-t"],
         "confirm-before" | "confirm" => &["-c", "-p", "-t"],
         _ => return None,
     };
@@ -940,7 +940,7 @@ pub fn deferred_command_start<S: AsRef<str>>(command: &str, args: &[S]) -> Optio
 
     match command {
         "bind-key" | "bind" | "set-hook" => (i < args.len()).then_some(i + 1),
-        "confirm-before" | "confirm" => (i < args.len()).then_some(i),
+        "confirm-before" | "confirm" | "pipe-pane" | "pipep" => (i < args.len()).then_some(i),
         _ => None,
     }
 }

@@ -43,6 +43,8 @@ pub fn conpty_preemptive_dsr_response(_writer: &mut dyn std::io::Write) {
 /// exactly like tmux's event buffer.
 struct QueuedPaneWriter {
     tx: std::sync::mpsc::Sender<PaneInput>,
+    pipe_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    failed: Arc<AtomicBool>,
     /// Set when the pane drops its writer.  Whatever is still queued then
     /// (the rest of a large paste into a pane being killed or respawned) is
     /// discarded instead of being written to a pane that no longer exists,
@@ -76,8 +78,41 @@ impl PaneInputSink for QueuedPaneWriter {
     fn queue_inject_paste(&mut self, job: InjectPaste) -> Result<(), InjectPaste> {
         self.tx.send(PaneInput::InjectPaste(job)).map_err(|e| match e.0 {
             PaneInput::InjectPaste(job) => job,
-            PaneInput::Bytes(_) => unreachable!("sent an InjectPaste"),
+            _ => unreachable!("sent an InjectPaste"),
         })
+    }
+
+    fn try_queue_pipe(&mut self, bytes: Vec<u8>) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
+        use std::sync::mpsc::TrySendError::{Disconnected, Full};
+        if self.failed.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+            return Err(Disconnected(bytes));
+        }
+        let len = bytes.len();
+        if len == 0 { return Ok(()); }
+        if self.pipe_bytes.try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            (len <= PIPE_INPUT_BUDGET.saturating_sub(used)).then_some(used + len)
+        }).is_err() {
+            return Err(Full(bytes));
+        }
+        let permit = PipeInputPermit { bytes: len, used: self.pipe_bytes.clone() };
+        self.tx.send(PaneInput::PipeBytes(bytes, permit)).map_err(|e| match e.0 {
+            PaneInput::PipeBytes(bytes, _) => Disconnected(bytes),
+            _ => unreachable!("sent PipeBytes"),
+        })
+    }
+}
+
+pub(crate) const PIPE_INPUT_BUDGET: usize = 64 * 1024;
+
+/// Held through the actual PTY write, not just until the queue is drained.
+pub(crate) struct PipeInputPermit {
+    bytes: usize,
+    used: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for PipeInputPermit {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
 
@@ -87,6 +122,7 @@ impl PaneInputSink for QueuedPaneWriter {
 pub(crate) enum PaneInput {
     /// Bytes for the ConPTY input pipe.
     Bytes(Vec<u8>),
+    PipeBytes(Vec<u8>, PipeInputPermit),
     /// A bracketed paste to deliver as console `KEY_EVENT` records
     /// (`WriteConsoleInputW`), the route `input::choose_paste_route` picks
     /// where conhost strips the paste markers from the pipe (issue #684).
@@ -116,6 +152,12 @@ pub struct InjectPaste {
 /// the paste in order with its bytes (a test stand in) hands the job back and
 /// the caller writes the paste to the pipe instead.
 pub trait PaneInputSink: std::io::Write + Send {
+    /// Autonomous pipe input alone has a budget. A full queue returns ownership
+    /// so the caller can pause its source without losing bytes.
+    fn try_queue_pipe(&mut self, bytes: Vec<u8>) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
+        Err(std::sync::mpsc::TrySendError::Disconnected(bytes))
+    }
+
     /// Queue `job` behind everything already written.  Returns it when this
     /// writer cannot carry it (or its thread is gone).
     fn queue_inject_paste(&mut self, job: InjectPaste) -> Result<(), InjectPaste> {
@@ -306,6 +348,9 @@ pub(crate) fn spawn_pane_write_queue_with(
     let (tx, rx) = std::sync::mpsc::channel::<PaneInput>();
     let closed = Arc::new(AtomicBool::new(false));
     let closed_rx = closed.clone();
+    let pipe_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failed = Arc::new(AtomicBool::new(false));
+    let failed_rx = failed.clone();
     let _ = std::thread::Builder::new()
         .name("pane-writer".to_string())
         .spawn(move || {
@@ -340,6 +385,19 @@ pub(crate) fn spawn_pane_write_queue_with(
                         }
                         if inner.write_all(&buf).is_err() {
                             broken = true;
+                            failed_rx.store(true, Ordering::Release);
+                            continue;
+                        }
+                        let _ = inner.flush();
+                        crate::pty_trace::mark("w", 0, &buf);
+                    }
+                    PaneInput::PipeBytes(buf, _permit) => {
+                        if broken || closed_rx.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        if inner.write_all(&buf).is_err() {
+                            broken = true;
+                            failed_rx.store(true, Ordering::Release);
                             continue;
                         }
                         let _ = inner.flush();
@@ -372,12 +430,13 @@ pub(crate) fn spawn_pane_write_queue_with(
                         }
                         if !crate::input::write_paste_remainder(&mut *inner, &job.text, r.consumed, job.normalize) {
                             broken = true;
+                            failed_rx.store(true, Ordering::Release);
                         }
                     }
                 }
             }
         });
-    Box::new(QueuedPaneWriter { tx, closed })
+    Box::new(QueuedPaneWriter { tx, closed, pipe_bytes, failed })
 }
 
 /// Cached resolved shell path to avoid repeated `which::which()` PATH scans.
@@ -4623,21 +4682,10 @@ pub fn spawn_reader_thread(
                     // its pipe write fails; drop that entry and decrement the gate
                     // so the reader stops trying.
                     if crate::types::PIPE_PANE_COUNT.load(Ordering::Relaxed) > 0 {
-                        if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                            use std::io::Write;
-                            let mut i = 0;
-                            while i < writers.len() {
-                                if writers[i].0 == pane_id {
-                                    let w = &mut writers[i].1;
-                                    if w.write_all(&local[..n]).is_err() || w.flush().is_err() {
-                                        writers.remove(i);
-                                        crate::types::PIPE_PANE_COUNT.fetch_sub(1, Ordering::Relaxed);
-                                        continue;
-                                    }
-                                }
-                                i += 1;
-                            }
-                        }
+                        crate::pipe_pane::tee_output(
+                            &crate::types::PIPE_WRITERS, &crate::types::PIPE_PANE_COUNT,
+                            pane_id, &local[..n],
+                        );
                     }
                 }
                 Ok(_) => {

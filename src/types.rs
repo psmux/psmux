@@ -1501,12 +1501,30 @@ pub struct Hook {
 // PopupPty has been removed: popups now store an actual Pane
 // (see src/popup.rs for the popup-as-pane architecture).
 
-/// Pipe pane state - process piping pane output
+/// Owned command and directions for one pipe-pane invocation.
 pub struct PipePaneState {
     pub pane_id: usize,
     pub process: Option<std::process::Child>,
-    pub stdin: bool,
-    pub stdout: bool,
+    pub input: Option<std::process::ChildStdout>,
+    pub pending: Option<Vec<u8>>,
+    // The registry holds the writer until reader EOF; dropping it closes
+    // child stdin so the child can exit.
+    pub output: Option<std::sync::Weak<Mutex<Box<dyn std::io::Write + Send>>>>,
+}
+
+impl Drop for PipePaneState {
+    fn drop(&mut self) {
+        if let Some(output) = self.output.take().and_then(|w| w.upgrade()) {
+            crate::pipe_pane::remove_writer(&PIPE_WRITERS, &PIPE_PANE_COUNT, &output);
+        }
+        // Never acquire the sink mutex: its pane reader may be blocked in a
+        // write. Killing our child can release that write; stopping must not wait.
+        self.input.take();
+        if let Some(child) = self.process.as_mut() {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
+    }
 }
 
 /// Wait-for channel state
@@ -5165,12 +5183,12 @@ pub fn parse_x11_color(s: &str) -> Option<(u8, u8, u8)> {
 /// `PIPE_PANE_COUNT` is a cheap gate: it lets every reader thread skip the mutex
 /// entirely in the overwhelmingly common case where no pipe is active, so panes
 /// that are not being piped pay nothing. The server handler (`CtrlReq::PipePane`)
-/// pushes/removes `(pane_id, child_stdin)` entries and keeps the count in sync.
+/// pushes/removes owned sink entries and keeps the count in sync.
 pub static PIPE_PANE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Writers are boxed so the same tee path serves both pipe-pane child stdins
 /// and cross-session forward tunnels (TcpStream) without a second reader
 /// competing for the ConPTY output pipe.
-pub static PIPE_WRITERS: Mutex<Vec<(usize, Box<dyn std::io::Write + Send>)>> = Mutex::new(Vec::new());
+pub static PIPE_WRITERS: Mutex<Vec<(usize, crate::pipe_pane::PipeWriter)>> = Mutex::new(Vec::new());
 
 /// Issue #685: the low sixteen OSC 4 palette entries of every pane that has
 /// set any, mirrored out of the pane's `vt100::Screen` so the server loop's

@@ -18,6 +18,7 @@ mod rendering;
 mod config;
 mod commands;
 mod pane;
+mod pipe_pane;
 mod warm_pane_sync;
 mod warm_trace;
 mod popup;
@@ -5796,12 +5797,15 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             "pipe-pane" | "pipep" => {
                 let mut cmd = "pipe-pane".to_string();
                 let mut i = 1;
+                let mut options = true;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
-                        "-I" => { cmd.push_str(" -I"); }
-                        "-O" => { cmd.push_str(" -O"); }
-                        "-o" => { cmd.push_str(" -o"); }
-                        "-t" => {
+                        "--" if options => { cmd.push_str(" --"); options = false; }
+                        "-IO" | "-OI" if options => { cmd.push_str(" -I -O"); }
+                        "-I" if options => { cmd.push_str(" -I"); }
+                        "-O" if options => { cmd.push_str(" -O"); }
+                        "-o" if options => { cmd.push_str(" -o"); }
+                        "-t" if options => {
                             if let Some(t) = cmd_args.get(i + 1) {
                                 cmd.push_str(&format!(" -t {}", t));
                                 i += 1;
@@ -5814,7 +5818,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         // arrive as several arguments (issue #563). Quoting through
                         // quote_arg_if_needed makes that join an identity and
                         // escapes backslashes to match parse_command_line.
-                        s => { cmd.push_str(&format!(" {}", crate::util::quote_arg_if_needed(s))); }
+                        s => {
+                            options = false;
+                            cmd.push_str(&format!(" {}", crate::util::quote_arg_if_needed(s)));
+                        }
                     }
                     i += 1;
                 }
