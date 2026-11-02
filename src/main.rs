@@ -859,7 +859,17 @@ fn run_command_list_on(
             .map(|c| crate::cli::with_client_path(c, path.as_deref()))
             .collect();
         let line = crate::cli::command_list_wire_line(&with_path[0], &with_path[1..]);
-        let reply = match crate::session::send_control_with_completion(format!("{}\n", line)) {
+        // Only a list that waits needs the completion receipt. Every other
+        // list keeps the shipped exchange, so a CLI from this build still runs
+        // `a ; b` on a server an older binary started (that server refuses
+        // the completion AUTH outright).
+        let sent = format!("{}\n", line);
+        let reply = if crate::wait_for::list_waits(&commands[..shared]) {
+            crate::session::send_control_with_completion(sent)
+        } else {
+            send_control_with_response(sent)
+        };
+        let reply = match reply {
             Ok(reply) => reply,
             Err(e) => {
                 eprintln!("psmux: {}", e);

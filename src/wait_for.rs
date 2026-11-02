@@ -8,6 +8,8 @@ pub(crate) const AUTH_CAPABILITY: &str = "PSMUX_WAIT_REPLY_V1";
 pub(crate) const NEGOTIATION_ACK: &str = "\u{0001}PSMUX_WAIT_REPLY_V1\u{0001}\n";
 pub(crate) const MAX_BUFFERED_INPUT: usize = 64 * 1024;
 const MAX_CHUNK: usize = 64 * 1024;
+/// How long a pending wait sleeps on its reply between looks at its socket.
+const WAIT_POLL: Duration = Duration::from_millis(50);
 
 // Negotiation is entirely inside AUTH, before aliases or command dispatch.
 pub(crate) fn negotiate(
@@ -69,6 +71,12 @@ pub(crate) fn read_response(reader: &mut impl Read) -> io::Result<String> {
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid completion frame")),
         }
     }
+}
+
+/// Whether a CLI command list names wait-for, so it needs the completion
+/// receipt. A list that does not wait keeps the ordinary exchange.
+pub(crate) fn list_waits(commands: &[Vec<String>]) -> bool {
+    commands.iter().any(|c| matches!(c.first().map(String::as_str), Some("wait-for" | "wait")))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,13 +275,17 @@ impl WaitInput {
         retry: impl Fn(&io::Error) -> bool,
     ) -> Option<Result<(), String>> {
         loop {
-            match reply.try_recv() {
+            // Sleep on the reply, not on the socket: the release wakes this at
+            // once, and the socket is looked at only every WAIT_POLL to notice
+            // a client that went away. Polling the socket alone woke each
+            // pending wait every 10 ms (its read timeout), 100 times a second.
+            match reply.recv_timeout(WAIT_POLL) {
                 Ok(result) => return Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => {
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.failed = true;
                     return None;
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             if self.eof {
                 if self.cancel_on_eof {
@@ -331,3 +343,6 @@ mod auth_tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_wait_for_codec.rs"]
 mod codec_tests;
+#[cfg(test)]
+#[path = "../tests-rs/test_wait_for_pending_cost.rs"]
+mod pending_cost_tests;
