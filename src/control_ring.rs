@@ -48,6 +48,10 @@ static DRAINED: Condvar = Condvar::new();
 /// woken for it even when no TUI client is watching (`wake_server_loop`).
 pub static CONTROL_CLIENTS_PRESENT: AtomicBool = AtomicBool::new(false);
 
+// Tests replacing CONSUMED or CONTROL_CLIENTS_PRESENT must share this lock.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
 fn key(ring: &Ring) -> usize {
     Arc::as_ptr(ring) as *const () as usize
 }
@@ -101,44 +105,9 @@ pub fn push(ring: &Ring, data: &[u8]) {
     }
 }
 
-/// The length of the longest prefix of `bytes` that does not end inside a
-/// UTF-8 sequence, so a character split across two reads is sent whole in
-/// the later `%output` instead of as two replacement characters.
-pub fn complete_utf8_len(bytes: &[u8]) -> usize {
-    let n = bytes.len();
-    // Look back at most 3 bytes for the lead byte of a trailing sequence.
-    for back in 1..=3.min(n) {
-        let b = bytes[n - back];
-        if b & 0xC0 == 0x80 {
-            continue; // continuation byte, keep looking for the lead
-        }
-        let need = if b & 0xE0 == 0xC0 {
-            2
-        } else if b & 0xF0 == 0xE0 {
-            3
-        } else if b & 0xF8 == 0xF0 {
-            4
-        } else {
-            return n; // ASCII or invalid: nothing to hold back
-        };
-        return if back < need { n - back } else { n };
-    }
-    n
-}
-
-/// Server side: take what the ring holds for the control clients, leaving
-/// only an unfinished UTF-8 character for the next pass.
+/// Server side: take all raw bytes the ring holds for the control clients.
 pub fn drain(ring: &Ring) -> Vec<u8> {
-    let mut buf = ring.lock().unwrap_or_else(|e| e.into_inner());
-    if buf.is_empty() {
-        return Vec::new();
-    }
-    let all: Vec<u8> = buf.drain(..).collect();
-    let keep = complete_utf8_len(&all);
-    buf.extend(&all[keep..]);
-    let mut all = all;
-    all.truncate(keep);
-    all
+    ring.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
 }
 
 /// Wake readers waiting on a full ring after a drain pass.
@@ -174,26 +143,13 @@ pub fn set_consumed(rings: &[&Ring], attach: bool) {
     }
 }
 
-/// Split pane output into `%output` payloads of at most `OUTPUT_CHUNK_MAX`
-/// bytes, on character boundaries.
-pub fn chunks(data: String) -> Vec<String> {
+/// Split raw pane output into `%output` payloads of at most `OUTPUT_CHUNK_MAX`
+/// bytes. Octal escaping does not require UTF-8 character boundaries.
+pub fn chunks(data: Vec<u8>) -> Vec<Vec<u8>> {
     if data.len() <= OUTPUT_CHUNK_MAX {
         return vec![data];
     }
-    let mut out = Vec::new();
-    let mut rest = data.as_str();
-    while rest.len() > OUTPUT_CHUNK_MAX {
-        let mut cut = OUTPUT_CHUNK_MAX;
-        while !rest.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.push(rest[..cut].to_string());
-        rest = &rest[cut..];
-    }
-    if !rest.is_empty() {
-        out.push(rest.to_string());
-    }
-    out
+    data.chunks(OUTPUT_CHUNK_MAX).map(|chunk| chunk.to_vec()).collect()
 }
 
 #[cfg(test)]

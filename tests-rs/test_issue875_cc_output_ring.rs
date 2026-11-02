@@ -5,12 +5,8 @@ use super::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-// set_consumed replaces the whole consumed set, so tests that use it run
-// one at a time.
-static SERIAL: Mutex<()> = Mutex::new(());
-
 fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn ring() -> Ring {
@@ -155,46 +151,48 @@ fn first_attach_empties_the_rings_but_a_later_pane_keeps_its_output() {
 }
 
 #[test]
-fn drain_holds_back_a_split_utf8_character() {
+fn drain_preserves_a_split_utf8_character() {
     let _g = serial();
     let r = ring();
     set_consumed(&[&r], true);
     let s = "box \u{2500}\u{2502} end".as_bytes().to_vec();
     // Cut inside the 3 byte U+2502.
     let cut = s.len() - " end".len() - 1;
+    assert!(std::str::from_utf8(&s[..cut]).is_err());
     push(&r, &s[..cut]);
     let first = drain(&r);
+    assert_eq!(first, s[..cut]);
+    assert_eq!(len(&r), 0);
     push(&r, &s[cut..]);
     let second = drain(&r);
-    assert!(std::str::from_utf8(&first).is_ok());
-    assert!(std::str::from_utf8(&second).is_ok());
+    assert_eq!(second, s[cut..]);
+    assert_eq!(len(&r), 0);
     assert_eq!([first, second].concat(), s);
     set_consumed(&[], false);
 }
 
 #[test]
-fn complete_utf8_len_cases() {
-    assert_eq!(complete_utf8_len(b""), 0);
-    assert_eq!(complete_utf8_len(b"abc"), 3);
-    let e = "\u{e9}".as_bytes(); // 2 bytes
-    assert_eq!(complete_utf8_len(&[b'a', e[0]]), 1);
-    assert_eq!(complete_utf8_len(&[b'a', e[0], e[1]]), 3);
-    let w = "\u{1F600}".as_bytes(); // 4 bytes
-    assert_eq!(complete_utf8_len(&w[..3]), 0);
-    assert_eq!(complete_utf8_len(w), 4);
-    // Invalid bytes are passed on, not held forever.
-    assert_eq!(complete_utf8_len(&[0x80, 0x80, 0x80, 0x80]), 4);
-    assert_eq!(complete_utf8_len(&[b'a', 0xFF]), 2);
+fn drain_keeps_arbitrary_bytes_including_incomplete_utf8_tails() {
+    let r = ring();
+    for bytes in [b"".as_slice(), b"abc", b"\x80\xff", b"\xc2", b"\xe2\x94", b"\xf0\x9f\x98"] {
+        r.lock().unwrap().extend(bytes);
+        assert_eq!(len(&r), bytes.len());
+        assert_eq!(drain(&r), bytes);
+        assert_eq!(len(&r), 0);
+    }
 }
 
 #[test]
-fn chunks_split_on_character_boundaries() {
-    assert_eq!(chunks("short".into()), vec!["short".to_string()]);
-    let s: String = "\u{2500}".repeat(50_000); // 150 000 bytes
-    let parts = chunks(s.clone());
-    assert!(parts.len() >= 3);
-    assert!(parts.iter().all(|p| p.len() <= OUTPUT_CHUNK_MAX && !p.is_empty()));
-    assert_eq!(parts.concat(), s);
+fn chunks_preserve_bytes_at_the_payload_limit() {
+    for size in [0, 5, OUTPUT_CHUNK_MAX - 1, OUTPUT_CHUNK_MAX, OUTPUT_CHUNK_MAX + 1, 150_000] {
+        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        let parts = chunks(data.clone());
+        assert!(parts.iter().all(|p| p.len() <= OUTPUT_CHUNK_MAX));
+        assert_eq!(parts.concat(), data);
+        if size > 0 {
+            assert!(parts.iter().all(|p| !p.is_empty()));
+        }
+    }
 }
 
 #[test]

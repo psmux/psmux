@@ -57,7 +57,10 @@ fn output_lines_give_pane_and_payload() {
 #[test]
 fn unescape_undoes_escape_output() {
     let raw = "a\\b\r\n\x1b[31mgr\u{fc}n\t";
-    assert_eq!(unescape_output(&crate::control::escape_output(raw)), raw.as_bytes());
+    assert_eq!(unescape_output(&crate::control::escape_output(raw.as_bytes())), raw.as_bytes());
+    let bytes: Vec<u8> = (0..=255).collect();
+    assert!(std::str::from_utf8(&bytes).is_err());
+    assert_eq!(unescape_output(&crate::control::escape_output(&bytes)), bytes);
     assert_eq!(unescape_output("\\12"), b"\\12", "a short escape is literal");
 }
 
