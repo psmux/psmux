@@ -3630,7 +3630,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut status_fg: Color = Color::Black;
     // #372: terminal default until the server sends a parseable status-style.
     let mut status_bg: Color = Color::Reset;
-    let mut status_bold: bool = false;
+    // Every other attribute of status-style (bold, reverse, underscore,
+    // overline and the rest), with no colours set.
+    let mut status_attrs: Style = Style::default();
     let mut custom_status_left: Option<String> = None;
     let mut custom_status_right: Option<String> = None;
     // Last `codepoint-widths` array applied to this process's width table, so
@@ -3639,8 +3641,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut win_status_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_current_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_sep: String = " ".to_string();
-    let mut win_status_style: Option<(Option<Color>, Option<Color>, bool)> = None;
-    let mut win_status_current_style: Option<(Option<Color>, Option<Color>, bool)> = None;
+    let mut win_status_style: Option<(Option<Color>, Option<Color>, Style)> = None;
+    let mut win_status_current_style: Option<(Option<Color>, Option<Color>, Style)> = None;
     let mut mode_style_str: String = "bg=yellow,fg=black".to_string();
     let mut status_position_str: String = "bottom".to_string();
     let mut status_justify_str: String = "left".to_string();
@@ -8859,13 +8861,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Update status-style from server config (if provided)
         if let Some(ref ss) = state.status_style {
             if !ss.is_empty() {
-                let (fg, bg, bold) = parse_tmux_style_components(ss);
+                let (fg, bg, attrs) = parse_tmux_style_components(ss);
                 status_fg = fg.unwrap_or(Color::Black);
                 // #372: fall back to the terminal default rather than bright
                 // green when a bg fails to parse, so any future parse miss is
                 // invisible instead of alarming.
                 status_bg = bg.unwrap_or(Color::Reset);
-                status_bold = bold;
+                status_attrs = attrs;
             }
         }
 
@@ -9785,11 +9787,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
             let sb_fg = status_fg;
             let sb_bg = status_bg;
-            let sb_base = if status_bold {
-                Style::default().fg(sb_fg).bg(sb_bg).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(sb_fg).bg(sb_bg)
-            };
+            let sb_base = status_attrs.fg(sb_fg).bg(sb_bg);
             // ── Build three separate span groups: left, tabs, right ──
             // If status_format[0] is set, use it for line 0 instead of the default 3-part layout
             let use_status_format_0 = status_format.len() > 0 && !status_format[0].is_empty();
@@ -9838,11 +9836,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // over the server wide one; the parsed server wide style is
                 // still the base so an override that only names a foreground
                 // keeps the rest.
-                let server_normal_style = if let Some((fg, bg, bold)) = win_status_style {
-                    let mut s = Style::default();
+                let server_normal_style = if let Some((fg, bg, attrs)) = win_status_style {
+                    let mut s = attrs;
                     if let Some(c) = fg { s = s.fg(c); }
                     if let Some(c) = bg { s = s.bg(c); }
-                    if bold { s = s.add_modifier(Modifier::BOLD); }
                     s
                 } else {
                     sb_base
@@ -9871,11 +9868,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     Some(normal_style.patch(crate::style::parse_tmux_style(raw)))
                 };
                 let fallback_style = if w.active {
-                    let server_current = if let Some((fg, bg, bold)) = win_status_current_style {
-                        let mut s = Style::default();
+                    let server_current = if let Some((fg, bg, attrs)) = win_status_current_style {
+                        let mut s = attrs;
                         if let Some(c) = fg { s = s.fg(c); }
                         if let Some(c) = bg { s = s.bg(c); }
-                        if bold { s = s.add_modifier(Modifier::BOLD); }
                         s
                     } else {
                         sb_base
