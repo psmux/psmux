@@ -2291,3 +2291,7 @@ mod tests_issue947_status_format_array;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue948_status_line_options.rs"]
 mod tests_issue948_status_line_options;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_update_environment_array.rs"]
+mod tests_update_environment_array;
