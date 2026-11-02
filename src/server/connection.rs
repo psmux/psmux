@@ -301,11 +301,25 @@ fn show_array_text(
     if name == crate::command_alias::OPTION {
         return Some(crate::command_alias::read(aliases).show_lines(values_only));
     }
+    scoped_array_text(name, values_only, false, false, tx)
+}
+
+/// [`show_array_text`] for the table `-g` and `-A` pick: a session array
+/// option (update-environment, #803) is read from the global array with
+/// `global`, and with `mark_inherited` each line the session inherits has
+/// tmux's `*` after its name. `None` for an option that is no stored array.
+fn scoped_array_text(
+    name: &str,
+    values_only: bool,
+    global: bool,
+    mark_inherited: bool,
+    tx: &TargetedSender<'_>,
+) -> Option<String> {
     if !crate::server::options::is_stored_array_option(name) {
         return None;
     }
     let (rtx, rrx) = mpsc::channel::<String>();
-    let _ = tx.send(CtrlReq::ShowArrayOption(rtx, name.to_string(), values_only));
+    let _ = tx.send(CtrlReq::ShowArrayOption(rtx, name.to_string(), values_only, global, mark_inherited));
     rrx.recv_timeout(Duration::from_millis(2000)).ok()
 }
 
@@ -5556,14 +5570,22 @@ match cmd {
         if let Some(name) = session_query {
             // #803: `show -g <name>` reads the global table, `show -A <name>`
             // marks a value the session inherits (cmd-show-options.c:197).
-            let (rtx, rrx) = mpsc::channel::<(String, bool)>();
-            let _ = tx.send(CtrlReq::SessionOptionQuery(rtx, name.to_string(), has_g));
-            if let Ok((value, inherited)) = rrx.recv_timeout(Duration::from_millis(2000)) {
-                let output = if has_v {
-                    format!("{}\n", value)
-                } else {
-                    format!("{}{} {}\n", name, if has_a && inherited { "*" } else { "" }, value)
-                };
+            // A session array (update-environment) prints a line per element.
+            let reply = match scoped_array_text(name, has_v, has_g, has_a, tx) {
+                Some(text) => Some(text),
+                None => {
+                    let (rtx, rrx) = mpsc::channel::<(String, bool)>();
+                    let _ = tx.send(CtrlReq::SessionOptionQuery(rtx, name.to_string(), has_g));
+                    rrx.recv_timeout(Duration::from_millis(2000)).ok().map(|(value, inherited)| {
+                        if has_v {
+                            format!("{}\n", value)
+                        } else {
+                            format!("{}{} {}\n", name, if has_a && inherited { "*" } else { "" }, value)
+                        }
+                    })
+                }
+            };
+            if let Some(output) = reply {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
                 } else {
@@ -7839,6 +7861,11 @@ fn dispatch_control_command(
             if let Some(name) = opt_name.as_deref().filter(|n| {
                 !window_scope2 && (has_g2 || has_a2) && crate::server::options::is_session_option(n)
             }) {
+                // A session array (update-environment) prints a line per element.
+                if let Some(text) = scoped_array_text(name, value_only, has_g2, has_a2, tx) {
+                    let _ = resp_tx.send(text.trim_end_matches('\n').to_string());
+                    return true;
+                }
                 let (qrtx, qrrx) = mpsc::channel::<(String, bool)>();
                 let _ = tx.send(CtrlReq::SessionOptionQuery(qrtx, name.to_string(), has_g2));
                 let reply = match qrrx.recv_timeout(Duration::from_millis(2000)) {
