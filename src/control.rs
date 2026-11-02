@@ -1387,3 +1387,7 @@ mod tests_issue824_827_cc;
 #[cfg(test)]
 #[path = "../tests-rs/test_control_output_bytes.rs"]
 mod tests_control_output_bytes;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr975_cc_raw_bytes.rs"]
+mod tests_pr975_cc_raw_bytes;
