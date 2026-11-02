@@ -187,6 +187,9 @@ struct Peer {
     /// target names this session runs on its handler with these (`route`).
     tx: mpsc::Sender<CtrlReq>,
     aliases: Aliases,
+    /// The session's job identity (`job_identity`): a line routed here runs
+    /// its jobs as this session, not as the listener's.
+    identity: Arc<Vec<(String, String)>>,
 }
 
 /// Deliver one server wide write straight to a session's own handler, with
@@ -206,7 +209,11 @@ fn deliver(p: &Peer, line: &str) {
         let tx = p.tx.clone();
         let key = p.key.clone();
         let aliases = p.aliases.clone();
-        thread::spawn(move || connection::handle_connection(inner, tx, &key, aliases));
+        let identity = p.identity.clone();
+        thread::spawn(move || {
+            crate::commands::set_connection_job_env(Some(identity));
+            connection::handle_connection(inner, tx, &key, aliases)
+        });
     }
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = write!(s, "AUTH {}\n{}\n", p.key, line);
@@ -1018,6 +1025,7 @@ fn create_session(
             base: base.clone(),
             tx,
             aliases: aliases.clone(),
+            identity: Arc::new(job_identity(app.control_port.unwrap_or(0), ns, &base)),
         });
     }
     Ok(Session { app, lp: SessionLoop::new(aliases), cwd, port, stop, _guard: guard })
@@ -1265,8 +1273,13 @@ fn serve_session_connection(
     aliases: Aliases,
     sid: usize,
     globals: &Globals,
-    identity: &[(String, String)],
+    identity: &Arc<Vec<(String, String)>>,
 ) {
+    // A job this connection's handler starts (run-shell, an if-shell
+    // condition) runs as this session. The process wide job environment
+    // names whichever session the loop entered last, which is not this one
+    // whenever the loop is not running this session's request.
+    crate::commands::set_connection_job_env(Some(identity.clone()));
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
     let mut buf = vec![0u8; 16 * 1024];
     let deadline = Instant::now() + Duration::from_millis(2000);
@@ -1321,15 +1334,15 @@ fn serve_session_connection(
             // it had been sent to that session's listener. The client
             // authenticated for this server already; every session of it is
             // the same user's, as every session of a tmux socket is.
-            let (tx, aliases, sid) = match sibling_peer(globals, sid, &line) {
-                Some(p) => (p.tx, p.aliases, p.sid),
-                None => (tx, aliases, sid),
+            let (tx, aliases, sid, identity) = match sibling_peer(globals, sid, &line) {
+                Some(p) => (p.tx, p.aliases, p.sid, p.identity),
+                None => (tx, aliases, sid, identity.clone()),
             };
             match router::first_unsupported_aliased(&line, |name| alias_of(&aliases, name)) {
                 Some(name) => refuse(stream, &Outcome::Unsupported(name), lines),
                 None => {
                     apply_global_writes(&line, sid, globals);
-                    serve_gated(stream, tx, key, aliases, sid, globals, lines);
+                    serve_gated(stream, tx, key, aliases, sid, globals, lines, identity);
                 }
             }
         }
@@ -1345,7 +1358,7 @@ fn serve_session_connection(
         // B). The handler answers it as a per session server does, but every
         // command line it gets is checked first.
         router::Opening::Undecided if router::opening_authenticates(&buf[..n], key) => {
-            serve_gated(stream, tx, key, aliases, sid, globals, 1);
+            serve_gated(stream, tx, key, aliases, sid, globals, 1, identity.clone());
         }
         // An attached client, or no good AUTH (the handler refuses it).
         _ => connection::handle_connection(stream, tx, key, aliases),
@@ -1454,6 +1467,7 @@ fn serve_gated(
     sid: usize,
     globals: &Globals,
     checked: usize,
+    identity: Arc<Vec<(String, String)>>,
 ) {
     use std::io::BufRead;
     let (inner, mut to_handler) = match loopback_pair() {
@@ -1471,7 +1485,10 @@ fn serve_gated(
     {
         let key = key.to_string();
         let aliases = aliases.clone();
-        thread::spawn(move || connection::handle_connection(inner, tx, &key, aliases));
+        thread::spawn(move || {
+            crate::commands::set_connection_job_env(Some(identity));
+            connection::handle_connection(inner, tx, &key, aliases)
+        });
     }
     let refusal: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let done = Arc::new(AtomicBool::new(false));

@@ -184,6 +184,7 @@ fn delivery_peer(alias: Option<&str>) -> (Peer, mpsc::Receiver<CtrlReq>) {
         base: "A".to_string(),
         tx,
         aliases,
+        identity: Arc::new(Vec::new()),
     };
     (peer, rx)
 }

@@ -520,9 +520,25 @@ pub fn job_env() -> Vec<(String, String)> {
     JOB_ENV.read().map(|g| g.clone()).unwrap_or_default()
 }
 
-/// Give a job child this server's identity (see [`JOB_ENV`]).
+thread_local! {
+    /// The job identity of the session a shared server connection thread
+    /// serves (#798). Never set in a per session server, so there a job
+    /// gets [`JOB_ENV`] exactly as before.
+    static CONNECTION_JOB_ENV: std::cell::RefCell<Option<std::sync::Arc<Vec<(String, String)>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Make the jobs this thread starts run as one session of a shared server.
+pub fn set_connection_job_env(vars: Option<std::sync::Arc<Vec<(String, String)>>>) {
+    CONNECTION_JOB_ENV.with(|c| *c.borrow_mut() = vars);
+}
+
+/// Give a job child this server's identity (see [`JOB_ENV`]), or the
+/// session's on a shared server connection thread.
 pub fn apply_job_env(c: &mut std::process::Command) {
-    let vars = job_env();
+    let vars = CONNECTION_JOB_ENV
+        .with(|c| c.borrow().as_ref().map(|v| (**v).clone()))
+        .unwrap_or_else(job_env);
     if vars.is_empty() {
         return;
     }

@@ -123,3 +123,47 @@ fn cli_job_takes_the_server_environment() {
         assert!(path.split(';').any(|p| p.eq_ignore_ascii_case(&own)), "PATH = {path}");
     }
 }
+
+// #798 shared server: a connection thread's jobs run as that connection's
+// session. The process wide JOB_ENV names whichever session the shared loop
+// entered last, so an untargeted run-shell sent to session A's listener ran
+// with session B's TMUX and PSMUX_TARGET_SESSION.
+#[test]
+fn shared_connection_identity_overrides_the_process_job_env() {
+    let _g = JOB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _p = Published::new(5002, Some("ns"));
+    let identity = std::sync::Arc::new(vec![
+        ("TMUX".to_string(), "/tmp/psmux-1/ns,5001,0".to_string()),
+        ("MSYS2_ENV_CONV_EXCL".to_string(), "TMUX".to_string()),
+        ("PSMUX_TARGET_SESSION".to_string(), "ns__A".to_string()),
+    ]);
+    set_connection_job_env(Some(identity));
+    let c = build_run_shell_command("echo hi", None);
+    set_connection_job_env(None);
+    assert_eq!(env_of(&c, "TMUX"), Some(Some(OsStr::new("/tmp/psmux-1/ns,5001,0"))));
+    assert_eq!(env_of(&c, "PSMUX_TARGET_SESSION"), Some(Some(OsStr::new("ns__A"))));
+}
+
+#[test]
+fn without_a_connection_identity_the_job_env_is_unchanged() {
+    let _g = JOB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _p = Published::new(5002, Some("ns"));
+    set_connection_job_env(None);
+    let c = build_run_shell_command("echo hi", None);
+    let tmux = env_of(&c, "TMUX").flatten().map(|v| v.to_string_lossy().into_owned()).unwrap_or_default();
+    assert!(tmux.ends_with(",5002,0"), "TMUX from JOB_ENV, got {tmux}");
+    assert_eq!(env_of(&c, "PSMUX_TARGET_SESSION"), None, "no identity: nothing set beyond JOB_ENV");
+}
+
+#[test]
+fn the_connection_identity_is_per_thread() {
+    let _g = JOB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _p = Published::new(5002, Some("ns"));
+    set_connection_job_env(Some(std::sync::Arc::new(vec![("TMUX".to_string(), "A".to_string())])));
+    let other = std::thread::spawn(|| {
+        let c = build_run_shell_command("echo hi", None);
+        env_of(&c, "TMUX").flatten().map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+    }).join().unwrap();
+    set_connection_job_env(None);
+    assert!(other.ends_with(",5002,0"), "another thread keeps JOB_ENV, got {other}");
+}
