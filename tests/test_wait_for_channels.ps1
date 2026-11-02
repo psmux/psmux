@@ -200,6 +200,26 @@ try {
     Until $persistent 'PERSISTENT-AFTER' | Out-Null
     $persistent.Socket.Close()
 
+    # A command list that does not wait must still run on a server an older
+    # binary started (PSMUX_OLD_EXE: a build from before the completion
+    # protocol). That server refuses the completion AUTH outright.
+    if ($env:PSMUX_OLD_EXE) {
+        $oldNs = $ns + '-old'
+        $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path $env:PSMUX_OLD_EXE).Path)
+        $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+        foreach ($word in @('-L', $oldNs, '-f', $config, 'new-session', '-d', '-s', 'old')) { $info.ArgumentList.Add($word) }
+        $info.Environment['PSMUX_NO_WARM'] = '1'
+        $oldStart = [Diagnostics.Process]::Start($info); [void]$oldStart.WaitForExit(15000)
+        try {
+            $saved = $ns; $ns = $oldNs
+            $oldList = Finish (Start-CLI -Words @('display-message', '-p', 'OLD-A', ';', 'display-message', '-p', 'OLD-B'))
+            Check ($oldList.Code -eq 0 -and $oldList.Out -match '^OLD-A\r?\nOLD-B') "command list failed on an older server: $($oldList.Code) / $($oldList.Err)"
+        } finally {
+            $ns = $saved
+            & $env:PSMUX_OLD_EXE -L $oldNs kill-server 2>&1 | Out-Null
+        }
+    }
+
     # The server really exits while both clients are pending. Prior output
     # must not substitute for the completion receipt on the command-list path.
     P set-option -g '@before-death' no | Out-Null
