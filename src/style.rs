@@ -325,27 +325,30 @@ pub fn parse_tmux_style(style_str: &str) -> Style {
     style
 }
 
-/// Parse a tmux style string into `(Option<fg>, Option<bg>, bold)` tuple.
+/// Parse a tmux style string into `(Option<fg>, Option<bg>, attributes)`.
 ///
-/// This is the decomposed variant used by the remote client where it needs
-/// individual components to merge into existing styles.
-pub fn parse_tmux_style_components(style: &str) -> (Option<Color>, Option<Color>, bool) {
+/// This is the decomposed variant used by the client for `status-style`,
+/// `window-status-style` and `window-status-current-style`, where an unnamed
+/// or unparseable colour falls back to the caller's own default. The third
+/// part is every other attribute of the style (the modifiers, the extended
+/// underline and the overline bits, `us=`), with no colours set. It used to
+/// be the bold flag alone, so `status-style reverse` or `underscore` drew
+/// nothing.
+pub fn parse_tmux_style_components(style: &str) -> (Option<Color>, Option<Color>, Style) {
     let mut fg = None;
     let mut bg = None;
-    let mut bold = false;
     for part in style.split(',') {
         let part = part.trim();
         if let Some(val) = part.strip_prefix("fg=") {
             fg = parse_tmux_color(val);
         } else if let Some(val) = part.strip_prefix("bg=") {
             bg = parse_tmux_color(val);
-        } else if part == "bold" {
-            bold = true;
-        } else if part == "nobold" {
-            bold = false;
         }
     }
-    (fg, bg, bold)
+    let mut attrs = parse_tmux_style(style);
+    attrs.fg = None;
+    attrs.bg = None;
+    (fg, bg, attrs)
 }
 
 /// Apply a modifier token (e.g. "bold", "nobold", "italic") to a `Style`.
@@ -359,7 +362,9 @@ fn apply_modifier(token: &str, style: &mut Style) {
         "reverse" => { *style = style.add_modifier(Modifier::REVERSED); }
         "hidden" => { *style = style.add_modifier(Modifier::HIDDEN); }
         "strikethrough" => { *style = style.add_modifier(Modifier::CROSSED_OUT); }
-        "overline" => { /* ratatui doesn't support overline natively */ }
+        // tmux attributes.c:81 at tag 3.8. ratatui has no overline; it rides the
+        // smuggled modifier bit `draw_cells` turns into `CSI 53 m` (#962).
+        "overline" => { *style = crate::rendering::with_overline(*style, true); }
         // tmux's styled underscores (attributes.c: double-underscore,
         // curly-underscore, dotted-underscore, dashed-underscore).  The
         // extended style rides in the smuggled high modifier bits that
@@ -390,6 +395,11 @@ fn apply_modifier(token: &str, style: &mut Style) {
         "noreverse" => { *style = style.remove_modifier(Modifier::REVERSED); }
         "nohidden" => { *style = style.remove_modifier(Modifier::HIDDEN); }
         "nostrikethrough" => { *style = style.remove_modifier(Modifier::CROSSED_OUT); }
+        // tmux style.c:245-254 at tag 3.8 takes `no` and any attribute name
+        // to clear it.
+        "nooverline" => {
+            *style = style.remove_modifier(Modifier::from_bits_retain(crate::rendering::OVERLINE_BIT));
+        }
         _ => {}
     }
 }
@@ -410,6 +420,7 @@ pub(crate) fn style_sgr(style: Style) -> String {
     if m.contains(Modifier::SLOW_BLINK) { params.push("5".into()); }
     if m.contains(Modifier::REVERSED) { params.push("7".into()); }
     if m.contains(Modifier::CROSSED_OUT) { params.push("9".into()); }
+    if crate::rendering::overline_of(m) { params.push("53".into()); }
     format!("\x1b[{}m", params.join(";"))
 }
 
@@ -1137,11 +1148,11 @@ mod tests {
     /// Issue #182: parse_tmux_style_components should propagate bg=default as Some(Color::Reset)
     #[test]
     fn parse_tmux_style_components_bg_default() {
-        let (fg, bg, bold) = parse_tmux_style_components("fg=white,bg=default");
+        let (fg, bg, attrs) = parse_tmux_style_components("fg=white,bg=default");
         assert_eq!(fg, Some(Color::White));
         assert_eq!(bg, Some(Color::Reset),
             "bg=default should yield Some(Color::Reset), got {:?}", bg);
-        assert!(!bold);
+        assert!(!attrs.add_modifier.contains(Modifier::BOLD));
     }
 
     /// Issue #182: map_color("default") should return Color::Reset
