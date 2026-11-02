@@ -1,7 +1,7 @@
 // PR #975: %output carries the pane's raw bytes, octal escaped, and does not
 // hold an unfinished UTF-8 character back in the ring. Written against the
-// wire line (format_notification) so the same test builds on the old String
-// payload and the new byte payload.
+// wire line (format_notification); without the TEST_SERIAL lock the same
+// body builds on the old String payload too, where it fails.
 use super::*;
 use crate::types::{AppState, ControlClient, Node, Pane, Window};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8};
@@ -73,6 +73,9 @@ fn flush(app: &mut AppState, ring: &crate::control_ring::Ring, bytes: &[u8], rx:
 
 #[test]
 fn invalid_utf8_and_unfinished_tails_reach_output_as_their_own_bytes() {
+    // start_consuming_output replaces the global consumed set.
+    let _serial = crate::control_ring::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let was_present = crate::control_ring::CONTROL_CLIENTS_PRESENT.load(std::sync::atomic::Ordering::Acquire);
     let (mut app, ring, rx) = app_with_ring();
     // A byte that is not UTF-8 goes out as its own octal code, not as the
     // three bytes of U+FFFD (tmux control.c control_append_data copies it).
@@ -85,5 +88,5 @@ fn invalid_utf8_and_unfinished_tails_reach_output_as_their_own_bytes() {
     assert_eq!(flush(&mut app, &ring, "\u{4e2d}\x1b[31m".as_bytes(), &rx), vec!["\\344\\270\\255\\033[31m".to_string()]);
     app.control_clients.clear();
     crate::control_ring::set_consumed(&[], false);
-    crate::control_ring::CONTROL_CLIENTS_PRESENT.store(false, std::sync::atomic::Ordering::Release);
+    crate::control_ring::CONTROL_CLIENTS_PRESENT.store(was_present, std::sync::atomic::Ordering::Release);
 }
