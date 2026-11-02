@@ -60,6 +60,22 @@ fn negotiation_requires_native_acknowledgement() {
     assert!(negotiate(&mut reader, &mut Vec::new(), "key").is_ok());
 }
 
+// A server from before the handshake refuses the capability word as a wrong
+// key. The CLI tells the user to restart it rather than only "Invalid session
+// key", which reads as a broken install.
+#[test]
+fn an_older_server_refusal_says_to_restart_it() {
+    for reply in ["ERROR: Invalid session key\n", "OK\n"] {
+        let mut reader = std::io::Cursor::new(reply.as_bytes());
+        let err = negotiate(&mut reader, &mut Vec::new(), "key").unwrap_err();
+        assert!(err.to_string().contains("older psmux"), "{reply:?} gave {err}");
+        assert!(err.to_string().contains("kill-server"), "{reply:?} gave {err}");
+    }
+    let mut reader = std::io::Cursor::new("ERROR: Authentication required\n".as_bytes());
+    let err = negotiate(&mut reader, &mut Vec::new(), "key").unwrap_err();
+    assert_eq!(err.to_string(), "ERROR: Authentication required");
+}
+
 #[test]
 fn negotiation_write_failure_prevents_read() {
     struct Refuse;

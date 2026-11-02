@@ -3,6 +3,7 @@
 // AUTH runs before command aliases or application dispatch.
 pub(crate) const AUTH_CAPABILITY: &str = "PSMUX_RUN_SHELL_NATIVE_V1";
 pub(crate) const NEGOTIATION_ACK: &str = "\u{0001}PSMUX_RUN_SHELL_NATIVE_V1\u{0001}\n";
+const OLD_SERVER_HINT: &str = "run-shell: a server started by an older psmux cannot run this; restart it with kill-server";
 
 pub(crate) fn negotiate(reader: &mut impl std::io::BufRead, writer: &mut impl std::io::Write, key: &str) -> std::io::Result<()> {
     writeln!(writer, "AUTH {} {}", key, AUTH_CAPABILITY)?;
@@ -14,7 +15,14 @@ pub(crate) fn negotiate(reader: &mut impl std::io::BufRead, writer: &mut impl st
     }
     match reply.as_str() {
         NEGOTIATION_ACK => Ok(()),
-        "OK\n" | "OK\r\n" => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "server does not support native run-shell replies")),
+        "OK\n" | "OK\r\n" => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, OLD_SERVER_HINT)),
+        // A server from before this handshake reads the capability word as
+        // part of the key and refuses it. Nothing has been sent yet, so say
+        // what to do instead of printing only "Invalid session key".
+        "ERROR: Invalid session key\n" => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("ERROR: Invalid session key ({})", OLD_SERVER_HINT),
+        )),
         _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, reply.trim().to_string())),
     }
 }

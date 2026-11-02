@@ -264,7 +264,7 @@ exit 7
     Assert ($r.Parent -eq $serverPid) 'plain foreground is owned by server'
     Assert ($out.Contains('FG_OUTPUT') -and $out.Contains('STDERR_FG_OUTPUT') -and -not $out.Contains('returned 7')) 'native CLI bytes do not include UI status text'
     Assert ($r.Env -eq 'server' -and $r.Tmux) 'job uses server environment and TMUX'
-    Assert ($r.Cwd -eq $callerCwd.FullName -and $r.PwdEnv -eq $callerCwd.FullName) 'unattached CLI uses caller cwd and PWD'
+    Assert ($r.Cwd -eq $callerCwd.FullName) 'unattached CLI uses caller cwd'
     $out = (P run-shell 'cmd /c echo OK') -join "`n"
     Assert ($LASTEXITCODE -eq 0 -and $out.Trim() -eq 'OK') 'consumed AUTH acknowledgement does not strip child OK output'
     $hostname = Join-Path $env:SystemRoot 'System32/hostname.exe'
@@ -299,7 +299,7 @@ exit 7
     $result = Run-Bytes (Probe-Command $report '-' 'NATIVE_CWD')
     Assert ($result.Code -eq 7 -and (Test-Path $report)) "native helper executes absolute cwd probe (Code=$($result.Code); Err=$(ConvertTo-Json -Compress -InputObject ([Text.Encoding]::UTF8.GetString([byte[]]$result.Err))))"
     $r = Get-Content $report -Raw | ConvertFrom-Json
-    Assert ($r.Parent -eq $serverPid -and $r.Cwd -eq $callerCwd.FullName -and $r.PwdEnv -eq $callerCwd.FullName) 'native client supplies PowerShell caller cwd to the server-owned job'
+    Assert ($r.Parent -eq $serverPid -and $r.Cwd -eq $callerCwd.FullName) 'native client supplies PowerShell caller cwd to the server-owned job'
     $relative = Join-Path $callerCwd.FullName 'relative probe.ps1'
     Copy-Item $probe $relative
     Assert (-not (Test-Path (Join-Path ([Environment]::CurrentDirectory) 'relative probe.ps1'))) 'relative script is absent from the native process cwd'
@@ -338,7 +338,7 @@ exit 7
                 Assert ($result.Code -eq 7 -and [Text.Encoding]::UTF8.GetString($result.Out) -ceq $tag -and [Text.Encoding]::UTF8.GetString($result.Err) -ceq "STDERR_$tag") 'start-directory foreground reply retains separate output and actual status'
             }
             $r = Get-Content $report -Raw | ConvertFrom-Json
-            Assert ($r.Parent -eq $serverPid -and $r.Env -eq 'server' -and $r.Cwd -eq $case.Expected -and $r.PwdEnv -eq $case.Expected) "server probes relative file in effective job cwd ($tag)"
+            Assert ($r.Parent -eq $serverPid -and $r.Env -eq 'server' -and $r.Cwd -eq $case.Expected) "server probes relative file in effective job cwd ($tag)"
         }
     }
     $nativeProbe = Join-Path $explicitCwd.FullName 'nativeprobe.exe'

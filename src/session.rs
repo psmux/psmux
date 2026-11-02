@@ -3052,16 +3052,19 @@ fn control_endpoint(line: &str) -> io::Result<(u16, String, Option<String>)> {
             target, env::var("PSMUX_TARGET_FULL").ok(),
             env::args().collect::<Vec<_>>(), line.trim());
     }
+    // Never target a warm (standby) session, resolve to a real session instead,
+    // unless it is the namespace's held empty server (issue #734).
     if is_warm_session(&target) && !warm_target_addressable(&target) {
         let ns = target.strip_suffix("____warm__").map(|s| s.to_string());
         target = resolve_last_session_name_ns(ns.as_deref()).unwrap_or_else(|| "default".to_string());
     }
+    // Every CLI command that talks to the server comes through here, so the
+    // error stays the one it always printed: a missing or unreadable port
+    // file is "no server running", with no OS error text appended.
     let path = crate::paths::port_file(&target);
-    let contents = std::fs::read_to_string(&path).map_err(|e| {
-        io::Error::new(e.kind(), format!("no server running on session '{}': {}", target, e))
-    })?;
-    let port = contents.trim().parse::<u16>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid server port"))?;
+    let port = std::fs::read_to_string(&path).ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?;
     Ok((port, read_session_key(&target).unwrap_or_default(), env::var("PSMUX_TARGET_FULL").ok()))
 }
 

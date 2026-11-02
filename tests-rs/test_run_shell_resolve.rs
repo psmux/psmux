@@ -671,3 +671,18 @@ fn non_spaced_native_commands_keep_shell_evaluation_for_operators() {
         }
     }
 }
+
+// A job's directory is set without a Windows path in PWD. Git Bash takes PWD
+// as its logical directory when it names the same directory, so a bash job
+// (a plugin's .tmux script) printed `C:\Users/...` for `pwd`.
+#[cfg(windows)]
+#[test]
+fn job_directory_does_not_put_a_windows_path_in_pwd() {
+    let cwd = std::env::temp_dir();
+    let cmd = build_run_shell_command("Write-Output x", Some(&cwd));
+    assert_eq!(cmd.get_current_dir(), Some(cwd.as_path()));
+    assert!(
+        !cmd.get_envs().any(|(k, _)| k.eq_ignore_ascii_case("PWD")),
+        "build_run_shell_command set PWD"
+    );
+}

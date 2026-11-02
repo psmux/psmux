@@ -381,7 +381,11 @@ pub fn build_run_shell_command(shell_cmd: &str, cwd: Option<&std::path::Path>) -
     let mut c = build_run_shell_command_inner(shell_cmd, cwd);
     if let Some(cwd) = cwd {
         c.current_dir(cwd);
-        // tmux job.c sets PWD after selecting the job directory.
+        // tmux job.c sets PWD after selecting the job directory. Not on
+        // Windows: no Windows shell reads PWD, and Git Bash takes a Windows
+        // path in it as its logical directory, so `pwd` in a bash job (a
+        // plugin's .tmux script) printed `C:\Users/...` instead of `/c/Users/...`.
+        #[cfg(not(windows))]
         c.env("PWD", cwd);
     }
     #[cfg(windows)]
