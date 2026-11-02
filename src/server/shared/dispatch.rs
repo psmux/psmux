@@ -574,7 +574,7 @@ pub(crate) fn dispatch(
                         // environment, so it never changed anything, and it
                         // dropped a missing name instead of recording -NAME.
                         if let Some(src) = app.env_scopes.pending_client_environ.take() {
-                            let patterns = app.update_environment.clone();
+                            let patterns = app.update_environment.values();
                             crate::environ::update_environment(&mut app.environment, &mut app.env_scopes, &patterns, &src, false);
                         }
                     }
@@ -1923,8 +1923,8 @@ pub(crate) fn dispatch(
                     let val = get_option_value(&app, &name);
                     let _ = resp.send(val);
                 }
-                CtrlReq::ShowArrayOption(resp, name, values_only) => {
-                    let _ = resp.send(crate::server::options::array_option_show_lines(&app, &name, values_only));
+                CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
+                    let _ = resp.send(crate::server::options::array_option_show_lines_scoped(&app, &name, values_only, global, mark_inherited));
                 }
                 // copied from server/mod.rs run_server (line 6278 at 86a78100)
                 CtrlReq::ShowOptions(resp) => {
@@ -2068,7 +2068,9 @@ pub(crate) fn dispatch(
                     output.push_str(&format!("bell-action {}\n", app.bell_action));
                     output.push_str(&format!("activity-action {}\n", app.activity_action));
                     output.push_str(&format!("silence-action {}\n", app.silence_action));
-                    output.push_str(&format!("update-environment \"{}\"\n", app.update_environment.join(" ")));
+                    // One line per element, as tmux lists an array
+                    // (cmd-show-options.c:156-192).
+                    output.push_str(&app.update_environment.show_lines("update-environment", false));
                     if let Some(ref group) = app.session_group {
                         output.push_str(&format!("session-group \"{}\"\n", group));
                     }

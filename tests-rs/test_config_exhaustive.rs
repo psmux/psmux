@@ -454,8 +454,8 @@ fn default_allow_predictions() {
 #[test]
 fn default_update_environment() {
     let app = mock_app();
-    assert!(app.update_environment.contains(&"DISPLAY".to_string()));
-    assert!(app.update_environment.contains(&"SSH_AUTH_SOCK".to_string()));
+    assert!(app.update_environment.values().contains(&"DISPLAY".to_string()));
+    assert!(app.update_environment.values().contains(&"SSH_AUTH_SOCK".to_string()));
 }
 
 // ============================================================
@@ -1067,7 +1067,7 @@ fn config_file_allow_predictions_on() {
 fn config_file_update_environment() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g update-environment \"FOO BAR BAZ\"\n");
-    assert_eq!(app.update_environment, vec!["FOO", "BAR", "BAZ"]);
+    assert_eq!(app.update_environment.values(), vec!["FOO", "BAR", "BAZ"]);
 }
 
 #[test]

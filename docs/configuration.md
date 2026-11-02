@@ -231,7 +231,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `allow-set-title` | Bool | `off` | Allow programs to set pane title via OSC 0/2 escape sequences (see [pane-titles.md](pane-titles.md)) |
 | `allow-predictions` | Bool | `off` | Preserve PSReadLine prediction settings (see below) |
 | `default-terminal` | Str | | Terminal type string (sets `TERM` env var in panes) |
-| `update-environment` | Str | *(tmux defaults)* | Space-separated glob patterns; at new-session and on every attach each matching variable of the client's environment is copied into the session environment, and a pattern nothing matches is recorded as a `-NAME` removal (tmux environ_update) |
+| `update-environment` | Str | *(tmux 3.8 defaults)* | Array of glob patterns, split on space and `,` or one element with `update-environment[N]`; at new-session and on every attach each matching variable of the client's environment is copied into the session environment, and a pattern nothing matches is recorded as a `-NAME` removal (tmux environ_update; see [Updating the environment on attach](#updating-the-environment-on-attach)) |
 | `warm` | Bool | `on` | Pre-spawn shells for instant window/pane creation (see [warm-sessions.md](warm-sessions.md)) |
 | `copy-command` | Str | | Shell command for clipboard pipe |
 | `codepoint-widths` | Str | | Array of overrides for how many columns Unicode codepoints occupy, comma separated or one element with `codepoint-widths[N]` (see [Codepoint widths](#codepoint-widths)) |
@@ -1336,6 +1336,48 @@ You can also pass environment variables when creating a new session:
 # Create a session with custom environment
 psmux new-session -s work -e "PROJECT=myapp" -e "ENV=production"
 ```
+
+### Updating the environment on attach
+
+`update-environment` names the variables psmux copies from a client into the
+session environment, at new-session from the client that creates the session
+and on every attach from the client that attaches. Each element is a glob
+pattern; every variable of the client that matches is copied, and a pattern
+that matches nothing records a removal, so new panes do not get a stale value.
+
+The default is tmux 3.8's list:
+
+```text
+DISPLAY KRB5CCNAME MSYSTEM SSH_ASKPASS SSH_AUTH_SOCK SSH_AGENT_PID
+SSH_CONNECTION WAYLAND_DISPLAY WINDOWID XAUTHORITY XDG_CURRENT_DESKTOP
+XDG_SESSION_DESKTOP XDG_SESSION_TYPE
+```
+
+`MSYSTEM` is set by Git Bash and MSYS2, so attaching from such a shell copies
+it, and attaching from PowerShell, where it is not set, removes it from the
+session environment.
+
+It is an array option, as in tmux, and each pattern is an element with its own
+index, `update-environment[N]`:
+
+```tmux
+set -g update-environment "DISPLAY SSH_AUTH_SOCK"   # replaces the whole array: [0] [1]
+set -ga update-environment "MY_TOKEN"               # adds at the lowest free index: [2]
+set -g update-environment[10] "PROJECT_*"           # sets one element
+set -gu update-environment[0]                       # removes one; the others keep their index
+set -gu update-environment                          # back to the default
+```
+
+A value is split on space and `,`. The elements are used in index order.
+`show-options -g update-environment` prints one `update-environment[N] pattern`
+line per element, `-v` the patterns alone, and `#{update-environment}` joins
+them with a space.
+
+It is a session option. Without `-g`, `set` writes the session's own array,
+which starts empty as tmux's does: `set -a update-environment MY_TOKEN` with
+nothing set before gives the session `[0] MY_TOKEN` alone, and the global
+patterns are no longer used for it. `set -u update-environment` drops the
+session's array, and the global one applies again.
 
 ## Status Bar Time Updates
 

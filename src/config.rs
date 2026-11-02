@@ -2346,8 +2346,9 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
             app.allow_set_title = matches!(value, "on" | "true" | "1" | "yes");
         }
         // The array options and their elements: codepoint-widths,
-        // status-format and terminal-overrides, whose smcup/rmcup decide whether the attach
-        // client uses the host's alternate screen (issue #700).
+        // status-format, terminal-overrides, whose smcup/rmcup decide whether the attach
+        // client uses the host's alternate screen (issue #700), and
+        // update-environment.
         name if crate::server::options::is_stored_array_option(name) => {
             if let Err(error) = crate::server::options::set_array_option(app, name, value, false) {
                 warn_config(app, error);
@@ -2357,10 +2358,6 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "default-terminal" => {
             // tmux sets the TERM env var from this option (#137)
             app.environment.insert("TERM".to_string(), value.to_string());
-        }
-        "update-environment" => {
-            // tmux: space-separated list of env var names to update from client on attach
-            app.update_environment = value.split_whitespace().map(|s| s.to_string()).collect();
         }
         "bell-action" => { app.bell_action = value.to_string(); }
         "visual-bell" => { app.visual_bell = matches!(value, "on" | "true" | "1" | "yes"); }
