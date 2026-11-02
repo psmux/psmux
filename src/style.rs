@@ -1172,3 +1172,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue185_layout_directives.rs"]
 mod test_issue185_layout_directives;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_style_attrs.rs"]
+mod test_style_attrs;
