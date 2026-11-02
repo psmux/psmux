@@ -1509,12 +1509,6 @@ pub struct PipePaneState {
     pub stdout: bool,
 }
 
-/// Wait-for channel state
-pub struct WaitChannel {
-    pub locked: bool,
-    pub waiters: Vec<mpsc::Sender<()>>,
-}
-
 pub enum Mode {
     Passthrough,
     Prefix { armed_at: Instant },
@@ -1995,8 +1989,8 @@ pub struct AppState {
     pub sync_input: bool,
     /// Hooks: map of hook name to list of commands
     pub hooks: std::collections::HashMap<String, Vec<String>>,
-    /// Wait-for channels: map of channel name to list of waiting senders
-    pub wait_channels: std::collections::HashMap<String, WaitChannel>,
+    /// Named signal channels and independent lock acquisition queues.
+    pub wait_channels: crate::wait_for::WaitChannels,
     /// Pipe pane processes
     pub pipe_panes: Vec<PipePaneState>,
     /// Vec position of the last window (last-window, `!`, the `-` flag).
@@ -3461,7 +3455,7 @@ impl AppState {
             client_prefix_active: false,
             sync_input: false,
             hooks: std::collections::HashMap::new(),
-            wait_channels: std::collections::HashMap::new(),
+            wait_channels: crate::wait_for::WaitChannels::default(),
             pipe_panes: Vec::new(),
             last_window_idx: NO_LAST_WINDOW,
             last_pane_path: Vec::new(),
@@ -4666,7 +4660,13 @@ pub enum CtrlReq {
     /// client's socket — its `-L` namespace, or the default one — and then this
     /// one. `true` is `-a`, the psmux-only sweep of every namespace (#649).
     KillServerScoped(bool),
-    WaitFor(String, WaitForOp),
+    WaitFor {
+        channel: String,
+        op: WaitForOp,
+        client_id: u64,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    WaitForClientLost(u64),
     DisplayMenu(String, Option<i16>, Option<i16>),
     DisplayMenuDirect(Menu),
     /// Parsed `display-popup` arguments and whether the popup closes when its
@@ -5515,14 +5515,7 @@ pub fn next_client_id() -> u64 {
     NEXT_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Wait-for operation types
-#[derive(Clone, Copy)]
-pub enum WaitForOp {
-    Wait,
-    Lock,
-    Signal,
-    Unlock,
-}
+pub use crate::wait_for::WaitForOp;
 
 /// Parsed target specification from -t argument.
 #[derive(Debug, Clone, Default)]

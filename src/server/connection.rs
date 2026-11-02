@@ -2,9 +2,10 @@ use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::net::TcpStream;
+use crate::wait_for::WaitInput;
 
 use crate::types::{
-    ControlNotification, CtrlReq, LayoutKind, WaitForOp, WindowDumpFormat,
+    ControlNotification, CtrlReq, LayoutKind, WindowDumpFormat,
 };
 
 /// Clear HANDLE_FLAG_INHERIT on a connection socket (see the comment at the
@@ -114,8 +115,8 @@ pub(crate) fn one_shot_new_session_reply(out: String, in_command_list: bool) -> 
 /// (one-shot) or its newline (persistent frames); one send per reply keeps the
 /// bytes a reader sees independent of timing. This wrapper formats the whole argument
 /// list into one buffer and sends it with a single `write_all`, so every
-/// `write!` / `writeln!` on a connection is one send; `write`, `write_all` and
-/// `flush` pass straight through. It derefs to the socket for the read only
+/// `write!` / `writeln!` on an ordinary connection is one send; `write`,
+/// `write_all` and `flush` pass straight through on that route. It derefs to the socket for the read only
 /// calls (`set_nodelay`, `shutdown`, `register_persistent_stream`), and
 /// `try_clone` hands back another `ReplyStream` so clones keep the property.
 ///
@@ -132,7 +133,10 @@ pub(crate) fn one_shot_new_session_reply(out: String, in_command_list: bool) -> 
 /// and dropped it. tmux's cmdq_error shows the error of a command whose
 /// client has a session on that client's status line (cmd-queue.c:880-882
 /// at tag 3.8).
-pub(crate) struct ReplyStream(TcpStream, bool, Option<PromptErrors>);
+///
+/// The fourth field enables negotiated one-shot framing. Clones share its
+/// lock so a payload header and body cannot interleave with another writer.
+pub(crate) struct ReplyStream(TcpStream, bool, Option<PromptErrors>, Option<std::sync::Arc<std::sync::Mutex<()>>>);
 
 /// Where a persistent connection's error replies go: the server loop, as a
 /// status message, worded for the command that is running.
@@ -143,7 +147,7 @@ pub(crate) struct PromptErrors {
 
 impl ReplyStream {
     fn new(stream: TcpStream) -> ReplyStream {
-        ReplyStream(stream, false, None)
+        ReplyStream(stream, false, None, None)
     }
 
     /// Send this connection's error replies to the status line from now on.
@@ -161,7 +165,11 @@ impl ReplyStream {
     }
 
     fn try_clone(&self) -> io::Result<ReplyStream> {
-        self.0.try_clone().map(ReplyStream::new)
+        self.0.try_clone().map(|stream| {
+            let mut clone = ReplyStream::new(stream);
+            clone.3 = self.3.clone();
+            clone
+        })
     }
 
     /// Whether an error reply was written since the last call, clearing it.
@@ -182,7 +190,15 @@ impl ReplyStream {
                 return Ok(());
             }
         }
-        self.0.write_all(text.as_bytes())
+        self.write_all(text.as_bytes())
+    }
+
+    fn complete(&mut self, input: &WaitInput) -> io::Result<()> {
+        if let Some(lock) = &self.3 {
+            let _guard = lock.lock().unwrap();
+            crate::wait_for::write_complete(&mut self.0, input)?;
+        }
+        Ok(())
     }
 
     /// The underlying socket, for a clone that is only ever shut down.
@@ -200,11 +216,21 @@ impl std::ops::Deref for ReplyStream {
 
 impl Write for ReplyStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
+        if self.3.is_some() {
+            self.write_all(buf)?;
+            Ok(buf.len())
+        } else {
+            self.0.write(buf)
+        }
     }
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0.write_all(buf)
+        if let Some(lock) = &self.3 {
+            let _guard = lock.lock().unwrap();
+            crate::wait_for::write_output(&mut self.0, buf)
+        } else {
+            self.0.write_all(buf)
+        }
     }
 
     fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
@@ -2040,6 +2066,35 @@ pub(crate) fn run_shell_output_text(out: &std::process::Output) -> String {
     text
 }
 
+struct WaitClientGuard {
+    tx: mpsc::Sender<CtrlReq>,
+    client_id: u64,
+}
+
+impl Drop for WaitClientGuard {
+    fn drop(&mut self) { let _ = self.tx.send(CtrlReq::WaitForClientLost(self.client_id)); }
+}
+
+fn run_wait_for(args: &[&str], tx: &TargetedSender, client_id: u64,
+    r: &mut impl io::BufRead, input: &mut WaitInput) -> Option<String> {
+    let result = match crate::wait_for::parse(args) {
+        Err(e) => Err(e),
+        Ok((channel, op)) => {
+            let _guard = WaitClientGuard { tx: tx.inner.clone(), client_id };
+            let (reply, response) = mpsc::channel();
+            if tx.send(CtrlReq::WaitFor { channel, op, client_id, reply }).is_err() {
+                input.failed = true;
+                return None;
+            }
+            input.wait(r, response, is_read_retry)?
+        }
+    };
+    Some(match result {
+        Ok(()) => String::new(),
+        Err(e) => format!("\u{0001}ERR\u{0001}{}", e),
+    })
+}
+
 /// Handle a single TCP connection from a client.
 /// Parses auth, optional TARGET/PERSISTENT flags, then dispatches commands
 /// to the main server event loop via the `tx` channel.
@@ -2050,6 +2105,7 @@ pub(crate) fn handle_connection(
     aliases: crate::command_alias::SharedAliases,
 ) {
 let client_id = crate::types::next_client_id();
+let mut wait_input = WaitInput::default();
 // Enable TCP_NODELAY for low-latency responses
 let _ = stream.set_nodelay(true);
 // Clone stream for writing, original goes into BufReader for reading
@@ -2088,7 +2144,9 @@ if !auth_line.starts_with("AUTH ") {
     return;
 }
 let provided_key = auth_line.strip_prefix("AUTH ").unwrap_or("");
-if provided_key != session_key {
+let suffix = format!(" {}", crate::wait_for::AUTH_CAPABILITY);
+let completion = provided_key.strip_suffix(&suffix) == Some(session_key);
+if !completion && provided_key != session_key {
     auth_debug(&format!(
         "client_id={} reject: key mismatch provided={:?} expected={:?}",
         client_id, provided_key, session_key
@@ -2096,8 +2154,9 @@ if provided_key != session_key {
     refuse_auth(&mut write_stream, &mut r, b"ERROR: Invalid session key\n");
     return;
 }
-// Auth successful - send OK and flush immediately
-let _ = write_stream.write_all(b"OK\n");
+// Ordinary AUTH, including control clients, keeps its shipped acknowledgement.
+let ack = if completion { crate::wait_for::NEGOTIATION_ACK.as_bytes() } else { b"OK\n" };
+if write_stream.write_all(ack).is_err() { return; }
 let _ = write_stream.flush();
 
 // Use a reasonable timeout for the first command after AUTH.
@@ -2117,8 +2176,18 @@ if r.read_line(&mut line).is_err() {
     return;
 }
 
+// Completion framing belongs only to a negotiated one-shot request.
+if completion {
+    if !line.ends_with('\n') || matches!(line.trim(), "PERSISTENT" | "CONTROL" | "CONTROL_QUIET" | "CONTROL_NOECHO") {
+        return;
+    }
+    write_stream.3 = Some(std::sync::Arc::new(std::sync::Mutex::new(())));
+    wait_input.cancel_on_eof = true;
+}
+
 // Check if client requests persistent connection mode
 if line.trim() == "PERSISTENT" {
+    wait_input.cancel_on_eof = true;
     persistent = true;
     // A command that fails here was typed at the client's command prompt:
     // its error belongs on the status line, not on this socket.
@@ -2286,6 +2355,7 @@ if control_echo || control_quiet || control_noecho {
     let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(5000)));
 
     let ctrl_client_id = crate::types::next_client_id();
+    wait_input.cancel_on_eof = true;
     crate::types::register_persistent_stream(ctrl_client_id, &write_stream);
     // Set by `refresh-client -f read-only` (dispatch_control_command).
     let ctrl_readonly = std::cell::Cell::new(false);
@@ -2458,7 +2528,7 @@ if control_echo || control_quiet || control_noecho {
             s
         } else {
             line.clear();
-            match r.read_line(&mut line) {
+            match wait_input.read_line(&mut r, &mut line) {
                 Ok(0) => break, // EOF
                 Err(e) => {
                     // A read budget that expired is not a client that died.
@@ -2879,7 +2949,7 @@ if control_echo || control_quiet || control_noecho {
         // From here to the written reply no `continue` leaves the iteration.
         cmd_busy.store(true, std::sync::atomic::Ordering::Release);
         let early_begin = focus_err.is_none()
-            && matches!(cmd_name, "run-shell" | "run" | "if-shell" | "if");
+            && matches!(cmd_name, "run-shell" | "run" | "if-shell" | "if" | "wait-for" | "wait");
         if early_begin {
             let mut head = String::new();
             if control_echo {
@@ -2902,11 +2972,14 @@ if control_echo || control_quiet || control_noecho {
             Some(Ok(format!("\u{0001}ERR\u{0001}{}", err)))
         } else {
             let targeted_tx = TargetedSender::new(&tx_ctrl, ctrl_command_target.take());
+            let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(50)));
             let dispatched = dispatch_control_command(
                 cmd_name, &filtered_args, &targeted_tx, resp_s,
                 ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
-                ctrl_client_id, &ctrl_readonly, ctrl_target_failed, &aliases_ctrl,
+                ctrl_client_id, &ctrl_readonly, ctrl_target_failed, &aliases_ctrl, &mut r, &mut wait_input,
             );
+            let _ = r.get_ref().set_read_timeout(Some(Duration::from_secs(5)));
+            if wait_input.failed { break; }
             // Collect the response BEFORE acquiring the write lock, so the
             // notification thread can still write while we wait.
             if dispatched {
@@ -3064,6 +3137,8 @@ if line.trim().starts_with("TARGET ") {
     }
 }
 
+if completion && !line.ends_with('\n') { return; }
+
 // Set short read timeout for batched command processing
 let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
 
@@ -3093,6 +3168,7 @@ loop {
     // A failed command ends the rest of its list (see ReplyStream::take_error).
     if write_stream.take_error() && !persistent {
         pending_chain.clear();
+        if completion { break; }
     }
     // Check pending chained commands before reading from socket. A line
     // still in `line` here is run again, so every arm that ends with
@@ -3106,8 +3182,9 @@ loop {
     } else if line.trim().is_empty() {
         // Try to read another command with timeout
         line.clear();
-        match r.read_line(&mut line) {
+        match wait_input.read_line(&mut r, &mut line) {
             Ok(0) => {
+                wait_input.failed = true;
                 // EOF - client disconnected. A zero byte read is EOF here, but
                 // it is also how a timed out socket read surfaces on some
                 // Windows stacks, so log which one we think we saw: this line
@@ -3137,6 +3214,7 @@ loop {
                     let _ = tx.send(CtrlReq::ClientDetach(client_id));
                 }
                 crate::types::teardown_client_connection(client_id);
+                wait_input.failed = true;
                 break; // Real error or non-persistent timeout
             }
             Ok(_) => {
@@ -6069,16 +6147,14 @@ match cmd {
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
-    "wait-for" => {
-        let lock = args.iter().any(|a| *a == "-L");
-        let signal = args.iter().any(|a| *a == "-S");
-        let unlock = args.iter().any(|a| *a == "-U");
-        let channel = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
-        let op = if lock { WaitForOp::Lock }
-            else if signal { WaitForOp::Signal }
-            else if unlock { WaitForOp::Unlock }
-            else { WaitForOp::Wait };
-        let _ = tx.send(CtrlReq::WaitFor(channel, op));
+    "wait-for" | "wait" => {
+        let Some(reply) = run_wait_for(&args, &tx, client_id, &mut r, &mut wait_input) else { break; };
+        if let Some(error) = reply.strip_prefix("\u{0001}ERR\u{0001}") {
+            if persistent { let _ = tx.send(CtrlReq::StatusMessage(error.to_string())); }
+            else { let _ = writeln!(write_stream, "ERROR: {}", error); let _ = write_stream.flush(); }
+        }
+        if wait_input.failed { break; }
+        if !persistent && pending_chain.is_empty() && wait_input.is_empty() { break; }
     }
     "display-menu" | "menu" => {
         let mut x_pos: Option<i16> = None;
@@ -7000,10 +7076,12 @@ match cmd {
         line.clear();
         continue;
     }
+    if completion && wait_input.is_empty() { break; }
     // Try to read next command for batching (with timeout)
     line.clear();
-    match r.read_line(&mut line) {
+    match wait_input.read_line(&mut r, &mut line) {
         Ok(0) => {
+            wait_input.failed = true;
             // EOF - client disconnected. Logged for the same reason as the
             // batching read above, and closed for real: a client whose reader
             // ends but whose writer and stream stay alive keeps painting frames
@@ -7031,6 +7109,7 @@ match cmd {
                 let _ = tx.send(CtrlReq::ClientDetach(client_id));
             }
             crate::types::teardown_client_connection(client_id);
+            wait_input.failed = true;
             break; // Non-persistent timeout or real error
         }
         Ok(_) => {
@@ -7054,8 +7133,11 @@ match cmd {
         }
     }
 } // end command loop
+    if completion {
+        let _ = write_stream.complete(&wait_input);
+    }
     // A one-shot connection ends with the reply and then EOF: that is the
-    // whole contract a client reads to (tmux's client reads its server until
+    // whole contract an ordinary client reads to (tmux's client reads its server until
     // the peer closes, never on a timer: proc.c:82-91 hands the closed read to
     // client_dispatch, client.c:579). Close it gracefully: everything written
     // above is already in the send buffer, shutdown(Write) queues the FIN
@@ -7063,8 +7145,7 @@ match cmd {
     // off before the socket is dropped, because closesocket() on a socket
     // with unread input sends RST instead of FIN and a reset can discard the
     // reply the client has not read yet. The drain is bounded by the 10 ms
-    // batching read timeout set above and by a byte cap, and costs the client
-    // nothing: its FIN has already gone out.
+    // batching read timeout set above and by a byte cap.
     if !persistent {
         let _ = write_stream.flush();
         let _ = write_stream.shutdown(std::net::Shutdown::Write);
@@ -7093,6 +7174,8 @@ fn dispatch_control_command(
     readonly: &std::cell::Cell<bool>,
     target_failed: bool,
     aliases: &crate::command_alias::SharedAliases,
+    r: &mut impl io::BufRead,
+    wait_input: &mut WaitInput,
 ) -> bool {
     match cmd {
         "list-windows" | "lsw" => {
@@ -8398,14 +8481,9 @@ fn dispatch_control_command(
             true
         }
         "wait-for" | "wait" => {
-            let op = if args.iter().any(|a| *a == "-L") { WaitForOp::Lock }
-                     else if args.iter().any(|a| *a == "-U") { WaitForOp::Unlock }
-                     else if args.iter().any(|a| *a == "-S") { WaitForOp::Signal }
-                     else { WaitForOp::Wait };
-            if let Some(channel) = args.iter().find(|a| !a.starts_with('-')) {
-                let _ = tx.send(CtrlReq::WaitFor(channel.to_string(), op));
+            if let Some(reply) = run_wait_for(args, tx, client_id, r, wait_input) {
+                let _ = resp_tx.send(reply);
             }
-            let _ = resp_tx.send(String::new());
             true
         }
         "refresh-client" | "refresh" => {
@@ -8655,8 +8733,9 @@ fn dispatch_control_command(
                 let sub_tx = TargetedSender::new(tx.inner, sub_target);
                 let (stx, srx) = mpsc::channel::<String>();
                 let answered = dispatch_control_command(
-                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, readonly, sub_failed, aliases,
+                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, readonly, sub_failed, aliases, r, wait_input,
                 );
+                if wait_input.failed { return true; }
                 if !answered { continue; }
                 let text = srx.recv_timeout(Duration::from_secs(15)).unwrap_or_default();
                 if let Some(err) = text.strip_prefix("\u{0001}ERR\u{0001}") {
@@ -8892,6 +8971,10 @@ mod tests_issue813_cc_buffers_cmdlist;
 #[cfg(test)]
 #[path = "../../tests-rs/test_set_hook_quoted_command.rs"]
 mod tests_set_hook_quoted_command;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_wait_for_auth_connection.rs"]
+mod tests_wait_for_auth_connection;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_readonly_control_client.rs"]

@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 mod types;
+mod wait_for;
 mod terminal_features;
 mod platform;
 mod cli;
@@ -858,7 +859,7 @@ fn run_command_list_on(
             .map(|c| crate::cli::with_client_path(c, path.as_deref()))
             .collect();
         let line = crate::cli::command_list_wire_line(&with_path[0], &with_path[1..]);
-        let reply = match send_control_with_response(format!("{}\n", line)) {
+        let reply = match crate::session::send_control_with_completion(format!("{}\n", line)) {
             Ok(reply) => reply,
             Err(e) => {
                 eprintln!("psmux: {}", e);
@@ -5378,37 +5379,13 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             }
             // wait-for - Wait for a signal
             "wait-for" | "wait" => {
-                let mut lock = false;
-                let mut signal = false;
-                let mut unlock = false;
-                let mut channel: Option<String> = None;
-                let mut i = 1;
-                
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-L" => { lock = true; }
-                        "-S" => { signal = true; }
-                        "-U" => { unlock = true; }
-                        s if !s.starts_with('-') => { channel = Some(s.to_string()); }
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                
-                if let Some(ch) = channel {
-                    if signal {
-                        send_control(format!("wait-for -S {}\n", ch))?;
-                    } else if lock {
-                        send_control(format!("wait-for -L {}\n", ch))?;
-                    } else if unlock {
-                        send_control(format!("wait-for -U {}\n", ch))?;
-                    } else {
-                        // Wait for channel - this blocks
-                        let resp = send_control_with_response(format!("wait-for {}\n", ch))?;
-                        if !resp.is_empty() {
-                            print!("{}", resp);
-                        }
-                    }
+                let line = format!("wait-for {}\n", cmd_args[1..].iter()
+                    .map(|a| crate::util::quote_arg(a)).collect::<Vec<_>>().join(" "));
+                let resp = crate::session::send_control_with_completion(line)?;
+                let (out, errors) = crate::cli::command_list_reply(&resp);
+                print!("{}", out);
+                if let Some(error) = errors.first() {
+                    return Err(io::Error::new(io::ErrorKind::Other, error.clone()));
                 }
                 return Ok(());
             }

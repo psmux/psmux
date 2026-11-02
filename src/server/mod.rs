@@ -20,7 +20,7 @@ use ratatui::prelude::Rect;
 #[cfg(test)]
 use crate::types::LayoutKind;
 use crate::types::{AppState, CtrlReq, Mode, FocusDir, PipePaneState,
-    WaitChannel, WaitForOp, Node, Action, Bind};
+    Node, Action, Bind};
 use crate::platform::install_console_ctrl_handler;
 use crate::pane::{create_window, create_window_with_env, create_window_raw, kill_active_pane, kill_pane_by_id};
 use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all_children,
@@ -8109,37 +8109,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::KillServer => {
                     shutdown_this_server(&mut app);
                 }
-                CtrlReq::WaitFor(channel, op) => {
-                    match op {
-                        WaitForOp::Lock => {
-                            let entry = app.wait_channels.entry(channel).or_insert_with(|| WaitChannel {
-                                locked: false,
-                                waiters: Vec::new(),
-                            });
-                            entry.locked = true;
-                        }
-                        WaitForOp::Unlock => {
-                            if let Some(ch) = app.wait_channels.get_mut(&channel) {
-                                ch.locked = false;
-                                for waiter in ch.waiters.drain(..) {
-                                    let _ = waiter.send(());
-                                }
-                            }
-                        }
-                        WaitForOp::Signal => {
-                            if let Some(ch) = app.wait_channels.get_mut(&channel) {
-                                for waiter in ch.waiters.drain(..) {
-                                    let _ = waiter.send(());
-                                }
-                            }
-                        }
-                        WaitForOp::Wait => {
-                            app.wait_channels.entry(channel).or_insert_with(|| WaitChannel {
-                                locked: false,
-                                waiters: Vec::new(),
-                            });
-                        }
-                    }
+                CtrlReq::WaitFor { channel, op, client_id, reply } => {
+                    app.wait_channels.execute(channel, op, client_id, reply);
+                }
+                CtrlReq::WaitForClientLost(client_id) => {
+                    app.wait_channels.client_lost(client_id);
                 }
                 CtrlReq::DisplayMenu(menu_def, x, y) => {
                     let menu = parse_menu_definition(&menu_def, x, y);
