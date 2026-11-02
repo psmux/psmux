@@ -92,3 +92,36 @@ fn colours_alone_give_no_attributes() {
     assert_eq!((fg, bg), (Some(Color::Black), Some(Color::Green)));
     assert_eq!(attrs, Style::default());
 }
+
+// tmux style.c:243: `none` sets the attributes to 0. A window style is put
+// into the window list as `#[...]` over status-style, so `none` in it clears
+// the attributes status-style set as well, and only what follows it stays.
+#[test]
+fn none_in_a_window_style_clears_what_status_style_set() {
+    let (_, _, base_attrs) =
+        parse_tmux_style_components("bg=green,reverse,bold,overline,dashed-underscore");
+    let base = base_attrs.fg(Color::Black).bg(Color::Green);
+
+    let (fg, _, attrs) = parse_tmux_style_components("none,fg=red");
+    assert_eq!(fg, Some(Color::Red));
+    let drawn = base.patch(attrs);
+    for m in [Modifier::REVERSED, Modifier::BOLD, Modifier::UNDERLINED] {
+        assert!(!drawn.add_modifier.contains(m), "{m:?} left in {drawn:?}");
+    }
+    assert!(!overline_of(drawn.add_modifier));
+    assert_eq!(drawn.add_modifier.bits() & UL_STYLE_MASK, 0);
+
+    // What comes after `none` is kept.
+    let (_, _, attrs) = parse_tmux_style_components("none,italics,curly-underscore");
+    let drawn = base.patch(attrs);
+    assert!(drawn.add_modifier.contains(Modifier::ITALIC));
+    assert!(!drawn.add_modifier.contains(Modifier::REVERSED));
+    assert_eq!(drawn.add_modifier.bits() & UL_STYLE_MASK, 3 << 12);
+
+    // Without `none` the window style adds on top and removes nothing.
+    let (_, _, attrs) = parse_tmux_style_components("fg=red,italics");
+    assert!(attrs.sub_modifier.is_empty());
+    let drawn = base.patch(attrs);
+    assert!(drawn.add_modifier.contains(Modifier::REVERSED));
+    assert!(drawn.add_modifier.contains(Modifier::ITALIC));
+}
