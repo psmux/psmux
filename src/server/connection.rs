@@ -5853,25 +5853,7 @@ match cmd {
         if !persistent && pending_chain.is_empty() { break; }
     }
     "pipe-pane" | "pipep" => {
-        let stdin_flag = args.iter().any(|a| *a == "-I");
-        let stdout_flag = args.iter().any(|a| *a == "-O");
-        let toggle = args.iter().any(|a| *a == "-o");
-        // #482: everything after pipe-pane's own options (-I/-O/-o; the -t target
-        // was already stripped by the global -t parser) is an opaque shell
-        // command. Skip only the leading option flags and keep the rest verbatim
-        // so the command's OWN dash-flags survive (e.g.
-        // `pwsh -NoProfile -EncodedCommand <b64>`). Previously every dash-token
-        // was filtered out, silently mangling the piped command.
-        let mut start = 0;
-        while start < args.len() && matches!(args[start], "-I" | "-O" | "-o") {
-            start += 1;
-        }
-        let cmd = args[start..].join(" ");
-        let (stdin, stdout) = if !stdin_flag && !stdout_flag {
-            (false, true)
-        } else {
-            (stdin_flag, stdout_flag)
-        };
+        let (stdin, stdout, toggle, cmd) = crate::pipe_pane::options(&args);
         // Same reply shape as #559/#566: a direct file sink that cannot be
         // opened must reach the caller as a non-zero exit, not a silent
         // rc-0 no-op. The handler answers "" on acceptance; only an

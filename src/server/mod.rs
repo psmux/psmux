@@ -49,6 +49,45 @@ use crate::control;
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override, set_named_buffer_override};
 use crate::help;
 
+/// Poll only ready stdout and retry a full pane queue without reading ahead.
+/// Child exit alone is not EOF: its pipe may still hold the final input bytes.
+fn service_pipe_panes(app: &mut AppState) {
+    let mut pipes = std::mem::take(&mut app.pipe_panes);
+    pipes.retain_mut(|pipe| {
+        if let Some(input) = pipe.input.as_mut() {
+            let pane = tree::find_pane_mut_by_id_global(app, pipe.pane_id);
+            let result = match pane.filter(|pane| !pane.dead) {
+                Some(pane) => crate::pipe_pane::pump_input(
+                    input, &mut pipe.pending, &mut *pane.writer, crate::pipe_pane::ready,
+                ),
+                None => Err(io::ErrorKind::BrokenPipe.into()),
+            };
+            let stop_source = result.is_err() && pipe.output.is_none();
+            match result {
+                Ok(true) => {}
+                result => {
+                    pipe.input = None;
+                    pipe.pending = None;
+                    if let Err(e) = result {
+                        if e.kind() != io::ErrorKind::BrokenPipe {
+                            app.status_message = Some((format!("pipe-pane: input: {}", e), Instant::now(), None));
+                        }
+                    }
+                }
+            }
+            if stop_source { return false; }
+        }
+        // Reader EOF closes a direction, not the command. The output reader
+        // owes its raw tail, and the child may still have work after stdout EOF.
+        if pipe.input.is_some() { return true; }
+        match pipe.process.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => pipe.output.as_ref().and_then(|w| w.upgrade()).is_some(),
+        }
+    });
+    app.pipe_panes = pipes;
+}
+
 /// The `-L` namespace this server process belongs to (`None` = default), set
 /// once at startup. The connection threads, which have no `AppState`, need it
 /// so a command they run on the server's behalf stays in its namespace.
@@ -87,6 +126,7 @@ fn shutdown_this_server(app: &mut AppState) -> ! {
         app.warm_pane.inflight,
         crate::warm_pane_sync::inflight::pending()
     );
+    app.pipe_panes.clear();
     // Children FIRST, before anything that costs time (#686).
     //
     // This used to notify the control clients (80ms drain), remove the
@@ -3021,6 +3061,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // The standby spawn the boot hold owes, and since when (see the release).
     let mut standby_owed_at: Option<Instant> = None;
     loop {
+        service_pipe_panes(&mut app);
         // Set when this iteration marked the state dirty only because a pty
         // batch is still PENDING in `PTY_DATA_READY`. See the request arm and
         // the end of iteration push.
@@ -4138,6 +4179,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // later parented to a dead psmux, idle at a prompt forever (#686).
                             crate::warm_pane_sync::reap_inflight_spares();
                             std::thread::sleep(std::time::Duration::from_millis(10));
+                            app.pipe_panes.clear();
                             std::process::exit(0);
                         }
                     }
@@ -5526,6 +5568,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // TerminateProcess is synchronous on Windows — processes
                     // are already dead.  Minimal delay for OS handle cleanup.
                     std::thread::sleep(std::time::Duration::from_millis(10));
+                    app.pipe_panes.clear();
                     std::process::exit(0);
                 }
                 CtrlReq::HasSession(resp) => {
@@ -7190,88 +7233,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // even after focus moves elsewhere.
                     let win = &app.windows[app.active_idx];
                     let pane_id = get_active_pane_id(&win.root, &win.active_path).unwrap_or(0);
-                    // A recorded pipe whose child has already exited is NOT an
-                    // existing pipe. The reader thread drops the writer when a
-                    // tee write fails, but nothing cleared app.pipe_panes, so a
-                    // sink that exits on its own left the pane marked as piped
-                    // forever and `-o` toggled OFF against a dead process
-                    // instead of re-arming (issue #564). Reap the exited entries
-                    // before the toggle decision reads them.
-                    let mut reaped: Vec<usize> = Vec::new();
-                    app.pipe_panes.retain_mut(|p| match p.process.as_mut() {
-                        Some(child) => {
-                            let alive = matches!(child.try_wait(), Ok(None));
-                            if !alive { reaped.push(p.pane_id); }
-                            alive
-                        }
-                        // No child: a direct file sink. Its liveness IS the
-                        // registered writer — when the reader thread dropped
-                        // it on a failed write, keeping the entry would make
-                        // `-o` toggle OFF a dead sink again (the exact #564
-                        // shape). A pane_id match from another writer kind
-                        // (cross-session tunnel) errs on keeping the entry,
-                        // which is the pre-existing behavior.
-                        None => crate::types::PIPE_WRITERS
-                            .lock()
-                            .map(|w| w.iter().any(|(id, _)| *id == p.pane_id))
-                            .unwrap_or(true),
-                    });
-
-                    // Drop any writer this pane's reader thread was teeing to
-                    // (issue #440). Dropping the ChildStdin closes the pipe so the
-                    // child sees EOF; the count gate is kept in sync so idle panes
-                    // pay nothing.
-                    let unregister_writer = |pid: usize| {
-                        if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                            let before = writers.len();
-                            writers.retain(|(id, _)| *id != pid);
-                            let removed = before - writers.len();
-                            if removed > 0 {
-                                crate::types::PIPE_PANE_COUNT
-                                    .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    };
-
-                    // Drop the writers belonging to the sinks reaped above. The
-                    // reader thread already drops a writer when a tee write
-                    // fails, but a sink that exited without the pane emitting
-                    // anything since leaves one registered.
-                    for pid in reaped { unregister_writer(pid); }
+                    service_pipe_panes(&mut app);
                     let has_existing = app.pipe_panes.iter().any(|p| p.pane_id == pane_id);
-
-                    // Non-empty only when the sink could not be started; sent
-                    // to the reply channel at the end of the arm so the
-                    // one-shot CLI can exit non-zero (see CtrlReq::PipePane).
                     let mut outcome = String::new();
-
-                    if cmd.is_empty() {
-                        // No command: close any existing pipe on this pane
-                        if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
-                            unregister_writer(pane_id);
-                            if let Some(ref mut proc) = app.pipe_panes[idx].process {
-                                let _ = proc.kill();
-                            }
-                            app.pipe_panes.remove(idx);
-                        }
-                    } else if toggle && has_existing {
-                        // -o flag with existing pipe: close it (toggle off), don't start new
-                        if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
-                            unregister_writer(pane_id);
-                            if let Some(ref mut proc) = app.pipe_panes[idx].process {
-                                let _ = proc.kill();
-                            }
-                            app.pipe_panes.remove(idx);
-                        }
-                    } else {
-                        // Close any existing pipe first (replace)
-                        if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
-                            unregister_writer(pane_id);
-                            if let Some(ref mut proc) = app.pipe_panes[idx].process {
-                                let _ = proc.kill();
-                            }
-                            app.pipe_panes.remove(idx);
-                        }
+                    // Closing/replacing drops only this pipe's owned handles.
+                    if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
+                        app.pipe_panes.remove(idx);
+                    }
+                    if !cmd.is_empty() && !(toggle && has_existing) {
                         // Direct file sink: the canonical tmux logging idiom
                         // `cat > file` / `cat >> file` cannot work through the
                         // Windows sink shell — PowerShell's `cat` is the
@@ -7315,14 +7284,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             match opts.open(&path) {
                                 Ok(file) => {
                                     if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                                        writers.push((pane_id, Box::new(file)));
+                                        let output: crate::pipe_pane::PipeWriter =
+                                            std::sync::Arc::new(std::sync::Mutex::new(Box::new(file)));
+                                        writers.push((pane_id, output.clone()));
                                         crate::types::PIPE_PANE_COUNT
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         app.pipe_panes.push(PipePaneState {
-                                            pane_id,
-                                            process: None,
-                                            stdin,
-                                            stdout,
+                                            pane_id, process: None, input: None,
+                                            pending: None, output: Some(std::sync::Arc::downgrade(&output)),
                                         });
                                     } else {
                                         // Poisoned registry: recording the pane as
@@ -7373,27 +7342,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         };
                         match spawn_result {
                             Ok(mut child) => {
-                                // Issue #440: hand the child's stdin to this pane's reader
-                                // thread so pane output is actually fed to the pipe command.
-                                // Without this the child blocked on an empty pipe forever and
-                                // the sink stayed 0 bytes. Only the output direction (`-O` /
-                                // default) registers a writer; `-I` (child stdout -> pane
-                                // input) is unchanged.
+                                let mut output = None;
                                 if stdout {
-                                    if let Some(stdin_handle) = child.stdin.take() {
+                                    if let Some(handle) = child.stdin.take() {
+                                        let sink: crate::pipe_pane::PipeWriter =
+                                            std::sync::Arc::new(std::sync::Mutex::new(Box::new(handle)));
                                         if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                                            writers.push((pane_id, Box::new(stdin_handle)));
+                                            writers.push((pane_id, sink.clone()));
                                             crate::types::PIPE_PANE_COUNT
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            output = Some(std::sync::Arc::downgrade(&sink));
                                         }
                                     }
                                 }
-
+                                let input = if stdin { child.stdout.take() } else { None };
                                 app.pipe_panes.push(PipePaneState {
-                                    pane_id,
-                                    process: Some(child),
-                                    stdin,
-                                    stdout,
+                                    pane_id, process: Some(child), input,
+                                    pending: None, output,
                                 });
                             }
                             Err(e) => {
@@ -7538,6 +7503,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // later parented to a dead psmux, idle at a prompt forever (#686).
                         crate::warm_pane_sync::reap_inflight_spares();
                         std::thread::sleep(std::time::Duration::from_millis(10));
+                        app.pipe_panes.clear();
                         std::process::exit(0);
                     }
                 }
@@ -7636,6 +7602,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // later parented to a dead psmux, idle at a prompt forever (#686).
                         crate::warm_pane_sync::reap_inflight_spares();
                         std::thread::sleep(std::time::Duration::from_millis(10));
+                        app.pipe_panes.clear();
                         std::process::exit(0);
                     }
                 }
@@ -7690,6 +7657,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // later parented to a dead psmux, idle at a prompt forever (#686).
                         crate::warm_pane_sync::reap_inflight_spares();
                         std::thread::sleep(std::time::Duration::from_millis(10));
+                        app.pipe_panes.clear();
                         std::process::exit(0);
                     }
                 }
@@ -9512,6 +9480,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // later parented to a dead psmux, idle at a prompt forever (#686).
                 crate::warm_pane_sync::reap_inflight_spares();
                 std::thread::sleep(std::time::Duration::from_millis(10));
+                app.pipe_panes.clear();
                 std::process::exit(0);
             }
         }
