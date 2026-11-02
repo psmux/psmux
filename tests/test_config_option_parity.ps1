@@ -103,7 +103,10 @@ try {
     if ($rtErr.Count -eq 0) { Write-Pass "runtime set -g accepted every value" } else { Write-Fail "runtime set -g errors:`n$($rtErr -join "`n")" }
     $bad = @()
     foreach ($k in $opts.Keys) {
-        $a = Get-Opt $nsCfg $k; $b = Get-Opt $nsRt $k; $want = $opts[$k]
+        $a = (Get-Opt $nsCfg $k) -replace "`r", ''; $b = (Get-Opt $nsRt $k) -replace "`r", ''; $want = $opts[$k]
+        # An array option prints one element a line with -v, as tmux 3.8 does
+        # (update-environment splits `FOO BAR` into two elements).
+        if ($k -eq 'update-environment') { $want = $want -replace ' ', "`n" }
         if ($a -ne $want -or $b -ne $want) { $bad += ("{0}: want [{1}] config [{2}] runtime [{3}]" -f $k, $want, $a, $b) }
     }
     if ($bad.Count -eq 0) { Write-Pass "all $($opts.Count) options read back identically on both paths" }
