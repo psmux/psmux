@@ -1,6 +1,6 @@
 // update-environment as tmux's array option (options-table.c:1210-1220 at tag
 // 3.8: a SESSION option, OPTIONS_TABLE_IS_ARRAY, no separator so a value is
-// split on space and `,`, and 13 default patterns). Each pattern keeps its own
+// split on space and `,`, and 12 default patterns, tmux 3.8 less MSYSTEM). Each pattern keeps its own
 // index, `-a` takes the lowest free index, `-u update-environment[N]` removes
 // one, show prints a line per element, and environ_update walks the elements
 // in key order (environ.c:186-213).
@@ -16,8 +16,8 @@ use crate::types::AppState;
 
 const OPTION: &str = "update-environment";
 
-const DEFAULT: [&str; 13] = [
-    "DISPLAY", "KRB5CCNAME", "MSYSTEM", "SSH_ASKPASS", "SSH_AUTH_SOCK",
+const DEFAULT: [&str; 12] = [
+    "DISPLAY", "KRB5CCNAME", "SSH_ASKPASS", "SSH_AUTH_SOCK",
     "SSH_AGENT_PID", "SSH_CONNECTION", "WAYLAND_DISPLAY", "WINDOWID",
     "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "XDG_SESSION_TYPE",
 ];
@@ -76,9 +76,9 @@ fn append_index_and_unset_follow_tmux() {
          set -gu update-environment[0]\n",
     );
     let values = a.update_environment.values();
-    assert_eq!(values.len(), 14);
+    assert_eq!(values.len(), 13);
     assert!(!values.contains(&"DISPLAY".to_string()));
-    assert_eq!(a.update_environment.get_index(13), Some("FOO"));
+    assert_eq!(a.update_environment.get_index(12), Some("FOO"));
     assert_eq!(a.update_environment.get_index(20), Some("BAR"));
     assert_eq!(array_option_show_lines(&a, "update-environment[20]", false), "update-environment[20] BAR\n");
     assert_eq!(array_option_value(&a, "update-environment[20]"), "BAR");
@@ -125,9 +125,9 @@ fn a_session_element_alone_is_the_whole_session_array() {
     set_session(&mut a, "update-environment[20]", "X", false);
     assert_eq!(items(&a), vec![item("20", "X")]);
     assert_eq!(show(&a, false, false), "update-environment[20] X\n");
-    // The global array is untouched and still has its 13 patterns.
+    // The global array is untouched and still has its 12 patterns.
     let global = show(&a, true, false);
-    assert_eq!(global.lines().count(), 13);
+    assert_eq!(global.lines().count(), 12);
     assert!(global.starts_with("update-environment[0] DISPLAY\n"));
 }
 
@@ -156,7 +156,7 @@ fn session_unset_puts_the_global_array_back() {
     assert_eq!(items(&a), vec![item("0", "S")]);
     assert_eq!(apply_set_session_option(&mut a, OPTION, "", true, false, false, false), "");
     assert!(!session_overrides(&a, OPTION));
-    assert_eq!(a.update_environment.values().len(), 14);
+    assert_eq!(a.update_environment.values().len(), 13);
     assert_eq!(a.update_environment.get_index(30), Some("Z"));
 }
 
@@ -184,7 +184,7 @@ fn a_global_unset_while_the_session_overrides_restores_the_default() {
     crate::config::parse_config_content(&mut a, "set -g update-environment ONLY\n");
     set_session(&mut a, OPTION, "S", false);
     write_shadowed_global(&mut a, OPTION, GlobalWrite::Unset).unwrap();
-    assert_eq!(show(&a, true, false).lines().count(), 13);
+    assert_eq!(show(&a, true, false).lines().count(), 12);
     unset_session_option(&mut a, OPTION);
     assert_eq!(a.update_environment.values(), DEFAULT.to_vec());
 }

@@ -1345,17 +1345,19 @@ and on every attach from the client that attaches. Each element is a glob
 pattern; every variable of the client that matches is copied, and a pattern
 that matches nothing records a removal, so new panes do not get a stale value.
 
-The default is tmux 3.8's list:
+The default is tmux 3.8's list without `MSYSTEM`:
 
 ```text
-DISPLAY KRB5CCNAME MSYSTEM SSH_ASKPASS SSH_AUTH_SOCK SSH_AGENT_PID
-SSH_CONNECTION WAYLAND_DISPLAY WINDOWID XAUTHORITY XDG_CURRENT_DESKTOP
-XDG_SESSION_DESKTOP XDG_SESSION_TYPE
+DISPLAY KRB5CCNAME SSH_ASKPASS SSH_AUTH_SOCK SSH_AGENT_PID SSH_CONNECTION
+WAYLAND_DISPLAY WINDOWID XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
+XDG_SESSION_TYPE
 ```
 
-`MSYSTEM` is set by Git Bash and MSYS2, so attaching from such a shell copies
-it, and attaching from PowerShell, where it is not set, removes it from the
-session environment.
+`MSYSTEM` is left out on purpose. Git Bash and MSYS2 set it, and psmux clients
+attach from mixed shells, so copying it would take `MINGW64` away from an MSYS2
+bash pane when you attach from PowerShell, or put it into PowerShell panes when
+you attach from Git Bash. Add it back with `set -ga update-environment MSYSTEM`
+if you want tmux's list.
 
 It is an array option, as in tmux, and each pattern is an element with its own
 index, `update-environment[N]`:

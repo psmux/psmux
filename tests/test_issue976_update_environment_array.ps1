@@ -1,6 +1,6 @@
 # Issue #976: update-environment is tmux's array option (options-table.c:
 # 1210-1220 at tag 3.8: a session option, OPTIONS_TABLE_IS_ARRAY, a value split
-# on space and `,`, 13 default patterns). psmux kept a list split on spaces:
+# on space and `,`, 12 default patterns, tmux 3.8 less MSYSTEM). psmux kept a list split on spaces:
 # show printed one joined line, `-ga` changed nothing, `-a` without -g glued
 # the text onto the last pattern (`XAUTHORITYFOO`), `update-environment[N]`
 # was kept as text and never used, `-u update-environment[N]` removed nothing,
@@ -60,7 +60,7 @@ function Fresh([string[]]$config = @()) {
     Start-Sleep -Milliseconds 500
 }
 
-$DEFAULT = @('DISPLAY', 'KRB5CCNAME', 'MSYSTEM', 'SSH_ASKPASS', 'SSH_AUTH_SOCK', 'SSH_AGENT_PID',
+$DEFAULT = @('DISPLAY', 'KRB5CCNAME', 'SSH_ASKPASS', 'SSH_AUTH_SOCK', 'SSH_AGENT_PID',
     'SSH_CONNECTION', 'WAYLAND_DISPLAY', 'WINDOWID', 'XAUTHORITY', 'XDG_CURRENT_DESKTOP',
     'XDG_SESSION_DESKTOP', 'XDG_SESSION_TYPE')
 function Lines([string[]]$values, [int]$from = 0, [string]$mark = '') {
@@ -75,18 +75,18 @@ Write-Host "  $((& $PSMUX -V) -join ' ')"
 try {
     Write-Host "`n[1] The default, as tmux 3.8 shows it" -ForegroundColor Yellow
     Fresh
-    Check "show -g: one line per element, 13 patterns" (P show -g update-environment) (Lines $DEFAULT)
+    Check "show -g: one line per element, 12 patterns" (P show -g update-environment) (Lines $DEFAULT)
     Check "show -gv: the patterns alone" (P show -gv update-environment) ($DEFAULT -join "`n")
     Check "#{update-environment} joins them with a space" (P display -p '#{update-environment}') ($DEFAULT -join ' ')
 
     Write-Host "`n[2] -ga, [N], -gu [N], a split value, -gu" -ForegroundColor Yellow
     P set -ga update-environment FOO | Out-Null
-    Check "-ga adds at the lowest free index" ((P show -g update-environment) -split "`n" | Select-Object -Last 1) "update-environment[13] FOO"
+    Check "-ga adds at the lowest free index" ((P show -g update-environment) -split "`n" | Select-Object -Last 1) "update-environment[12] FOO"
     P set -g 'update-environment[20]' BAR | Out-Null
     Check "[20] sets one element" (P show -g 'update-environment[20]') "update-environment[20] BAR"
     Check "#{update-environment[20]}" (P display -p '#{update-environment[20]}') "BAR"
     P set -gu 'update-environment[0]' | Out-Null
-    Check "-gu [0] removes one, the others keep their index" (((P show -g update-environment) -split "`n" | Select-Object -First 2) -join "`n") "update-environment[1] KRB5CCNAME`nupdate-environment[2] MSYSTEM"
+    Check "-gu [0] removes one, the others keep their index" (((P show -g update-environment) -split "`n" | Select-Object -First 2) -join "`n") "update-environment[1] KRB5CCNAME`nupdate-environment[2] SSH_ASKPASS"
     P set -g update-environment 'A B,C' | Out-Null
     Check "a value splits on space and ," (P show -g update-environment) (Lines @('A', 'B', 'C'))
     P set -g update-environment 'X' | Out-Null
@@ -98,7 +98,7 @@ try {
     Fresh
     P set 'update-environment[20]' X | Out-Null
     Check "an element alone is the whole session array" (P show update-environment) "update-environment[20] X"
-    Check "the global array keeps its 13" (P show -g update-environment) (Lines $DEFAULT)
+    Check "the global array keeps its 12" (P show -g update-environment) (Lines $DEFAULT)
     Fresh
     P set -a update-environment FOO | Out-Null
     Check "-a with nothing before starts empty" (P show update-environment) "update-environment[0] FOO"

@@ -76,10 +76,15 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
     },
     // options-table.c:1210-1220 at tag 3.8, a session option. It names no
     // separator, so a value without an index is split on space and `,`.
+    // The default is tmux 3.8's list without MSYSTEM, for a Windows reason:
+    // psmux clients attach from mixed shells (PowerShell, Git Bash, MSYS2),
+    // so copying it either removed MINGW64 from a usrin or MSYS2 bash
+    // pane (no mingw64/bin on its PATH) or leaked MINGW64 into PowerShell
+    // panes. `set -ga update-environment MSYSTEM` restores tmux's list.
     ArraySpec {
         name: "update-environment",
         separator: " ,",
-        default: "DISPLAY KRB5CCNAME MSYSTEM SSH_ASKPASS SSH_AUTH_SOCK \
+        default: "DISPLAY KRB5CCNAME SSH_ASKPASS SSH_AUTH_SOCK \
                   SSH_AGENT_PID SSH_CONNECTION WAYLAND_DISPLAY \
                   WINDOWID XAUTHORITY XDG_CURRENT_DESKTOP \
                   XDG_SESSION_DESKTOP XDG_SESSION_TYPE",
