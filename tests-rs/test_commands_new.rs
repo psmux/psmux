@@ -686,38 +686,46 @@ fn choose_tree_asks_the_client_for_its_tree() {
 
 #[test]
 fn choose_tree_builds_correct_tree_from_list_all_sessions() {
-    // Directly test list_all_sessions_tree with known data
+    let _env = crate::util::lock_test_env();
+    struct RestoreDataDir(Option<std::ffi::OsString>, std::path::PathBuf);
+    impl Drop for RestoreDataDir {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("PSMUX_DATA_DIR", v),
+                None => std::env::remove_var("PSMUX_DATA_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("psmux_choose_tree_{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    // Restore before releasing the lock, including when an assertion panics.
+    let _restore = RestoreDataDir(std::env::var_os("PSMUX_DATA_DIR"), dir.clone());
+    std::env::set_var("PSMUX_DATA_DIR", &dir);
     let windows = vec![
         ("editor".to_string(), 1usize, "120x30".to_string(), true, 0usize),
         ("server".to_string(), 2, "120x30".to_string(), false, 1usize),
     ];
-    // Create a fake port file for our session so the tree builder can find it
-    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap();
-    let psmux_dir = format!("{}/.psmux", home);
-    let port_file = format!("{}/test_tree_session.port", psmux_dir);
-    let _ = std::fs::create_dir_all(&psmux_dir);
-    let _ = std::fs::write(&port_file, "0");
-    
+    let port_file = dir.join("test_tree_session.port");
+    assert!(!port_file.exists());
+    std::fs::write(&port_file, "0").unwrap();
+
     let tree = crate::session::list_all_sessions_tree("test_tree_session", &windows);
-    let _ = std::fs::remove_file(&port_file); // cleanup
-    
-    // Find our session entries
-    let our_entries: Vec<_> = tree.iter().filter(|e| e.session_name == "test_tree_session").collect();
-    if !our_entries.is_empty() {
-        // Should have 1 session header + 2 window entries
-        let headers: Vec<_> = our_entries.iter().filter(|e| e.is_session_header).collect();
-        assert_eq!(headers.len(), 1, "should have exactly 1 session header");
-        assert!(headers[0].is_current_session, "should be marked as current session");
-        
-        let wins: Vec<_> = our_entries.iter().filter(|e| !e.is_session_header).collect();
-        assert_eq!(wins.len(), 2, "should have 2 window entries");
-        assert_eq!(wins[0].window_name, "editor");
-        assert_eq!(wins[1].window_name, "server");
-        assert!(wins[0].is_active_window, "editor should be active");
-        assert!(!wins[1].is_active_window, "server should not be active");
-        assert_eq!(wins[0].window_panes, 1);
-        assert_eq!(wins[0].window_size, "120x30");
-    }
+
+    assert_eq!(tree.len(), 3, "only our session header and two windows are listed");
+    assert!(tree.iter().all(|e| e.session_name == "test_tree_session"));
+    let headers: Vec<_> = tree.iter().filter(|e| e.is_session_header).collect();
+    assert_eq!(headers.len(), 1, "should have exactly 1 session header");
+    assert!(headers[0].is_current_session, "should be marked as current session");
+
+    let wins: Vec<_> = tree.iter().filter(|e| !e.is_session_header).collect();
+    assert_eq!(wins.len(), 2, "should have 2 window entries");
+    assert_eq!(wins[0].window_name, "editor");
+    assert_eq!(wins[1].window_name, "server");
+    assert!(wins[0].is_active_window, "editor should be active");
+    assert!(!wins[1].is_active_window, "server should not be active");
+    assert_eq!(wins[0].window_panes, 1);
+    assert_eq!(wins[0].window_size, "120x30");
 }
 
 #[test]
