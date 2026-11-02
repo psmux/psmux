@@ -232,7 +232,11 @@ Drain-Notifications $cc 600 | Out-Null
 
 # ============================================================
 Hdr "Layer 6: refresh-client -B subscriptions + %subscription-changed"
-Send-CC $cc 'refresh-client -B subA:%0:#{pane_current_command}'
+# Subscribe to the session's real pane. Warm panes consume low ids, so %0
+# rarely exists, and like tmux (control.c window_pane_find_by_id) a pane
+# subscription for a missing pane never fires.
+$subPane = ((& $PSMUX display-message -t $S -p '#{pane_id}' 2>&1) -join '').Trim()
+Send-CC $cc "refresh-client -B subA:${subPane}:#{pane_current_command}"
 $reply = Read-Reply $cc 1500
 if ($reply -match "%end \d+ \d+ 1") { P "refresh-client -B accepted" }
 elseif ($reply -match "%error") { F "refresh-client -B rejected: $reply" }

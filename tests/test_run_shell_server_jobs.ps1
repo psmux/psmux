@@ -5,7 +5,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (-not $PsmuxExe) {
-    throw 'Set PSMUX_EXE or pass -PsmuxExe to select the binary under test.'
+    # The full sweep runner sets no binary variable; every other suite tests
+    # the installed psmux, so fall back to it instead of failing at startup.
+    $PsmuxExe = (Get-Command psmux -ErrorAction Stop).Source
 }
 $Binary = (Resolve-Path $PsmuxExe).Path
 $null = Get-Command pwsh -ErrorAction Stop
