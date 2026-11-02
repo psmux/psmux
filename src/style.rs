@@ -348,6 +348,18 @@ pub fn parse_tmux_style_components(style: &str) -> (Option<Color>, Option<Color>
     let mut attrs = parse_tmux_style(style);
     attrs.fg = None;
     attrs.bg = None;
+    // tmux style.c:243 (`none` sets the attributes to 0): the window styles go
+    // into the window list as `#[...]` over status-style, so a `none` there
+    // clears what status-style set, not only what came before it in the same
+    // string. parse_tmux_style already starts afresh at `none`; marking every
+    // attribute bit as removed (less any added after it) makes the patch onto
+    // the status line's base clear the inherited ones too.
+    if style.split(',').any(|p| p.trim() == "none") {
+        let every = Modifier::all().bits()
+            | crate::rendering::UL_STYLE_MASK
+            | crate::rendering::OVERLINE_BIT;
+        attrs.sub_modifier = Modifier::from_bits_retain(every & !attrs.add_modifier.bits());
+    }
     (fg, bg, attrs)
 }
 

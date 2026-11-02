@@ -176,6 +176,18 @@ try {
         Check "attributes of QQQ" (Bits $row 'QQQ' $all) '000'
         Check "attributes of WWW" (Bits $row 'WWW' $all) '000'
     }
+
+    # tmux style.c:243: `none` sets the attributes to 0, and the window style
+    # is drawn as #[...] over status-style, so it clears status-style's too.
+    Write-Host "`n[8] window-status-current-style none clears status-style's attributes on the current window" -ForegroundColor Yellow
+    $row = Status-Row (@("set -g status-style 'bg=green,reverse,overline'", "set -g window-status-current-style 'none,fg=red'") + $common) 'QQQ'
+    if ($null -eq $row) { Write-Fail "no status row with QQQ" }
+    else {
+        Check "reverse of QQQ" (Bits $row 'QQQ' $REVERSE) '111'
+        Check "overline of QQQ" (Bits $row 'QQQ' $OVERLINE) '111'
+        Check "reverse of WWW" (Bits $row 'WWW' $REVERSE) '000'
+        Check "overline of WWW" (Bits $row 'WWW' $OVERLINE) '000'
+    }
 }
 catch {
     if ("$_" -ne 'no conread') { Write-Fail "exception: $_" }
