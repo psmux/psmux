@@ -3045,7 +3045,16 @@ pub fn send_control_with_response_wait(line: String) -> io::Result<String> {
     send_control_with_response_bounded(line, None)
 }
 
+/// A wait-for or command-list request whose reply requires an explicit receipt.
+pub(crate) fn send_control_with_completion(line: String) -> io::Result<String> {
+    send_control_response(line, None, true)
+}
+
 fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
+    send_control_response(line, read_timeout, false)
+}
+
+fn send_control_response(line: String, read_timeout: Option<Duration>, completion: bool) -> io::Result<String> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
     if env::var("PSMUX_ROUTE_DEBUG").is_ok() {
         eprintln!("[route] send_control_with_response target={:?} full={:?} argv={:?} line={:?}",
@@ -3062,7 +3071,30 @@ fn send_control_with_response_bounded(line: String, read_timeout: Option<Duratio
     let path = crate::paths::port_file(&target);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
     let session_key = read_session_key(&target).unwrap_or_default();
-    exchange_on_port(port, &session_key, full_target.as_deref(), &line, read_timeout)
+    if completion {
+        exchange_with_completion(port, &session_key, full_target.as_deref(), &line)
+    } else {
+        exchange_on_port(port, &session_key, full_target.as_deref(), &line, read_timeout)
+    }
+}
+
+const COMPLETION_AUTH_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn exchange_with_completion(port: u16, key: &str, target: Option<&str>, line: &str) -> io::Result<String> {
+    let key = validate_auth_key(key)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid session key"))?;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(COMPLETION_AUTH_TIMEOUT))?;
+    let mut reader = io::BufReader::new(stream.try_clone()?);
+    crate::wait_for::negotiate(&mut reader, &mut stream, key)?;
+    reader.get_ref().set_read_timeout(None)?;
+    if let Some(target) = target { writeln!(stream, "TARGET {}", target)?; }
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+    // Keep writing open: losing this client must cancel its queued waiter.
+    crate::wait_for::read_response(&mut reader)
 }
 
 /// One request to the server on `port` and its whole reply: AUTH, an optional
@@ -3710,3 +3742,7 @@ mod tests_discussion844_namespace_names;
 #[cfg(test)]
 #[path = "../tests-rs/test_unstorable_names.rs"]
 mod tests_unstorable_names;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_wait_for_transport.rs"]
+mod tests_wait_for_transport;

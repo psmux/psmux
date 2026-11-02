@@ -52,7 +52,7 @@ fn show(args: &[&str], session_inherits: bool) -> (String, Vec<bool>) {
         None,
         false,
         None,
-        0, &Default::default(), false, &Default::default(),
+        0, &Default::default(), false, &Default::default(), &mut io::Cursor::new(Vec::<u8>::new()), &mut WaitInput::default(),
     ));
     let reply = response_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     drop(request_tx);

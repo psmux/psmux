@@ -53,9 +53,10 @@ pub(crate) fn command_name(req: &CtrlReq) -> Option<&'static str> {
         CtrlReq::ShowPromptHistory(..) => "show-prompt-history",
         CtrlReq::ClearPromptHistory => "clear-prompt-history",
         CtrlReq::RunCommand(..) => "run-shell",
-        CtrlReq::WaitFor(..) => "wait-for",
+        CtrlReq::WaitFor { .. } => "wait-for",
         // Not the user's doing: internal or bookkeeping requests.
-        CtrlReq::ClaimSession(..)
+        CtrlReq::WaitForClientLost(..)
+        | CtrlReq::ClaimSession(..)
         | CtrlReq::SourceJobDone { .. }
         | CtrlReq::SourceReplay(..)
         | CtrlReq::InFile(..)
