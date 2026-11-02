@@ -73,9 +73,11 @@ pub enum ControlNotification {
     SubscriptionChanged {
         name: String,
         session_id: usize,
-        window_id: usize,
-        window_index: usize,
-        pane_id: usize,
+        /// (window id, window index); `None` for a session subscription,
+        /// written `- -` as tmux does.
+        window: Option<(usize, usize)>,
+        /// `None` for a session or window subscription, written `-`.
+        pane_id: Option<usize>,
         value: String,
     },
     Exit { reason: Option<String> },
