@@ -9534,6 +9534,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 /// that no longer exists yields nothing.
 fn subscription_instances(app: &AppState, target: &str, format: &str) -> Vec<(String, Option<usize>, Option<usize>, String)> {
     use crate::control::SubscriptionTarget;
+    // tmux expands subscriptions with FORMAT_NOJOBS (monitor.c
+    // monitor_create_formats): `#()` is empty and starts no command. Here a
+    // `#()` would run synchronously in the server loop, once per object.
+    let _nojobs = crate::format::NoJobsFormatGuard::new();
     let mut out = Vec::new();
     if app.windows.is_empty() {
         return out;

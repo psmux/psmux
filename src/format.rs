@@ -446,6 +446,31 @@ impl Drop for AsyncFormatGuard {
     }
 }
 
+thread_local! {
+    // When true, `#()` expands to nothing and runs no command.
+    static FORMAT_NOJOBS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard under which `#()` expands to an empty string, as tmux's
+/// FORMAT_NOJOBS does (format.c: "#() is disabled"). tmux creates the format
+/// tree of every `refresh-client -B` subscription with it (monitor.c
+/// monitor_create_formats), so a subscription never starts a job. psmux
+/// checks subscriptions in the server loop, where a synchronous `#()` would
+/// block every client for as long as the command runs, once per pane for
+/// `%*`, every second.
+pub struct NoJobsFormatGuard(bool);
+impl NoJobsFormatGuard {
+    pub fn new() -> Self {
+        NoJobsFormatGuard(FORMAT_NOJOBS.with(|c| c.replace(true)))
+    }
+}
+impl Drop for NoJobsFormatGuard {
+    fn drop(&mut self) {
+        let prev = self.0;
+        FORMAT_NOJOBS.with(|c| c.set(prev));
+    }
+}
+
 pub(crate) type JobContext = Box<dyn FnOnce(&mut std::process::Command) + Send>;
 
 pub(crate) static JOB_CONTEXT: std::sync::OnceLock<fn() -> Option<JobContext>> =
@@ -496,6 +521,9 @@ fn format_job_command(cmd: &str) -> std::process::Command {
 /// stale. That asymmetry is why the guard has to be right — anything on the
 /// render path that misses it does not merely lose caching, it blocks the loop.
 fn run_shell_command(cmd: &str, app: &AppState) -> String {
+    if FORMAT_NOJOBS.with(|c| c.get()) {
+        return String::new();
+    }
     // Synchronous one-shot expansion (the default): run the command inline and
     // return its real output. A one-shot `display-message -p '#(cmd)'` has no
     // later repaint to pick up an async result, so it must block here.

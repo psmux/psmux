@@ -378,3 +378,27 @@ fn an_empty_session_checks_nothing() {
     assert!(check(&app, &mut last, "s", "", "#{pane_title}").is_empty());
     assert!(check(&app, &mut last, "t", "%*", "#{pane_title}").is_empty());
 }
+
+// A `#()` in a subscription format starts no command and expands to nothing,
+// as tmux's FORMAT_NOJOBS does for monitors (monitor.c
+// monitor_create_formats, format.c "#() is disabled"). psmux checks
+// subscriptions in the server loop, so a `#()` there ran synchronously once
+// per object every second: `#(ping -n 2 127.0.0.1)` under `%*` held every
+// client 2 to 3 s per check. The guard must not leak into later expansions.
+#[test]
+fn a_job_in_a_subscription_format_does_not_run() {
+    let app = app();
+    let mut last = std::collections::HashMap::new();
+    assert_eq!(
+        check(&app, &mut last, "j", "%1", "<#(echo RAN969)>#{pane_title}"),
+        vec!["%subscription-changed j $0 @10 0 %1 : <>one"]
+    );
+    let all = values(&app, "%*", "#(echo RAN969)");
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|v| v.3.is_empty()), "{:?}", all);
+    assert_eq!(
+        crate::format::expand_format("#(echo RAN969)", &app),
+        "RAN969",
+        "a one shot expansion after a subscription check still runs its job"
+    );
+}
