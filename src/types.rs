@@ -1523,6 +1523,15 @@ impl Drop for PipePaneState {
         // write. Killing our child can release that write; stopping must not wait.
         self.input.take();
         if let Some(child) = self.process.as_mut() {
+            // The command runs under the run shell (pwsh -Command), so the
+            // process that holds the pipe is usually a grandchild. Killing only
+            // the shell left that grandchild holding the inherited stdin, and
+            // a pane reader blocked writing to it stayed frozen after stop.
+            // Only while the shell is still running: our Child handle keeps its
+            // pid from being reused, and a shell that already exited is done.
+            if matches!(child.try_wait(), Ok(None)) {
+                crate::platform::process_kill::kill_pid_tree(child.id());
+            }
             let _ = child.kill();
             let _ = child.try_wait();
         }
