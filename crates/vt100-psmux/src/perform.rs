@@ -80,7 +80,18 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
 
 impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     fn print(&mut self, c: char) {
-        if c == '\u{fffd}' || ('\u{80}'..'\u{a0}').contains(&c) {
+        // U+FFFD is a character of one cell, as in tmux, which writes it for
+        // a byte that is no UTF-8 (input.c:783-793 at tag 3.8,
+        // input_stop_utf8). The console hosts hand psmux the same: a lone
+        // 8-bit C1 byte, a byte such as 0xFF and a cut off sequence all
+        // arrive as U+FFFD, and their cursor moves one cell for it. Dropping
+        // it left every later cell of the line one column short.
+        //
+        // U+0080 to U+009F are ignored, as the console hosts keep them as no
+        // cell at all. vte hands them, encoded or as a lone byte, to
+        // `execute`, which ignores them too; only an encoded one split across
+        // two reads reaches here (vte's advance_partial_utf8).
+        if ('\u{80}'..'\u{a0}').contains(&c) {
             self.callbacks.unhandled_char(&mut self.screen, c);
         } else {
             self.screen.text(c);
