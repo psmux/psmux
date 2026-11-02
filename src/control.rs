@@ -312,9 +312,9 @@ pub fn format_notification(notif: &ControlNotification) -> String {
 /// Escape non-printable bytes as octal \\NNN sequences (tmux compatible).
 /// Printable ASCII (0x20..=0x7E), space, and tab are passed through.
 /// Backslash is escaped as \\134 (octal) per the tmux protocol.
-pub fn escape_output(data: &str) -> String {
+pub fn escape_output(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len());
-    for b in data.bytes() {
+    for &b in data {
         match b {
             b'\\' => out.push_str("\\134"),
             0x20..=0x7E => out.push(b as char),
@@ -452,14 +452,13 @@ pub fn flush_pane_output(app: &mut AppState) {
     if all_behind {
         return;
     }
-    let mut pane_outputs: Vec<(usize, String)> = Vec::new();
+    let mut pane_outputs: Vec<(usize, Vec<u8>)> = Vec::new();
     for (pane_id, ring) in &rings {
         let bytes = crate::control_ring::drain(ring);
         if bytes.is_empty() {
             continue;
         }
-        let data = String::from_utf8_lossy(&bytes).into_owned();
-        for chunk in crate::control_ring::chunks(data) {
+        for chunk in crate::control_ring::chunks(bytes) {
             pane_outputs.push((*pane_id, chunk));
         }
     }
@@ -1017,31 +1016,29 @@ mod tests {
 
     #[test]
     fn test_escape_output_printable() {
-        assert_eq!(escape_output("hello world"), "hello world");
+        assert_eq!(escape_output(b"hello world"), "hello world");
     }
 
     #[test]
     fn test_escape_output_backslash() {
         // tmux escapes backslash as octal \134
-        assert_eq!(escape_output("a\\b"), "a\\134b");
+        assert_eq!(escape_output(b"a\\b"), "a\\134b");
     }
 
     #[test]
     fn test_escape_output_control_chars() {
         // \r = 0x0D = octal 015, \n = 0x0A = octal 012
-        assert_eq!(escape_output("a\r\nb"), "a\\015\\012b");
+        assert_eq!(escape_output(b"a\r\nb"), "a\\015\\012b");
     }
 
     #[test]
     fn test_escape_output_tab_passthrough() {
-        assert_eq!(escape_output("a\tb"), "a\tb");
+        assert_eq!(escape_output(b"a\tb"), "a\tb");
     }
 
     #[test]
     fn test_escape_output_high_bytes() {
-        // U+FFFD replacement character = UTF-8 bytes ef bf bd = octal 357 277 275
-        let data = String::from_utf8_lossy(b"x\xffy").to_string();
-        assert_eq!(escape_output(&data), "x\\357\\277\\275y");
+        assert_eq!(escape_output(b"x\xffy"), "x\\377y");
     }
 
     #[test]
@@ -1078,9 +1075,20 @@ mod tests {
     fn test_format_notification_output() {
         let line = format_notification(&ControlNotification::Output {
             pane_id: 1,
-            data: "hello\r\n".to_string(),
+            data: b"hello\r\n".to_vec(),
         });
         assert_eq!(line, "%output %1 hello\\015\\012");
+    }
+
+    #[test]
+    fn test_format_notification_pane_output() {
+        let line = format_notification(&ControlNotification::PaneOutput {
+            pane_id: 1,
+            data: b"hello\r\n\xff".to_vec(),
+            seq: 1,
+            queued_at: std::time::Instant::now(),
+        });
+        assert_eq!(line, "%output %1 hello\\015\\012\\377");
     }
 
     #[test]
@@ -1244,13 +1252,13 @@ mod tests {
 
     #[test]
     fn test_escape_output_empty() {
-        assert_eq!(escape_output(""), "");
+        assert_eq!(escape_output(b""), "");
     }
 
     #[test]
     fn test_escape_output_mixed() {
         // Mix of printable, backslash, control, and tab
-        assert_eq!(escape_output("a\\b\tc\x01d"), "a\\134b\tc\\001d");
+        assert_eq!(escape_output(b"a\\b\tc\x01d"), "a\\134b\tc\\001d");
     }
 
     #[test]
@@ -1258,7 +1266,7 @@ mod tests {
         let line = format_notification(&ControlNotification::ExtendedOutput {
             pane_id: 2,
             age_ms: 150,
-            data: "hello\r\n".to_string(),
+            data: b"hello\r\n".to_vec(),
         });
         assert_eq!(line, "%extended-output %2 150 : hello\\015\\012");
     }
@@ -1346,7 +1354,7 @@ mod tests {
         let line = format_notification(&ControlNotification::ExtendedOutput {
             pane_id: 0,
             age_ms: 5000,
-            data: "line1\\line2".to_string(),
+            data: b"line1\\line2".to_vec(),
         });
         assert_eq!(line, "%extended-output %0 5000 : line1\\134line2");
     }
@@ -1375,3 +1383,7 @@ mod tests_issue825_control_detach;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue824_827_cc.rs"]
 mod tests_issue824_827_cc;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_control_output_bytes.rs"]
+mod tests_control_output_bytes;

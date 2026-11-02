@@ -49,7 +49,7 @@ pub fn build_version_string() -> String {
 /// Notifications emitted to control mode clients (tmux wire-compatible).
 #[derive(Clone, Debug)]
 pub enum ControlNotification {
-    Output { pane_id: usize, data: String },
+    Output { pane_id: usize, data: Vec<u8> },
     WindowAdd { window_id: usize },
     WindowClose { window_id: usize },
     WindowRenamed { window_id: usize, name: String },
@@ -64,11 +64,11 @@ pub enum ControlNotification {
     Continue { pane_id: usize },
     Pause { pane_id: usize },
     /// Extended output with age information (when pause-after is active).
-    ExtendedOutput { pane_id: usize, age_ms: u64, data: String },
+    ExtendedOutput { pane_id: usize, age_ms: u64, data: Vec<u8> },
     /// Pane output queued by the server loop through the client's
     /// `ControlOutputGate`; the writer decides when it reaches it whether it
     /// goes out as %output, %extended-output, a %pause, or not at all (#826).
-    PaneOutput { pane_id: usize, data: String, seq: u64, queued_at: Instant },
+    PaneOutput { pane_id: usize, data: Vec<u8>, seq: u64, queued_at: Instant },
     /// Subscription value changed notification.
     SubscriptionChanged {
         name: String,
