@@ -3094,7 +3094,13 @@ fn exchange_with_completion(port: u16, key: &str, target: Option<&str>, line: &s
     stream.write_all(line.as_bytes())?;
     stream.flush()?;
     // Keep writing open: losing this client must cancel its queued waiter.
-    crate::wait_for::read_response(&mut reader)
+    // A server that goes away before the receipt is reported as tmux's command
+    // client reports it ("server exited", client.c), not as a socket error.
+    crate::wait_for::read_response(&mut reader).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted => io::Error::new(e.kind(), "server exited"),
+        _ => e,
+    })
 }
 
 /// One request to the server on `port` and its whole reply: AUTH, an optional
