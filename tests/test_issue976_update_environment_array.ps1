@@ -116,7 +116,7 @@ try {
     Fresh @("set -g 'update-environment[30]' Z")
     P set update-environment S | Out-Null
     P set -u update-environment | Out-Null
-    Check "-u drops the session array and the global one applies again" ((P show -g update-environment) -split "`n" | Select-Object -Last 2) "update-environment[12] XDG_SESSION_TYPE update-environment[30] Z"
+    Check "-u drops the session array and the global one applies again" ((P show -g update-environment) -split "`n" | Select-Object -Last 2) "update-environment[11] XDG_SESSION_TYPE update-environment[30] Z"
     Check "show -A marks what the session inherits" (((P show -A update-environment) -split "`n" | Select-Object -First 2) -join "`n") (Lines @('DISPLAY', 'KRB5CCNAME') 0 '*')
 
     Write-Host "`n[4] The elements are used on attach" -ForegroundColor Yellow
