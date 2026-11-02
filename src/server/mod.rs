@@ -8686,15 +8686,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ControlSubscribe { client_id, name, target, format } => {
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {
                         cc.subscriptions.insert(name.clone(), (target, format));
-                        // Clear cached value so the first check always emits
-                        cc.subscription_values.remove(&name);
+                        // Clear cached values so the first check always emits
+                        clear_subscription_values(&mut cc.subscription_values, &name);
                         cc.subscription_last_check.remove(&name);
                     }
                 }
                 CtrlReq::ControlUnsubscribe { client_id, name } => {
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {
                         cc.subscriptions.remove(&name);
-                        cc.subscription_values.remove(&name);
+                        clear_subscription_values(&mut cc.subscription_values, &name);
                         cc.subscription_last_check.remove(&name);
                     }
                 }
@@ -9279,7 +9279,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         if !app.control_clients.is_empty() {
             let now_sub = std::time::Instant::now();
             // Phase 1: collect (client_id, sub_name, format) pairs that need checking
-            let mut to_check: Vec<(u64, String, String)> = Vec::new();
+            let mut to_check: Vec<(u64, String, String, String)> = Vec::new();
             for client in app.control_clients.values_mut() {
                 if client.subscriptions.is_empty() {
                     continue;
@@ -9293,48 +9293,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     client.subscription_last_check.insert(name.clone(), now_sub);
-                    let format = client.subscriptions[&name].1.clone();
-                    to_check.push((client.client_id, name, format));
+                    let (target, format) = client.subscriptions[&name].clone();
+                    to_check.push((client.client_id, name, target, format));
                 }
             }
-            // Phase 2: expand formats with immutable borrow of app
-            let mut sub_results: Vec<(u64, String, String)> = Vec::new();
-            for (cid, name, format) in &to_check {
-                let expanded = crate::format::expand_format(format, &app);
-                sub_results.push((*cid, name.clone(), expanded));
-            }
-            // Phase 3: compare and emit notifications
-            let active_win = &app.windows[app.active_idx];
-            let win_id = active_win.id;
-            let pane_id = get_active_pane_id(&active_win.root, &active_win.active_path).unwrap_or(0);
-            let session_id = app.session_id;
-            let win_idx = app.active_idx;
+            // Phase 2: check each due subscription once per object its
+            // target names (see check_subscription). iTerm2 subscribes once
+            // per pane (`<name>:%<id>:#{pane_title}`); expanding every
+            // subscription against the active pane put the active pane's
+            // title on every tab.
             let mut sub_notifs: Vec<(u64, crate::types::ControlNotification)> = Vec::new();
-            for (cid, name, expanded) in sub_results {
-                if let Some(cc) = app.control_clients.get(&cid) {
-                    let changed = match cc.subscription_values.get(&name) {
-                        Some(prev) => prev != &expanded,
-                        None => true,
-                    };
-                    if changed {
-                        sub_notifs.push((cid, crate::types::ControlNotification::SubscriptionChanged {
-                            name: name.clone(),
-                            session_id,
-                            window_id: win_id,
-                            window_index: win_idx,
-                            pane_id,
-                            value: expanded.clone(),
-                        }));
-                    }
-                }
-            }
-            // Phase 4: update cached values and send notifications
-            for (cid, ref notif) in &sub_notifs {
+            for (cid, name, target, format) in &to_check {
+                let Some(mut last) = app.control_clients.get_mut(cid)
+                    .map(|cc| std::mem::take(&mut cc.subscription_values)) else { continue };
+                let notifs = check_subscription(&app, &mut last, name, target, format);
                 if let Some(cc) = app.control_clients.get_mut(cid) {
-                    if let crate::types::ControlNotification::SubscriptionChanged { name, value, .. } = notif {
-                        cc.subscription_values.insert(name.clone(), value.clone());
-                    }
+                    cc.subscription_values = last;
                 }
+                sub_notifs.extend(notifs.into_iter().map(|n| (*cid, n)));
             }
             for (cid, notif) in sub_notifs {
                 if let Some(cc) = app.control_clients.get(&cid) {
@@ -9545,6 +9521,120 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     Ok(())
 }
 
+/// The objects a `refresh-client -B name:target:format` subscription is
+/// expanded for, as tmux 3.8's monitor_check_* (monitor.c) walk them: `%*`
+/// every pane, `%N` that pane unless it is dead, `@*` every window, `@N` that
+/// window, empty the session (its active window and pane). Floating panes
+/// count as panes, after the tiled ones, as `#{P:}` walks them. Each entry is
+/// (cache-key suffix, window position, pane id, expanded value). The suffix
+/// names the object and its window's index, `%id:index` or `@id:index`, as
+/// tmux keys its last values by pane or window and `wl->idx`; it is empty for
+/// the session. The window and pane are `None` where tmux writes `-` (the
+/// pane of a window target, both for the session target). A pane or window
+/// that no longer exists yields nothing.
+fn subscription_instances(app: &AppState, target: &str, format: &str) -> Vec<(String, Option<usize>, Option<usize>, String)> {
+    use crate::control::SubscriptionTarget;
+    let mut out = Vec::new();
+    if app.windows.is_empty() {
+        return out;
+    }
+    match crate::control::parse_subscription_target(target) {
+        Some(SubscriptionTarget::AllPanes) => {
+            for (wi, w) in app.windows.iter().enumerate() {
+                let mut ids = tree::collect_pane_ids(&w.root);
+                ids.extend(w.floating.iter().map(|fp| fp.id));
+                for pid in ids {
+                    let value = crate::format::expand_format_for_pane_by_id(format, app, pid);
+                    out.push((format!("%{}:{}", pid, app.win_display_index(wi)), Some(wi), Some(pid), value));
+                }
+            }
+        }
+        Some(SubscriptionTarget::Pane(pid)) => {
+            // tmux skips a pane whose process is gone (`wp->fd == -1`).
+            let found = tree::find_pane_by_id_global(app, pid)
+                .and_then(|(wi, pos)| tree::get_nth_pane(&app.windows[wi].root, pos).map(|p| (wi, p.dead)))
+                .or_else(|| tree::find_floating_by_id(app, pid)
+                    .map(|(wi, fi)| (wi, app.windows[wi].floating[fi].pane.dead)));
+            if let Some((wi, false)) = found {
+                let value = crate::format::expand_format_for_pane_by_id(format, app, pid);
+                out.push((format!("%{}:{}", pid, app.win_display_index(wi)), Some(wi), Some(pid), value));
+            }
+        }
+        Some(SubscriptionTarget::AllWindows) => {
+            for wi in 0..app.windows.len() {
+                let value = crate::format::expand_format_for_window(format, app, wi);
+                out.push((format!("@{}:{}", app.windows[wi].id, app.win_display_index(wi)), Some(wi), None, value));
+            }
+        }
+        Some(SubscriptionTarget::Window(wid)) => {
+            if let Some(wi) = find_window_index_by_id(app, wid) {
+                let value = crate::format::expand_format_for_window(format, app, wi);
+                out.push((format!("@{}:{}", wid, app.win_display_index(wi)), Some(wi), None, value));
+            }
+        }
+        Some(SubscriptionTarget::Session) => {
+            if app.active_idx < app.windows.len() {
+                out.push((String::new(), None, None, crate::format::expand_format(format, app)));
+            }
+        }
+        // Never stored: parse_subscription_request turns it into a removal.
+        None => {}
+    }
+    out
+}
+
+/// One check of subscription `name`, as tmux 3.8's monitor_check_*: a
+/// `%subscription-changed` for each object whose value differs from the last
+/// one sent. `last` holds those values, under `name` for the session and
+/// `name` + U+001F + `%id:index` / `@id:index` for a pane or window, and is
+/// updated here. A pane or window seen under a new index has no last value,
+/// so it is reported again, as in tmux. For `%*` and `@*`, the entries not
+/// seen in this check are dropped, as tmux's monitor_sweep_all_panes /
+/// monitor_sweep_all_windows drop them; tmux keeps the entries of `%N` and
+/// `@N`, so a dead pane that comes back with the same value is not reported.
+fn check_subscription(
+    app: &AppState,
+    last: &mut std::collections::HashMap<String, String>,
+    name: &str,
+    target: &str,
+    format: &str,
+) -> Vec<crate::types::ControlNotification> {
+    use crate::control::SubscriptionTarget;
+    let sweep = matches!(
+        crate::control::parse_subscription_target(target),
+        Some(SubscriptionTarget::AllPanes | SubscriptionTarget::AllWindows)
+    );
+    let prefix = format!("{}\u{1f}", name);
+    let mut live = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (suffix, wi, pane_id, value) in subscription_instances(app, target, format) {
+        let key = if suffix.is_empty() { name.to_string() } else { format!("{}{}", prefix, suffix) };
+        live.insert(key.clone());
+        if last.get(&key) == Some(&value) {
+            continue;
+        }
+        last.insert(key, value.clone());
+        out.push(crate::types::ControlNotification::SubscriptionChanged {
+            name: name.to_string(),
+            session_id: app.session_id,
+            window: wi.map(|wi| (app.windows[wi].id, app.win_display_index(wi))),
+            pane_id,
+            value,
+        });
+    }
+    if sweep {
+        last.retain(|k, _| !k.starts_with(&prefix) || live.contains(k));
+    }
+    out
+}
+
+/// Forget the last values of subscription `name`: its own entry and its
+/// per-object entries (`name` + U+001F + `%id:index` / `@id:index`).
+fn clear_subscription_values(values: &mut std::collections::HashMap<String, String>, name: &str) {
+    let prefix = format!("{}\u{1f}", name);
+    values.retain(|k, _| k != name && !k.starts_with(&prefix));
+}
+
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue505_rename_session_guard.rs"]
 mod tests_issue505_rename_session_guard;
@@ -9613,3 +9703,7 @@ mod tests_copy_mode_parity_send_keys_x;
 #[cfg(test)]
 #[path = "../../tests-rs/test_select_pane_input_off.rs"]
 mod tests_select_pane_input_off;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_control_subscription_targets.rs"]
+mod tests_control_subscription_targets;

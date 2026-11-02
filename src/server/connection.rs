@@ -8470,25 +8470,20 @@ fn dispatch_control_command(
             while i < args.len() {
                 if args[i] == "-B" {
                     if let Some(spec) = args.get(i + 1) {
-                        // Format: "name:what:format" or "name:" (remove)
                         let spec = spec.trim_matches('"');
-                        if let Some(colon1) = spec.find(':') {
-                            let name = spec[..colon1].to_string();
-                            let rest = &spec[colon1 + 1..];
-                            if rest.is_empty() {
-                                // Remove subscription: "name:"
-                                let _ = tx.send(CtrlReq::ControlUnsubscribe {
-                                    client_id,
-                                    name,
-                                });
-                            } else if let Some(colon2) = rest.find(':') {
-                                let target = rest[..colon2].to_string();
-                                let format = rest[colon2 + 1..].to_string();
+                        match crate::control::parse_subscription_request(spec) {
+                            crate::control::SubscriptionRequest::Add { name, target, format } => {
                                 let _ = tx.send(CtrlReq::ControlSubscribe {
                                     client_id,
                                     name,
                                     target,
                                     format,
+                                });
+                            }
+                            crate::control::SubscriptionRequest::Remove { name } => {
+                                let _ = tx.send(CtrlReq::ControlUnsubscribe {
+                                    client_id,
+                                    name,
                                 });
                             }
                         }

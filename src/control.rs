@@ -138,6 +138,87 @@ pub fn emit_panes_closed(app: &AppState, window_id: usize, killed_active: bool, 
     }
 }
 
+/// What a `refresh-client -B name:what:format` subscription watches, as tmux
+/// 3.8's monitor_parse (monitor.c) reads `what`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionTarget {
+    /// `` (empty): the session.
+    Session,
+    /// `%N`: one pane.
+    Pane(usize),
+    /// `%*`: every pane of the session.
+    AllPanes,
+    /// `@N`: one window.
+    Window(usize),
+    /// `@*`: every window of the session.
+    AllWindows,
+}
+
+/// An id read the way tmux reads one with `sscanf(what, "%%%d")`: leading
+/// white space, an optional sign, then the leading digits, so `%12x` is pane
+/// 12. A negative id names nothing (tmux checks `id >= 0`).
+fn scan_subscription_id(s: &str) -> Option<usize> {
+    let s = s.trim_start_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'));
+    let (negative, s) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let n: i64 = s[..end].parse().ok()?;
+    let n = if negative { -n } else { n };
+    if (0..=i32::MAX as i64).contains(&n) { Some(n as usize) } else { None }
+}
+
+/// Parse the `what` of a subscription as tmux 3.8's monitor_parse does: `%*`,
+/// `%N`, `@*`, `@N` or empty for the session. Anything else is not a
+/// subscription.
+pub fn parse_subscription_target(what: &str) -> Option<SubscriptionTarget> {
+    if what == "%*" {
+        Some(SubscriptionTarget::AllPanes)
+    } else if let Some(id) = what.strip_prefix('%').and_then(scan_subscription_id) {
+        Some(SubscriptionTarget::Pane(id))
+    } else if what == "@*" {
+        Some(SubscriptionTarget::AllWindows)
+    } else if let Some(id) = what.strip_prefix('@').and_then(scan_subscription_id) {
+        Some(SubscriptionTarget::Window(id))
+    } else if what.is_empty() {
+        Some(SubscriptionTarget::Session)
+    } else {
+        None
+    }
+}
+
+/// What one `refresh-client -B` value asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionRequest {
+    Add { name: String, target: String, format: String },
+    Remove { name: String },
+}
+
+/// Read one `refresh-client -B` value as tmux 3.8's
+/// cmd_refresh_client_update_subscription does: `name:what:format` adds or
+/// replaces a subscription; any value that does not parse removes the
+/// subscription named by the whole value, which makes a bare `name` remove
+/// `name`. psmux also keeps its own `name:` as a way to remove `name`.
+pub fn parse_subscription_request(value: &str) -> SubscriptionRequest {
+    if let Some((name, rest)) = value.split_once(':') {
+        if rest.is_empty() {
+            return SubscriptionRequest::Remove { name: name.to_string() };
+        }
+        if let Some((what, format)) = rest.split_once(':') {
+            if parse_subscription_target(what).is_some() {
+                return SubscriptionRequest::Add {
+                    name: name.to_string(),
+                    target: what.to_string(),
+                    format: format.to_string(),
+                };
+            }
+        }
+    }
+    SubscriptionRequest::Remove { name: value.to_string() }
+}
+
 /// Format a control mode notification as a tmux wire-compatible line.
 pub fn format_notification(notif: &ControlNotification) -> String {
     match notif {
@@ -192,8 +273,18 @@ pub fn format_notification(notif: &ControlNotification) -> String {
         ControlNotification::PaneOutput { pane_id, data, .. } => {
             format!("%output %{} {}", pane_id, escape_output(data))
         }
-        ControlNotification::SubscriptionChanged { name, session_id, window_id, window_index, pane_id, value } => {
-            format!("%subscription-changed {} ${} @{} {} %{} : {}", name, session_id, window_id, window_index, pane_id, value)
+        ControlNotification::SubscriptionChanged { name, session_id, window, pane_id, value } => {
+            // tmux control.c writes `-` for the window and pane a session
+            // subscription has no use for, and for the pane of a window one.
+            let window = match window {
+                Some((id, index)) => format!("@{} {}", id, index),
+                None => "- -".to_string(),
+            };
+            let pane = match pane_id {
+                Some(id) => format!("%{}", id),
+                None => "-".to_string(),
+            };
+            format!("%subscription-changed {} ${} {} {} : {}", name, session_id, window, pane, value)
         }
         ControlNotification::Exit { reason } => {
             if let Some(r) = reason {
@@ -1177,12 +1268,31 @@ mod tests {
         let line = format_notification(&ControlNotification::SubscriptionChanged {
             name: "mysub".to_string(),
             session_id: 0,
-            window_id: 1,
-            window_index: 0,
-            pane_id: 3,
+            window: Some((1, 0)),
+            pane_id: Some(3),
             value: "pwsh".to_string(),
         });
         assert_eq!(line, "%subscription-changed mysub $0 @1 0 %3 : pwsh");
+    }
+
+    #[test]
+    fn test_format_notification_subscription_changed_window_and_session() {
+        let line = format_notification(&ControlNotification::SubscriptionChanged {
+            name: "w".to_string(),
+            session_id: 0,
+            window: Some((1, 0)),
+            pane_id: None,
+            value: "0/first".to_string(),
+        });
+        assert_eq!(line, "%subscription-changed w $0 @1 0 - : 0/first");
+        let line = format_notification(&ControlNotification::SubscriptionChanged {
+            name: "sess".to_string(),
+            session_id: 0,
+            window: None,
+            pane_id: None,
+            value: "second".to_string(),
+        });
+        assert_eq!(line, "%subscription-changed sess $0 - - - : second");
     }
 
     #[test]
@@ -1246,9 +1356,8 @@ mod tests {
         let line = format_notification(&ControlNotification::SubscriptionChanged {
             name: "test_sub".to_string(),
             session_id: 1,
-            window_id: 2,
-            window_index: 3,
-            pane_id: 4,
+            window: Some((2, 3)),
+            pane_id: Some(4),
             value: String::new(),
         });
         assert_eq!(line, "%subscription-changed test_sub $1 @2 3 %4 : ");
