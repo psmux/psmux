@@ -60,20 +60,49 @@ fn negotiation_requires_native_acknowledgement() {
     assert!(negotiate(&mut reader, &mut Vec::new(), "key").is_ok());
 }
 
-// A server from before the handshake refuses the capability word as a wrong
-// key. The CLI tells the user to restart it rather than only "Invalid session
-// key", which reads as a broken install.
+// The CLI falls back to the legacy run-shell on exactly these kinds (session.rs
+// send_run_shell_with_response): Unsupported when the server took the key and
+// ignored the capability, PermissionDenied when it refused it, which an AUTH
+// only probe then tells apart from a wrong key. Anything else is an error.
 #[test]
-fn an_older_server_refusal_says_to_restart_it() {
-    for reply in ["ERROR: Invalid session key\n", "OK\n"] {
+fn refusals_have_the_kinds_the_legacy_fallback_reads() {
+    use std::io::ErrorKind;
+    for (reply, kind) in [
+        ("OK\n", ErrorKind::Unsupported),
+        ("OK\r\n", ErrorKind::Unsupported),
+        ("ERROR: Invalid session key\n", ErrorKind::PermissionDenied),
+        ("ERROR: Authentication required\n", ErrorKind::PermissionDenied),
+        ("", ErrorKind::UnexpectedEof),
+    ] {
         let mut reader = std::io::Cursor::new(reply.as_bytes());
         let err = negotiate(&mut reader, &mut Vec::new(), "key").unwrap_err();
-        assert!(err.to_string().contains("older psmux"), "{reply:?} gave {err}");
-        assert!(err.to_string().contains("kill-server"), "{reply:?} gave {err}");
+        assert_eq!(err.kind(), kind, "{reply:?} gave {err}");
     }
-    let mut reader = std::io::Cursor::new("ERROR: Authentication required\n".as_bytes());
+    // The probe runs for exactly an older server's refusal text, nothing else.
+    let mut reader = std::io::Cursor::new("ERROR: Invalid session key\n".as_bytes());
     let err = negotiate(&mut reader, &mut Vec::new(), "key").unwrap_err();
-    assert_eq!(err.to_string(), "ERROR: Authentication required");
+    assert_eq!(err.to_string(), "ERROR: Invalid session key");
+}
+
+// A `-b` job reports only a failure, as tmux words it, and nothing for exit 0.
+#[cfg(windows)]
+#[test]
+fn background_job_reports_only_a_failure() {
+    use super::{failure_text, wait_background};
+    let run = |code: u32| {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", &format!("echo chatty & exit {}", code)])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe starts");
+        wait_background(&mut child, "job")
+    };
+    assert_eq!(run(0), None, "a successful -b job shows nothing");
+    assert_eq!(run(3).as_deref(), Some("'job' returned 3"));
+    let ok = std::process::Command::new("cmd.exe").args(["/d", "/c", "exit 0"]).status().unwrap();
+    assert_eq!(failure_text("x", &ok), None);
 }
 
 #[test]

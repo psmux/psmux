@@ -76,6 +76,25 @@ fn server_line_without_a_directory_sends_no_c() {
     assert_eq!(line, "run-shell -d 1.5 -- \"x\"\n");
 }
 
+// The line for a server from an older psmux is the one psmux sent before the
+// native reply: no `--`, which an older server may hand to the shell.
+#[test]
+fn legacy_line_is_the_pre_native_line() {
+    let line = cli_run_shell_legacy_line(true, None, Some("C:\\a b"), "helper.exe #{pane_id}");
+    let native = cli_run_shell_server_line(true, None, Some("C:\\a b"), "helper.exe #{pane_id}");
+    assert_eq!(native.replacen(" -- ", " ", 1), line, "only the `--` differs");
+    assert!(!line.contains(" -- "), "{line}");
+    let args = parse_command_line(line.trim_end());
+    let parsed = parse_run_shell_args(&args[1..]).unwrap();
+    assert!(parsed.background);
+    assert_eq!(parsed.cwd.as_deref(), Some("C:\\a b"));
+    assert_eq!(parsed.command.join(" ").trim(), "helper.exe #{pane_id}");
+    assert_eq!(cli_run_shell_legacy_line(false, None, None, "x"), "run-shell \"x\"\n");
+    assert!(cli_run_shell_goes_to_server("helper.exe 2", true));
+    assert!(cli_run_shell_goes_to_server("helper.exe #{pane_id}", false));
+    assert!(!cli_run_shell_goes_to_server("helper.exe 2", false));
+}
+
 fn cwd_of(cwd: Option<&str>) -> String {
     let mut c = std::process::Command::new("cmd.exe");
     c.args(["/d", "/c", "cd"]);

@@ -4074,6 +4074,24 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
         app.run_shell_rx = Some(rx);
     }
     let tx = app.run_shell_tx.as_ref().unwrap().clone();
+    if parsed.background {
+        // Output not read, only a failure reported, on the status line
+        // (run_shell::wait_background).
+        crate::commands::null_job_output(&mut cmd);
+        std::thread::spawn(move || {
+            if let Some(delay) = delay {
+                std::thread::sleep(delay);
+            }
+            let message = match cmd.spawn() {
+                Ok(mut child) => crate::run_shell::wait_background(&mut child, &shell_cmd),
+                Err(e) => Some(format!("run-shell: {}", e)),
+            };
+            if let Some(message) = message {
+                let _ = tx.send((crate::run_shell::STATUS_TITLE.to_string(), message));
+            }
+        });
+        return;
+    }
     std::thread::spawn(move || {
         if let Some(delay) = delay {
             std::thread::sleep(delay);

@@ -6494,8 +6494,12 @@ match cmd {
                     let _done = done;
                     if let Some(delay) = delay { std::thread::sleep(delay); }
                     let tx = TargetedSender::new(&inner, target);
-                    c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-                    let child = match c.spawn() {
+                    if background {
+                        crate::commands::null_job_output(&mut c);
+                    } else {
+                        c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                    }
+                    let mut child = match c.spawn() {
                         Ok(child) => { let _ = launch.send(Ok(())); child }
                         Err(e) => {
                             let message = format!("run-shell: {}", e);
@@ -6504,6 +6508,13 @@ match cmd {
                             return;
                         }
                     };
+                    if background {
+                        // Only a failure, on the status line (wait_background).
+                        if let Some(message) = crate::run_shell::wait_background(&mut child, &shell_cmd) {
+                            let _ = tx.send(CtrlReq::StatusMessage(message));
+                        }
+                        return;
+                    }
                     match child.wait_with_output() {
                         Ok(out) => {
                             let text = crate::run_shell::output_text(&shell_cmd, &out);
@@ -8582,8 +8593,8 @@ fn dispatch_control_command(
                 std::thread::spawn(move || {
                     if let Some(delay) = delay { std::thread::sleep(delay); }
                     let tx = TargetedSender::new(&inner, target);
-                    c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-                    let child = match c.spawn() {
+                    crate::commands::null_job_output(&mut c);
+                    let mut child = match c.spawn() {
                         Ok(child) => { let _ = launch.send(Ok(())); child }
                         Err(e) => {
                             let message = format!("run-shell: {}", e);
@@ -8592,14 +8603,9 @@ fn dispatch_control_command(
                             return;
                         }
                     };
-                    match child.wait_with_output() {
-                        Ok(out) => {
-                            let text = crate::run_shell::output_text(&shell_cmd, &out);
-                            if !text.is_empty() {
-                                let _ = tx.send(CtrlReq::ShowTextPopup("run-shell".to_string(), text));
-                            }
-                        }
-                        Err(e) => { let _ = tx.send(CtrlReq::StatusMessage(format!("run-shell: {}", e))); }
+                    // Only a failure, on the status line (wait_background).
+                    if let Some(message) = crate::run_shell::wait_background(&mut child, &shell_cmd) {
+                        let _ = tx.send(CtrlReq::StatusMessage(message));
                     }
                 });
                 if delay.is_some() {

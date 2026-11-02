@@ -3,7 +3,6 @@
 // AUTH runs before command aliases or application dispatch.
 pub(crate) const AUTH_CAPABILITY: &str = "PSMUX_RUN_SHELL_NATIVE_V1";
 pub(crate) const NEGOTIATION_ACK: &str = "\u{0001}PSMUX_RUN_SHELL_NATIVE_V1\u{0001}\n";
-const OLD_SERVER_HINT: &str = "run-shell: a server started by an older psmux cannot run this; restart it with kill-server";
 
 pub(crate) fn negotiate(reader: &mut impl std::io::BufRead, writer: &mut impl std::io::Write, key: &str) -> std::io::Result<()> {
     writeln!(writer, "AUTH {} {}", key, AUTH_CAPABILITY)?;
@@ -15,14 +14,7 @@ pub(crate) fn negotiate(reader: &mut impl std::io::BufRead, writer: &mut impl st
     }
     match reply.as_str() {
         NEGOTIATION_ACK => Ok(()),
-        "OK\n" | "OK\r\n" => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, OLD_SERVER_HINT)),
-        // A server from before this handshake reads the capability word as
-        // part of the key and refuses it. Nothing has been sent yet, so say
-        // what to do instead of printing only "Invalid session key".
-        "ERROR: Invalid session key\n" => Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("ERROR: Invalid session key ({})", OLD_SERVER_HINT),
-        )),
+        "OK\n" | "OK\r\n" => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "server does not support native run-shell replies")),
         _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, reply.trim().to_string())),
     }
 }
@@ -66,6 +58,40 @@ pub(crate) fn read_reply(reader: &mut impl std::io::BufRead) -> std::io::Result<
     Ok(CliReply { code, stdout, stderr })
 }
 
+/// tmux's line for a job that did not succeed (cmd-run-shell.c:276 to :282),
+/// None for exit 0.
+pub(crate) fn failure_text(command: &str, status: &std::process::ExitStatus) -> Option<String> {
+    match status.code() {
+        Some(0) => None,
+        Some(code) => Some(format!("'{}' returned {}", command, code)),
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal().map(|signal| format!("'{}' terminated by signal {}", command, signal))
+            }
+            #[cfg(not(unix))]
+            { None }
+        }
+    }
+}
+
+/// The marker title on the run-shell channel (AppState::run_shell_tx) that
+/// makes the server loop show the text as a status line message, not a popup.
+pub(crate) const STATUS_TITLE: &str = "\u{0001}run-shell-status";
+
+/// Wait for a `-b` job and say what to report: only a failure, as a status
+/// line message. Its output is not read (the caller nulls it, as psmux always
+/// did for `-b`). tmux shows `-b` output in view mode (cmd-run-shell.c:87 to
+/// :103), but here the only place for it is the modal popup, which takes the
+/// client's keys, so every chatty background hook or bind would block typing.
+pub(crate) fn wait_background(child: &mut std::process::Child, command: &str) -> Option<String> {
+    match child.wait() {
+        Ok(status) => failure_text(command, &status),
+        Err(e) => Some(format!("run-shell: {}", e)),
+    }
+}
+
 pub(crate) fn output_text(command: &str, out: &std::process::Output) -> String {
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&out.stderr);
@@ -75,20 +101,7 @@ pub(crate) fn output_text(command: &str, out: &std::process::Output) -> String {
         }
         text.push_str(&stderr_text);
     }
-    let status = match out.status.code() {
-        Some(0) => None,
-        Some(code) => Some(format!("'{}' returned {}", command, code)),
-        None => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                out.status.signal().map(|signal| format!("'{}' terminated by signal {}", command, signal))
-            }
-            #[cfg(not(unix))]
-            { None }
-        }
-    };
-    if let Some(status) = status {
+    if let Some(status) = failure_text(command, &out.status) {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }

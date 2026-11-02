@@ -63,6 +63,14 @@ function Server-State {
     } finally { $c.Tcp.Dispose() }
 }
 function Popup-Text { return ((Server-State).popup_lines -join "`n") }
+# A -b job (owner decision on #966): only a failure, on the status line, and
+# never the modal popup, whose output would take the client's keys.
+function Bg-Failure-Shown([string]$token, [string]$output) {
+    $st = Server-State
+    $status = "$($st.status_message)"
+    $popup = ($st.popup_lines -join "`n")
+    return ($status.Contains($token) -and $status.Contains('returned 7') -and -not $popup.Contains($output))
+}
 function Run-Bytes([string]$command, [string[]]$flags = @()) {
     $info = [Diagnostics.ProcessStartInfo]::new($Binary)
     $info.WorkingDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
@@ -143,16 +151,23 @@ exit 7
         $report = Join-Path $root "missing-server-$background.txt"
         Assert (-not (Test-Path $portFile) -and -not (Test-Path $report)) 'missing-server port and report start absent'
         $result = Run-Bytes "pwsh -NoProfile -File '$marker' '$report'" $flags
-        Assert (-not (Test-Path $portFile) -and -not (Test-Path $report)) 'missing server does not launch the marker or create an endpoint'
-        Assert ($result.Code -ne 0) "missing-server run-shell fails (background=$background)"
+        # No server: the CLI runs the command itself, as psmux did before the
+        # native reply (owner decision on #966).
+        Assert (-not (Test-Path $portFile)) 'missing server creates no endpoint'
+        Assert (Wait-Until { Test-Path $report }) "missing server runs the command in the CLI (background=$background)"
+        $expected = if ($background) { 0 } else { 7 }
+        Assert ($result.Code -eq $expected) "missing-server run-shell keeps the pre-native exit code $expected (background=$background, got $($result.Code))"
+        Remove-Item $report
     }
     $nativeAck = "$([char]1)PSMUX_RUN_SHELL_NATIVE_V1$([char]1)`n"
     foreach ($case in @(
-        @{ Name = 'ordinary-ack'; Ack = "OK`n"; Reply = ''; Submitted = $false },
-        @{ Name = 'auth-refusal'; Ack = "ERROR: Invalid session key`n"; Reply = ''; Submitted = $false },
-        @{ Name = 'invalid-ack'; Ack = "unexpected reply`n"; Reply = ''; Submitted = $false },
-        @{ Name = 'invalid-frame'; Ack = $nativeAck; Reply = "RS1 bad 0 0`n"; Submitted = $true },
-        @{ Name = 'truncated-frame'; Ack = $nativeAck; Reply = "RS1 7 5 0`nhi"; Submitted = $true }
+        # Legacy: the peer acts as a server from an older psmux (it takes a plain
+        # AUTH), so the CLI falls back to the pre-native run-shell.
+        @{ Name = 'ordinary-ack'; Ack = "OK`n"; Reply = ''; Submitted = $false; Legacy = $true },
+        @{ Name = 'auth-refusal'; Ack = "ERROR: Invalid session key`n"; Reply = ''; Submitted = $false; Legacy = $true },
+        @{ Name = 'invalid-ack'; Ack = "unexpected reply`n"; Reply = ''; Submitted = $false; Legacy = $false },
+        @{ Name = 'invalid-frame'; Ack = $nativeAck; Reply = "RS1 bad 0 0`n"; Submitted = $true; Legacy = $false },
+        @{ Name = 'truncated-frame'; Ack = $nativeAck; Reply = "RS1 7 5 0`nhi"; Submitted = $true; Legacy = $false }
     )) {
         foreach ($background in $false,$true) {
             $flags = @(); if ($background) { $flags = @('-b') }
@@ -205,9 +220,27 @@ exit 7
                 $trace = ConvertTo-Json -Compress -Depth 4 -InputObject @{ Connections = $observed; Code = $result.Code; ReportExists = (Test-Path $report); Err = [Text.Encoding]::UTF8.GetString([byte[]]$result.Err) }
                 Set-Content (Join-Path $root "$($case.Name)-$background-peer.json") $trace
                 Assert ($worker.Streams.Error.Count -eq 0) "controlled peer completes without errors: $($worker.Streams.Error)"
+                Assert ($observed[0].Auth -ceq "AUTH $key PSMUX_RUN_SHELL_NATIVE_V1") 'run-shell requires native AUTH acknowledgement'
+                if ($case.Legacy) {
+                    # Nothing went over the native connection, and no later one
+                    # asks for the native reply again: the command runs once.
+                    Assert ($observed[0].Body -ceq '') "older server: nothing submitted on the native connection ($trace)"
+                    Assert (@($observed | Select-Object -Skip 1 | Where-Object { $_.Auth -cne "AUTH $key" }).Count -eq 0) "older server: later connections are plain AUTH only ($trace)"
+                    if ($background) {
+                        # Pre-native -b goes to the server as the legacy line.
+                        $legacy = @($observed | Where-Object { $_.Body -and $_.Body.Contains('run-shell -b ') })
+                        Assert ($legacy.Count -eq 1 -and -not $legacy[0].Body.Contains(' -- ')) "older server: -b goes over once as the legacy line ($trace)"
+                        Assert (-not (Test-Path $report) -and $result.Code -eq 0) "older server: -b is the server's, not run in the CLI ($trace)"
+                    } else {
+                        # Pre-native plain foreground runs in the CLI.
+                        Assert ((Test-Path $report) -and $result.Code -eq 7) "older server: plain command runs in the CLI with its exit code ($trace)"
+                        Assert (@($observed | Where-Object { $_.Body -and $_.Body.Contains('reject-marker') }).Count -eq 0) "older server: plain command never sent to the server ($trace)"
+                        Remove-Item $report
+                    }
+                    continue
+                }
                 Assert (-not (Test-Path $report)) 'peer rejection or bad reply never causes local marker execution'
                 Assert ($observed.Count -eq 1) "run-shell uses one connection without reconnect ($trace)"
-                Assert ($observed[0].Auth -ceq "AUTH $key PSMUX_RUN_SHELL_NATIVE_V1") 'run-shell requires native AUTH acknowledgement'
                 if ($case.Submitted) {
                     $prefix = 'run-shell'; if ($background) { $prefix += ' -b' }; $prefix += ' -- '
                     Assert ($observed[0].Body.StartsWith('CLIENT_CWD ') -and $observed[0].Body.Contains("`n$prefix") -and $observed[0].Body.Contains('reject-marker.ps1')) 'bad final frame follows actual command submission to the nonexecuting peer'
@@ -227,6 +260,8 @@ exit 7
     Remove-Item Env:PSMUX_TARGET_SESSION
     & $Binary -L $ns -f $conf new-session -d -s $session -c $serverCwd.FullName | Out-Null
     Assert ($LASTEXITCODE -eq 0) 'isolated session created'
+    # Keep status line messages up long enough for dump-state polling.
+    P set -g display-time 60000 | Out-Null
     $serverPid = [int]((P display-message -p '#{pid}') -join '').Trim()
     Assert ($serverPid -gt 0) 'server PID known before ownership check'
     $result = Run-Bytes "Start-Sleep -Seconds 4; [Console]::Out.Write('LATE_OUT'); [Console]::Error.Write('LATE_ERR'); exit 7"
@@ -332,7 +367,7 @@ exit 7
             if ($background) {
                 $flags = @('-b') + $flags
                 Launch "cwdprobe.ps1 '$report' '$gate' '$tag'" $flags
-                Assert (Wait-Until { (Popup-Text).Contains("STDERR_$tag") -and (Popup-Text).Contains('returned 7') }) 'start-directory background output and exit status reach server display'
+                Assert (Wait-Until { Bg-Failure-Shown $tag "STDERR_$tag" }) 'start-directory background failure on the status line, output not shown'
             } else {
                 $result = Run-Bytes "cwdprobe.ps1 '$report' '-' '$tag'" $flags
                 Assert ($result.Code -eq 7 -and [Text.Encoding]::UTF8.GetString($result.Out) -ceq $tag -and [Text.Encoding]::UTF8.GetString($result.Err) -ceq "STDERR_$tag") 'start-directory foreground reply retains separate output and actual status'
@@ -379,7 +414,7 @@ exit 7
         $cmd = Probe-Command $report $gate "BG_$tag"
         Launch $cmd $flags
         Assert (Wait-Until { Test-Path $report }) 'background probe starts'
-        Assert (Wait-Until { (Popup-Text).Contains("BG_$tag") -and (Popup-Text).Contains('returned 7') }) 'background output and status reach server display'
+        Assert (Wait-Until { Bg-Failure-Shown "BG_$tag" "STDERR_BG_$tag" }) 'background failure on the status line, output not shown'
         $r = Get-Content $report -Raw | ConvertFrom-Json
         Assert ($r.Parent -eq $serverPid -and $r.Env -eq 'server') 'background server ownership and env'
         Assert ($r.Cwd -eq $callerCwd.FullName) 'background caller cwd survives client exit'
@@ -425,8 +460,9 @@ exit 7
         Assert (Wait-Until {
             $lastControlState.Value = Server-State
             $text = $lastControlState.Value.popup_lines -join "`n"
-            $text.Contains('CONTROL_OUTPUT') -and $text.Contains('returned 7')
-        }) 'control background output/status displayed'
+            $status = "$($lastControlState.Value.status_message)"
+            $status.Contains('CONTROL_OUTPUT') -and $status.Contains('returned 7') -and -not $text.Contains('STDERR_CONTROL_OUTPUT')
+        }) 'control background failure on the status line, output not shown'
         $r = Get-Content $report -Raw | ConvertFrom-Json
         Assert ($r.Cwd -eq $serverCwd.FullName -and $r.Parent -eq $serverPid) 'attached control uses session cwd and server ownership'
     } catch {
@@ -449,10 +485,11 @@ exit 7
     Assert ($LASTEXITCODE -eq 0 -and -not (Test-Path $report)) 'hook configured without executing probe'
     P new-window -d | Out-Null
     Assert ($LASTEXITCODE -eq 0) 'hook event succeeds'
-    Assert (Wait-Until { (Popup-Text).Contains('HOOK_OUTPUT') -and (Popup-Text).Contains('returned 7') }) 'hook background output/status displayed'
+    Assert (Wait-Until { Bg-Failure-Shown 'HOOK_OUTPUT' 'STDERR_HOOK_OUTPUT' }) 'hook background failure on the status line, output not shown'
     P run-shell -b 'cmd /c exit 9' | Out-Null
     Assert ($LASTEXITCODE -eq 0) 'silent failing background job returns launch success'
-    Assert (Wait-Until { (Popup-Text).Contains("'cmd /c exit 9' returned 9") }) 'silent background failure is displayed'
+    Assert (Wait-Until { "$((Server-State).status_message)".Contains("'cmd /c exit 9' returned 9") }) 'silent background failure is on the status line'
+    Assert (-not (Server-State).popup_active) 'no -b job opened a popup'
     # Delayed commandless jobs still wait, and invalid delay remains an error.
     $timer = [Diagnostics.Stopwatch]::StartNew()
     P run-shell -d 0.2 | Out-Null

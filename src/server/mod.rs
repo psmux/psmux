@@ -8969,7 +8969,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // Drain async run-shell results (non-blocking).
         if let Some(rx) = app.run_shell_rx.as_ref() {
             while let Ok((title, text)) = rx.try_recv() {
-                if !text.is_empty() {
+                if title == crate::run_shell::STATUS_TITLE {
+                    // A `-b` job's failure: a status line message, never the
+                    // modal popup (run_shell::wait_background).
+                    app.status_message = Some((text, std::time::Instant::now(), None));
+                    state_dirty = true;
+                } else if !text.is_empty() {
                     let lines: Vec<&str> = text.lines().collect();
                     let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
                     let height = (lines.len() as u16 + 2).max(5);

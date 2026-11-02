@@ -3073,17 +3073,70 @@ fn send_control_with_response_bounded(line: String, read_timeout: Option<Duratio
     exchange_on_port(port, &key, target.as_deref(), &line, read_timeout)
 }
 
-/// Require native AUTH acknowledgement before submitting the shell command.
-/// Every transport or framing failure is an error, never a retry.
-pub(crate) fn send_run_shell_with_response(line: &str, cwd: &std::path::Path) -> io::Result<crate::run_shell::CliReply> {
-    use base64::Engine;
-    let (port, key, target) = control_endpoint(line)?;
+/// How the CLI's run-shell went: the server ran it and replied natively, or
+/// nothing was sent and the CLI does what psmux did before the native reply.
+pub(crate) enum RunShellRoute {
+    Native(crate::run_shell::CliReply),
+    /// No server is reachable, or it is from an older psmux. Nothing has been
+    /// submitted, so running the legacy way cannot run the command twice.
+    Legacy,
+}
+
+/// Whether the server takes a plain AUTH with this key: AUTH only, no
+/// command, then the connection closes. A server that refused the native
+/// AUTH but takes this one is from a psmux older than the native reply.
+fn plain_auth_accepted(port: u16, key: &str) -> bool {
+    use std::io::BufRead;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else { return false };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    if writeln!(stream, "AUTH {}", key).and_then(|_| stream.flush()).is_err() {
+        return false;
+    }
+    let Ok(clone) = stream.try_clone() else { return false };
+    let mut reply = String::new();
+    let ok = std::io::BufReader::new(clone).read_line(&mut reply).is_ok() && reply.trim_end() == "OK";
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    ok
+}
+
+/// Require native AUTH acknowledgement before submitting the shell command.
+/// Every failure after the command is submitted is an error, never a retry.
+/// Before that, no server or a server from an older psmux is
+/// [`RunShellRoute::Legacy`], so an upgrade does not break run-shell until the
+/// server restarts.
+pub(crate) fn send_run_shell_with_response(line: &str, cwd: &std::path::Path) -> io::Result<RunShellRoute> {
+    use base64::Engine;
+    // No port file: no server. Before the native reply psmux ran the command
+    // in the CLI then, and still does.
+    let Ok((port, key, target)) = control_endpoint(line) else { return Ok(RunShellRoute::Legacy) };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    // A stale port file: nothing listens, nothing was sent.
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
+        return Ok(RunShellRoute::Legacy);
+    };
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     let mut reader = std::io::BufReader::new(stream.try_clone()?);
-    crate::run_shell::negotiate(&mut reader, &mut stream, &key)?;
+    if let Err(e) = crate::run_shell::negotiate(&mut reader, &mut stream, &key) {
+        // Close the refused connection before any probe or legacy request.
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        drop(reader);
+        drop(stream);
+        match e.kind() {
+            // Took the key, ignored the capability: an older server.
+            io::ErrorKind::Unsupported => return Ok(RunShellRoute::Legacy),
+            // An older server reads the capability as part of the key and
+            // refuses it with exactly this. Tell that from a wrong key with an
+            // AUTH only probe. Any other reply is an error, not a fallback.
+            io::ErrorKind::PermissionDenied
+                if e.to_string() == "ERROR: Invalid session key" && plain_auth_accepted(port, &key) =>
+            {
+                return Ok(RunShellRoute::Legacy)
+            }
+            _ => return Err(e),
+        }
+    }
     reader.get_ref().set_read_timeout(None)?;
     if let Some(target) = target { writeln!(stream, "TARGET {}", target)?; }
     let cwd = base64::engine::general_purpose::STANDARD.encode(cwd.to_string_lossy().as_bytes());
@@ -3092,7 +3145,7 @@ pub(crate) fn send_run_shell_with_response(line: &str, cwd: &std::path::Path) ->
     stream.write_all(line.as_bytes())?;
     stream.flush()?;
     stream.shutdown(std::net::Shutdown::Write)?;
-    crate::run_shell::read_reply(&mut reader)
+    crate::run_shell::read_reply(&mut reader).map(RunShellRoute::Native)
 }
 
 /// One request to the server on `port` and its whole reply: AUTH, an optional

@@ -1242,6 +1242,67 @@ fn std_handle_is_console(id: i32) -> bool {
     unsafe { GetConsoleMode(GetStdHandle(id as u32), &mut mode) != 0 }
 }
 
+/// The CLI's run-shell as psmux ran it before the native reply, for when no
+/// server is reachable or it is from an older psmux (nothing has been sent to
+/// it). A plain foreground command runs here and takes its exit code; a
+/// command with a format, or any `-b`, goes to the server as the legacy line;
+/// with no server those run here too, the format text unexpanded.
+fn run_shell_legacy_cli(parsed: &crate::commands::RunShellArgs, shell_cmd_str: &str) -> io::Result<()> {
+    let background = parsed.background;
+    let delay = parsed.delay;
+    if shell_cmd_str.trim().is_empty() {
+        // `-d` with no command only waits (cmd-run-shell.c:125).
+        if let Some(delay) = delay {
+            if !background {
+                std::thread::sleep(delay);
+            }
+        }
+        return Ok(());
+    }
+    if crate::commands::cli_run_shell_goes_to_server(shell_cmd_str, background) {
+        let line = crate::commands::cli_run_shell_legacy_line(
+            background, delay, parsed.cwd.as_deref(), shell_cmd_str);
+        match crate::session::send_control_with_response_wait(line) {
+            Ok(resp) => {
+                if !resp.is_empty() {
+                    io::stdout().write_all(resp.as_bytes())?;
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("run-shell: {} (running without format expansion)", e);
+            }
+        }
+    }
+    let shell_cmd = crate::util::expand_run_shell_path(shell_cmd_str);
+    let job_env = crate::commands::fetch_server_job_environment();
+    let cwd = crate::commands::resolve_run_shell_cwd(parsed.cwd.as_deref());
+    let build = |cmd: &str| {
+        let mut c = crate::commands::build_run_shell_command(cmd, cwd.as_deref());
+        if let Some(env) = &job_env {
+            crate::commands::apply_server_job_environment(&mut c, env);
+        }
+        c
+    };
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
+    }
+    if background {
+        let mut c = build(&shell_cmd);
+        crate::commands::null_job_output(&mut c);
+        if let Err(e) = c.spawn() {
+            eprintln!("run-shell: {}: {}", shell_cmd, e);
+            std::process::exit(1);
+        }
+        Ok(())
+    } else {
+        let output = build(&shell_cmd).output()?;
+        write_shell_output(io::stdout(), -11, &output.stdout)?;
+        write_shell_output(io::stderr(), -12, &output.stderr)?;
+        std::process::exit(output.status.code().unwrap_or(0));
+    }
+}
+
 fn write_shell_output(mut stream: impl Write, _std_handle: i32, bytes: &[u8]) -> io::Result<()> {
     // Windows console stdio requires UTF-8. Redirected output, an MSYS2 pty
     // pipe included, retains the child's bytes.
@@ -4465,10 +4526,18 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 let line = crate::commands::cli_run_shell_server_line(
                     parsed.background, parsed.delay, parsed.cwd.as_deref(), &shell_cmd);
                 let cwd = env::current_dir()?;
-                let reply = crate::session::send_run_shell_with_response(&line, &cwd)?;
-                write_shell_output(io::stdout(), -11, &reply.stdout)?;
-                write_shell_output(io::stderr(), -12, &reply.stderr)?;
-                std::process::exit(reply.code);
+                match crate::session::send_run_shell_with_response(&line, &cwd)? {
+                    crate::session::RunShellRoute::Native(reply) => {
+                        write_shell_output(io::stdout(), -11, &reply.stdout)?;
+                        write_shell_output(io::stderr(), -12, &reply.stderr)?;
+                        std::process::exit(reply.code);
+                    }
+                    // No server, or one from an older psmux: nothing was sent,
+                    // so do exactly what psmux did before the native reply.
+                    crate::session::RunShellRoute::Legacy => {
+                        return run_shell_legacy_cli(&parsed, &shell_cmd);
+                    }
+                }
             }
             // respawn-pane - Restart the pane's process
             "respawn-pane" | "respawnp" | "resp" => {

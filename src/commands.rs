@@ -402,6 +402,38 @@ pub(crate) fn cli_run_shell_server_line(
     cwd: Option<&str>,
     shell_cmd: &str,
 ) -> String {
+    // `--` keeps a command that starts with `-` from reading as a flag. Only
+    // the native route sends it; the legacy line is the one older servers know.
+    run_shell_line(background, delay, cwd, shell_cmd, true)
+}
+
+/// Whether the legacy CLI hands a run-shell to the server instead of running
+/// it itself: a command with a format in it, which only the server can
+/// expand, and any `-b` (cmd-run-shell.c:187). Used only when the server
+/// predates the native run-shell reply, or none is running.
+pub(crate) fn cli_run_shell_goes_to_server(shell_cmd: &str, background: bool) -> bool {
+    shell_cmd.contains('#') || background
+}
+
+/// The run-shell line exactly as psmux sent it before the native reply, for a
+/// server from an older psmux: the command as ONE quoted argument, `-c` only
+/// when the user gave one.
+pub(crate) fn cli_run_shell_legacy_line(
+    background: bool,
+    delay: Option<std::time::Duration>,
+    cwd: Option<&str>,
+    shell_cmd: &str,
+) -> String {
+    run_shell_line(background, delay, cwd, shell_cmd, false)
+}
+
+fn run_shell_line(
+    background: bool,
+    delay: Option<std::time::Duration>,
+    cwd: Option<&str>,
+    shell_cmd: &str,
+    end_of_flags: bool,
+) -> String {
     let mut line = String::from("run-shell");
     if background {
         line.push_str(" -b");
@@ -413,7 +445,7 @@ pub(crate) fn cli_run_shell_server_line(
         line.push_str(" -c ");
         line.push_str(&crate::util::quote_arg(cwd));
     }
-    line.push_str(" -- ");
+    line.push_str(if end_of_flags { " -- " } else { " " });
     line.push_str(&crate::util::quote_arg(shell_cmd));
     line.push('\n');
     line
@@ -4774,22 +4806,41 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 if !target_session.is_empty() {
                     c.env("PSMUX_TARGET_SESSION", &target_session);
                 }
-                std::thread::spawn(move || {
-                    if let Some(delay) = delay {
-                        std::thread::sleep(delay);
-                    }
-                    match c.output() {
-                        Ok(output) => {
-                            let text = crate::run_shell::output_text(&shell_cmd, &output);
-                            // Send result back; empty output is also sent so
-                            // the status message "running..." can be cleared.
-                            let _ = tx.send(("run-shell".to_string(), text));
+                if background {
+                    // Output not read, only a failure reported, on the status
+                    // line (run_shell::wait_background).
+                    null_job_output(&mut c);
+                    let status_title = crate::run_shell::STATUS_TITLE.to_string();
+                    std::thread::spawn(move || {
+                        if let Some(delay) = delay {
+                            std::thread::sleep(delay);
                         }
-                        Err(e) => {
-                            let _ = tx.send(("run-shell".to_string(), format!("run-shell: {}", e)));
+                        let message = match c.spawn() {
+                            Ok(mut child) => crate::run_shell::wait_background(&mut child, &shell_cmd),
+                            Err(e) => Some(format!("run-shell: {}: {}", shell_cmd, e)),
+                        };
+                        if let Some(message) = message {
+                            let _ = tx.send((status_title, message));
                         }
-                    }
-                });
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        if let Some(delay) = delay {
+                            std::thread::sleep(delay);
+                        }
+                        match c.output() {
+                            Ok(output) => {
+                                let text = crate::run_shell::output_text(&shell_cmd, &output);
+                                // Send result back; empty output is also sent so
+                                // the status message "running..." can be cleared.
+                                let _ = tx.send(("run-shell".to_string(), text));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(("run-shell".to_string(), format!("run-shell: {}", e)));
+                            }
+                        }
+                    });
+                }
                 if !background {
                     app.status_message = Some((
                         format!("running: {}", shell_cmd_display),
