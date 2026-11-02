@@ -133,9 +133,15 @@ try {
     if ($git -and (git -C $repo rev-parse --verify --quiet "$base^{commit}" 2>$null)) {
         $commits = @(git -C $repo log --format='%H %s' "$base..HEAD" -- src/server/shared |
             Where-Object { $_ -match '^\S+ (shared[:(]|.*#798)' } | ForEach-Object { $_.Split(' ')[0] })
+        # Reviewed exceptions, one file per commit, each inert on the default
+        # path. 780c995a: apply_job_env reads a thread local that only the
+        # shared server sets; a per session server never sets it, so its jobs
+        # take JOB_ENV exactly as before (unit test
+        # without_a_connection_identity_the_job_env_is_unchanged).
+        $allowed = @('780c995a src/commands.rs')
         $outside = @()
         foreach ($c in $commits) {
-            $outside += @(git -C $repo diff-tree --no-commit-id --name-only -r $c -- src ':!src/server/shared' | ForEach-Object { "$($c.Substring(0, 8)) $_" })
+            $outside += @(git -C $repo diff-tree --no-commit-id --name-only -r $c -- src ':!src/server/shared' | ForEach-Object { "$($c.Substring(0, 8)) $_" } | Where-Object { $allowed -notcontains $_ })
         }
         Check ($commits.Count -gt 0) "found the shared server commits since $base ($($commits.Count))"
         Check ($outside.Count -eq 0) "none of them changes a file under src/ outside src/server/shared" ($outside -join ', ')
