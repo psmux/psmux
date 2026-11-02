@@ -1122,7 +1122,7 @@ fn set_up_session(
     crate::config::populate_default_bindings(app);
     load_config(app);
     {
-        let patterns = app.update_environment.clone();
+        let patterns = app.update_environment.values();
         crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
     }
     // The server wide writes made so far (set -g, setenv -g, set-hook -g,

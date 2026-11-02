@@ -372,9 +372,9 @@ fn test_appstate_defaults_monitor_silence() {
 #[test]
 fn test_appstate_defaults_update_environment() {
     let app = mock_app();
-    assert!(app.update_environment.contains(&"DISPLAY".to_string()));
-    assert!(app.update_environment.contains(&"SSH_AUTH_SOCK".to_string()));
-    assert!(app.update_environment.contains(&"SSH_AGENT_PID".to_string()));
+    assert!(app.update_environment.values().contains(&"DISPLAY".to_string()));
+    assert!(app.update_environment.values().contains(&"SSH_AUTH_SOCK".to_string()));
+    assert!(app.update_environment.values().contains(&"SSH_AGENT_PID".to_string()));
 }
 
 // ── Session group format variable tests ─────────────────────────

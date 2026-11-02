@@ -2097,8 +2097,11 @@ pub struct AppState {
     pub set_titles: bool,
     /// set-titles-string: format for terminal title
     pub set_titles_string: String,
-    /// update-environment: list of env var names to update from client on attach
-    pub update_environment: Vec<String>,
+    /// update-environment: an ARRAY option (crate::option_array), the fnmatch
+    /// patterns of the client variables copied into the session environment
+    /// on attach and at new-session (environ.c:186, environ_update), used in
+    /// key order.
+    pub update_environment: crate::option_array::OptionArray,
     /// Environment variables set via set-environment
     pub environment: std::collections::HashMap<String, String>,
     /// Removal markers, hidden entries and shadowed global values that
@@ -2126,6 +2129,11 @@ pub struct AppState {
     /// `Some(value)` for a global somebody set, `None` for the built in
     /// default. See options::apply_set_session_option.
     pub session_option_globals: std::collections::HashMap<String, Option<String>>,
+    /// The global ARRAY a session array option shadows, kept whole so its keys
+    /// survive (#803 for an array, update-environment). The typed array holds
+    /// the session's own elements, which start empty as tmux's session table
+    /// does; `session_option_globals` still marks the override.
+    pub session_array_globals: std::collections::HashMap<String, crate::option_array::OptionArray>,
     /// pane-border-style: style for inactive pane borders
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
@@ -3528,22 +3536,16 @@ impl AppState {
             aggressive_resize: false,
             set_titles: false,
             set_titles_string: String::new(),
-            update_environment: vec![
-                "DISPLAY".to_string(),
-                "KRB5CCNAME".to_string(),
-                "SSH_ASKPASS".to_string(),
-                "SSH_AUTH_SOCK".to_string(),
-                "SSH_AGENT_PID".to_string(),
-                "SSH_CONNECTION".to_string(),
-                "WINDOWID".to_string(),
-                "XAUTHORITY".to_string(),
-            ],
+            update_environment: crate::option_array::OptionArray::with_default(
+                crate::option_array::spec("update-environment").expect("update-environment is in ARRAY_OPTIONS"),
+            ),
             environment: std::collections::HashMap::new(),
             env_scopes: crate::environ::EnvScopes::default(),
             user_options: std::collections::HashMap::new(),
             global_window_user_options: std::collections::HashMap::new(),
             user_set_options: std::collections::HashSet::new(),
             session_option_globals: std::collections::HashMap::new(),
+            session_array_globals: std::collections::HashMap::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
             pane_border_hover_style: "fg=yellow".to_string(),
@@ -4711,8 +4713,10 @@ pub enum CtrlReq {
     /// `show-options` text for an array option the server stores
     /// (terminal-overrides), the bare name or `name[N]`, and whether `-v`
     /// asked for the values alone. The connection thread cannot print it from
-    /// the joined value, which loses each element's index.
-    ShowArrayOption(mpsc::Sender<String>, String, bool),
+    /// the joined value, which loses each element's index. The last two are
+    /// `-g` and `-A` for a session array option (update-environment, #803):
+    /// read the global array, and mark what the session inherits with `*`.
+    ShowArrayOption(mpsc::Sender<String>, String, bool, bool, bool),
     /// Read a window-scoped option value. The third field is the RAW `-t`
     /// target so the server resolves `s:zero`, `s:1`, `@3` and tmux's
     /// symbolic window spellings alike; empty means the active window.

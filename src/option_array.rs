@@ -10,8 +10,8 @@
 //!
 //! [`ARRAY_OPTIONS`] lists the options built on this so far. tmux 3.7c has
 //! more, and they move here one at a time: terminal-features and user-keys
-//! split on `,`; update-environment and pane-colours on space and `,`; every
-//! hook is an array of commands that does not split at all.
+//! split on `,`; pane-colours on space and `,`; every hook is an array of
+//! commands that does not split at all.
 
 use std::collections::BTreeMap;
 
@@ -72,6 +72,17 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
         name: "terminal-overrides",
         separator: ",",
         default: "linux*:AX@",
+        trim: false,
+    },
+    // options-table.c:1210-1220 at tag 3.8, a session option. It names no
+    // separator, so a value without an index is split on space and `,`.
+    ArraySpec {
+        name: "update-environment",
+        separator: " ,",
+        default: "DISPLAY KRB5CCNAME MSYSTEM SSH_ASKPASS SSH_AUTH_SOCK \
+                  SSH_AGENT_PID SSH_CONNECTION WAYLAND_DISPLAY \
+                  WINDOWID XAUTHORITY XDG_CURRENT_DESKTOP \
+                  XDG_SESSION_DESKTOP XDG_SESSION_TYPE",
         trim: false,
     },
 ];
@@ -183,6 +194,14 @@ impl OptionArray {
     /// Every element in key order: the numbered ones, then the named ones.
     pub fn iter(&self) -> impl Iterator<Item = (&ArrayKey, &str)> {
         self.items.iter().map(|(key, value)| (key, value.as_str()))
+    }
+
+    /// Every element's value in key order, as tmux walks an array with
+    /// options_array_first and options_array_next (environ.c:197-213 at tag
+    /// 3.8 for update-environment). Owned, so a caller can let go of the
+    /// option before it changes what the values are applied to.
+    pub fn values(&self) -> Vec<String> {
+        self.items.values().cloned().collect()
     }
 
     /// The numbered elements alone, in order.

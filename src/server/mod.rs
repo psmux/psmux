@@ -1163,8 +1163,8 @@ fn drain_plugin_req(
             let val = get_option_value(app, &name);
             let _ = resp.send(val);
         }
-        CtrlReq::ShowArrayOption(resp, name, values_only) => {
-            let _ = resp.send(crate::server::options::array_option_show_lines(app, &name, values_only));
+        CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
+            let _ = resp.send(crate::server::options::array_option_show_lines_scoped(app, &name, values_only, global, mark_inherited));
         }
         CtrlReq::ShowWindowOptionValue(resp, name, target) => {
             let val = crate::server::options::window_option_value_for_target(app, &name, &target);
@@ -2737,7 +2737,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // from the creating client, #775): this server's start environment IS that
     // client's. Entries from `-e` and the config keep their values.
     {
-        let patterns = app.update_environment.clone();
+        let patterns = app.update_environment.values();
         crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
     }
     crate::startup_trace::mark("srv.config");
@@ -4141,7 +4141,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // environment, so it never changed anything, and it
                         // dropped a missing name instead of recording -NAME.
                         if let Some(src) = app.env_scopes.pending_client_environ.take() {
-                            let patterns = app.update_environment.clone();
+                            let patterns = app.update_environment.values();
                             crate::environ::update_environment(&mut app.environment, &mut app.env_scopes, &patterns, &src, false);
                         }
                     }
@@ -5845,7 +5845,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Re-seed update-environment from the adopted (claiming
                     // client's) environment, replacing the standby's seed (#775).
                     {
-                        let patterns = app.update_environment.clone();
+                        let patterns = app.update_environment.values();
                         crate::environ::seed_session_from_start_env(&mut app.environment, &mut app.env_scopes, &patterns);
                     }
                     // Surface config warnings to the claiming client (#370 follow-up).
@@ -6769,7 +6769,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("bell-action {}\n", app.bell_action));
                     output.push_str(&format!("activity-action {}\n", app.activity_action));
                     output.push_str(&format!("silence-action {}\n", app.silence_action));
-                    output.push_str(&format!("update-environment \"{}\"\n", app.update_environment.join(" ")));
+                    // One line per element, as tmux lists an array
+                    // (cmd-show-options.c:156-192).
+                    output.push_str(&app.update_environment.show_lines("update-environment", false));
                     if let Some(ref group) = app.session_group {
                         output.push_str(&format!("session-group \"{}\"\n", group));
                     }
@@ -8266,8 +8268,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let val = get_option_value(&app, &name);
                     let _ = resp.send(val);
                 }
-                CtrlReq::ShowArrayOption(resp, name, values_only) => {
-                    let _ = resp.send(crate::server::options::array_option_show_lines(&app, &name, values_only));
+                CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
+                    let _ = resp.send(crate::server::options::array_option_show_lines_scoped(&app, &name, values_only, global, mark_inherited));
                 }
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
                     let val = crate::server::options::window_option_value_for_target(&app, &name, &target);

@@ -61,6 +61,7 @@ fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut Opt
         "codepoint-widths" => Some(&mut app.codepoint_widths),
         "status-format" => Some(&mut app.status_format),
         "terminal-overrides" => Some(&mut app.terminal_overrides),
+        "update-environment" => Some(&mut app.update_environment),
         _ => None,
     }
 }
@@ -70,6 +71,7 @@ fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
         "codepoint-widths" => Some(&app.codepoint_widths),
         "status-format" => Some(&app.status_format),
         "terminal-overrides" => Some(&app.terminal_overrides),
+        "update-environment" => Some(&app.update_environment),
         _ => None,
     }
 }
@@ -129,12 +131,47 @@ pub(crate) fn array_option_value(app: &AppState, name: &str) -> String {
 /// `name[N] value` line per element for the bare name, the one line for
 /// `name[N]`, and only the values with `-v`.
 pub(crate) fn array_option_show_lines(app: &AppState, name: &str, values_only: bool) -> String {
+    array_option_show_lines_scoped(app, name, values_only, false, false)
+}
+
+/// [`array_option_show_lines`] for the table `-g` and `-A` pick. For a
+/// session array option (update-environment) `global` reads the global array
+/// the session may be shadowing, and `mark_inherited` puts tmux's `*` after
+/// the name of each line the session inherits (cmd-show-options.c:197,
+/// measured on tmux 3.8 as `update-environment[0]* DISPLAY`).
+pub(crate) fn array_option_show_lines_scoped(
+    app: &AppState,
+    name: &str,
+    values_only: bool,
+    global: bool,
+    mark_inherited: bool,
+) -> String {
     let Ok((base, key)) = crate::option_array::parse_name(name) else {
         return String::new();
     };
-    let Some(array) = array_option(app, base) else {
+    let session_array = is_session_array_option(base);
+    let shadowed = session_array && global && session_overrides(app, base);
+    let array = if shadowed {
+        app.session_array_globals.get(base)
+    } else {
+        array_option(app, base)
+    };
+    let Some(array) = array else {
         return String::new();
     };
+    let text = array_show_text(array, base, key, values_only);
+    if values_only || !mark_inherited || global || !session_array || session_overrides(app, base) {
+        return text;
+    }
+    text.split_inclusive('\n')
+        .map(|line| match line.find([' ', '\n']) {
+            Some(at) => format!("{}*{}", &line[..at], &line[at..]),
+            None => format!("{}*", line),
+        })
+        .collect()
+}
+
+fn array_show_text(array: &OptionArray, base: &str, key: Option<crate::option_array::ArrayKey>, values_only: bool) -> String {
     match key {
         None => array.show_lines(base, values_only),
         Some(key) => match array.get(&key) {
@@ -576,17 +613,43 @@ pub(crate) fn unset_window_option(app: &mut AppState, window_index: usize, name:
 /// True for an option tmux keeps in the SESSION table, as the catalog marks it.
 /// Only these get a session entry; every other name keeps its single store.
 pub(crate) fn is_session_option(name: &str) -> bool {
-    crate::server::option_catalog::option_definition(name)
+    crate::server::option_catalog::option_definition(option_base(name))
         .is_some_and(|d| d.scope == crate::server::option_catalog::OptionScope::Session)
+}
+
+/// The option a name refers to: an array element (`update-environment[3]`)
+/// belongs to its array, so the session table's entry is the array's.
+fn option_base(name: &str) -> &str {
+    if is_stored_array_option(name) {
+        if let Ok((base, _)) = crate::option_array::parse_name(name) {
+            return base;
+        }
+    }
+    name
+}
+
+/// True for an array option kept in the session table (update-environment),
+/// as the bare name or one element.
+fn is_session_array_option(name: &str) -> bool {
+    is_stored_array_option(name) && is_session_option(name)
 }
 
 /// Does the session hold its own value for `name`?
 pub(crate) fn session_overrides(app: &AppState, name: &str) -> bool {
-    app.session_option_globals.contains_key(name)
+    app.session_option_globals.contains_key(option_base(name))
 }
 
 /// What the GLOBAL session table holds for `name` (`show -g`).
 pub(crate) fn global_session_option_value(app: &AppState, name: &str) -> String {
+    if is_session_array_option(name) {
+        let Some(global) = app.session_array_globals.get(option_base(name)) else {
+            return get_option_value(app, name);
+        };
+        return match crate::option_array::parse_name(name) {
+            Ok((_, Some(key))) => global.get(&key).unwrap_or_default().to_string(),
+            _ => global.joined(),
+        };
+    }
     match app.session_option_globals.get(name) {
         Some(Some(value)) => value.clone(),
         Some(None) => crate::server::option_catalog::default_for(name)
@@ -637,6 +700,9 @@ pub(crate) fn apply_set_session_option(
         unset_session_option(app, option);
         return String::new();
     }
+    if is_session_array_option(option) {
+        return set_session_array(app, option, value, append, only_if_unset, quiet);
+    }
     if only_if_unset && session_overrides(app, option) {
         return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
     }
@@ -675,10 +741,115 @@ pub(crate) fn apply_set_session_option(
     }
 }
 
+/// `set-option [-a|-o] <session array option>[key] value` without `-g`.
+///
+/// tmux's session table starts without the option, and the first write
+/// creates it there empty (cmd-set-option.c:194-225 on the session's
+/// options), so the session's array holds only what was written to it: an
+/// element alone, or `-a` with nothing before it, is the whole session array
+/// and the global one is no longer used. Measured on tmux 3.8: `set
+/// 'update-environment[20]' X` leaves the session with `[20] X` only, and
+/// `set -a update-environment FOO` with `[0] FOO`. The global array moves to
+/// `session_array_globals` whole, keeping its keys, for `show -g`, a `-g`
+/// write and the `-u` that puts it back.
+fn set_session_array(
+    app: &mut AppState,
+    option: &str,
+    value: &str,
+    append: bool,
+    only_if_unset: bool,
+    quiet: bool,
+) -> String {
+    if only_if_unset && session_overrides(app, option) {
+        return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
+    }
+    if let Err(error) = crate::server::option_catalog::validate_option_value(option, value) {
+        return format!("ERROR: {}", error);
+    }
+    let base = option_base(option).to_string();
+    if !session_overrides(app, &base) {
+        let Some(array) = array_option_mut(app, &base) else {
+            return format!("ERROR: invalid option: {}", option);
+        };
+        let global = std::mem::take(array);
+        let text = app.user_set_options.contains(&base).then(|| global.joined());
+        app.session_array_globals.insert(base.clone(), global);
+        app.session_option_globals.insert(base, text);
+    }
+    match set_array_option(app, option, value, append) {
+        Ok(()) => String::new(),
+        Err(error) => format!("ERROR: {}", error),
+    }
+}
+
+/// `set-option -u <session array option>[key]` without `-g`: one element of
+/// the session's own array, or the whole of it, which puts the global array
+/// back. Nothing to do when the session holds none, as tmux removes nothing
+/// from a table that does not have the option.
+fn unset_session_array(app: &mut AppState, option: &str) {
+    let base = option_base(option).to_string();
+    if !session_overrides(app, &base) {
+        return;
+    }
+    match crate::option_array::parse_name(option) {
+        Ok((_, Some(_))) => {
+            let _ = unset_array_option(app, option);
+        }
+        Ok((_, None)) => {
+            app.session_option_globals.remove(&base);
+            let global = app.session_array_globals.remove(&base);
+            let spec = crate::option_array::spec(&base);
+            if let (Some(array), Some(spec)) = (array_option_mut(app, &base), spec) {
+                *array = global.unwrap_or_else(|| OptionArray::with_default(spec));
+            }
+            array_option_changed(app, &base);
+        }
+        Err(_) => {}
+    }
+}
+
+/// A `-g` write to a session array option while the session overrides it:
+/// the change goes to the global array the session shadows, element by
+/// element as on the global table itself.
+fn write_shadowed_global_array(app: &mut AppState, option: &str, op: GlobalWrite) -> Result<(), String> {
+    let (base, key) = crate::option_array::parse_name(option)?;
+    let base = base.to_string();
+    let spec = crate::option_array::spec(&base).ok_or_else(|| format!("invalid option: {}", option))?;
+    if let GlobalWrite::OnlyIfUnset(_) = op {
+        if app.user_set_options.contains(&base) {
+            return Err(format!("already set: {}", option));
+        }
+    }
+    let unset_whole = matches!(op, GlobalWrite::Unset) && key.is_none();
+    let global = app
+        .session_array_globals
+        .entry(base.clone())
+        .or_insert_with(|| OptionArray::with_default(spec));
+    match op {
+        GlobalWrite::Set(value) | GlobalWrite::OnlyIfUnset(value) => global.apply_set(key, value, false, spec),
+        GlobalWrite::Append(value) => global.apply_set(key, value, true, spec),
+        GlobalWrite::Unset => global.apply_unset(key, spec),
+        GlobalWrite::Toggle => return Err(format!("empty value for '{}'", option)),
+    }
+    let text = global.joined();
+    if unset_whole {
+        app.user_set_options.remove(&base);
+        app.session_option_globals.insert(base, None);
+    } else {
+        app.user_set_options.insert(base.clone());
+        app.session_option_globals.insert(base, Some(text));
+    }
+    Ok(())
+}
+
 /// `set-option -u <session option>` without `-g`: drop the session's entry and
 /// put the global it shadowed back. Nothing to do when the session has none,
 /// exactly like tmux removing an entry its table does not hold.
 pub(crate) fn unset_session_option(app: &mut AppState, option: &str) {
+    if is_session_array_option(option) {
+        unset_session_array(app, option);
+        return;
+    }
     let Some(global) = app.session_option_globals.remove(option) else { return };
     match global {
         Some(value) => {
@@ -711,6 +882,9 @@ pub(crate) enum GlobalWrite<'a> {
 /// session is using. Callers check [`session_overrides`] first; with no
 /// session entry the ordinary global path runs unchanged.
 pub(crate) fn write_shadowed_global(app: &mut AppState, option: &str, op: GlobalWrite) -> Result<(), String> {
+    if is_session_array_option(option) {
+        return write_shadowed_global_array(app, option, op);
+    }
     let current = global_session_option_value(app, option);
     let new_value = match op {
         GlobalWrite::Unset => {
@@ -803,6 +977,9 @@ pub(crate) fn session_option_query(app: &AppState, name: &str, global: bool) -> 
 /// other options pass through untouched.
 pub(crate) fn scope_session_listing(app: &AppState, text: &str, global: bool, mark_inherited: bool) -> String {
     let mut out = String::with_capacity(text.len());
+    // A session array the session overrides prints the global array's lines
+    // once, in place of the session's own element lines.
+    let mut arrays_done: Vec<&str> = Vec::new();
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\r', '\n']);
         let ending = &line[body.len()..];
@@ -812,6 +989,14 @@ pub(crate) fn scope_session_listing(app: &AppState, text: &str, global: bool, ma
         };
         if !is_session_option(name) {
             out.push_str(line);
+            continue;
+        }
+        if global && is_session_array_option(name) && session_overrides(app, name) {
+            let base = option_base(name);
+            if !arrays_done.contains(&base) {
+                arrays_done.push(base);
+                out.push_str(&array_option_show_lines_scoped(app, base, false, true, false));
+            }
             continue;
         }
         if global && session_overrides(app, name) {
@@ -981,7 +1166,6 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "monitor-silence" => app.monitor_silence.to_string(),
         "activity-action" => app.activity_action.clone(),
         "silence-action" => app.silence_action.clone(),
-        "update-environment" => app.update_environment.join(" "),
         "status-left-length" => app.status_left_length.to_string(),
         "status-right-length" => app.status_right_length.to_string(),
         "window-size" => app.window_size.clone(),
@@ -1423,8 +1607,9 @@ pub(crate) fn apply_set_option(
                 app.pane_base_index = idx;
             }
         }
-        // codepoint-widths, status-format, terminal-overrides and their
-        // elements (`status-format[N]`), as for any array option.
+        // codepoint-widths, status-format, terminal-overrides,
+        // update-environment and their elements (`status-format[N]`), as for
+        // any array option.
         name if is_stored_array_option(name) => {
             set_array_option(app, name, value, false)?;
         }
@@ -1606,9 +1791,6 @@ pub(crate) fn apply_set_option(
         "visual-bell" => { app.visual_bell = matches!(value, "on" | "true" | "1" | "yes"); }
         "monitor-silence" => {
             if let Ok(n) = value.parse::<u64>() { app.monitor_silence = n; }
-        }
-        "update-environment" => {
-            app.update_environment = value.split_whitespace().map(|s| s.to_string()).collect();
         }
         "prediction-dimming" | "dim-predictions" => {
             app.prediction_dimming = !matches!(value, "off" | "false" | "0");
