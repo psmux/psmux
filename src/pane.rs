@@ -89,7 +89,9 @@ impl PaneInputSink for QueuedPaneWriter {
         }
         let len = bytes.len();
         if len == 0 { return Ok(()); }
-        if self.pipe_bytes.try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+        // fetch_update, not try_update: same semantics, and try_update is a
+        // recent stabilization that older toolchains building psmux lack.
+        if self.pipe_bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             (len <= PIPE_INPUT_BUDGET.saturating_sub(used)).then_some(used + len)
         }).is_err() {
             return Err(Full(bytes));
