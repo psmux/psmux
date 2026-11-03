@@ -2297,3 +2297,7 @@ mod tests_issue948_status_line_options;
 #[cfg(test)]
 #[path = "../../tests-rs/test_update_environment_array.rs"]
 mod tests_update_environment_array;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_terminal_features_array.rs"]
+mod tests_terminal_features_array;
