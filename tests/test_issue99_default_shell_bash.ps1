@@ -29,6 +29,19 @@ function Write-Fail { param($msg) Write-Host "[FAIL] $msg" -ForegroundColor Red;
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Write-Test { param($msg) Write-Host "[TEST] $msg" -ForegroundColor White }
 
+# Git bash needs 7 to 12 s to its first prompt on a machine where each MSYS
+# fork costs about 150 ms (measured outside psmux as well), so the fixed 1 s
+# waits after send-keys failed the sweep. Poll the pane for the expected line.
+function Wait-PaneOutput {
+    param([string]$Target, [string]$Pattern, [int]$TimeoutMs = 25000)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Start-Sleep -Milliseconds 500
+        $out = (& $PSMUX capture-pane -t $Target -p 2>&1) | Out-String
+    } while ($out -notmatch $Pattern -and $sw.ElapsedMilliseconds -lt $TimeoutMs)
+    return $out
+}
+
 $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\debug\psmux.exe" -ErrorAction SilentlyContinue).Path }
 if (-not $PSMUX) { Write-Error "psmux binary not found. Build first: cargo build --release"; exit 1 }
@@ -97,8 +110,7 @@ if ($cmd -match "bash") {
 
 # Send a command and verify it works
 & $PSMUX send-keys -t $session 'echo ISSUE99_WORKS' Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 1
-$output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+$output = Wait-PaneOutput $session '(?m)^ISSUE99_WORKS'
 if ($output -match "ISSUE99_WORKS") {
     Write-Pass "Bash pane executes commands correctly"
 } else {
@@ -283,8 +295,7 @@ Start-Sleep -Seconds 3
 
 # Check PSMUX_SESSION is set
 & $PSMUX send-keys -t $session 'echo "PSMUX=$PSMUX_SESSION"' Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 1
-$output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+$output = Wait-PaneOutput $session '(?m)^PSMUX=.+'
 if ($output -match "PSMUX=.+") {
     Write-Pass "PSMUX_SESSION is set in bash pane"
 } else {
@@ -294,8 +305,7 @@ if ($output -match "PSMUX=.+") {
 
 # Check TMUX is set
 & $PSMUX send-keys -t $session 'echo "TMUX_VAR=$TMUX"' Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 1
-$output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+$output = Wait-PaneOutput $session '(?m)^TMUX_VAR=.+'
 if ($output -match "TMUX_VAR=.+") {
     Write-Pass "TMUX env var is set in bash pane"
 } else {

@@ -332,8 +332,14 @@ if ($bashPath) {
 
             # Now send a command to that pane using session:window.pane format
             & $PSMUX send-keys -t "${SESSION}:0.1" "echo TEAMMATE_SPAWN_OK" Enter
-            Start-Sleep -Seconds 2
-            $cap = & $PSMUX capture-pane -t "${SESSION}:0.1" -p 2>&1 | Out-String
+            # Git bash needs 7 to 12 s to its first prompt on a machine where
+            # each MSYS fork costs about 150 ms (measured outside psmux too), so
+            # a fixed 2 s wait failed the sweep. Poll for the echo instead.
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                Start-Sleep -Milliseconds 500
+                $cap = & $PSMUX capture-pane -t "${SESSION}:0.1" -p 2>&1 | Out-String
+            } while ($cap -notmatch "(?m)^TEAMMATE_SPAWN_OK" -and $sw.ElapsedMilliseconds -lt 25000)
             if ($cap -match "TEAMMATE_SPAWN_OK") {
                 Pass "3.3b: send-keys to teammate pane works correctly"
             } else {
