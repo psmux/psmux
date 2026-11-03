@@ -116,11 +116,21 @@ pub(crate) fn palette_of(array: &OptionArray) -> Option<vt100::ColourPalette> {
 
 /// What a pane last had installed, so [`reconcile`] does nothing for a pane
 /// whose window, parser and option tables have not moved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The parser is held weakly: while this lives its allocation cannot be
+/// handed to a new parser, so a parser that replaced it (respawn, a dead
+/// pane's restart) never compares equal by address.
+#[derive(Debug)]
 struct Applied {
     window: usize,
-    parser: usize,
+    parser: std::sync::Weak<std::sync::Mutex<vt100::Parser>>,
     generation: u64,
+}
+
+impl Applied {
+    fn is(&self, window: usize, parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, generation: u64) -> bool {
+        self.window == window && self.generation == generation && std::ptr::eq(self.parser.as_ptr(), std::sync::Arc::as_ptr(parser))
+    }
 }
 
 /// The window and pane tables, and what has been pushed into the panes.
@@ -400,14 +410,11 @@ pub(crate) fn reconcile(app: &mut AppState) -> bool {
     for window in &app.windows {
         window_panes(window, |pane| {
             seen += 1;
-            let now = Applied {
-                window: window.id,
-                parser: std::sync::Arc::as_ptr(pane.live_parser()) as usize,
-                generation,
-            };
-            if tables.applied.get(&pane.id) == Some(&now) {
+            let live = pane.live_parser();
+            if tables.applied.get(&pane.id).is_some_and(|a| a.is(window.id, live, generation)) {
                 return;
             }
+            let now = Applied { window: window.id, parser: std::sync::Arc::downgrade(live), generation };
             let palette = palette_of(effective(tables, window.id, pane.id).0);
             for term in pane.each_term() {
                 if let Ok(mut parser) = term.lock() {

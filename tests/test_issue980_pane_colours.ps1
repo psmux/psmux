@@ -45,6 +45,8 @@ New-Item -ItemType Directory -Force $env:PSMUX_DATA_DIR | Out-Null
 $TESTS = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OUT = "$env:TEMP\psmux_980_out_$PID"
 New-Item -ItemType Directory -Force $OUT | Out-Null
+# A log left by an earlier run would be read as this run's reply.
+Get-ChildItem $OUT -Filter "*.log" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $emit = "$OUT\seq_emit980.exe"
@@ -256,6 +258,17 @@ P break-pane -d -s $pid4 | Out-Null
 $r4 = Replies (Wait-Log $log4 30)
 if ($r4.Count -eq 1 -and $r4[0] -eq "rgb:0000/ffff/0000") { Write-Pass "break-pane hands the pane the global table" }
 else { Write-Fail "after break-pane the query gave '$($r4 -join ',')'" }
+
+# respawn-pane puts a new parser behind the same pane; the pane's own table
+# reaches it.
+$log5 = "$OUT\q5.log"
+$pid5 = Lines (P new-window -d -P -F "#{pane_id}" -t base -n q5)
+P set -p -t $pid5 "pane-colours[1]" "#ff0000" | Out-Null
+Start-Sleep -Milliseconds 500
+P respawn-pane -k -t $pid5 "$emit $log5 \p\e]4\s1\s? 2500 10" | Out-Null
+$r5 = Replies (Wait-Log $log5 30)
+if ($r5.Count -eq 1 -and $r5[0] -eq "rgb:ffff/0000/0000") { Write-Pass "a respawned pane keeps its own table" }
+else { Write-Fail "after respawn-pane the query gave '$($r5 -join ',')'" }
 
 & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null
 foreach ($id in $started) { try { Stop-Process -Id $id -Force -EA Stop } catch {} }
