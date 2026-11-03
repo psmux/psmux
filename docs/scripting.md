@@ -508,8 +508,9 @@ are empty. Incomplete ConEmu hints use that fallback too.
 All other environments retain `256,RGB,hyperlinks,title` as a compatibility assumption, not verified
 capability support. Clients that send no valid report receive the independently owned four-bit server
 fallback. Detection uses the attaching client's environment and passive local console observations at each
-attachment, including reconnection. It does not probe the terminal. `terminal-features` configuration and
-feature-based output gating are not implemented; OSC 8 forwarding is unchanged.
+attachment, including reconnection. It does not probe the terminal. The `terminal-features` option is kept
+as an array, as tmux keeps it, but nothing reads it, and feature-based output gating is not implemented;
+OSC 8 forwarding is unchanged.
 
 The optional attach argument is `features=0x<hex digits>`, an unsigned 64-bit mask. Leading zeroes
 are optional. Bits 0, 1, 2, and 3 represent `256`, `RGB`, `hyperlinks`, and `title`, respectively.

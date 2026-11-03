@@ -60,6 +60,7 @@ fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut Opt
     match base {
         "codepoint-widths" => Some(&mut app.codepoint_widths),
         "status-format" => Some(&mut app.status_format),
+        "terminal-features" => Some(&mut app.terminal_features),
         "terminal-overrides" => Some(&mut app.terminal_overrides),
         "update-environment" => Some(&mut app.update_environment),
         _ => None,
@@ -70,6 +71,7 @@ fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
     match base {
         "codepoint-widths" => Some(&app.codepoint_widths),
         "status-format" => Some(&app.status_format),
+        "terminal-features" => Some(&app.terminal_features),
         "terminal-overrides" => Some(&app.terminal_overrides),
         "update-environment" => Some(&app.update_environment),
         _ => None,

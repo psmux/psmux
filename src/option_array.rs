@@ -9,9 +9,9 @@
 //! they say 3.8.
 //!
 //! [`ARRAY_OPTIONS`] lists the options built on this so far. tmux 3.7c has
-//! more, and they move here one at a time: terminal-features and user-keys
-//! split on `,`; pane-colours on space and `,`; every hook is an array of
-//! commands that does not split at all.
+//! more, and they move here one at a time: user-keys splits on `,`;
+//! pane-colours on space and `,`; every hook is an array of commands that
+//! does not split at all.
 
 use std::collections::BTreeMap;
 
@@ -65,6 +65,17 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
         name: "status-format",
         separator: " ,",
         default: "",
+        trim: false,
+    },
+    // options-table.c:553-563 at tag 3.8, a server option split on `,`.
+    // psmux keeps it as tmux does and reads nothing from it: the client's
+    // features come from the attaching client's own report (#763).
+    ArraySpec {
+        name: "terminal-features",
+        separator: ",",
+        default: "xterm*:clipboard:ccolour:cstyle:focus:title,\
+                  screen*:title,\
+                  rxvt*:ignorefkeys",
         trim: false,
     },
     // options-table.c:518-525

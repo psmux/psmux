@@ -2227,6 +2227,11 @@ pub struct AppState {
     /// back; the parsed lookup table lives in the vt100 crate, which is where
     /// every width decision is made.
     pub codepoint_widths: crate::option_array::OptionArray,
+    /// terminal-features: server-scope ARRAY of `pattern:feature:...`
+    /// entries, starting as tmux 3.8's default (crate::option_array). Kept
+    /// for set, show and `#{}` only; nothing reads it, as the client's
+    /// features come from its own report at attach (#763).
+    pub terminal_features: crate::option_array::OptionArray,
     /// terminal-overrides: server-scope ARRAY of `pattern:cap...` entries by
     /// index, starting as tmux's default `linux*:AX@` (crate::option_array).
     /// The attach client honours smcup/rmcup from it (issue #700, see
@@ -3590,6 +3595,9 @@ impl AppState {
             )),
             codepoint_widths: crate::option_array::OptionArray::with_default(
                 crate::option_array::spec("codepoint-widths").expect("codepoint-widths is in ARRAY_OPTIONS"),
+            ),
+            terminal_features: crate::option_array::OptionArray::with_default(
+                crate::option_array::spec("terminal-features").expect("terminal-features is in ARRAY_OPTIONS"),
             ),
             terminal_overrides: crate::option_array::OptionArray::with_default(
                 crate::option_array::spec("terminal-overrides").expect("terminal-overrides is in ARRAY_OPTIONS"),
