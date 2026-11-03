@@ -193,6 +193,13 @@ pub struct Screen {
     /// (`tmux.h:1379`) and allocates it lazily too (`colour.c:1280`).
     palette: Option<Box<crate::palette::ColourPalette>>,
 
+    /// The pane's default palette from its `pane-colours` option, which the
+    /// OSC 4 `palette` above wins over (tmux `p->default_palette`,
+    /// colour.c:1251-1268 and :1293-1322). Set by the embedder, never by the
+    /// pane's output, so OSC 104 and RIS leave it as it is. `None` when the
+    /// option names no colour.
+    default_palette: Option<Box<crate::palette::DefaultPalette>>,
+
     /// Bumped on every change to `palette`.  The pane reader thread compares
     /// it to the value it last published so it can mirror the low sixteen
     /// entries for the OSC 4 query responder without locking on every batch.
@@ -340,6 +347,7 @@ impl Screen {
             sixel_images: Vec::new(),
             osc_shell_command: None,
             palette: None,
+            default_palette: None,
             palette_generation: 0,
             squelch_cleared: false,
             squelch_clear_pending: false,
@@ -1437,6 +1445,37 @@ impl Screen {
         self.palette.as_deref()
     }
 
+    /// The OSC 4 palette and the `pane-colours` default together, as tmux's
+    /// `colour_palette_get` reads them (colour.c:1251-1268). Serialisers take
+    /// it once per pane per frame; a pane with neither pays two null checks.
+    #[must_use]
+    pub fn palette_view(&self) -> crate::palette::PaletteView<'_> {
+        crate::palette::PaletteView {
+            own: self.palette.as_deref(),
+            defaults: self.default_palette.as_deref(),
+        }
+    }
+
+    /// The default palette, if the embedder set one.
+    #[must_use]
+    pub fn default_palette(&self) -> Option<&crate::palette::DefaultPalette> {
+        self.default_palette.as_deref()
+    }
+
+    /// Set (or, with `None`, drop) the default palette from the pane's
+    /// `pane-colours` option (tmux's `colour_palette_from_option`,
+    /// colour.c:1293-1322). Returns `true` when it changed.
+    pub fn set_default_palette(
+        &mut self,
+        palette: Option<Box<crate::palette::DefaultPalette>>,
+    ) -> bool {
+        if self.default_palette == palette {
+            return false;
+        }
+        self.default_palette = palette;
+        true
+    }
+
     /// The RGB override for one index, if set.  tmux's `colour_palette_get`
     /// (`colour.c:1251`).
     #[must_use]
@@ -1493,10 +1532,7 @@ impl Screen {
     #[inline]
     #[must_use]
     pub fn resolve_colour(&self, c: crate::attrs::Color) -> crate::attrs::Color {
-        match &self.palette {
-            Some(p) => p.resolve(c),
-            None => c,
-        }
+        self.palette_view().resolve(c)
     }
 
     /// Begin an OSC 8 hyperlink: intern `uri` and set it as the current pen's
@@ -2178,7 +2214,11 @@ impl Screen {
         let capture = self.capture_queries;
         let program_status_enabled = self.program_status_enabled;
         let win32_input_requested = self.win32_input_requested;
+        // tmux's RIS clears the OSC 4 palette only (input.c:1408,
+        // colour_palette_clear); the pane-colours default stays.
+        let default_palette = self.default_palette.take();
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+        self.default_palette = default_palette;
         self.program_status = statuses;
         self.pending_queries = queries;
         self.capture_queries = capture;

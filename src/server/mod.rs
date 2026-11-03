@@ -1166,6 +1166,9 @@ fn drain_plugin_req(
         CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
             let _ = resp.send(crate::server::options::array_option_show_lines_scoped(app, &name, values_only, global, mark_inherited));
         }
+        CtrlReq::ShowPaneColours { target, name, values_only, mark_inherited, resp } => {
+            let _ = resp.send(crate::pane_colours::show_request(app, &target, &name, values_only, mark_inherited));
+        }
         CtrlReq::ShowWindowOptionValue(resp, name, target) => {
             let val = crate::server::options::window_option_value_for_target(app, &name, &target);
             let _ = resp.send(val);
@@ -3283,7 +3286,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     for fp in win.floating.iter_mut() {
                         let bits = fp.pane.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
                         if bits != 0 {
-                            let own = crate::types::pane_palette(fp.pane.id);
+                            let own = crate::pane_colours::merged_reply_palette(fp.pane.id, crate::types::pane_palette(fp.pane.id));
                             helpers::answer_color_queries_for_pane(bits, &mut *fp.pane.writer, fp.pane.child_pid, &colors, own);
                         }
                     }
@@ -3291,7 +3294,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
                     let bits = pane.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
                     if bits != 0 {
-                        let own = crate::types::pane_palette(pane.id);
+                        let own = crate::pane_colours::merged_reply_palette(pane.id, crate::types::pane_palette(pane.id));
                         helpers::answer_color_queries_for_pane(bits, &mut *pane.writer, pane.child_pid, &colors, own);
                     }
                 }
@@ -3392,6 +3395,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::commands::fire_hooks(&mut app, event);
             }
         }
+        // pane-colours: a pane created, moved or retargeted since the last
+        // pass gets its default palette, and its OSC 4 replies with it, even
+        // with no client attached to draw a frame. Free until the option is
+        // first written.
+        crate::pane_colours::sync(&mut app);
         if let Some(rx) = app.control_rx.as_ref() {
             if let Ok(req) = rx.recv_timeout(Duration::from_millis(timeout_ms)) {
                 let mut pending = vec![req];
@@ -8270,6 +8278,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
                     let _ = resp.send(crate::server::options::array_option_show_lines_scoped(&app, &name, values_only, global, mark_inherited));
+                }
+                CtrlReq::ShowPaneColours { target, name, values_only, mark_inherited, resp } => {
+                    let _ = resp.send(crate::pane_colours::show_request(&mut app, &target, &name, values_only, mark_inherited));
                 }
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
                     let val = crate::server::options::window_option_value_for_target(&app, &name, &target);

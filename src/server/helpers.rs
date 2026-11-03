@@ -1574,7 +1574,7 @@ pub(crate) fn drain_color_queries(node: &mut crate::types::Node, colors: &crate:
         crate::types::Node::Leaf(p) => {
             let bits = p.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
             if bits != 0 {
-                let own = crate::types::pane_palette(p.id);
+                let own = crate::pane_colours::merged_reply_palette(p.id, crate::types::pane_palette(p.id));
                 answer_color_queries_for_pane(bits, &mut *p.writer, p.child_pid, colors, own);
             }
         }

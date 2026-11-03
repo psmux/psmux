@@ -15,7 +15,7 @@ use crate::tree::get_split_mut;
 /// a parsed cell, in the shape the run JSON carries them (#589).
 fn cell_underline(
     cell: &vt100::Cell,
-    pal: Option<&vt100::ColourPalette>,
+    pal: vt100::PaletteView<'_>,
 ) -> (u8, Option<String>) {
     let ul = cell.underline_style().sgr_subparam();
     let ulc = match pal_resolve(pal, cell.underline_color()) {
@@ -38,13 +38,12 @@ fn cell_underline(
 /// is just an ordinary RGB cell and no frame grows by a byte.
 #[inline]
 fn pal_resolve(
-    pal: Option<&vt100::ColourPalette>,
+    pal: vt100::PaletteView<'_>,
     c: vt100::Color,
 ) -> vt100::Color {
-    match pal {
-        Some(p) => p.resolve(c),
-        None => c,
-    }
+    // The OSC 4 entry, then the pane's pane-colours default (tmux
+    // colour_palette_get, colour.c:1251-1268).
+    pal.resolve(c)
 }
 
 pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Vec<RowRunsJson> {
@@ -58,7 +57,7 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
     const FLAG_STRIKETHROUGH: u8 = 128;
 
     // Issue #685: taken once for the whole screen, not per cell.
-    let pal = screen.colour_palette();
+    let pal = screen.palette_view();
 
     let mut result: Vec<RowRunsJson> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
@@ -428,6 +427,8 @@ fn sync_copy_freeze(app: &mut AppState, in_copy_mode: bool) {
 }
 
 fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::Result<LayoutJson> {
+    // Each pane draws with the pane-colours palette its tables name now.
+    crate::pane_colours::sync(app);
     let in_copy_mode = app.mode.in_copy();
     if win_id_override.is_none() {
         sync_copy_freeze(app, in_copy_mode);
@@ -511,7 +512,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                 };
                 let screen = parser.screen();
                 // Issue #685: the pane's OSC 4 palette, taken once per frame.
-                let pal = screen.colour_palette();
+                let pal = screen.palette_view();
                 let (cr, cc) = screen.cursor_position();
                 let hide_cursor_flag = screen.hide_cursor();
                 // ConPTY never passes through ESC[?1049h, so alternate_screen()
@@ -847,6 +848,8 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
 /// allocations **and** the `serde_json::to_string` traversal.  Produces the
 /// identical JSON format that the client deserialises into `LayoutJson`.
 pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
+    // Each pane draws with the pane-colours palette its tables name now.
+    crate::pane_colours::sync(app);
     let in_copy = app.mode.in_copy();
     sync_copy_freeze(app, in_copy);
     let scroll_off = app.copy_scroll_offset;
@@ -1047,7 +1050,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     // one, which is the overwhelmingly common case, so the
                     // per-cell cost is a single null check on an already hot
                     // register.
-                    let pal = screen.colour_palette();
+                    let pal = screen.palette_view();
                     let (cr, cc) = screen.cursor_position();
                     let hide_cursor = screen.hide_cursor();
                     // Live scrollback offset — nonzero for a direct-scrolled

@@ -62,12 +62,16 @@ fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut Opt
         "status-format" => Some(&mut app.status_format),
         "terminal-overrides" => Some(&mut app.terminal_overrides),
         "update-environment" => Some(&mut app.update_environment),
+        // The global window table's; a window's and a pane's own live in
+        // crate::pane_colours.
+        crate::pane_colours::OPTION => Some(&mut app.pane_colours),
         _ => None,
     }
 }
 
 fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
     match base {
+        crate::pane_colours::OPTION => Some(&app.pane_colours),
         "codepoint-widths" => Some(&app.codepoint_widths),
         "status-format" => Some(&app.status_format),
         "terminal-overrides" => Some(&app.terminal_overrides),
@@ -87,6 +91,9 @@ pub(crate) fn is_stored_array_option(name: &str) -> bool {
 pub(crate) fn set_array_option(app: &mut AppState, name: &str, value: &str, append: bool) -> Result<(), String> {
     let (base, key) = crate::option_array::parse_name(name)?;
     let spec = crate::option_array::spec(base).ok_or_else(|| format!("invalid option: {}", name))?;
+    if base == crate::pane_colours::OPTION {
+        crate::pane_colours::validate(name, value)?;
+    }
     let array = array_option_mut(app, base).ok_or_else(|| format!("invalid option: {}", name))?;
     array.apply_set(key, value, append, spec);
     array_option_changed(app, base);
@@ -106,9 +113,13 @@ pub(crate) fn unset_array_option(app: &mut AppState, name: &str) -> Result<(), S
 
 /// What a change to the array `base` sets off, as tmux's
 /// `options_push_changes` (options.c:1460-1461 at tag 3.8) does.
-fn array_option_changed(app: &AppState, base: &str) {
+fn array_option_changed(app: &mut AppState, base: &str) {
     if base == "codepoint-widths" {
         sync_codepoint_widths(app);
+    }
+    // options.c:1433-1436: every pane's palette is built again.
+    if base == crate::pane_colours::OPTION {
+        crate::pane_colours::changed(app);
     }
 }
 
@@ -224,7 +235,11 @@ pub(crate) fn is_window_option(name: &str) -> bool {
 /// (#795 follow up). The format expander resolves `@` names through the
 /// window now ([`pane_user_option`]), so the write has a reader.
 pub(crate) fn is_window_scoped_write(name: &str) -> bool {
-    is_window_option(name) || is_window_local_only(name) || name.starts_with('@')
+    is_window_option(name)
+        || is_window_local_only(name)
+        || name.starts_with('@')
+        // A window and pane array, the bare name or one element.
+        || crate::pane_colours::is_option(name)
 }
 
 /// Window options a window can override (`set -w`) that `show-options -w`
@@ -524,6 +539,14 @@ pub(crate) fn apply_set_window_option(
         Ok(index) => index,
         Err(error) => return format!("ERROR: {}", error),
     };
+    if crate::pane_colours::is_option(option) {
+        let Some(window_id) = app.windows.get(index).map(|window| window.id) else {
+            return format!("ERROR: can't find window: {}", index);
+        };
+        return crate::pane_colours::set_window(
+            app, window_id, option, value, unset, append, only_if_unset, quiet,
+        );
+    }
     if unset {
         unset_window_option(app, index, option);
         // `automatic-rename` predates the window store and also answers from
@@ -2009,6 +2032,12 @@ pub(crate) fn apply_set_pane_option(
     let Some(pane) = resolve_option_target_pane(app, target) else {
         return format!("ERROR: can't find pane: {}", target);
     };
+    if crate::pane_colours::is_option(option) {
+        let pane_id = pane.id;
+        return crate::pane_colours::set_pane(
+            app, pane_id, option, value, unset, append, only_if_unset, quiet,
+        );
+    }
     let store = &mut pane.pane_options;
     match option {
         "remain-on-exit" | "@mouse-force" => {

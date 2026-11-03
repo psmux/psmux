@@ -304,6 +304,29 @@ fn show_array_text(
     scoped_array_text(name, values_only, false, false, tx)
 }
 
+/// `show-options` text of pane-colours in the table `target` names
+/// (crate::pane_colours::show), `None` for any other option.
+fn pane_colours_text(
+    name: &str,
+    target: crate::pane_colours::ShowTarget,
+    values_only: bool,
+    mark_inherited: bool,
+    tx: &TargetedSender<'_>,
+) -> Option<String> {
+    if !crate::pane_colours::is_option(name) {
+        return None;
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    let _ = tx.send(CtrlReq::ShowPaneColours {
+        target,
+        name: name.to_string(),
+        values_only,
+        mark_inherited,
+        resp: rtx,
+    });
+    rrx.recv_timeout(Duration::from_millis(2000)).ok()
+}
+
 /// [`show_array_text`] for the table `-g` and `-A` pick: a session array
 /// option (update-environment, #803) is read from the global array with
 /// `global`, and with `mark_inherited` each line the session inherits has
@@ -5439,6 +5462,18 @@ match cmd {
                 .filter(|a| !a.starts_with('-'))
                 .copied()
                 .last();
+            // pane-colours is an array in the pane's own table, with the
+            // window's and the global one under it for -A.
+            if let Some(text) = name.and_then(|name| {
+                let target = crate::pane_colours::ShowTarget::Pane(raw_target.clone());
+                pane_colours_text(name, target, has_v, has_a, &tx)
+            }) {
+                let _ = write_stream.write_all(text.as_bytes());
+                let _ = write_stream.flush();
+                if !persistent && pending_chain.is_empty() { break; }
+                line.clear();
+                continue;
+            }
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowPaneOptions(raw_target, rtx));
             if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
@@ -5567,7 +5602,24 @@ match cmd {
         let session_query = opt_name.filter(|name| {
             !window_scope && (has_g || has_a) && crate::server::options::is_session_option(name)
         });
-        if let Some(name) = session_query {
+        // pane-colours: the global window table with -g, else a window's own
+        // with -w (with -A, what it inherits), a line per element.
+        let pane_colours_reply = opt_name.and_then(|name| {
+            let target = if window_scope && !has_g {
+                crate::pane_colours::ShowTarget::Window(target_window.clone())
+            } else {
+                crate::pane_colours::ShowTarget::Global
+            };
+            pane_colours_text(name, target, has_v, has_a, &tx)
+        });
+        if let Some(output) = pane_colours_reply {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+            } else {
+                let _ = write_stream.write_all(output.as_bytes());
+                let _ = write_stream.flush();
+            }
+        } else if let Some(name) = session_query {
             // #803: `show -g <name>` reads the global table, `show -A <name>`
             // marks a value the session inherits (cmd-show-options.c:197).
             // A session array (update-environment) prints a line per element.
@@ -7738,6 +7790,15 @@ fn dispatch_control_command(
                     .map(|s| s.trim_matches('"').to_string())
                     .unwrap_or_default();
                 let raw = pane_scope_target(raw_t.clone());
+                // pane-colours, as on the one-shot route.
+                let named = args.iter().filter(|a| !a.starts_with('-')).copied().last();
+                if let Some(text) = named.and_then(|name| {
+                    let target = crate::pane_colours::ShowTarget::Pane(raw.clone());
+                    pane_colours_text(name, target, combined_has2('v'), combined_has2('A'), tx)
+                }) {
+                    let _ = resp_tx.send(text.trim_end_matches('\n').to_string());
+                    return true;
+                }
                 let _ = tx.send(CtrlReq::ShowPaneOptions(raw, rtx));
                 let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
                 // #647 (WIN-02): a named query answers with that one option,
@@ -7858,6 +7919,19 @@ fn dispatch_control_command(
             // control client saw `set -t` overrides as the global value.
             let has_g2 = combined_has2('g');
             let has_a2 = combined_has2('A');
+            // pane-colours, as on the one-shot route: the global window table
+            // with -g, else the window's own with -w.
+            if let Some(text) = opt_name.as_deref().and_then(|name| {
+                let target = if window_scope2 && !has_g2 {
+                    crate::pane_colours::ShowTarget::Window(target_window2.clone())
+                } else {
+                    crate::pane_colours::ShowTarget::Global
+                };
+                pane_colours_text(name, target, value_only, has_a2, tx)
+            }) {
+                let _ = resp_tx.send(text.trim_end_matches('\n').to_string());
+                return true;
+            }
             if let Some(name) = opt_name.as_deref().filter(|n| {
                 !window_scope2 && (has_g2 || has_a2) && crate::server::options::is_session_option(n)
             }) {

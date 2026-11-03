@@ -496,6 +496,11 @@ fn run(ns: Option<String>) -> ! {
         } else {
             50
         };
+        // pane-colours, as in run_server: each pane gets its default palette
+        // before the next wait.
+        for session in sessions.values_mut() {
+            crate::pane_colours::sync(&mut session.app);
+        }
         let mut pending: Vec<Msg> = Vec::new();
         if let Ok(m) = msg_rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             pending.push(m);
@@ -853,7 +858,7 @@ fn data_ready_work(app: &mut AppState, cpr: bool, color: bool) {
             for fp in win.floating.iter_mut() {
                 let bits = fp.pane.color_query_pending.swap(0, Ordering::AcqRel);
                 if bits != 0 {
-                    let own = crate::types::pane_palette(fp.pane.id);
+                    let own = crate::pane_colours::merged_reply_palette(fp.pane.id, crate::types::pane_palette(fp.pane.id));
                     helpers::answer_color_queries_for_pane(bits, &mut *fp.pane.writer, fp.pane.child_pid, &colors, own);
                 }
             }
@@ -861,7 +866,7 @@ fn data_ready_work(app: &mut AppState, cpr: bool, color: bool) {
         if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
             let bits = pane.color_query_pending.swap(0, Ordering::AcqRel);
             if bits != 0 {
-                let own = crate::types::pane_palette(pane.id);
+                let own = crate::pane_colours::merged_reply_palette(pane.id, crate::types::pane_palette(pane.id));
                 helpers::answer_color_queries_for_pane(bits, &mut *pane.writer, pane.child_pid, &colors, own);
             }
         }

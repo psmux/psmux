@@ -54,6 +54,15 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
         default: "",
         trim: true,
     },
+    // options-table.c:1629-1635 at tag 3.8, a window and pane option of
+    // colours. It names no separator, so a value without an index is split on
+    // space and `,`. `pane-colors` is its other name (options-table.c:288).
+    ArraySpec {
+        name: crate::pane_colours::OPTION,
+        separator: " ,",
+        default: "",
+        trim: false,
+    },
     // options-table.c:1030-1040 at tag 3.8. It names no separator, so a
     // value without an index is split on space and `,` (options.c:640-641).
     // The default is psmux's own and empty: tmux's is three formats
@@ -102,11 +111,16 @@ pub fn spec(name: &str) -> Option<&'static ArraySpec> {
 /// anything between the brackets, so `set` can answer a bad index with
 /// `invalid option` from [`parse_name`] instead of keeping it as text.
 pub fn is_array_name(name: &str) -> Option<&'static ArraySpec> {
+    let element = |rest: &str| rest.starts_with('[') && rest.ends_with(']');
+    // `pane-colors` and `pane-colors[N]` are pane-colours (canonical_base).
+    if name
+        .strip_prefix(crate::pane_colours::ALIAS)
+        .is_some_and(|rest| rest.is_empty() || element(rest))
+    {
+        return spec(crate::pane_colours::OPTION);
+    }
     ARRAY_OPTIONS.iter().find(|spec| {
-        name == spec.name
-            || name
-                .strip_prefix(spec.name)
-                .is_some_and(|rest| rest.starts_with('[') && rest.ends_with(']'))
+        name == spec.name || name.strip_prefix(spec.name).is_some_and(element)
     })
 }
 
@@ -157,7 +171,7 @@ pub fn parse_name(name: &str) -> Result<(&str, Option<ArrayKey>), String> {
         return Err(invalid());
     }
     let Some(open) = name.find('[') else {
-        return Ok((name, None));
+        return Ok((canonical_base(name), None));
     };
     let rest = &name[open + 1..];
     let close = rest.find(']').ok_or_else(invalid)?;
@@ -165,7 +179,18 @@ pub fn parse_name(name: &str) -> Result<(&str, Option<ArrayKey>), String> {
         return Err(invalid());
     }
     let key = ArrayKey::parse(&rest[..close]).ok_or_else(invalid)?;
-    Ok((&name[..open], Some(key)))
+    Ok((canonical_base(&name[..open]), Some(key)))
+}
+
+/// An array's base name under its own spelling: `pane-colors` is tmux's other
+/// name for `pane-colours` (options-table.c:288 at tag 3.8,
+/// options_other_names), and tmux shows it under `pane-colours`.
+fn canonical_base(base: &str) -> &str {
+    if base == crate::pane_colours::ALIAS {
+        crate::pane_colours::OPTION
+    } else {
+        base
+    }
 }
 
 /// The elements of one array option, by key. Values are strings

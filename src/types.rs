@@ -2134,6 +2134,18 @@ pub struct AppState {
     /// the session's own elements, which start empty as tmux's session table
     /// does; `session_option_globals` still marks the override.
     pub session_array_globals: std::collections::HashMap<String, crate::option_array::OptionArray>,
+    /// pane-colours (crate::pane_colours), an ARRAY option of colours in
+    /// three tables: the global window table here, a window's own keyed by
+    /// window id, and a pane's own keyed by pane id. A pane uses the first of
+    /// its own, its window's and the global one that exists.
+    pub pane_colours: crate::option_array::OptionArray,
+    pub window_pane_colours: std::collections::HashMap<usize, crate::option_array::OptionArray>,
+    pub pane_pane_colours: std::collections::HashMap<usize, crate::option_array::OptionArray>,
+    /// Bumped on every pane-colours change; 0 until the first one, so a
+    /// server that never sets it never walks its panes for it.
+    pub pane_colours_generation: u64,
+    /// The generation and window each pane's default palette was built for.
+    pub pane_colours_applied: std::collections::HashMap<usize, (u64, usize)>,
     /// pane-border-style: style for inactive pane borders
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
@@ -3546,6 +3558,11 @@ impl AppState {
             user_set_options: std::collections::HashSet::new(),
             session_option_globals: std::collections::HashMap::new(),
             session_array_globals: std::collections::HashMap::new(),
+            pane_colours: crate::option_array::OptionArray::default(),
+            window_pane_colours: std::collections::HashMap::new(),
+            pane_pane_colours: std::collections::HashMap::new(),
+            pane_colours_generation: 0,
+            pane_colours_applied: std::collections::HashMap::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
             pane_border_hover_style: "fg=yellow".to_string(),
@@ -4362,6 +4379,15 @@ pub enum CtrlReq {
     },
     /// show-options -p (issue #580): list a pane's scoped options.
     ShowPaneOptions(String, mpsc::Sender<String>),
+    /// `show-options` of pane-colours in one of its three tables (global,
+    /// a window's, a pane's), with `-v` and `-A` (crate::pane_colours::show).
+    ShowPaneColours {
+        target: crate::pane_colours::ShowTarget,
+        name: String,
+        values_only: bool,
+        mark_inherited: bool,
+        resp: mpsc::Sender<String>,
+    },
     BindKey(String, String, String, bool, Option<String>),  // table, key, command, repeat, -N note
     /// key, optional table (None = prefix), and a reply for the prompt and
     /// the CLI: tmux's "table %s doesn't exist" for a table that is none

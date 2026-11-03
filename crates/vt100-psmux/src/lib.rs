@@ -71,7 +71,7 @@ pub use attrs::{Color, UnderlineStyle};
 pub use callbacks::Callbacks;
 pub use cell::Cell;
 pub use image::SixelImage;
-pub use palette::{parse_palette_index, parse_x11_colour, ColourPalette};
+pub use palette::{parse_palette_index, parse_x11_colour, ColourPalette, DefaultPalette, PaletteView};
 pub use parser::Parser;
 pub use perform::{input_buffer_size, set_input_buffer_size, DEFAULT_INPUT_BUFFER_SIZE};
 pub use queries::{QueryDetector, MAX_PENDING_QUERIES};

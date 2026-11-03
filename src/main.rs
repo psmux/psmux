@@ -62,6 +62,7 @@ mod wsl_path;
 mod terminal_overrides;
 mod command_alias;
 mod option_array;
+mod pane_colours;
 mod socket_path;
 mod environ;
 mod program_status;

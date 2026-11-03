@@ -93,6 +93,43 @@ impl ColourPalette {
     }
 }
 
+/// A pane's default palette from its `pane-colours` option: per index, the
+/// colour to draw instead, an index, an RGB or the default colour (tmux's
+/// `p->default_palette`, colour.c:1293-1322).
+pub type DefaultPalette = [Option<Color>; 256];
+
+/// The two palettes of a pane as tmux's `colour_palette_get` reads them
+/// (colour.c:1251-1268): the OSC 4 entry first, then the default palette,
+/// else the colour as it is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaletteView<'a> {
+    /// The entries the pane's program set with OSC 4.
+    pub own: Option<&'a ColourPalette>,
+    /// The default palette from the pane's `pane-colours`.
+    pub defaults: Option<&'a DefaultPalette>,
+}
+
+impl PaletteView<'_> {
+    /// True when neither palette is set, so colours pass through unchanged.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.own.is_none() && self.defaults.is_none()
+    }
+
+    /// Replace an indexed colour with the OSC 4 entry, else with the default
+    /// palette's colour, which is used as it is (an index there is not looked
+    /// up again, as in tmux). `Default` and RGB colours pass through.
+    #[inline]
+    #[must_use]
+    pub fn resolve(&self, c: Color) -> Color {
+        let Color::Idx(i) = c else { return c };
+        if let Some((r, g, b)) = self.own.and_then(|p| p.get(i)) {
+            return Color::Rgb(r, g, b);
+        }
+        self.defaults.and_then(|d| d[usize::from(i)]).unwrap_or(c)
+    }
+}
+
 /// Parse the colour specification of an OSC 4 pair.
 ///
 /// Accepts what tmux's `colour_parseX11` (`colour.c:1176`) accepts of the

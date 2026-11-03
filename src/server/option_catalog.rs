@@ -615,6 +615,10 @@ pub fn validate_option_value(name: &str, value: &str) -> Result<(), String> {
     if crate::option_array::is_array_name(name).is_some() {
         crate::option_array::parse_name(name)?;
     }
+    // Each pane-colours element is a colour (options.c:1205-1210).
+    if crate::pane_colours::is_option(name) {
+        return crate::pane_colours::validate(name, value);
+    }
     if let Some(definition) = option_definition(name) {
         return definition.validate_value(value);
     }

@@ -4918,6 +4918,14 @@ pub fn spawn_reader_thread(
                 }
                 let st = decrqm_state.unwrap_or_default();
                 let colours = crate::types::shared_host_colors();
+                // An index the pane set no colour for reports its
+                // pane-colours colour, as tmux's colour_palette_get reads the
+                // default palette under the OSC 4 one (colour.c:1251-1268).
+                for query in device_queries.iter_mut() {
+                    if let DeviceQuery::PaletteColour { index, own: own @ None } = query {
+                        *own = crate::pane_colours::reply_colour(pane_id, usize::from(*index));
+                    }
+                }
                 let replies = pane_replies(
                     &device_queries, &st, &colours, &mut console_host_da1_open,
                 );
