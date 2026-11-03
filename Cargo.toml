@@ -127,7 +127,7 @@ vt100 = { version = "0.16.13", path = "crates/vt100-psmux", package = "vt100-psm
 # ratatui-core drops its compensation (test_osc8_stale_link case12 guards it).
 # Rechecked 2026-10-31: ratatui-core 0.1.2 is still the newest release, and
 # with 0.2.3 case12 measures the 4 cell row as 7, so the pin stays.
-unicode-width = "=0.2.2"
+unicode-width = "=0.2.3"
 serde ={ version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 regex = "1.13.1"
