@@ -2208,6 +2208,9 @@ pub struct AppState {
     /// status line by index; `status-format[0]`, when set, replaces the
     /// default status-left, window list and status-right layout of line 0.
     pub status_format: crate::option_array::OptionArray,
+    /// pane-colours (#980): the global window array and every window's and
+    /// pane's own table.
+    pub pane_colours: crate::pane_colours::PaneColours,
     /// window-size: "smallest", "largest", "manual", "latest" (default "latest")
     pub window_size: String,
     /// Requested manual geometry, keyed by window ID. The visible geometry may
@@ -3578,6 +3581,7 @@ impl AppState {
             status_left_length: 10,
             status_right_length: 40,
             status_lines: 1,
+            pane_colours: crate::pane_colours::PaneColours::default(),
             status_format: crate::option_array::OptionArray::with_default(
                 crate::option_array::spec("status-format").expect("status-format is in ARRAY_OPTIONS"),
             ),
@@ -4710,6 +4714,17 @@ pub enum CtrlReq {
     ResizePaneAbsolute(String, u16),
     ResizePanePercent(String, u8), // axis, percentage (0-100)
     ShowOptionValue(mpsc::Sender<String>, String),
+    /// `show-options` text for pane-colours (#980): the table `scope` names
+    /// for the `-t` target, with `-A` (`inherited`) and `-v`
+    /// (`values_only`).
+    ShowPaneColours {
+        resp: mpsc::Sender<String>,
+        option: String,
+        scope: crate::pane_colours::Scope,
+        target: String,
+        inherited: bool,
+        values_only: bool,
+    },
     /// `show-options` text for an array option the server stores
     /// (terminal-overrides), the bare name or `name[N]`, and whether `-v`
     /// asked for the values alone. The connection thread cannot print it from

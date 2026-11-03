@@ -1166,6 +1166,9 @@ fn drain_plugin_req(
         CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
             let _ = resp.send(crate::server::options::array_option_show_lines_scoped(app, &name, values_only, global, mark_inherited));
         }
+        CtrlReq::ShowPaneColours { resp, option, scope, target, inherited, values_only } => {
+            let _ = resp.send(crate::pane_colours::show(app, scope, &target, &option, inherited, values_only));
+        }
         CtrlReq::ShowWindowOptionValue(resp, name, target) => {
             let val = crate::server::options::window_option_value_for_target(app, &name, &target);
             let _ = resp.send(val);
@@ -3062,6 +3065,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let mut standby_owed_at: Option<Instant> = None;
     loop {
         service_pipe_panes(&mut app);
+        // pane-colours (#980): push each pane's default palette into its
+        // screen when it changed. One boolean test until the option is set.
+        if crate::pane_colours::reconcile(&mut app) {
+            state_dirty = true;
+        }
         // Set when this iteration marked the state dirty only because a pty
         // batch is still PENDING in `PTY_DATA_READY`. See the request arm and
         // the end of iteration push.
@@ -8270,6 +8278,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
                     let _ = resp.send(crate::server::options::array_option_show_lines_scoped(&app, &name, values_only, global, mark_inherited));
+                }
+                CtrlReq::ShowPaneColours { resp, option, scope, target, inherited, values_only } => {
+                    let _ = resp.send(crate::pane_colours::show(&app, scope, &target, &option, inherited, values_only));
                 }
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
                     let val = crate::server::options::window_option_value_for_target(&app, &name, &target);

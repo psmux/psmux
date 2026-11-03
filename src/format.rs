@@ -2539,6 +2539,11 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             crate::server::options::pane_user_option(app, Some(win), target_pane(), var)
                 .unwrap_or_else(|| UNKNOWN_VAR.to_string())
         }
+        // pane-colours resolves for THIS pane too (#980): its own table, its
+        // window's, then the global one.
+        _ if crate::pane_colours::is_name(var) => {
+            crate::pane_colours::format_value(app, Some(win), target_pane(), var)
+        }
         // Anything else: try as option, then report "not a variable at all".
         _ => {
             if let Some(val) = lookup_option(var, app) { val }

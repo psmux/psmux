@@ -1926,6 +1926,9 @@ pub(crate) fn dispatch(
                 CtrlReq::ShowArrayOption(resp, name, values_only, global, mark_inherited) => {
                     let _ = resp.send(crate::server::options::array_option_show_lines_scoped(&app, &name, values_only, global, mark_inherited));
                 }
+                CtrlReq::ShowPaneColours { resp, option, scope, target, inherited, values_only } => {
+                    let _ = resp.send(crate::pane_colours::show(&app, scope, &target, &option, inherited, values_only));
+                }
                 // copied from server/mod.rs run_server (line 6278 at 86a78100)
                 CtrlReq::ShowOptions(resp) => {
                     let mut output = String::new();

@@ -323,6 +323,45 @@ fn scoped_array_text(
     rrx.recv_timeout(Duration::from_millis(2000)).ok()
 }
 
+/// `show-options` for pane-colours (#980) when `args` names it, `None`
+/// otherwise. A window and pane option takes its table from the flags as
+/// tmux's options_scope_from_name does: `-p` the pane's, `-g` the global
+/// window table, anything else the window's (options.c:1046-1072).
+fn pane_colours_show(args: &[&str], tx: &TargetedSender<'_>) -> Option<String> {
+    let name = crate::cli::first_operand("show-options", args)?;
+    if !crate::pane_colours::is_name(name) {
+        return None;
+    }
+    let has = |ch: char| {
+        args.iter().take_while(|a| **a != "--").any(|a| {
+            a.starts_with('-') && a.len() > 1 && a[1..].chars().all(|c| c.is_ascii_alphabetic()) && a[1..].contains(ch)
+        })
+    };
+    let scope = if has('p') {
+        crate::pane_colours::Scope::Pane
+    } else if has('g') {
+        crate::pane_colours::Scope::Global
+    } else {
+        crate::pane_colours::Scope::Window
+    };
+    let target = extract_flag_value(args, "-t")
+        .map(|t| t.trim_matches('"').to_string())
+        .unwrap_or_default();
+    let (rtx, rrx) = mpsc::channel::<String>();
+    let _ = tx.send(CtrlReq::ShowPaneColours {
+        resp: rtx,
+        option: name.to_string(),
+        scope,
+        target,
+        inherited: has('A'),
+        values_only: has('v'),
+    });
+    Some(
+        rrx.recv_timeout(Duration::from_millis(2000))
+            .unwrap_or_else(|_| "ERROR: no response from server (timed out)\n".to_string()),
+    )
+}
+
 /// Whether `name` is a tmux command or alias in the [`TMUX_COMMANDS`] catalog.
 pub(crate) fn is_catalog_command(name: &str) -> bool {
     TMUX_COMMANDS.iter().any(|entry| match entry.split_once(" (") {
@@ -5421,6 +5460,23 @@ match cmd {
             }
             out
         };
+        // pane-colours has a window, a pane and the global table (#980).
+        if let Some(output) = pane_colours_show(&args, tx) {
+            if is_error_reply(&output) {
+                let _ = write!(write_stream, "{}", output);
+                let _ = write_stream.flush();
+            } else if !output.is_empty() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+                } else {
+                    let _ = write_stream.write_all(output.as_bytes());
+                    let _ = write_stream.flush();
+                }
+            }
+            if !persistent && pending_chain.is_empty() { break; }
+            line.clear();
+            continue;
+        }
         // Pane scope (issue #580): list the target pane's `set-option -p`
         // options. `-p` is a bare flag; only -t carries a value.
         if combined_has('p') {
@@ -7732,6 +7788,11 @@ fn dispatch_control_command(
                     a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
                 })
             };
+            // pane-colours has a window, a pane and the global table (#980).
+            if let Some(output) = pane_colours_show(args, tx) {
+                let _ = resp_tx.send(output);
+                return true;
+            }
             // Pane scope (#580): list a pane's `set-option -p` options.
             if combined_has2('p') {
                 let raw_t = extract_flag_value(&args, "-t")
