@@ -123,13 +123,36 @@ fn low_sixteen(palette: Option<&vt100::DefaultPalette>) -> [Option<(u8, u8, u8)>
 /// replies, which the pane reader threads build (pane.rs `pane_replies`).
 type LowSixteen = [Option<(u8, u8, u8)>; 16];
 
-static REPLY_COLOURS: Mutex<Vec<(usize, LowSixteen)>> = Mutex::new(Vec::new());
+/// One entry per pane: its id, the owner that published it (the
+/// `AppState::pane_colours_owner` of the session holding the pane) and the
+/// colours. The table is for the whole process, and a shared server keeps
+/// several sessions in it, each with its own panes (pane ids are unique
+/// across them, server/shared/ids.rs), so a session drops only the entries
+/// it published itself.
+static REPLY_COLOURS: Mutex<Vec<(usize, u64, LowSixteen)>> = Mutex::new(Vec::new());
 
-fn publish(pane_id: usize, entries: [Option<(u8, u8, u8)>; 16]) {
+static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A new owner for [`REPLY_COLOURS`] entries, one per `AppState`.
+pub fn new_owner() -> u64 {
+    NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Publish `entries` for `pane_id` on behalf of `owner`, replacing what any
+/// owner published for that pane (a pane moved to another session is now the
+/// new session's).
+fn publish(owner: u64, pane_id: usize, entries: [Option<(u8, u8, u8)>; 16]) {
     let Ok(mut table) = REPLY_COLOURS.lock() else { return };
-    table.retain(|(id, _)| *id != pane_id);
+    table.retain(|(id, _, _)| *id != pane_id);
     if entries.iter().any(Option::is_some) {
-        table.push((pane_id, entries));
+        table.push((pane_id, owner, entries));
+    }
+}
+
+/// Drop the entries `owner` published for panes it no longer holds.
+fn prune_replies(owner: u64, panes: &std::collections::HashSet<usize>) {
+    if let Ok(mut table) = REPLY_COLOURS.lock() {
+        table.retain(|(id, by, _)| *by != owner || panes.contains(id));
     }
 }
 
@@ -137,7 +160,7 @@ fn publish(pane_id: usize, entries: [Option<(u8, u8, u8)>; 16]) {
 /// set no entry of its own (0 to 15).
 pub fn reply_colour(pane_id: usize, index: usize) -> Option<(u8, u8, u8)> {
     let table = REPLY_COLOURS.lock().ok()?;
-    table.iter().find(|(id, _)| *id == pane_id).and_then(|(_, e)| *e.get(index)?)
+    table.iter().find(|(id, _, _)| *id == pane_id).and_then(|(_, _, e)| *e.get(index)?)
 }
 
 /// A pane's own OSC 4 entries with its pane-colours colours under them, for
@@ -149,7 +172,7 @@ pub fn merged_reply_palette(
     let defaults = REPLY_COLOURS
         .lock()
         .ok()
-        .and_then(|table| table.iter().find(|(id, _)| *id == pane_id).map(|(_, e)| *e));
+        .and_then(|table| table.iter().find(|(id, _, _)| *id == pane_id).map(|(_, _, e)| *e));
     match (own, defaults) {
         (own, None) => own,
         (None, defaults) => defaults,
@@ -180,12 +203,12 @@ pub fn sync(app: &mut AppState) {
         return;
     }
     type Term = std::sync::Arc<Mutex<vt100::Parser>>;
-    let mut seen: Vec<usize> = Vec::new();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut updates: Vec<(usize, usize, Term, Option<Box<vt100::DefaultPalette>>)> = Vec::new();
     for window in &app.windows {
         let window_id = window.id;
         let mut visit = |pane: &crate::types::Pane| {
-            seen.push(pane.id);
+            seen.insert(pane.id);
             if app.pane_colours_applied.get(&pane.id) == Some(&(generation, window_id)) {
                 return;
             }
@@ -197,20 +220,20 @@ pub fn sync(app: &mut AppState) {
             visit(&floating.pane);
         }
     }
+    let owner = app.pane_colours_owner;
     for (pane_id, window_id, term, palette) in updates {
-        publish(pane_id, low_sixteen(palette.as_deref()));
+        publish(owner, pane_id, low_sixteen(palette.as_deref()));
         if let Ok(mut parser) = term.lock() {
             parser.screen_mut().set_default_palette(palette);
         }
         app.pane_colours_applied.insert(pane_id, (generation, window_id));
     }
-    // Panes that are gone take their tables and their reply colours along.
+    // Panes that are gone take their tables and their reply colours along;
+    // the reply colours of another session's panes stay.
     app.pane_colours_applied.retain(|id, _| seen.contains(id));
     app.pane_pane_colours.retain(|id, _| seen.contains(id));
-    if let Ok(mut table) = REPLY_COLOURS.lock() {
-        table.retain(|(id, _)| seen.contains(id));
-    }
-    let windows: Vec<usize> = app.windows.iter().map(|window| window.id).collect();
+    prune_replies(owner, &seen);
+    let windows: std::collections::HashSet<usize> = app.windows.iter().map(|window| window.id).collect();
     app.window_pane_colours.retain(|id, _| windows.contains(id));
 }
 
@@ -249,14 +272,29 @@ fn set_own(
         }
         return String::new();
     }
-    if only_if_unset && store.contains_key(&id) {
-        return if quiet { String::new() } else { format!("ERROR: already set: {}", OPTION) };
+    // -o: the table's array, or with an index that one element
+    // (cmd-set-option.c:300-318 at tag 3.8).
+    let already = match &key {
+        None => store.contains_key(&id),
+        Some(key) => store.get(&id).is_some_and(|array| array.get(key).is_some()),
+    };
+    if only_if_unset && already {
+        return if quiet { String::new() } else { format!("ERROR: already set: {}", name) };
     }
     if let Err(error) = validate(name, value) {
         return format!("ERROR: {}", error);
     }
+    let append = appends(&key, append);
     store.entry(id).or_default().apply_set(key, value, append, spec);
     String::new()
+}
+
+/// Whether `-a` appends. On the whole array it adds elements, as for every
+/// array; on one element of a colour array tmux sets the colour given, since
+/// only a string element takes text on its end (options.c:600-629 at tag
+/// 3.8).
+pub fn appends(key: &Option<crate::option_array::ArrayKey>, append: bool) -> bool {
+    append && key.is_none()
 }
 
 /// [`set_own`] on the window with id `window_id`.

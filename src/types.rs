@@ -2146,6 +2146,9 @@ pub struct AppState {
     pub pane_colours_generation: u64,
     /// The generation and window each pane's default palette was built for.
     pub pane_colours_applied: std::collections::HashMap<usize, (u64, usize)>,
+    /// This session's mark on the process wide OSC 4 reply colours, so a
+    /// shared server's sessions each drop only their own panes' entries.
+    pub pane_colours_owner: u64,
     /// pane-border-style: style for inactive pane borders
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
@@ -3563,6 +3566,7 @@ impl AppState {
             pane_pane_colours: std::collections::HashMap::new(),
             pane_colours_generation: 0,
             pane_colours_applied: std::collections::HashMap::new(),
+            pane_colours_owner: crate::pane_colours::new_owner(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
             pane_border_hover_style: "fg=yellow".to_string(),

@@ -169,7 +169,8 @@ fn the_query_replies_see_the_low_sixteen_as_rgb() {
     assert_eq!(low.iter().filter(|e| e.is_some()).count(), 2);
     // A pane's own OSC 4 entry wins over the published default.
     let pane_id = 900_001;
-    publish(pane_id, low);
+    let owner = new_owner();
+    publish(owner, pane_id, low);
     let own = Some({
         let mut own = [None; 16];
         own[1] = Some((1, 2, 3));
@@ -179,6 +180,6 @@ fn the_query_replies_see_the_low_sixteen_as_rgb() {
     assert_eq!(merged[1], Some((1, 2, 3)));
     assert_eq!(merged[2], Some(crate::style::colour_256_to_rgb(4)));
     assert_eq!(reply_colour(pane_id, 1), Some((0, 255, 0)));
-    publish(pane_id, [None; 16]);
+    publish(owner, pane_id, [None; 16]);
     assert_eq!(reply_colour(pane_id, 1), None);
 }

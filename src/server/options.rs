@@ -91,8 +91,10 @@ pub(crate) fn is_stored_array_option(name: &str) -> bool {
 pub(crate) fn set_array_option(app: &mut AppState, name: &str, value: &str, append: bool) -> Result<(), String> {
     let (base, key) = crate::option_array::parse_name(name)?;
     let spec = crate::option_array::spec(base).ok_or_else(|| format!("invalid option: {}", name))?;
+    let mut append = append;
     if base == crate::pane_colours::OPTION {
         crate::pane_colours::validate(name, value)?;
+        append = crate::pane_colours::appends(&key, append);
     }
     let array = array_option_mut(app, base).ok_or_else(|| format!("invalid option: {}", name))?;
     array.apply_set(key, value, append, spec);
