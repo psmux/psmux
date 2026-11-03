@@ -379,3 +379,7 @@ pub fn show_request(app: &mut AppState, target: &ShowTarget, name: &str, values_
     };
     show(app, &scope, name, values_only, mark_inherited)
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_colours.rs"]
+mod tests_pane_colours;
