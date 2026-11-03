@@ -15,6 +15,10 @@
 #   [4] OSC 4 queries: an index the pane set nothing for reports the
 #       pane-colours colour; an OSC 4 set wins; OSC 104 brings it back
 #       (tests\palette_reply_probe.cs in the pane reads the replies)
+#   [5] -a on one element sets the colour given, and -o with an index asks
+#       about that element, in the pane, window and global tables
+#   [6] two sessions of a shared server (PSMUX_SERVER_MODE=shared) each
+#       report their own pane-colours colour to OSC 4 queries
 #
 # Private USERPROFILE, PSMUX_DATA_DIR and config, a -L namespace per server;
 # cleanup is `-L <ns> kill-server`. PSMUX_EXE picks the binary (defaults to
@@ -158,9 +162,9 @@ try {
         Fresh
         P set -gw 'pane-colours[1]' '#00ff00' | Out-Null
         Start-Sleep -Milliseconds 800
-        function Ask($queries) {
+        function Ask($queries, $target = 's') {
             $out = Join-Path $TempHome ("r_" + [guid]::NewGuid().ToString('N').Substring(0, 6) + ".txt")
-            P send-keys -t s "& '$PROBE' '$out' '$queries'" Enter | Out-Null
+            P send-keys -t $target "& '$PROBE' '$out' '$queries'" Enter | Out-Null
             for ($i = 0; $i -lt 40 -and -not (Test-Path $out); $i++) { Start-Sleep -Milliseconds 250 }
             Start-Sleep -Milliseconds 300
             return ((Get-Content $out -EA SilentlyContinue) -join ' | ')
@@ -168,6 +172,55 @@ try {
         Check "index 1 reports the pane-colours colour" (Ask '\e]4;1;?\e\') "1 rgb:0000/ffff/0000"
         Check "an OSC 4 set wins" (Ask '\e]4;1;rgb:11/22/33\e\\e]4;1;?\e\') "1 rgb:1111/2222/3333"
         Check "OSC 104 brings pane-colours back" (Ask '\e]104;1\e\\e]4;1;?\e\') "1 rgb:0000/ffff/0000"
+    }
+
+    Write-Host "`n[5] -a and -o on one element" -ForegroundColor Yellow
+    # tmux 3.8: -a on one colour element sets the colour given (options.c:
+    # 615-629), and -o with an index asks whether that element exists
+    # (cmd-set-option.c:300-318), in each of the three tables.
+    Fresh
+    foreach ($t in @(@('-p', 'show -p'), @('-w', 'show -w'), @('-gw', 'show -gw'))) {
+        $flag = $t[0]
+        P set $flag 'pane-colours[1]' red | Out-Null
+        P set "$($flag)a" 'pane-colours[1]' blue | Out-Null
+        Check "set $($flag)a [1] blue after red is blue" (P show $flag pane-colours) "pane-colours[1] blue"
+        Check "set $($flag)o [2], which is not set, is taken" (P set "$($flag)o" 'pane-colours[2]' green) ""
+        & $PSMUX -L $script:NS set "$($flag)o" 'pane-colours[1]' green 2>&1 | Out-Null
+        Check "set $($flag)o [1], which is set, is refused" $LASTEXITCODE "1"
+        Check "and [1] stays blue" (P show $flag pane-colours) "pane-colours[1] blue`npane-colours[2] green"
+    }
+    # The CLI puts its own prefix before tmux's message, which differs by
+    # route, so only the message and the exit code are checked here.
+    $refused = P set -pa 'pane-colours[5]' zzz
+    $rc = $LASTEXITCODE
+    Check "set -pa [5] zzz is refused with bad colour" ("$rc " + ($refused -replace '^psmux: (set-option: )?', '')) "1 bad colour: zzz"
+
+    Write-Host "`n[6] Two sessions of a shared server" -ForegroundColor Yellow
+    # Pane ids are unique across a shared server's sessions, and the OSC 4
+    # reply colours are one table for the process: each session keeps its
+    # own panes' colours there.
+    if (-not (Test-Path $PROBE)) {
+        Write-Fail "palette_reply_probe did not compile"
+    } else {
+        & $PSMUX -L $script:NS kill-server 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 400
+        $script:NS = "pcs_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
+        $env:PSMUX_SERVER_MODE = 'shared'
+        & $PSMUX -L $script:NS new-session -d -s s1 -x 100 -y 20 2>&1 | Out-Null
+        & $PSMUX -L $script:NS new-session -d -s s2 -x 100 -y 20 2>&1 | Out-Null
+        Remove-Item Env:PSMUX_SERVER_MODE
+        for ($i = 0; $i -lt 40; $i++) {
+            & $PSMUX -L $script:NS has-session -t s2 2>$null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        Start-Sleep -Milliseconds 1500
+        P set -w -t s1: 'pane-colours[1]' '#00ff00' | Out-Null
+        P set -w -t s2: 'pane-colours[1]' '#0000ff' | Out-Null
+        Start-Sleep -Milliseconds 800
+        Check "s1's pane reports s1's colour" (Ask '\e]4;1;?\e\' 's1') "1 rgb:0000/ffff/0000"
+        Check "s2's pane reports s2's colour" (Ask '\e]4;1;?\e\' 's2') "1 rgb:0000/0000/ffff"
+        Check "s1's pane still reports s1's colour" (Ask '\e]4;1;?\e\' 's1') "1 rgb:0000/ffff/0000"
     }
 }
 catch {

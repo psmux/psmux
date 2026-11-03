@@ -183,3 +183,67 @@ fn the_query_replies_see_the_low_sixteen_as_rgb() {
     publish(owner, pane_id, [None; 16]);
     assert_eq!(reply_colour(pane_id, 1), None);
 }
+
+#[test]
+fn a_session_drops_only_the_reply_colours_it_published() {
+    // A shared server keeps several sessions in one process, each syncing
+    // its own panes; one session's sync must not drop another's entries.
+    let (first, second) = (new_owner(), new_owner());
+    let mut colours = [None; 16];
+    colours[1] = Some((0, 255, 0));
+    publish(first, 900_101, colours);
+    publish(second, 900_102, colours);
+    prune_replies(second, &std::collections::HashSet::from([900_102]));
+    assert_eq!(reply_colour(900_101, 1), Some((0, 255, 0)), "the other session's pane keeps its colours");
+    prune_replies(first, &std::collections::HashSet::new());
+    assert_eq!(reply_colour(900_101, 1), None, "a session's pane that is gone loses them");
+    assert_eq!(reply_colour(900_102, 1), Some((0, 255, 0)));
+    // A pane another session now holds is that session's entry.
+    publish(first, 900_103, colours);
+    publish(second, 900_103, colours);
+    prune_replies(first, &std::collections::HashSet::new());
+    assert_eq!(reply_colour(900_103, 1), Some((0, 255, 0)));
+    prune_replies(second, &std::collections::HashSet::new());
+    assert_eq!(reply_colour(900_102, 1), None);
+    assert_eq!(reply_colour(900_103, 1), None);
+}
+
+#[test]
+fn append_on_one_element_sets_the_colour_given() {
+    // tmux 3.8 options.c:615-629: a colour element is replaced, never
+    // extended, so `-a 'pane-colours[1]' blue` after red is blue, not redblue.
+    let mut a = app();
+    crate::server::options::set_array_option(&mut a, "pane-colours[1]", "red", false).unwrap();
+    crate::server::options::set_array_option(&mut a, "pane-colours[1]", "blue", true).unwrap();
+    assert_eq!(a.pane_colours.get_index(1), Some("blue"));
+    // -a without an index still adds at the lowest free index.
+    crate::server::options::set_array_option(&mut a, OPTION, "green", true).unwrap();
+    assert_eq!(a.pane_colours.get_index(0), Some("green"));
+    assert_eq!(set_window(&mut a, 7, "pane-colours[1]", "red", false, false, false, false), "");
+    assert_eq!(set_window(&mut a, 7, "pane-colours[1]", "blue", false, true, false, false), "");
+    assert_eq!(a.window_pane_colours[&7].get_index(1), Some("blue"));
+    assert_eq!(set_pane(&mut a, 3, "pane-colours[1]", "red", false, false, false, false), "");
+    assert_eq!(set_pane(&mut a, 3, "pane-colours[1]", "blue", false, true, false, false), "");
+    assert_eq!(a.pane_pane_colours[&3].get_index(1), Some("blue"));
+    assert_eq!(default_palette(&a.pane_pane_colours[&3]).unwrap()[1], Some(vt100::Color::Idx(4)));
+}
+
+#[test]
+fn only_if_unset_on_one_element_looks_at_that_element() {
+    // tmux 3.8 cmd-set-option.c:300-318: with an index, -o asks whether that
+    // element exists.
+    let mut a = app();
+    assert_eq!(set_pane(&mut a, 3, "pane-colours[1]", "red", false, false, false, false), "");
+    assert_eq!(set_pane(&mut a, 3, "pane-colours[2]", "blue", false, false, true, false), "");
+    assert_eq!(a.pane_pane_colours[&3].values(), vec!["red", "blue"]);
+    assert_eq!(
+        set_pane(&mut a, 3, "pane-colours[1]", "green", false, false, true, false),
+        "ERROR: already set: pane-colours[1]"
+    );
+    assert_eq!(set_pane(&mut a, 3, "pane-colours[1]", "green", false, false, true, true), "");
+    assert_eq!(a.pane_pane_colours[&3].get_index(1), Some("red"));
+    assert_eq!(set_window(&mut a, 7, "pane-colours[1]", "red", false, false, false, false), "");
+    assert_eq!(set_window(&mut a, 7, "pane-colours[2]", "blue", false, false, true, false), "");
+    assert_eq!(a.window_pane_colours[&7].values(), vec!["red", "blue"]);
+    assert_eq!(set_window(&mut a, 7, OPTION, "x", false, false, true, false), "ERROR: already set: pane-colours");
+}
