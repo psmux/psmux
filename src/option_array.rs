@@ -10,8 +10,8 @@
 //!
 //! [`ARRAY_OPTIONS`] lists the options built on this so far. tmux 3.7c has
 //! more, and they move here one at a time: terminal-features and user-keys
-//! split on `,`; pane-colours on space and `,`; every hook is an array of
-//! commands that does not split at all.
+//! split on `,`; every hook is an array of commands that does not split at
+//! all.
 
 use std::collections::BTreeMap;
 
@@ -54,6 +54,18 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
         default: "",
         trim: true,
     },
+    // options-table.c:1614-1620 at tag 3.8, a window and pane option of
+    // colours with no default (issue #980). It names no separator, so a value
+    // without an index is split on space and `,`. Only this global window
+    // array is kept here; a window's and a pane's own live in
+    // crate::pane_colours, and so does the check that every element is a
+    // colour.
+    ArraySpec {
+        name: crate::pane_colours::OPTION,
+        separator: " ,",
+        default: "",
+        trim: false,
+    },
     // options-table.c:1030-1040 at tag 3.8. It names no separator, so a
     // value without an index is split on space and `,` (options.c:640-641).
     // The default is psmux's own and empty: tmux's is three formats
@@ -95,13 +107,30 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
 /// The array option `name` is, judged by its base name.
 pub fn spec(name: &str) -> Option<&'static ArraySpec> {
     let (base, _) = parse_name(name).ok()?;
+    let base = canonical_base(base);
     ARRAY_OPTIONS.iter().find(|spec| spec.name == base)
+}
+
+/// An array's base name as tmux spells it: `pane-colors` is the other name
+/// of `pane-colours` (options-table.c:284, options_map_name).
+pub fn canonical_base(base: &str) -> &str {
+    if base == crate::pane_colours::ALIAS {
+        crate::pane_colours::OPTION
+    } else {
+        base
+    }
 }
 
 /// The array option `name` names, as the bare name or as `name[...]` with
 /// anything between the brackets, so `set` can answer a bad index with
 /// `invalid option` from [`parse_name`] instead of keeping it as text.
 pub fn is_array_name(name: &str) -> Option<&'static ArraySpec> {
+    let name = match name.strip_prefix(crate::pane_colours::ALIAS) {
+        Some(rest) if rest.is_empty() || rest.starts_with('[') => {
+            return is_array_name(&format!("{}{}", crate::pane_colours::OPTION, rest));
+        }
+        _ => name,
+    };
     ARRAY_OPTIONS.iter().find(|spec| {
         name == spec.name
             || name
@@ -169,8 +198,8 @@ pub fn parse_name(name: &str) -> Result<(&str, Option<ArrayKey>), String> {
 }
 
 /// The elements of one array option, by key. Values are strings
-/// (`OPTIONS_TABLE_STRING`); hooks and pane-colours widen this when they move
-/// here.
+/// (`OPTIONS_TABLE_STRING`); pane-colours keeps each colour in tmux's spelling
+/// (crate::pane_colours); hooks widen this when they move here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionArray {
     items: BTreeMap<ArrayKey, String>,

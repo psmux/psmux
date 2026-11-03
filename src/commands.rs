@@ -3892,6 +3892,8 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         fresh.screen_mut().set_win32_input_requested(parser.screen().win32_input_requested());
                         // Same application, same key mode (issue #860).
                         fresh.screen_mut().set_extended_keys_mode(parser.screen().extended_keys_mode());
+                        // The pane's options are unchanged too (#980).
+                        fresh.screen_mut().set_pane_colours(parser.screen().pane_colours().cloned());
                         *parser = fresh;
                     }
                 }

@@ -193,7 +193,14 @@ pub struct Screen {
     /// (`tmux.h:1379`) and allocates it lazily too (`colour.c:1280`).
     palette: Option<Box<crate::palette::ColourPalette>>,
 
-    /// Bumped on every change to `palette`.  The pane reader thread compares
+    /// The pane's default palette from the `pane-colours` option (issue
+    /// #980), tmux's `p->default_palette` (`colour.c:1293`), with the OSC 4
+    /// entries laid over it.  `None` while no table that reaches the pane
+    /// holds an element from 0 to 255, which is every pane of a user who never
+    /// sets the option: then nothing below reads more than this one pointer.
+    pane_colours: Option<Box<PaneColours>>,
+
+    /// Bumped on every change to `palette` or `pane_colours`.  The pane reader thread compares
     /// it to the value it last published so it can mirror the low sixteen
     /// entries for the OSC 4 query responder without locking on every batch.
     palette_generation: u64,
@@ -308,6 +315,41 @@ pub fn xtmodkeys_off_mode(current: u8, ek: u8, resource: u16) -> u8 {
     if ek == 2 { 1 } else { 0 }
 }
 
+/// A pane's `pane-colours` default palette and the palette it draws with:
+/// the defaults with the OSC 4 entries laid over them, kept up to date as
+/// either changes so that drawing reads one table, as it did before #980.
+#[derive(Clone, Debug)]
+struct PaneColours {
+    defaults: crate::palette::ColourPalette,
+    merged: crate::palette::ColourPalette,
+}
+
+impl PaneColours {
+    fn new(
+        defaults: crate::palette::ColourPalette,
+        osc4: Option<&crate::palette::ColourPalette>,
+    ) -> Self {
+        let mut merged = defaults.clone();
+        if let Some(osc4) = osc4 {
+            for idx in 0..=255u8 {
+                if let Some(own) = osc4.entry(idx) {
+                    merged.set_colour(idx, Some(own));
+                }
+            }
+        }
+        Self { defaults, merged }
+    }
+
+    /// One OSC 4 entry changed: it wins where set, the default shows through
+    /// where it was unset.
+    fn overlay(&mut self, idx: u8, rgb: Option<(u8, u8, u8)>) {
+        let colour = rgb
+            .map(|(r, g, b)| crate::attrs::Color::Rgb(r, g, b))
+            .or_else(|| self.defaults.entry(idx));
+        self.merged.set_colour(idx, colour);
+    }
+}
+
 impl Screen {
     pub(crate) fn new(
         size: crate::grid::Size,
@@ -340,6 +382,7 @@ impl Screen {
             sixel_images: Vec::new(),
             osc_shell_command: None,
             palette: None,
+            pane_colours: None,
             palette_generation: 0,
             squelch_cleared: false,
             squelch_clear_pending: false,
@@ -434,6 +477,7 @@ impl Screen {
         let history = self.grid.take_scrollback();
         let hyperlinks = std::mem::take(&mut self.hyperlinks);
         let palette = self.palette.take();
+        let pane_colours = self.pane_colours.take();
         let palette_generation = self.palette_generation;
         let allow_alternate_screen = self.allow_alternate_screen;
         let mut program_status = std::mem::take(&mut self.program_status);
@@ -445,6 +489,7 @@ impl Screen {
         self.grid.put_scrollback(history);
         self.hyperlinks = hyperlinks;
         self.palette = palette;
+        self.pane_colours = pane_colours;
         self.palette_generation = palette_generation;
         self.allow_alternate_screen = allow_alternate_screen;
     }
@@ -1434,14 +1479,23 @@ impl Screen {
     /// pays a single null check for the whole frame.
     #[must_use]
     pub fn colour_palette(&self) -> Option<&crate::palette::ColourPalette> {
-        self.palette.as_deref()
+        match &self.pane_colours {
+            Some(colours) => Some(&colours.merged),
+            None => self.palette.as_deref(),
+        }
     }
 
     /// The RGB override for one index, if set.  tmux's `colour_palette_get`
     /// (`colour.c:1251`).
     #[must_use]
     pub fn palette_entry(&self, idx: u8) -> Option<(u8, u8, u8)> {
-        self.palette.as_ref().and_then(|p| p.get(idx))
+        let own = self.palette.as_ref().and_then(|p| p.get(idx));
+        match &self.pane_colours {
+            // colour_palette_get (colour.c:1251-1268): the OSC 4 entry, then
+            // the pane-colours default.
+            Some(colours) => own.or_else(|| colours.defaults.get(idx)),
+            None => own,
+        }
     }
 
     /// Set or unset one palette entry.  Returns `true` when the stored value
@@ -1462,6 +1516,9 @@ impl Screen {
             .get_or_insert_with(|| Box::new(crate::palette::ColourPalette::default()));
         if palette.set(idx, rgb) {
             self.palette_generation = self.palette_generation.wrapping_add(1);
+            if let Some(colours) = self.pane_colours.as_mut() {
+                colours.overlay(idx, rgb);
+            }
             true
         } else {
             false
@@ -1474,8 +1531,36 @@ impl Screen {
         let dropped = self.palette.take().is_some_and(|p| !p.is_empty());
         if dropped {
             self.palette_generation = self.palette_generation.wrapping_add(1);
+            if let Some(colours) = self.pane_colours.as_mut() {
+                colours.merged = colours.defaults.clone();
+            }
         }
         dropped
+    }
+
+    /// Install the pane's `pane-colours` default palette (issue #980), or
+    /// drop it with `None`.  tmux rebuilds it whenever the option changes or
+    /// the pane is created or moved (options.c:1411-1414, window.c:1333,
+    /// cmd-join-pane.c:508); psmux's server calls this at the same moments.
+    /// Returns `true` when it changed.
+    pub fn set_pane_colours(
+        &mut self,
+        defaults: Option<crate::palette::ColourPalette>,
+    ) -> bool {
+        let defaults = defaults.filter(|d| !d.is_empty());
+        if self.pane_colours.as_ref().map(|c| &c.defaults) == defaults.as_ref() {
+            return false;
+        }
+        self.pane_colours = defaults
+            .map(|d| Box::new(PaneColours::new(d, self.palette.as_deref())));
+        self.palette_generation = self.palette_generation.wrapping_add(1);
+        true
+    }
+
+    /// The pane-colours default palette as installed, if any.
+    #[must_use]
+    pub fn pane_colours(&self) -> Option<&crate::palette::ColourPalette> {
+        self.pane_colours.as_ref().map(|c| &c.defaults)
     }
 
     /// A counter bumped on every accepted palette change.  The pane reader
@@ -1493,7 +1578,7 @@ impl Screen {
     #[inline]
     #[must_use]
     pub fn resolve_colour(&self, c: crate::attrs::Color) -> crate::attrs::Color {
-        match &self.palette {
+        match self.colour_palette() {
             Some(p) => p.resolve(c),
             None => c,
         }
@@ -2178,7 +2263,14 @@ impl Screen {
         let capture = self.capture_queries;
         let program_status_enabled = self.program_status_enabled;
         let win32_input_requested = self.win32_input_requested;
+        // RIS drops the OSC 4 entries only; the pane-colours defaults belong
+        // to the pane's options, not to the program (input.c:1407 clears
+        // `p->palette` and leaves `p->default_palette`).
+        let pane_colours = self.pane_colours.take().map(|c| c.defaults);
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+        if let Some(defaults) = pane_colours {
+            self.pane_colours = Some(Box::new(PaneColours::new(defaults, None)));
+        }
         self.program_status = statuses;
         self.pending_queries = queries;
         self.capture_queries = capture;

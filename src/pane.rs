@@ -4353,7 +4353,7 @@ fn window_report(op: u16, rows: u16, cols: u16) -> String {
 }
 
 /// The sixteen ANSI colours of a pane's own palette (OSC 4, issue #685).
-fn palette16(screen: &vt100::Screen) -> [Option<(u8, u8, u8)>; 16] {
+pub(crate) fn palette16(screen: &vt100::Screen) -> [Option<(u8, u8, u8)>; 16] {
     let mut entries: [Option<(u8, u8, u8)>; 16] = [None; 16];
     for (i, slot) in entries.iter_mut().enumerate() {
         *slot = screen.palette_entry(u8::try_from(i).unwrap_or(0));
