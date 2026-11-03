@@ -86,6 +86,10 @@ name = "issue685_osc4_palette"
 path = "tests/issue685_osc4_palette.rs"
 
 [[test]]
+name = "issue980_pane_colours"
+path = "tests/issue980_pane_colours.rs"
+
+[[test]]
 name = "issue749_emoji_clusters"
 path = "tests/issue749_emoji_clusters.rs"
 

@@ -24,13 +24,18 @@
 
 use crate::attrs::Color;
 
-/// 256 optional RGB overrides, one per indexed colour.
+/// 256 optional overrides, one per indexed colour.
 ///
 /// Mirrors tmux's `p->palette`, which is likewise allocated only once an entry
-/// is actually set (`colour.c:1280`) and whose "unset" marker is `-1`.
+/// is actually set (`colour.c:1280`) and whose "unset" marker is `-1`.  An
+/// OSC 4 entry is always an RGB colour; an entry of the `pane-colours` default
+/// palette (issue #980, tmux's `p->default_palette`) can also be another
+/// index or the default colour, as `colour_palette_from_option`
+/// (`colour.c:1293`) stores any colour.  `Option<Color>` is the same four
+/// bytes the RGB triple took, so the table did not grow.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ColourPalette {
-    entries: [Option<(u8, u8, u8)>; 256],
+    entries: [Option<Color>; 256],
 }
 
 impl Default for ColourPalette {
@@ -42,9 +47,22 @@ impl Default for ColourPalette {
 }
 
 impl ColourPalette {
-    /// The RGB override for `idx`, if one has been set.
+    /// The override for `idx` as RGB, if one has been set: an RGB entry as
+    /// it is, an indexed one through the xterm table, as tmux's
+    /// `colour_force_rgb` (`colour.c:189`) turns a palette colour into the
+    /// RGB an OSC 4 query reports.  A default colour entry has no RGB.
     #[must_use]
     pub fn get(&self, idx: u8) -> Option<(u8, u8, u8)> {
+        match self.entries[idx as usize]? {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            Color::Idx(i) => Some(xterm_rgb(i)),
+            Color::Default => None,
+        }
+    }
+
+    /// The override for `idx` as it is stored.
+    #[must_use]
+    pub fn entry(&self, idx: u8) -> Option<Color> {
         self.entries[idx as usize]
     }
 
@@ -52,11 +70,16 @@ impl ColourPalette {
     /// actually changed, which is tmux's `colour_palette_set` return and what
     /// drives its `screen_write_fullredraw`.
     pub fn set(&mut self, idx: u8, rgb: Option<(u8, u8, u8)>) -> bool {
+        self.set_colour(idx, rgb.map(|(r, g, b)| Color::Rgb(r, g, b)))
+    }
+
+    /// [`set`](Self::set) for any colour, which a `pane-colours` entry can be.
+    pub fn set_colour(&mut self, idx: u8, colour: Option<Color>) -> bool {
         let slot = &mut self.entries[idx as usize];
-        if *slot == rgb {
+        if *slot == colour {
             return false;
         }
-        *slot = rgb;
+        *slot = colour;
         true
     }
 
@@ -77,18 +100,43 @@ impl ColourPalette {
         self.entries.iter().all(Option::is_none)
     }
 
-    /// Replace an indexed colour with this palette's RGB, leaving `Default`
+    /// Replace an indexed colour with this palette's entry, leaving `Default`
     /// and already-RGB colours alone.  This is the `tty_check_fg` substitution
-    /// (`tty.c:2836`).
+    /// (`tty.c:2836`), done once: an entry that is itself an index is drawn as
+    /// that index, as in tmux.
     #[inline]
     #[must_use]
     pub fn resolve(&self, c: Color) -> Color {
         match c {
-            Color::Idx(i) => match self.entries[i as usize] {
-                Some((r, g, b)) => Color::Rgb(r, g, b),
-                None => c,
-            },
+            Color::Idx(i) => self.entries[i as usize].unwrap_or(c),
             _ => c,
+        }
+    }
+}
+
+/// The xterm 256 colour table, tmux's `colour_256toRGB` (`colour.c:466`).
+#[must_use]
+pub fn xterm_rgb(idx: u8) -> (u8, u8, u8) {
+    const SYSTEM: [(u8, u8, u8); 16] = [
+        (0x00, 0x00, 0x00), (0x80, 0x00, 0x00), (0x00, 0x80, 0x00), (0x80, 0x80, 0x00),
+        (0x00, 0x00, 0x80), (0x80, 0x00, 0x80), (0x00, 0x80, 0x80), (0xc0, 0xc0, 0xc0),
+        (0x80, 0x80, 0x80), (0xff, 0x00, 0x00), (0x00, 0xff, 0x00), (0xff, 0xff, 0x00),
+        (0x00, 0x00, 0xff), (0xff, 0x00, 0xff), (0x00, 0xff, 0xff), (0xff, 0xff, 0xff),
+    ];
+    const LEVELS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+    match idx {
+        0..=15 => SYSTEM[idx as usize],
+        16..=231 => {
+            let n = idx - 16;
+            (
+                LEVELS[(n / 36) as usize],
+                LEVELS[((n / 6) % 6) as usize],
+                LEVELS[(n % 6) as usize],
+            )
+        }
+        _ => {
+            let v = 8 + (idx - 232) * 10;
+            (v, v, v)
         }
     }
 }
