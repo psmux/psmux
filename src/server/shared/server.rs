@@ -462,6 +462,19 @@ fn run(ns: Option<String>) -> ! {
     loop {
         // Sessions to end after this pass, and why.
         let mut ended: Vec<(usize, &'static str)> = Vec::new();
+        // pane-colours (#980), as at the top of run_server's loop: each
+        // session pushes its panes' default palettes before any OSC 4 query
+        // below is answered. One boolean test per session until the option
+        // is set.
+        ended.extend(
+            for_each_session_guarded(&mut sessions, |app, lp| {
+                if crate::pane_colours::reconcile(app) {
+                    lp.state_dirty = true;
+                }
+            })
+            .into_iter()
+            .map(|sid| (sid, "panic")),
+        );
         let data_ready = crate::types::PTY_DATA_READY.swap(false, Ordering::AcqRel);
         if data_ready {
             let cpr = crate::types::CPR_DATA_PENDING.swap(false, Ordering::AcqRel);

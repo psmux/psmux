@@ -271,6 +271,32 @@ if ($r5.Count -eq 1 -and $r5[0] -eq "rgb:ffff/0000/0000") { Write-Pass "a respaw
 else { Write-Fail "after respawn-pane the query gave '$($r5 -join ',')'" }
 
 & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null
+
+Write-Host "`n=== Group 5: a shared server answers each session's own colours ===" -ForegroundColor Cyan
+# PSMUX_SERVER_MODE=shared (#798) hosts both sessions in one process, whose
+# loop is its own: each session's panes must get their palette there too.
+$SHARED = "${SOCK}_sh"
+$env:PSMUX_SERVER_MODE = "shared"
+& $PSMUX -L $SHARED new-session -d -s s1 -x 80 -y 24 2>&1 | Out-Null
+& $PSMUX -L $SHARED new-session -d -s s2 -x 80 -y 24 2>&1 | Out-Null
+Remove-Item Env:PSMUX_SERVER_MODE
+Start-Sleep -Seconds 2
+$shPids = Lines (& $PSMUX -L $SHARED list-sessions -F "#{pid}" 2>&1 | Out-String)
+$log6 = "$OUT\q6.log"; $log7 = "$OUT\q7.log"
+& $PSMUX -L $SHARED new-window -d -t s1 -n q6 "$emit $log6 \p\p\p\e]4\s1\s?\a 2500 10" 2>&1 | Out-Null
+& $PSMUX -L $SHARED new-window -d -t s2 -n q7 "$emit $log7 \p\p\p\e]4\s1\s?\a 2500 10" 2>&1 | Out-Null
+& $PSMUX -L $SHARED set -w -t s1:q6 "pane-colours[1]" "#00ff00" 2>&1 | Out-Null
+& $PSMUX -L $SHARED set -w -t s2:q7 "pane-colours[1]" "#0000ff" 2>&1 | Out-Null
+$r6 = Replies (Wait-Log $log6 30)
+$r7 = Replies (Wait-Log $log7 30)
+if (@($shPids -split "`n" | Select-Object -Unique).Count -eq 1) { Write-Pass "both sessions are in one shared server" }
+else { Write-Fail "PSMUX_SERVER_MODE=shared gave server pids '$shPids'" }
+if ($r6.Count -eq 1 -and $r6[0] -eq "rgb:0000/ffff/0000") { Write-Pass "shared server: s1's pane reports s1's window colour" }
+else { Write-Fail "shared server: s1's query gave '$($r6 -join ',')'" }
+if ($r7.Count -eq 1 -and $r7[0] -eq "rgb:0000/0000/ffff") { Write-Pass "shared server: s2's pane reports s2's window colour" }
+else { Write-Fail "shared server: s2's query gave '$($r7 -join ',')'" }
+& $PSMUX -L $SHARED kill-server 2>&1 | Out-Null
+
 foreach ($id in $started) { try { Stop-Process -Id $id -Force -EA Stop } catch {} }
 $env:PSMUX_DATA_DIR = $savedDataDir
 $env:PSMUX_NO_WARM = $savedNoWarm
