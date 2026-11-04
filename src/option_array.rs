@@ -112,6 +112,15 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
                   XDG_SESSION_DESKTOP XDG_SESSION_TYPE",
         trim: false,
     },
+    // options-table.c:734-743 at tag 3.8, a server option split on `,`, no
+    // default. Element N is the byte sequence of the key UserN
+    // (crate::user_keys).
+    ArraySpec {
+        name: crate::user_keys::OPTION,
+        separator: ",",
+        default: "",
+        trim: false,
+    },
 ];
 
 /// The array option `name` is, judged by its base name.
@@ -368,10 +377,55 @@ impl OptionArray {
                 if values_only {
                     format!("{}\n", value)
                 } else {
-                    format!("{}[{}] {}\n", name, key, crate::util::quote_arg_if_needed(value))
+                    format!("{}[{}] {}\n", name, key, show_value(value))
                 }
             })
             .collect()
+    }
+}
+
+/// An element's value as a `show` line prints it. A value with a C0 control
+/// character, DEL (a `user-keys` sequence holds an ESC) or a backslash is
+/// escaped the way tmux's `args_escape` does (arguments.c:604-649 at tag
+/// 3.8, `utf8_stravis` with VIS_CSTYLE): octal or C style escapes (`\033`,
+/// `\t`, `\n`), a backslash doubled, and double quotes when the value holds
+/// one of ` #';${}%` (a `"` then escaped), else single quotes when it holds
+/// a space or `"`. Measured: `user-keys[0] "\033[5;30012~"`, `user-keys[3]
+/// \033Oz` and `user-keys[6] \\e[96~`. Any other value keeps psmux's
+/// quoting, so a listing without those characters does not change. `-v`
+/// prints the value as it is, as tmux does.
+pub(crate) fn show_value(value: &str) -> String {
+    let control = |c: char| (c as u32) < 0x20 || c as u32 == 0x7f;
+    if !value.chars().any(|c| control(c) || c == '\\') {
+        return crate::util::quote_arg_if_needed(value);
+    }
+    let quotes = if value.chars().any(|c| " #';${}%".contains(c)) {
+        Some('"')
+    } else if value.chars().any(|c| " \"".contains(c)) {
+        Some('\'')
+    } else {
+        None
+    };
+    let mut out = String::with_capacity(value.len() + 8);
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\x0b' => out.push_str("\\v"),
+            '\x0c' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '"' if quotes == Some('"') => out.push_str("\\\""),
+            c if control(c) => out.push_str(&format!("\\{:03o}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    match quotes {
+        Some('"') => format!("\"{}\"", out),
+        Some(_) => format!("'{}'", out),
+        None => out,
     }
 }
 

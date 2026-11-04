@@ -28,6 +28,7 @@ mod clipboard;
 mod copy_mode;
 mod grid_reader;
 mod mouse_keys;
+mod user_keys;
 mod copy_prompt;
 mod input;
 mod extended_keys;

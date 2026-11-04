@@ -4858,6 +4858,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // inside quoted arguments.
                             let parts: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
                             for key in parts.iter() {
+                                // A user key (UserN, crate::user_keys) sends nothing to the pane
+                                // (input-keys.c:676).
+                                if crate::user_keys::parse(key).is_some() { continue; }
                                 let key_upper = key.to_uppercase();
                                 let normalized = match key_upper.as_str() {
                                     "ENTER" => "enter",
@@ -4900,6 +4903,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // (strict tmux would concatenate them).
                         let parts: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
                         for (i, key) in parts.iter().enumerate() {
+                            // A user key (UserN, crate::user_keys) sends nothing to the pane
+                            // (input-keys.c:676), as tmux's send-keys User0 does.
+                            if crate::user_keys::parse(key).is_some() { continue; }
                             let key_upper = key.to_uppercase();
                             let _is_special = matches!(key_upper.as_str(), 
                                 "ENTER" | "TAB" | "BTAB" | "BACKTAB" | "ESCAPE" | "ESC" | "SPACE" | "BSPACE" | "BACKSPACE" |
