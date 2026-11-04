@@ -132,3 +132,27 @@ fn an_unknown_user_name_is_diagnosed_as_tmux_reports_it() {
         assert!(!crate::config::is_unmodelled_tmux_key_name(name), "{name}");
     }
 }
+
+#[test]
+fn a_nerd_font_glyph_is_text_where_no_user_key_can_come_from() {
+    // U+F1000 is User0's stored form and also a Nerd Fonts 3 Material Design
+    // icon (nf-md range U+F0001 to U+F1AF0), which the console route delivers
+    // as a key event for that character after an IME commit, a paste or the
+    // emoji picker. Measured on the PR as first written: the glyph reached the
+    // pane on master and was dropped by the client.
+    let glyph = char_for(0).unwrap();
+    assert_eq!(glyph as u32, 0xF1000);
+    // The console route never produces a user key: the glyph is text, with or
+    // without user-keys set.
+    assert!(!drop_as_unbound(glyph, false, false));
+    assert!(!drop_as_unbound(glyph, false, true));
+    // The VT route with user-keys empty (everyone who never sets it): text.
+    assert!(!drop_as_unbound(glyph, true, false));
+    // Only the VT route with sequences set drops an unbound user key.
+    assert!(drop_as_unbound(glyph, true, true));
+    assert!(drop_as_unbound(char_for(1000).unwrap(), true, true));
+    // Neighbouring glyphs outside the user range are never dropped.
+    for v in [0xF0FFFu32, 0xF13E9, 0xF2000] {
+        assert!(!drop_as_unbound(char::from_u32(v).unwrap(), true, true), "U+{v:X}");
+    }
+}

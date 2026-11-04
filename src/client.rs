@@ -3776,6 +3776,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // characters out of the bracket), so there the head is judged as before.
     #[cfg(windows)]
     let release_shape_is_evidence = matches!(input, crate::ssh_input::InputSource::Crossterm { .. });
+    // Only the VT and pipe readers match user-keys sequences (crate::user_keys);
+    // the console record route never produces a user key.
+    let user_key_route = !matches!(input, crate::ssh_input::InputSource::Crossterm { .. });
 
     // Track whether a modified Enter Press was already handled this keypress
     // cycle.  WezTerm sends Shift+Enter as Release-only (no Press), so we
@@ -6174,8 +6177,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // A user key (crate::user_keys) that no table bound
                                 // sends nothing: tmux ignores it on the way to the
                                 // pane (input-keys.c:676), and it is no text for a
-                                // prompt or a chooser either.
-                                KeyCode::Char(c) if crate::user_keys::is_user_char(c) => {}
+                                // prompt or a chooser either. Only where a user key
+                                // can come from (the VT and pipe routes, with
+                                // user-keys set): elsewhere the same character is a
+                                // Nerd Font glyph the user typed, and goes on as text.
+                                KeyCode::Char(c) if crate::user_keys::drop_as_unbound(
+                                    c, user_key_route, crate::user_keys::any()) => {}
                                 // A chooser's kill question takes the very next key, as
                                 // tmux's prompt does: it is set with PROMPT_SINGLE, so it
                                 // ends on one key (`window-tree.c:1306`), and its callback

@@ -131,6 +131,22 @@ pub fn any() -> bool {
     ANY.load(Ordering::Acquire)
 }
 
+/// True when the client should drop `c` as an unbound user key rather than
+/// pass it on as text.
+///
+/// The stored range U+F1000 to U+F13E8 is also real text: Nerd Fonts 3 puts
+/// its Material Design icons at U+F0001 to U+F1AF0, and an IME commit, a
+/// paste or the emoji picker delivers such a glyph as a key event for that
+/// character. Only the VT and pipe input reader ever turns a sequence into a
+/// user key, and only while `user-keys` has elements, so anywhere else the
+/// character is the glyph the user typed and goes on as master always sent
+/// it: on the console route (`vt_route` false, where the console host parses
+/// the sequences before psmux reads them), and on any route while the option
+/// is empty. `have_sequences` is [`any`], passed in so the rule is testable.
+pub fn drop_as_unbound(c: char, vt_route: bool, have_sequences: bool) -> bool {
+    vt_route && have_sequences && is_user_char(c)
+}
+
 /// The sequences published by [`set_sequences`], if there are any.
 pub fn table() -> Option<Table> {
     if !any() {
