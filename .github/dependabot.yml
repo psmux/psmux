@@ -21,6 +21,12 @@ updates:
       - dependencies
     commit-message:
       prefix: build
+    ignore:
+      # Pinned in Cargo.toml: 0.2.3 with ratatui-core 0.1.2 counts some cells
+      # twice (test_osc8_stale_link case12). Only this version is skipped, so
+      # a later release is still proposed and rechecked.
+      - dependency-name: unicode-width
+        versions: ["0.2.3"]
     groups:
       # One PR per week for routine patch/minor churn keeps this from burying
       # real work. Security updates are deliberately left out of the group so
