@@ -634,10 +634,92 @@ pub enum StatusAlignment {
     Right,
 }
 
-/// Type of a clickable range defined by `#[range=...]`.
+/// Type of a clickable range defined by `#[range=...]`, the set tmux keeps
+/// (style.c style_parse, tmux.1 STYLES).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusRangeType {
+    /// `range=left`: a click is the `StatusLeft` mouse key.
+    Left,
+    /// `range=right`: a click is the `StatusRight` mouse key.
+    Right,
+    /// `range=window|N`: window index N of the session.
     Window(usize),
+    /// `range=session|$N`: the session with id N.
+    Session(usize),
+    /// `range=pane|%N`: the pane with id N.
+    Pane(usize),
+    /// `range=user|X`: X is what `#{mouse_status_range}` reports.
+    User(String),
+    /// `range=control|N`, N 0 to 9: a click is the `ControlN` mouse key.
+    Control(u8),
+}
+
+impl StatusRangeType {
+    /// What `#{mouse_status_range}` reports for a click in this range
+    /// (tmux format.c format_cb_mouse_status_range).
+    pub fn format_name(&self) -> &str {
+        match self {
+            StatusRangeType::Left => "left",
+            StatusRangeType::Right => "right",
+            StatusRangeType::Window(_) => "window",
+            StatusRangeType::Session(_) => "session",
+            StatusRangeType::Pane(_) => "pane",
+            StatusRangeType::User(s) => s,
+            StatusRangeType::Control(_) => "control",
+        }
+    }
+
+    /// The location part of the mouse key a click in this range produces
+    /// (tmux server_client_check_mouse): `Status`, `StatusLeft`,
+    /// `StatusRight` or `ControlN`.
+    pub fn key_location(&self) -> String {
+        match self {
+            StatusRangeType::Left => "StatusLeft".into(),
+            StatusRangeType::Right => "StatusRight".into(),
+            StatusRangeType::Control(n) => format!("Control{}", n),
+            _ => "Status".into(),
+        }
+    }
+}
+
+/// Parse the value of a `range=` style directive the way tmux's style_parse
+/// does: the type name is case insensitive, `left` and `right` take no
+/// argument, `window|N`, `session|$N`, `pane|%N`, `user|X` and `control|N`
+/// (0 to 9) need one. `None` for anything tmux rejects. tmux keeps at most 15
+/// bytes of a user range's argument (range_string[16]).
+pub fn parse_range_value(val: &str) -> Option<StatusRangeType> {
+    let (name, arg) = match val.split_once('|') {
+        Some((n, a)) => {
+            if a.is_empty() {
+                return None;
+            }
+            (n, Some(a))
+        }
+        None => (val, None),
+    };
+    let num = |s: &str| -> Option<usize> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse::<u32>().ok().map(|n| n as usize)
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "left" if arg.is_none() => Some(StatusRangeType::Left),
+        "right" if arg.is_none() => Some(StatusRangeType::Right),
+        "window" => num(arg?).map(StatusRangeType::Window),
+        "session" => num(arg?.strip_prefix('$')?).map(StatusRangeType::Session),
+        "pane" => num(arg?.strip_prefix('%')?).map(StatusRangeType::Pane),
+        "control" => num(arg?).filter(|n| *n <= 9).map(|n| StatusRangeType::Control(n as u8)),
+        "user" => {
+            let a = arg?;
+            let mut end = a.len().min(15);
+            while !a.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(StatusRangeType::User(a[..end].to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// A token from parsing a format string with layout awareness.
@@ -730,12 +812,9 @@ pub fn parse_format_segments(text: &str, base_style: Style) -> Vec<FormatToken> 
                         tokens.push(FormatToken::ListRightMarker);
                     } else if p == "nolist" || p == "list=off" {
                         tokens.push(FormatToken::NoList);
-                    } else if p.starts_with("range=") {
-                        let val = &p[6..];
-                        if let Some(rest) = val.strip_prefix("window|") {
-                            if let Ok(n) = rest.parse::<usize>() {
-                                tokens.push(FormatToken::Range(StatusRangeType::Window(n)));
-                            }
+                    } else if p.len() > 6 && p[..6].eq_ignore_ascii_case("range=") {
+                        if let Some(rt) = parse_range_value(&p[6..]) {
+                            tokens.push(FormatToken::Range(rt));
                         }
                     } else if p == "norange" {
                         tokens.push(FormatToken::NoRange);
@@ -904,6 +983,14 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
             }
             FormatToken::NoList => { list_state = ListSt::Normal; }
             FormatToken::Range(rt) => {
+                // A new range ends the one before it, as a style change of
+                // the range does in tmux (format-draw.c format_draw_none).
+                if let Some((prt, sec, in_list, start_col)) = active_range.take() {
+                    let end_col = current_col(&left, &centre, &right, sec, in_list, list_total_w);
+                    recorded_ranges.push(RangeRecord {
+                        range_type: prt, section: sec, in_list, start_col, end_col,
+                    });
+                }
                 let col = current_col(&left, &centre, &right, current_align,
                                       list_state == ListSt::InList, list_total_w);
                 active_range = Some((rt.clone(), current_align, list_state == ListSt::InList, col));

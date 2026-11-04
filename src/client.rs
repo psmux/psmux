@@ -4314,10 +4314,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // pane-relative, drag handed to copy mode yet). The whole gesture then
     // goes through the key tables instead of the client selection.
     let mut pane_gesture: Option<(usize, Rect, char, char, (i16, i16), bool)> = None;
-    // tmux's click timer for the status line, used only while a
-    // Second/Double/TripleClick1Status binding exists: (presses so far, the
-    // window's end, target, col, row).
-    let mut status_clicks: Option<(u8, Instant, String, u16, u16)> = None;
+    // tmux's click timer for the status line, used only while a status line
+    // multi click (SecondClick1Status, DoubleClick1StatusLeft, ...) is
+    // bound: (presses so far, the window's end, the hit, whether it was on
+    // psmux's own status layout).
+    let mut status_clicks: Option<(u8, Instant, crate::mouse_keys::StatusHit, bool)> = None;
+    // A button went down on the status line and is not up yet, so its drag
+    // and release are status line keys too (#988).
+    let mut status_pressed = false;
     // The copy-mode line number mode and scrollback size the frames are being
     // painted with, which is what the gutter width is computed from. Kept out
     // here because a copy-mode release re-reports a cell the server gave as a
@@ -4325,11 +4329,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // (`copy_release_repin`).
     let mut client_copy_ln: (crate::copy_line_numbers::CopyLnMode, usize) =
         (crate::copy_line_numbers::CopyLnMode::Off, 0);
-    // Track rendered tab positions for accurate mouse click detection.
-    // (row, window_display_idx, x_start, x_end) — one entry per clickable tab
-    // span, on WHICHEVER status row it renders (#593: multi-row bars carry
-    // clickable ranges on every line, matching tmux status_get_range).
-    let mut client_tab_positions: Vec<(u16, usize, u16, u16)> = Vec::new();
+    // The clickable ranges as drawn: (row, range, x_start, x_end), on
+    // WHICHEVER status row they render (#593: multi-row bars carry
+    // clickable ranges on every line, matching tmux status_get_range), of
+    // every range type tmux has (#988).
+    let mut client_status_ranges: Vec<crate::mouse_keys::StatusRangeCell> = Vec::new();
+    // The status row drawn with psmux's own layout (no status-format[0]),
+    // whose left, window list and right parts stand in for tmux's default
+    // status-format ranges.
+    let mut client_status_builtin_row: Option<u16> = None;
     let mut client_status_row: u16 = u16::MAX; // first status bar row
     let mut client_status_rows: u16 = 0; // status bar height in rows (0 = hidden)
     // Display indices of windows that actually exist, so a click on a
@@ -7392,6 +7400,50 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             _pending_evt = input.try_read()?;
                             continue;
                         }
+                        // The status line keys of the other buttons, and of a
+                        // release or drag after a status press (#988): only a
+                        // user binding takes the event; unbound, it does what
+                        // it always did here.
+                        {
+                            let on_status = client_status_rows > 0
+                                && me.row >= client_status_row
+                                && me.row < client_status_row.saturating_add(client_status_rows);
+                            let from_status = status_pressed;
+                            match me.kind {
+                                MouseEventKind::Up(_) => status_pressed = false,
+                                MouseEventKind::Down(_) => status_pressed = on_status,
+                                _ => {}
+                            }
+                            let num = |b: MouseButton| match b { MouseButton::Left => 1, MouseButton::Middle => 2, MouseButton::Right => 3 };
+                            let ev = match me.kind {
+                                MouseEventKind::Down(b) if b != MouseButton::Left => Some(("MouseDown", num(b))),
+                                MouseEventKind::Up(b) if from_status => Some(("MouseUp", num(b))),
+                                MouseEventKind::Drag(b) if from_status => Some(("MouseDrag", num(b))),
+                                _ => None,
+                            };
+                            if let (Some((ev, b)), true, false) = (ev, on_status, mouse_overrides.is_empty()) {
+                                let builtin_row = client_status_builtin_row == Some(me.row);
+                                if let Some(hit) = crate::mouse_keys::status_hit(
+                                    &client_status_ranges, client_status_row, me.row, me.column, &client_window_indices,
+                                ) {
+                                    let loc = hit.location();
+                                    let n = routed_name(&mouse_overrides, &format!("{}{}{}", ev, b, loc), me.modifiers);
+                                    let f = routed_name(&mouse_overrides, &format!("{}{}Status", ev, b), me.modifiers);
+                                    let chosen = if mouse_route(&mouse_overrides, &n, client_copy_mode) == 'U' {
+                                        Some(n)
+                                    } else if builtin_row && loc != "Status" && mouse_route(&mouse_overrides, &f, client_copy_mode) == 'U' {
+                                        Some(f)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(n) = chosen {
+                                        cmd_batch.push(hit.command(&n, None));
+                                        _pending_evt = input.try_read()?;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // Status bar tab click. Every status row is
@@ -7403,64 +7455,76 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 if client_status_rows > 0
                                     && me.row >= client_status_row
                                     && me.row < client_status_row.saturating_add(client_status_rows) {
-                                    let mut clicked_tab: Option<usize> = None;
-                                    for &(row, win_idx, x_start, x_end) in &client_tab_positions {
-                                        if me.row == row && me.column >= x_start && me.column < x_end {
-                                            clicked_tab = Some(win_idx);
-                                            break;
-                                        }
-                                    }
-                                    // tmux MouseDown1Status: built in, select the
-                                    // window clicked; a user binding runs with that
-                                    // window as `-t =`; unbound, nothing.
-                                    // Status line multi clicks, when one is bound
-                                    // (tmux server_client_check_mouse).
-                                    if mouse_overrides.keys().any(|k| k.ends_with("Click1Status")) {
-                                        let target = clicked_tab
-                                            .filter(|i| client_window_indices.contains(i))
-                                            .map(|i| format!(":{}", i))
-                                            .unwrap_or_else(|| ":".to_string());
-                                        let now = Instant::now();
-                                        let window = Duration::from_millis(crate::mouse_keys::CLICK_TIMEOUT_MS);
-                                        let send = |name: &str, batch: &mut Vec<String>| {
-                                            if mouse_route(&mouse_overrides, name, client_copy_mode) == 'U' {
-                                                batch.push(format!("mouse-key {} {} {} {} 0\n", name, target, me.column, me.row));
+                                    // tmux server_client_check_mouse (#988): the
+                                    // range under the pointer picks the key,
+                                    // MouseDown1Status in a window, session, pane or
+                                    // user range, MouseDown1StatusLeft / Right /
+                                    // ControlN in those, MouseDown1StatusDefault
+                                    // outside every range; a window range naming
+                                    // no window gives no key.
+                                    let builtin_row = client_status_builtin_row == Some(me.row);
+                                    if let Some(hit) = crate::mouse_keys::status_hit(
+                                        &client_status_ranges, client_status_row, me.row, me.column, &client_window_indices,
+                                    ) {
+                                        let loc = hit.location();
+                                        // The key a status press of `ev` looks up: the
+                                        // range's own when bound. On psmux's own layout
+                                        // every press used to be a Status key, so there
+                                        // an unbound StatusLeft / StatusRight /
+                                        // StatusDefault key still looks up the Status
+                                        // one and a binding of it keeps working.
+                                        let bound_key = |ev: &str| -> Option<String> {
+                                            let n = routed_name(&mouse_overrides, &format!("{}1{}", ev, loc), me.modifiers);
+                                            if mouse_route(&mouse_overrides, &n, client_copy_mode) == 'U' {
+                                                return Some(n);
                                             }
-                                        };
-                                        status_clicks = match status_clicks.take() {
-                                            Some((1, end, ..)) if now < end => {
-                                                send("SecondClick1Status", &mut cmd_batch);
-                                                Some((2, now + window, target.clone(), me.column, me.row))
-                                            }
-                                            Some((2, end, ..)) if now < end => {
-                                                send("TripleClick1Status", &mut cmd_batch);
-                                                None
-                                            }
-                                            _ => Some((1, now + window, target.clone(), me.column, me.row)),
-                                        };
-                                    }
-                                    let status_name = routed_name(&mouse_overrides, "MouseDown1Status", me.modifiers);
-                                    match mouse_route(&mouse_overrides, &status_name, client_copy_mode) {
-                                        'B' => {
-                                            if let Some(idx) = clicked_tab {
-                                                // client_tab_positions stores the true display
-                                                // index (honors gaps from renumber-windows off).
-                                                // A range naming a window that does not exist
-                                                // is ignored, matching tmux.
-                                                if client_window_indices.contains(&idx) {
-                                                    cmd_batch.push(format!("select-window -t :{}\n", idx));
+                                            if builtin_row && loc != "Status" {
+                                                let f = routed_name(&mouse_overrides, &format!("{}1Status", ev), me.modifiers);
+                                                if mouse_route(&mouse_overrides, &f, client_copy_mode) == 'U' {
+                                                    return Some(f);
                                                 }
                                             }
+                                            None
+                                        };
+                                        // Status line multi clicks, when one is bound
+                                        // (tmux server_client_check_mouse): a press at
+                                        // another location starts the count again.
+                                        if mouse_overrides.keys().any(|k| k.contains("Click1Status") || k.contains("Click1Control")) {
+                                            let now = Instant::now();
+                                            let window = Duration::from_millis(crate::mouse_keys::CLICK_TIMEOUT_MS);
+                                            status_clicks = match status_clicks.take() {
+                                                Some((1, end, prev, _)) if now < end && prev.location() == loc => {
+                                                    if let Some(n) = bound_key("SecondClick") {
+                                                        cmd_batch.push(hit.command(&n, None));
+                                                    }
+                                                    Some((2, now + window, hit.clone(), builtin_row))
+                                                }
+                                                Some((2, end, prev, _)) if now < end && prev.location() == loc => {
+                                                    if let Some(n) = bound_key("TripleClick") {
+                                                        cmd_batch.push(hit.command(&n, None));
+                                                    }
+                                                    None
+                                                }
+                                                _ => Some((1, now + window, hit.clone(), builtin_row)),
+                                            };
                                         }
-                                        'U' => {
-                                            let target = clicked_tab
-                                                .filter(|i| client_window_indices.contains(i))
-                                                .map(|i| format!(":{}", i))
-                                                .unwrap_or_else(|| ":".to_string());
-                                            cmd_batch.push(format!("mouse-key {} {} {} {} 0\n",
-                                                status_name, target, me.column, me.row));
+                                        if loc == "Status" {
+                                            // tmux MouseDown1Status: built in, select the
+                                            // window clicked; a user binding runs with the
+                                            // range's window, session or pane as `-t =`.
+                                            let status_name = routed_name(&mouse_overrides, "MouseDown1Status", me.modifiers);
+                                            match mouse_route(&mouse_overrides, &status_name, client_copy_mode) {
+                                                'B' => {
+                                                    if let Some(crate::style::StatusRangeType::Window(idx)) = hit.range {
+                                                        cmd_batch.push(format!("select-window -t :{}\n", idx));
+                                                    }
+                                                }
+                                                'U' => cmd_batch.push(hit.command(&status_name, None)),
+                                                _ => {}
+                                            }
+                                        } else if let Some(n) = bound_key("MouseDown") {
+                                            cmd_batch.push(hit.command(&n, None));
                                         }
-                                        _ => {}
                                     }
                                 } else {
                                     // Border detection
@@ -8245,8 +8309,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     let on_status = client_status_rows > 0
                                         && me.row >= client_status_row
                                         && me.row < client_status_row.saturating_add(client_status_rows);
-                                    cmd_batch.push(format!("scroll-up {} {} {}{}\n", me.column, me.row,
-                                        crate::mouse_keys::sgr_mod_bits(me.modifiers), if on_status { " S" } else { "" }));
+                                    if on_status {
+                                        // WheelUpStatus, WheelUpStatusLeft, ... from
+                                        // the range under the pointer (#988); on
+                                        // psmux's own layout an unbound one looks up
+                                        // the Status key, as every notch there did.
+                                        if let Some(hit) = crate::mouse_keys::status_hit(
+                                            &client_status_ranges, client_status_row, me.row, me.column, &client_window_indices,
+                                        ) {
+                                            let pre = crate::mouse_keys::mod_prefix(me.modifiers);
+                                            let name = format!("{}WheelUp{}", pre, hit.location());
+                                            let fallback = format!("{}WheelUpStatus", pre);
+                                            let builtin_row = client_status_builtin_row == Some(me.row);
+                                            let fb = (builtin_row && name != fallback).then_some(fallback.as_str());
+                                            cmd_batch.push(hit.command(&name, fb));
+                                        }
+                                    } else {
+                                        cmd_batch.push(format!("scroll-up {} {} {}\n", me.column, me.row,
+                                            crate::mouse_keys::sgr_mod_bits(me.modifiers)));
+                                    }
                                 }
                             }
                             MouseEventKind::ScrollDown => {
@@ -8265,8 +8346,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     let on_status = client_status_rows > 0
                                         && me.row >= client_status_row
                                         && me.row < client_status_row.saturating_add(client_status_rows);
-                                    cmd_batch.push(format!("scroll-down {} {} {}{}\n", me.column, me.row,
-                                        crate::mouse_keys::sgr_mod_bits(me.modifiers), if on_status { " S" } else { "" }));
+                                    if on_status {
+                                        // WheelUpStatus, WheelUpStatusLeft, ... from
+                                        // the range under the pointer (#988); on
+                                        // psmux's own layout an unbound one looks up
+                                        // the Status key, as every notch there did.
+                                        if let Some(hit) = crate::mouse_keys::status_hit(
+                                            &client_status_ranges, client_status_row, me.row, me.column, &client_window_indices,
+                                        ) {
+                                            let pre = crate::mouse_keys::mod_prefix(me.modifiers);
+                                            let name = format!("{}WheelDown{}", pre, hit.location());
+                                            let fallback = format!("{}WheelDownStatus", pre);
+                                            let builtin_row = client_status_builtin_row == Some(me.row);
+                                            let fb = (builtin_row && name != fallback).then_some(fallback.as_str());
+                                            cmd_batch.push(hit.command(&name, fb));
+                                        }
+                                    } else {
+                                        cmd_batch.push(format!("scroll-down {} {} {}\n", me.column, me.row,
+                                            crate::mouse_keys::sgr_mod_bits(me.modifiers)));
+                                    }
                                 }
                             }
                             _ => {}
@@ -8517,10 +8615,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
         // tmux's click timer ran out after a second status line press:
         // DoubleClick1Status.
-        if let Some((count, end, ref target, col, row)) = status_clicks {
+        if let Some((count, end, ref hit, builtin_row)) = status_clicks {
             if Instant::now() >= end {
-                if count == 2 && mouse_route(&mouse_overrides, "DoubleClick1Status", client_copy_mode) == 'U' {
-                    cmd_batch.push(format!("mouse-key DoubleClick1Status {} {} {} 0\n", target, col, row));
+                if count == 2 {
+                    let loc = hit.location();
+                    let n = format!("DoubleClick1{}", loc);
+                    if mouse_route(&mouse_overrides, &n, client_copy_mode) == 'U' {
+                        cmd_batch.push(hit.command(&n, None));
+                    } else if builtin_row && loc != "Status"
+                        && mouse_route(&mouse_overrides, "DoubleClick1Status", client_copy_mode) == 'U'
+                    {
+                        cmd_batch.push(hit.command("DoubleClick1Status", None));
+                    }
                 }
                 status_clicks = None;
             }
@@ -10012,9 +10118,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
                 _ => left_w as u16, // "left" default
             };
-            client_tab_positions = tab_rel_positions.iter()
-                .map(|&(idx, s, e)| (status_chunk.y, idx, s + tabs_x_offset, e + tabs_x_offset))
-                .collect();
+            // tmux's default status-format marks status-left range=left, the
+            // window list range=window|N and status-right range=right
+            // (options-table.c OPTIONS_TABLE_STATUS_FORMAT1); this layout
+            // draws the same three parts, so it gets the same ranges.
+            client_status_ranges.clear();
+            if left_w > 0 {
+                client_status_ranges.push((status_chunk.y, crate::style::StatusRangeType::Left,
+                    status_chunk.x, status_chunk.x + left_w.min(total_width) as u16));
+            }
+            client_status_ranges.extend(tab_rel_positions.iter().map(|&(idx, s, e)| {
+                (status_chunk.y, crate::style::StatusRangeType::Window(idx), s + tabs_x_offset, e + tabs_x_offset)
+            }));
+            if right_w > 0 {
+                let tabs_end = (tabs_x_offset - status_chunk.x) as usize + tabs_w;
+                let right_start = total_width.saturating_sub(right_w).max(tabs_end).min(total_width);
+                client_status_ranges.push((status_chunk.y, crate::style::StatusRangeType::Right,
+                    status_chunk.x + right_start as u16, status_chunk.x + total_width as u16));
+            }
+            client_status_builtin_row = Some(status_chunk.y);
             client_status_row = status_chunk.y;
             client_status_rows = status_chunk.height;
             client_window_indices = windows.iter().map(|w| w.idx).collect();
@@ -10109,13 +10231,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // winlink_find_by_index (style.c strtonum, server-client.c
                 // STYLE_RANGE_WINDOW) with no base-index arithmetic, so
                 // `#[range=window|#{window_index}]` works at any base-index.
-                client_tab_positions = layout.ranges.iter().filter_map(|(rt, s, e)| {
-                    match rt {
-                        crate::style::StatusRangeType::Window(idx) => {
-                            Some((status_chunk.y, *idx, *s + status_chunk.x, *e + status_chunk.x))
-                        }
-                    }
-                }).collect();
+                client_status_ranges.clear();
+                client_status_ranges.extend(layout.ranges.iter().map(|(rt, s, e)| {
+                    (status_chunk.y, rt.clone(), *s + status_chunk.x, *e + status_chunk.x)
+                }));
+                client_status_builtin_row = None;
                 let fmt0_widget = Paragraph::new(Line::from(layout.spans)).style(sb_base);
                 f.render_widget(fmt0_widget, line0_area);
             } else {
@@ -10138,11 +10258,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // fills sle->ranges for every i in 0..lines) so a window list
                 // on status-format[1] is just as clickable as on line 0.
                 for (rt, s, e) in &layout.ranges {
-                    match rt {
-                        crate::style::StatusRangeType::Window(idx) => {
-                            client_tab_positions.push((line_y, *idx, *s + line_area.x, *e + line_area.x));
-                        }
-                    }
+                    client_status_ranges.push((line_y, rt.clone(), *s + line_area.x, *e + line_area.x));
                 }
                 let line_widget = Paragraph::new(Line::from(layout.spans)).style(sb_base);
                 f.render_widget(line_widget, line_area);

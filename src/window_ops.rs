@@ -2260,6 +2260,8 @@ pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Optio
             focus_pane_by_id(app, pane_id);
             let btn = (if up { 64 } else { 65 }) + crate::mouse_keys::sgr_mod_bits(mods);
             app.last_mouse_event = Some((pane_id, btn, true, at, std::time::Instant::now()));
+            let (c, r) = at.unwrap_or((0, 0));
+            note_mouse_pane(app, pane_id, c, r);
             run_mouse_binding(app, pane_id, &cmd);
         }
     }
@@ -2309,7 +2311,104 @@ pub fn handle_mouse_key(app: &mut AppState, name: &str, target: &str, col: i16, 
     if let crate::mouse_keys::Dispatch::User(cmd) = dispatch {
         let pane_id = pane_for_clicks;
         app.last_mouse_event = pane_id.map(|p| (p, btn, true, Some((col, row)), std::time::Instant::now()));
+        match pane_id {
+            Some(p) => note_mouse_pane(app, p, col, row),
+            None => app.mouse_fmt = None,
+        }
         run_mouse_binding_to(app, target, &cmd);
+    }
+}
+
+/// Remember a pane mouse event for the binding about to run:
+/// #{mouse_x} / #{mouse_y} are the pane relative cell (tmux cmd_mouse_at),
+/// #{mouse_line} / #{mouse_word} read that pane.
+fn note_mouse_pane(app: &mut AppState, pane_id: usize, col: i16, row: i16) {
+    app.mouse_fmt = Some(crate::types::MouseFormat {
+        x: col.max(0) as u16,
+        y: row.max(0) as u16,
+        pane: Some(pane_id),
+        status_line: None,
+        status_range: None,
+    });
+}
+
+/// A mouse event on the status line, as the client resolved it from the
+/// range under the pointer (#988, tmux server_client_check_mouse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusMouse {
+    /// The key, e.g. `MouseDown1StatusLeft`, `C-WheelUpStatus`,
+    /// `MouseDown1Control3`.
+    pub name: String,
+    /// The key to look up instead when `name` is unbound, for psmux's own
+    /// status layout (see the client).
+    pub fallback: Option<String>,
+    /// The mouse target: `:N` window, `:` current, `$N` session, `%N` pane.
+    pub target: String,
+    /// Column, and the line within the status lines.
+    pub x: u16,
+    pub line: u16,
+    /// What #{mouse_status_range} reports; None outside every range.
+    pub range: Option<String>,
+}
+
+/// Run the status line mouse key `ev` (tmux server_client_check_mouse and
+/// key-bindings.c): a user binding runs with the range's window, session or
+/// pane as `-t =` / `{mouse}`; the built in WheelUpStatus / WheelDownStatus
+/// switch windows; anything unbound does nothing.
+pub fn handle_status_mouse(app: &mut AppState, ev: &StatusMouse) {
+    if matches!(app.mode, Mode::PopupMode { .. }) {
+        return;
+    }
+    // A range naming a session or pane that is not there gives no key at
+    // all (tmux returns KEYC_UNKNOWN). This server's one session is the
+    // current one, so `-t =` for it is the current window.
+    let target = if let Some(id) = ev.target.strip_prefix('$') {
+        if id.parse::<usize>().ok() != Some(app.session_id) {
+            return;
+        }
+        ":".to_string()
+    } else if let Some(id) = ev.target.strip_prefix('%') {
+        match id.parse::<usize>() {
+            Ok(p) if crate::tree::find_pane_by_id_global(app, p).is_some() => ev.target.clone(),
+            _ => return,
+        }
+    } else {
+        ev.target.clone()
+    };
+    let Some(mut key) = crate::mouse_keys::parse(&ev.name) else { return };
+    let in_copy = app.mode.in_copy();
+    let mut dispatch = crate::mouse_keys::resolve(app, key, in_copy);
+    if matches!(dispatch, crate::mouse_keys::Dispatch::Forward | crate::mouse_keys::Dispatch::Drop) {
+        if let Some(fb) = ev.fallback.as_deref().and_then(crate::mouse_keys::parse) {
+            key = fb;
+            dispatch = crate::mouse_keys::resolve(app, key, in_copy);
+        }
+    }
+    mouse_log(&format!("handle_status_mouse: {:?} -> {:?}", ev, dispatch));
+    app.mouse_fmt = Some(crate::types::MouseFormat {
+        x: ev.x,
+        y: ev.line,
+        pane: None,
+        status_line: Some(ev.line),
+        status_range: ev.range.clone(),
+    });
+    match dispatch {
+        crate::mouse_keys::Dispatch::Builtin => {
+            let up = crate::mouse_keys::key(crate::mouse_keys::EV_WHEEL_UP, 0, crate::mouse_keys::LOC_STATUS, key.1);
+            let down = crate::mouse_keys::key(crate::mouse_keys::EV_WHEEL_DOWN, 0, crate::mouse_keys::LOC_STATUS, key.1);
+            if key == up {
+                let _ = crate::commands::execute_command_string(app, "previous-window");
+            } else if key == down {
+                let _ = crate::commands::execute_command_string(app, "next-window");
+            }
+            // MouseDown1Status's built in (select the window) runs in the
+            // client, which never sends it here.
+        }
+        crate::mouse_keys::Dispatch::User(cmd) => {
+            app.last_mouse_event = None;
+            run_mouse_binding_to(app, &target, &cmd);
+        }
+        crate::mouse_keys::Dispatch::Forward | crate::mouse_keys::Dispatch::Drop => {}
     }
 }
 
@@ -2347,6 +2446,7 @@ pub fn note_pane_press(app: &mut AppState, pane_id: usize, col: i16, row: i16) {
             let key = crate::mouse_keys::key(crate::mouse_keys::EV_SECOND_CLICK, 1, crate::mouse_keys::LOC_PANE, crossterm::event::KeyModifiers::NONE);
             if let crate::mouse_keys::Dispatch::User(cmd) = crate::mouse_keys::resolve(app, key, app.mode.in_copy()) {
                 app.last_mouse_event = Some((pane_id, 0, true, Some((col, row)), now));
+                note_mouse_pane(app, pane_id, col, row);
                 run_mouse_binding(app, pane_id, &cmd);
             }
         }
@@ -2400,6 +2500,7 @@ fn multi_click(app: &mut AppState, double: bool, pane_id: usize, col: i16, row: 
     match dispatch {
         crate::mouse_keys::Dispatch::User(cmd) => {
             app.last_mouse_event = Some((pane_id, 0, true, Some((col, row)), std::time::Instant::now()));
+            note_mouse_pane(app, pane_id, col, row);
             run_mouse_binding(app, pane_id, &cmd);
         }
         crate::mouse_keys::Dispatch::Builtin => {

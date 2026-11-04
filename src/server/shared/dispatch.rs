@@ -2775,6 +2775,7 @@ pub(crate) fn dispatch(
                 CtrlReq::MouseMove(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); if remote_mouse_motion(&mut app, x, y) { state_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 // copied from server/mod.rs run_server (line 4368 at 86a78100)
                 CtrlReq::MouseKey(cid, name, target, col, row, btn) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_mouse_key(&mut app, &name, &target, col, row, btn); state_dirty = true; meta_dirty = true; } }
+                CtrlReq::StatusMouse(cid, ev) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_status_mouse(&mut app, &ev); state_dirty = true; meta_dirty = true; } }
                 // copied from server/mod.rs run_server (line 4369 at 86a78100)
                 CtrlReq::MouseForward(cid, pane_id, btn, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::forward_mouse_to_pane(&mut app, pane_id, btn, press, Some((col, row))); state_dirty = true; } }
                 // copied from server/mod.rs run_server (line 4356 at 86a78100)

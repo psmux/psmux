@@ -4013,6 +4013,26 @@ match cmd {
             let _ = tx.send(CtrlReq::MouseKey(client_id, args[0].to_string(), args[1].to_string(), col, row, btn));
         }
     }
+    "status-mouse" => {
+        // status-mouse NAME FALLBACK TARGET X LINE RANGE (#988): a status
+        // line mouse key as the client resolved it from the range under the
+        // pointer. FALLBACK is `-` for none; RANGE is the hex of what
+        // #{mouse_status_range} reports, `-` outside every range (hex keeps
+        // a user range's argument one word whatever it holds).
+        if args.len() >= 6 {
+            let opt = |s: &str| if s == "-" { None } else { Some(s.to_string()) };
+            let range = if args[5] == "-" { None } else { crate::util::hex_decode(args[5]).and_then(|b| String::from_utf8(b).ok()) };
+            let ev = crate::window_ops::StatusMouse {
+                name: args[0].to_string(),
+                fallback: opt(args[1]),
+                target: args[2].to_string(),
+                x: args[3].parse::<u16>().unwrap_or(0),
+                line: args[4].parse::<u16>().unwrap_or(0),
+                range,
+            };
+            let _ = tx.send(CtrlReq::StatusMouse(client_id, ev));
+        }
+    }
     "mouse-forward" => {
         // mouse-forward PANE BTN COL ROW M|m: an unbound root mouse key, for
         // the program in the pane only if it asked for the mouse (tmux

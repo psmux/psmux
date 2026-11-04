@@ -1559,6 +1559,7 @@ fn no_session_var(var: &str) -> bool {
         "bracket_paste_flag", "history_bytes", "history_size", "insert_flag", "line", "origin_flag", "wrap_flag",
         "mouse_all_flag", "mouse_any_flag", "mouse_button_flag", "mouse_standard_flag",
         "mouse_utf8_flag", "mouse_line", "mouse_word", "mouse_x", "mouse_y",
+        "mouse_status_line", "mouse_status_range",
     ];
     PREFIXES.iter().any(|p| var.starts_with(p)) || NAMES.contains(&var)
 }
@@ -2254,52 +2255,41 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
 
         // ── Mouse ──
-        "mouse_x" => app.last_mouse_x.to_string(),
-        "mouse_y" => app.last_mouse_y.to_string(),
-        "mouse_line" => {
-            if let Some(w) = app.windows.get(win_idx) {
-                if let Some(p) = active_pane(&w.root, &w.active_path) {
-                    if let Ok(parser) = p.term.lock() {
-                        let screen = parser.screen();
-                        let cols = p.last_cols;
-                        // Convert screen-absolute mouse_y to pane-relative row
-                        let mut rects = Vec::new();
-                        crate::tree::format_rects(w, &mut rects);
-                        let pane_y_offset = rects.iter()
-                            .find(|(path, _)| crate::tree::get_active_pane_id_at_path(&w.root, path) == Some(p.id))
-                            .map(|(_, rect)| rect.y)
-                            .unwrap_or(0);
-                        let row = app.last_mouse_y.saturating_sub(pane_y_offset);
-                        let mut row_text = String::with_capacity(cols as usize);
-                        for col in 0..cols {
-                            if let Some(cell) = screen.cell(row, col) {
-                                let t = cell.contents();
-                                if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
-                            } else { row_text.push(' '); }
-                        }
-                        return row_text.trim_end().to_string();
-                    }
-                }
+        // tmux format.c format_cb_mouse_x / _y / _line / _word /
+        // _status_line / _status_range: the mouse event of the running
+        // binding; empty without one. x and y are pane relative for a pane
+        // event, and the column and line within the status lines for a
+        // status event (#988).
+        "mouse_x" => app.mouse_fmt.as_ref().map_or(String::new(), |m| m.x.to_string()),
+        "mouse_y" => app.mouse_fmt.as_ref().map_or(String::new(), |m| m.y.to_string()),
+        "mouse_status_line" => app.mouse_fmt.as_ref()
+            .and_then(|m| m.status_line)
+            .map_or(String::new(), |l| l.to_string()),
+        "mouse_status_range" => app.mouse_fmt.as_ref()
+            .and_then(|m| m.status_range.clone())
+            .unwrap_or_default(),
+        "mouse_line" | "mouse_word" => {
+            let Some(m) = app.mouse_fmt.as_ref() else { return String::new() };
+            let Some(pane_id) = m.pane else { return String::new() };
+            let Some(p) = app.windows.iter().find_map(|w| {
+                crate::tree::find_path_by_id(&w.root, pane_id).and_then(|path| active_pane(&w.root, &path))
+            }) else {
+                return String::new();
+            };
+            let Ok(mut parser) = p.term.lock() else { return String::new() };
+            if var == "mouse_word" {
+                return grid_word(&mut parser, m.y, m.x, &app.word_separators);
             }
-            String::new()
-        }
-        "mouse_word" => {
-            if let Some(w) = app.windows.get(win_idx) {
-                if let Some(p) = active_pane(&w.root, &w.active_path) {
-                    if let Ok(mut parser) = p.term.lock() {
-                        let mut rects = Vec::new();
-                        crate::tree::format_rects(w, &mut rects);
-                        let (pane_x_offset, pane_y_offset) = rects.iter()
-                            .find(|(path, _)| crate::tree::get_active_pane_id_at_path(&w.root, path) == Some(p.id))
-                            .map(|(_, rect)| (rect.x, rect.y))
-                            .unwrap_or((0, 0));
-                        let row = app.last_mouse_y.saturating_sub(pane_y_offset);
-                        let col = app.last_mouse_x.saturating_sub(pane_x_offset);
-                        return grid_word(&mut parser, row, col, &app.word_separators);
-                    }
-                }
+            let screen = parser.screen();
+            let cols = p.last_cols;
+            let mut row_text = String::with_capacity(cols as usize);
+            for col in 0..cols {
+                if let Some(cell) = screen.cell(m.y, col) {
+                    let t = cell.contents();
+                    if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
+                } else { row_text.push(' '); }
             }
-            String::new()
+            row_text.trim_end().to_string()
         }
 
         // ── Copy mode ──

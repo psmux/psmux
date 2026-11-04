@@ -32,7 +32,11 @@ const MAX_BUTTON: u32 = 11;
 const LOCATIONS: &[&str] = &[
     "Pane", "Status", "StatusLeft", "StatusRight", "StatusDefault",
     "ScrollbarUp", "ScrollbarSlider", "ScrollbarDown", "Border", "Empty",
+    "Control0", "Control1", "Control2", "Control3", "Control4",
+    "Control5", "Control6", "Control7", "Control8", "Control9",
 ];
+/// Room for each location in the encoding (LOCATIONS.len() fits).
+const LOC_SLOTS: u32 = 32;
 
 pub const EV_MOUSE_DOWN: usize = 0;
 pub const EV_MOUSE_DRAG: usize = 2;
@@ -51,14 +55,24 @@ pub const LOC_STATUS: usize = 1;
 pub const LOC_BORDER: usize = 8;
 
 fn encode(event: usize, button: u32, location: usize) -> char {
-    let code = ((event as u32 * 16 + button) * 16) + location as u32;
+    let code = ((event as u32 * 16 + button) * LOC_SLOTS) + location as u32;
     char::from_u32(BASE + code).expect("mouse key code is a valid scalar")
 }
 
 /// True when `c` is the stored form of a mouse key.
 pub fn is_mouse_char(c: char) -> bool {
     let v = c as u32;
-    v >= BASE && v < BASE + (EVENTS.len() as u32) * 256
+    v >= BASE && v < BASE + (EVENTS.len() as u32) * 16 * LOC_SLOTS
+}
+
+/// True when `c` is a mouse key on the status line: `Status`,
+/// `StatusLeft`, `StatusRight`, `StatusDefault` or `Control0` to `Control9`.
+pub fn is_status_char(c: char) -> bool {
+    if !is_mouse_char(c) {
+        return false;
+    }
+    let location = ((c as u32 - BASE) % LOC_SLOTS) as usize;
+    (1..=4).contains(&location) || location >= 10
 }
 
 /// True when `key` is a mouse key.
@@ -72,9 +86,9 @@ pub fn name(c: char) -> Option<String> {
         return None;
     }
     let code = c as u32 - BASE;
-    let location = (code % 16) as usize;
-    let button = (code / 16) % 16;
-    let event = (code / 256) as usize;
+    let location = (code % LOC_SLOTS) as usize;
+    let button = (code / LOC_SLOTS) % 16;
+    let event = (code / (16 * LOC_SLOTS)) as usize;
     let ev = EVENTS.get(event)?;
     let loc = LOCATIONS.get(location)?;
     if event < BUTTON_EVENTS {
@@ -333,11 +347,28 @@ pub fn client_overrides(app: &crate::types::AppState) -> String {
         let Some(binds) = app.key_tables.get(table) else { continue };
         for b in binds {
             let KeyCode::Char(ch) = b.key.0 else { continue };
-            if b.key.1.is_empty() || seen.contains(&b.key) {
+            if seen.contains(&b.key) {
                 continue;
             }
             let Some(base) = name(ch) else { continue };
             if !CLIENT_ROUTED.contains(&base.as_str()) {
+                // #988: a bound status line key at a location the client
+                // resolves from the clicked range (MouseDown1StatusLeft,
+                // MouseUp1Status, M-MouseDown3StatusRight, MouseDown1Control3,
+                // ...). tmux has no root default for these, so only a user
+                // binding is worth telling the client about.
+                if table == "root"
+                    && is_status_char(ch)
+                    && !(b.key.1.is_empty() && CLIENT_ROUTED_STATUS_CLICKS.contains(&base.as_str()))
+                {
+                    if let Dispatch::User(_) = resolve(app, b.key, false) {
+                        seen.push(b.key);
+                        parts.push(format!("\"{}\":\"UU\"", crate::config::format_key_binding(&b.key)));
+                    }
+                }
+                continue;
+            }
+            if b.key.1.is_empty() {
                 continue;
             }
             seen.push(b.key);
@@ -469,6 +500,73 @@ pub fn resolve_mouse_targets_to(cmd: &str, target: &str) -> String {
             && core[1..].chars().all(|c| c.is_ascii_alphabetic());
     }
     out
+}
+
+/// One clickable status line range as the client drew it: (screen row,
+/// range, first column, end column exclusive).
+pub type StatusRangeCell = (u16, crate::style::StatusRangeType, u16, u16);
+
+/// A status line mouse event resolved against the drawn ranges (#988).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusHit {
+    /// The range under the pointer; None outside every range.
+    pub range: Option<crate::style::StatusRangeType>,
+    /// The mouse target for the binding: `:N` for a window range, `$N` a
+    /// session, `%N` a pane, `:` (the current window) otherwise.
+    pub target: String,
+    /// The pointer column, and the line within the status lines.
+    pub x: u16,
+    pub line: u16,
+}
+
+impl StatusHit {
+    /// The location part of the key (`Status`, `StatusLeft`,
+    /// `StatusRight`, `ControlN`, `StatusDefault`).
+    pub fn location(&self) -> String {
+        self.range.as_ref().map_or_else(|| "StatusDefault".to_string(), |r| r.key_location())
+    }
+
+    /// The `status-mouse` line that hands this event to the server as key
+    /// `name`, looking up `fallback` instead when `name` is unbound.
+    pub fn command(&self, name: &str, fallback: Option<&str>) -> String {
+        let range = self.range.as_ref()
+            .map_or_else(|| "-".to_string(), |r| crate::util::hex_encode(r.format_name().as_bytes()));
+        format!("status-mouse {} {} {} {} {} {}\n",
+            name, fallback.unwrap_or("-"), self.target, self.x, self.line, range)
+    }
+}
+
+/// Resolve a status line event at (`col`, `row`) against `ranges` the way
+/// tmux's status_get_range and server_client_check_mouse do: the first range
+/// holding the column on that row. `None` when tmux makes no key of it, a
+/// window range naming a window that does not exist (`windows` holds the
+/// indices that do). `first_row` is the screen row of status line 0.
+pub fn status_hit(ranges: &[StatusRangeCell], first_row: u16, row: u16, col: u16, windows: &[usize]) -> Option<StatusHit> {
+    use crate::style::StatusRangeType as R;
+    let range = ranges.iter()
+        .find(|(r, _, s, e)| *r == row && col >= *s && col < *e)
+        .map(|(_, t, _, _)| t.clone());
+    let target = match &range {
+        Some(R::Window(i)) => {
+            if !windows.contains(i) {
+                return None;
+            }
+            format!(":{}", i)
+        }
+        Some(R::Session(n)) => format!("${}", n),
+        Some(R::Pane(n)) => format!("%{}", n),
+        _ => ":".to_string(),
+    };
+    Some(StatusHit { range, target, x: col, line: row.saturating_sub(first_row) })
+}
+
+/// tmux's spelling of held modifiers in front of a key name (`C-M-`).
+pub fn mod_prefix(mods: KeyModifiers) -> String {
+    let mut n = String::new();
+    if mods.contains(KeyModifiers::CONTROL) { n.push_str("C-"); }
+    if mods.contains(KeyModifiers::ALT) { n.push_str("M-"); }
+    if mods.contains(KeyModifiers::SHIFT) { n.push_str("S-"); }
+    n
 }
 
 #[cfg(test)]

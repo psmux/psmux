@@ -1711,6 +1711,23 @@ pub struct ShellEntry {
     pub running: bool,
 }
 
+/// Where a mouse event happened, as tmux's format variables for it report
+/// (format.c format_cb_mouse_x / _y / _status_line / _status_range).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MouseFormat {
+    /// Pane relative cell for a pane event; for a status line event the
+    /// column and the line within the status lines.
+    pub x: u16,
+    pub y: u16,
+    /// The pane a pane event happened in.
+    pub pane: Option<usize>,
+    /// The status line a status event happened on (0 is the first).
+    pub status_line: Option<u16>,
+    /// `#{mouse_status_range}`: the range type, or a user range's argument;
+    /// None outside every range.
+    pub status_range: Option<String>,
+}
+
 pub struct AppState {
     pub windows: Vec<Window>,
     pub active_idx: usize,
@@ -2300,9 +2317,10 @@ pub struct AppState {
     /// Last mouse hover position (col, row) for same-coordinate deduplication.
     /// Windows Terminal suppresses consecutive MOUSE_MOVED at the same position.
     pub last_hover_pos: Option<(u16, u16)>,
-    /// Last mouse event position (col, row) for #{mouse_x}, #{mouse_y} format variables.
-    pub last_mouse_x: u16,
-    pub last_mouse_y: u16,
+    /// The mouse event the running mouse binding was looked up for, read by
+    /// #{mouse_x}, #{mouse_y}, #{mouse_line}, #{mouse_word},
+    /// #{mouse_status_line} and #{mouse_status_range} (#988).
+    pub mouse_fmt: Option<MouseFormat>,
     /// Transient status-bar message from display-message (without -p).
     /// Tuple of (message_text, timestamp_when_set, optional per_message_duration_ms).
     pub status_message: Option<(String, std::time::Instant, Option<u64>)>,
@@ -3624,8 +3642,7 @@ impl AppState {
             claude_code_fix_tty: true,
             claude_code_force_interactive: true,
             last_hover_pos: None,
-            last_mouse_x: 0,
-            last_mouse_y: 0,
+            mouse_fmt: None,
             status_message: None,
             status_message_ignore_keys: None,
             warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
@@ -4103,6 +4120,9 @@ pub enum CtrlReq {
     /// A client routed mouse key with a user binding: client, key name,
     /// target (`%pane` / `:window`), col, row, SGR button.
     MouseKey(u64, String, String, i16, i16, u8),
+    /// A mouse event on the status line, resolved by the client from the
+    /// range under the pointer (#988).
+    StatusMouse(u64, crate::window_ops::StatusMouse),
     /// An unbound root mouse key handed to the pane's program: client, pane,
     /// SGR button, col, row, press.
     MouseForward(u64, usize, u8, i16, i16, bool),
