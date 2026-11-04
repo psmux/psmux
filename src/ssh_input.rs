@@ -3606,3 +3606,7 @@ mod test_issue658_frame_wake_escape;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue841_escape_no_hold.rs"]
 mod test_issue841_escape_no_hold;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_user_keys_vt.rs"]
+mod test_user_keys_vt;

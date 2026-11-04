@@ -209,3 +209,7 @@ pub fn key_event_with(n: u32, meta: bool) -> Option<crossterm::event::Event> {
     let mods = if meta { KeyModifiers::ALT } else { KeyModifiers::NONE };
     Some(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(KeyCode::Char(c), mods)))
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_user_keys.rs"]
+mod tests_user_keys;
