@@ -1782,6 +1782,10 @@ pub mod mouse_inject {
         }
     }
 
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_issue989_attach_ctrl_c.rs"]
+    mod tests_issue989_attach_ctrl_c;
+
     unsafe fn free_and_attach_unguarded(child_pid: u32, site: &str) -> bool {
         let target = if fake_inject_fail() {
             debug_log(&format!(
