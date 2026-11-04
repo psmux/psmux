@@ -260,6 +260,18 @@ while a bridge process is starting, psmux never broadcasts a console Ctrl+C even
 and it strips `ENABLE_PROCESSED_INPUT` before writing the raw `0x03` byte so conhost cannot turn
 it into one either.
 
+### Pressing Ctrl+C repeatedly in Git Bash
+
+Ctrl+C in a Git Bash pane interrupts the program in that pane and nothing else, however fast or
+often you press it, as in tmux. Earlier psmux builds could lose the whole server to a burst of
+Ctrl+C presses in Git Bash, most easily with the stock Git for Windows prompt (its
+`PROMPT_COMMAND` runs native programs): every session vanished at once and the server exited with
+`0xC000013A`. Git Bash panes keep the console's Ctrl+C processing on, so conhost turns each press
+into a console Ctrl+C event, and when one arrived while psmux was briefly attached to that console
+to deliver input, the server took it as its own. psmux now ignores console Ctrl+C and Ctrl+Break
+events for the whole time it is attached to a pane's console
+([#989](https://github.com/psmux/psmux/issues/989)).
+
 ### Mouse in WSL programs
 
 Clicks, drags and the wheel reach a mouse aware program inside WSL (for example `nvim` with
