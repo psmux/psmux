@@ -703,22 +703,30 @@ pub fn parse_range_value(val: &str) -> Option<StatusRangeType> {
         }
         s.parse::<u32>().ok().map(|n| n as usize)
     };
-    match name.to_ascii_lowercase().as_str() {
-        "left" if arg.is_none() => Some(StatusRangeType::Left),
-        "right" if arg.is_none() => Some(StatusRangeType::Right),
-        "window" => num(arg?).map(StatusRangeType::Window),
-        "session" => num(arg?.strip_prefix('$')?).map(StatusRangeType::Session),
-        "pane" => num(arg?.strip_prefix('%')?).map(StatusRangeType::Pane),
-        "control" => num(arg?).filter(|n| *n <= 9).map(|n| StatusRangeType::Control(n as u8)),
-        "user" => {
-            let a = arg?;
-            let mut end = a.len().min(15);
-            while !a.is_char_boundary(end) {
-                end -= 1;
-            }
-            Some(StatusRangeType::User(a[..end].to_string()))
+    // Compared in place: this runs for every range of every status line
+    // drawn, so it allocates nothing but a user range's argument.
+    let is = |n: &str| name.eq_ignore_ascii_case(n);
+    if is("left") {
+        arg.is_none().then_some(StatusRangeType::Left)
+    } else if is("right") {
+        arg.is_none().then_some(StatusRangeType::Right)
+    } else if is("window") {
+        num(arg?).map(StatusRangeType::Window)
+    } else if is("session") {
+        num(arg?.strip_prefix('$')?).map(StatusRangeType::Session)
+    } else if is("pane") {
+        num(arg?.strip_prefix('%')?).map(StatusRangeType::Pane)
+    } else if is("control") {
+        num(arg?).filter(|n| *n <= 9).map(|n| StatusRangeType::Control(n as u8))
+    } else if is("user") {
+        let a = arg?;
+        let mut end = a.len().min(15);
+        while !a.is_char_boundary(end) {
+            end -= 1;
         }
-        _ => None,
+        Some(StatusRangeType::User(a[..end].to_string()))
+    } else {
+        None
     }
 }
 
