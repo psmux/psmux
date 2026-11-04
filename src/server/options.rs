@@ -61,6 +61,7 @@ fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut Opt
         "codepoint-widths" => Some(&mut app.codepoint_widths),
         crate::pane_colours::OPTION => Some(&mut app.pane_colours.global),
         "status-format" => Some(&mut app.status_format),
+        "terminal-features" => Some(&mut app.terminal_features),
         "terminal-overrides" => Some(&mut app.terminal_overrides),
         "update-environment" => Some(&mut app.update_environment),
         _ => None,
@@ -72,6 +73,7 @@ fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
         "codepoint-widths" => Some(&app.codepoint_widths),
         crate::pane_colours::OPTION => Some(&app.pane_colours.global),
         "status-format" => Some(&app.status_format),
+        "terminal-features" => Some(&app.terminal_features),
         "terminal-overrides" => Some(&app.terminal_overrides),
         "update-environment" => Some(&app.update_environment),
         _ => None,
@@ -2342,3 +2344,7 @@ mod tests_issue948_status_line_options;
 #[cfg(test)]
 #[path = "../../tests-rs/test_update_environment_array.rs"]
 mod tests_update_environment_array;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_terminal_features_array.rs"]
+mod tests_terminal_features_array;

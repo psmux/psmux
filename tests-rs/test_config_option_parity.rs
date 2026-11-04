@@ -41,6 +41,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "default-shell" => "cmd.exe",
         "default-terminal" => "screen-256color",
         "copy-command" => "clip.exe",
+        "terminal-features" => "xterm*:overline",
         "terminal-overrides" => "xterm*:smcup@:rmcup@",
         "command-alias" => "sp=split-window",
         "exit-empty" => "off",
