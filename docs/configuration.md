@@ -1556,6 +1556,12 @@ keys (`bind -n M-User2 ...` for a terminal that sends ESC before the
 sequence). `list-keys` prints `User1000` in full, where tmux 3.8 cuts it to
 `User100`.
 
+psmux keeps a user key as a character in the private use range U+F1000 to
+U+F13E8, which Nerd Fonts also uses for its Material Design icons. A glyph from
+that range that you type, paste or pick still reaches the pane: on the console
+route always, and on the VT route while `user-keys` is empty. With `user-keys`
+set, the VT route reads such a typed glyph as the user key of the same number.
+
 `show-options -s user-keys` prints one `user-keys[N] value` line per element,
 with ESC written as `\033`, a backslash doubled, and quoted as tmux quotes it
 (`user-keys[0] "\033[5;30012~"`); `-v` prints the bytes as they are.
