@@ -1467,6 +1467,10 @@ pub mod mouse_inject {
         fn GetLastError() -> u32;
         fn GetConsoleProcessList(process_list: *mut u32, count: u32) -> u32;
         fn GetCurrentProcessId() -> u32;
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
     }
 
     /// Console input mode flags
@@ -1732,6 +1736,53 @@ pub mod mouse_inject {
     /// produces this error.  The report is assembled only when the attach has
     /// already failed and the debug log is on.
     unsafe fn free_and_attach(child_pid: u32, site: &str) -> bool {
+        // Issue #989: while attached, this process is one of the processes the
+        // pane console signals, and a Ctrl+C typed into a cooked pane (a native
+        // program on it keeps ENABLE_PROCESSED_INPUT on, which Git Bash always
+        // has: its bin\bash.exe launcher is one) becomes a CTRL_C_EVENT that
+        // conhost dispatches on its own schedule.  When it lands while we are
+        // attached, the server ran its default handler and exited with
+        // 0xC000013A, taking every session with it.  The startup handler from
+        // `install_console_ctrl_handler` does not help: measured, a handler
+        // registered before AttachConsole (even between FreeConsole and
+        // AttachConsole) is not called for the new console, and the process
+        // dies; one registered after AttachConsole is called and it survives.
+        // So: hold the "ignore Ctrl+C" bit across the attach itself (it does
+        // survive AttachConsole, measured), register the survival handler once
+        // attached, then drop the bit again.  The bit is inherited by child
+        // processes, so it is held only for this one call; ConPTY spawns are
+        // excluded by the console lock every caller holds, and the server's
+        // bit is known to be clear here (`clear_inherited_ctrl_c_ignore` ran at
+        // startup), which is what restoring it to clear relies on.
+        let server = SERVER_PROCESS.load(std::sync::atomic::Ordering::Relaxed);
+        if server {
+            SetConsoleCtrlHandler(None, 1);
+        }
+        let attached = free_and_attach_unguarded(child_pid, site);
+        if attached {
+            // Remove first so the list never holds more than one copy, in case
+            // a later Windows keeps handlers across AttachConsole.
+            SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 0);
+            SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 1);
+        }
+        if server {
+            SetConsoleCtrlHandler(None, 0);
+        }
+        attached
+    }
+
+    /// The handler `free_and_attach` registers on every attach (issue #989).
+    /// Ctrl+C and Ctrl+Break on a pane console belong to the pane's programs,
+    /// never to the psmux process that is briefly attached to it.  Close,
+    /// logoff and shutdown keep their default handling.
+    pub(crate) unsafe extern "system" fn survive_ctrl_c_while_attached(ctrl_type: u32) -> i32 {
+        match ctrl_type {
+            0 | 1 => 1, // CTRL_C_EVENT | CTRL_BREAK_EVENT: handled, keep running
+            _ => 0,
+        }
+    }
+
+    unsafe fn free_and_attach_unguarded(child_pid: u32, site: &str) -> bool {
         let target = if fake_inject_fail() {
             debug_log(&format!(
                 "{}: PSMUX_FAKE_INJECT_FAIL=1, aiming at {} instead of {}",
