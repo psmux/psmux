@@ -572,3 +572,7 @@ pub fn mod_prefix(mods: KeyModifiers) -> String {
 #[cfg(test)]
 #[path = "../tests-rs/test_mouse_key_bindings.rs"]
 mod tests_mouse_key_bindings;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue988_status_ranges.rs"]
+mod tests_issue988_status_ranges;

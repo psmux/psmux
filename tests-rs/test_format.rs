@@ -514,25 +514,26 @@ fn test_pane_bg_default_without_real_pane() {
 
 // ── Mouse position format variable tests ────────────────────────
 
+// tmux's format_cb_mouse_x / _y return nothing without a mouse event (#988).
 #[test]
-fn test_mouse_x_initial_zero() {
+fn test_mouse_x_empty_without_mouse_event() {
     let mut app = mock_app();
     app.windows.push(mock_window("win0"));
-    assert_eq!(expand_var("mouse_x", &app, 0), "0");
+    assert_eq!(expand_var("mouse_x", &app, 0), "");
 }
 
 #[test]
-fn test_mouse_y_initial_zero() {
+fn test_mouse_y_empty_without_mouse_event() {
     let mut app = mock_app();
     app.windows.push(mock_window("win0"));
-    assert_eq!(expand_var("mouse_y", &app, 0), "0");
+    assert_eq!(expand_var("mouse_y", &app, 0), "");
 }
 
 #[test]
 fn test_mouse_x_tracks_last_position() {
     let mut app = mock_app();
     app.windows.push(mock_window("win0"));
-    app.last_mouse_x = 42;
+    app.mouse_fmt = Some(crate::types::MouseFormat { x: 42, ..Default::default() });
     assert_eq!(expand_var("mouse_x", &app, 0), "42");
 }
 
@@ -540,7 +541,7 @@ fn test_mouse_x_tracks_last_position() {
 fn test_mouse_y_tracks_last_position() {
     let mut app = mock_app();
     app.windows.push(mock_window("win0"));
-    app.last_mouse_y = 17;
+    app.mouse_fmt = Some(crate::types::MouseFormat { y: 17, ..Default::default() });
     assert_eq!(expand_var("mouse_y", &app, 0), "17");
 }
 
