@@ -7509,16 +7509,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             };
                                         }
                                         if loc == "Status" {
-                                            // tmux MouseDown1Status: built in, select the
-                                            // window clicked; a user binding runs with the
+                                            // tmux MouseDown1Status: built in, tmux's
+                                            // `switch-client -t =`, which selects a window
+                                            // range's window and a pane range's pane (and
+                                            // its window); a user binding runs with the
                                             // range's window, session or pane as `-t =`.
                                             let status_name = routed_name(&mouse_overrides, "MouseDown1Status", me.modifiers);
                                             match mouse_route(&mouse_overrides, &status_name, client_copy_mode) {
-                                                'B' => {
-                                                    if let Some(crate::style::StatusRangeType::Window(idx)) = hit.range {
+                                                'B' => match hit.range {
+                                                    Some(crate::style::StatusRangeType::Window(idx)) => {
                                                         cmd_batch.push(format!("select-window -t :{}\n", idx));
                                                     }
-                                                }
+                                                    Some(crate::style::StatusRangeType::Pane(id)) => {
+                                                        cmd_batch.push(format!("switch-client -t %{}\n", id));
+                                                    }
+                                                    _ => {}
+                                                },
                                                 'U' => cmd_batch.push(hit.command(&status_name, None)),
                                                 _ => {}
                                             }

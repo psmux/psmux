@@ -128,17 +128,121 @@ $got = Click 19 9
 $want = "MouseDown1Pane x=[19] y=[8]"
 if ($got -eq $want) { Write-Pass "pane click -> $got" } else { Write-Fail "pane click -> got [$got] want [$want]" }
 
+# Any SGR mouse report at 0 based column $x, row $y: button code $b,
+# `M` press or `m` release.
+function Sgr($b, $x, $y, $kind) { "$([char]27)[<$b;$($x + 1);$($y + 1)$kind" }
+function Feed([string[]]$seqs) { Add-Content $ctrl ("HEX " + (($seqs | ForEach-Object { Hex $_ }) -join ' ')) }
+
+# Wait for option $opt to leave "none"; "none" if it never does.
+function Wait-Opt($opt, $tries = 14) {
+    for ($k = 0; $k -lt $tries; $k++) {
+        Start-Sleep -Milliseconds 150
+        $v = (P show -gv $opt).Trim()
+        if ($v -ne "none") { return $v }
+    }
+    return "none"
+}
+function Check($label, $got, $want) {
+    if ($got -eq $want) { Write-Pass "$label -> [$got]" } else { Write-Fail "$label -> got [$got] want [$want]" }
+}
+function Redraw { Start-Sleep -Milliseconds 1500 }
+
 Write-Host "`n=== Group 3: the {mouse} target follows the range ===" -ForegroundColor Cyan
 P new-window -d | Out-Null
-P bind -n MouseDown1Status 'set -gF @hit "#{session_name}:#{window_index}"' | Out-Null
-P set -g status-format[0] '#[range=window|1]W1#[norange] #[range=window|0]W0#[norange]' | Out-Null
-Start-Sleep -Milliseconds 1500
 P select-window -t t:0 | Out-Null
-Start-Sleep -Milliseconds 500
+P split-window -t t:0 | Out-Null
+$panes = @((P list-panes -t t:0 -F '#{pane_id}') -split "`r?`n" | Where-Object { $_ })
+$pa = $panes[0]; $pb = $panes[1]
+P set -g status-format[0] "#[range=window|1]W1#[norange] #[range=pane|$pa]PA#[norange] #[range=session|`$99]S99#[norange] #[range=window|7]W7#[norange] END" | Out-Null
 P bind -n MouseDown1Status 'select-window -t = ; set -gF @hit "sel=#{window_index}"' | Out-Null
+Redraw
 $got = Click 0 0
-if ($got -eq "sel=1") { Write-Pass "window range: select-window -t = picked window 1" }
-else { Write-Fail "window range: got [$got] want [sel=1]" }
+Check "window range: select-window -t = picks window 1" $got "sel=1"
+P select-window -t t:0 | Out-Null
+P select-pane -t $pb | Out-Null
+P bind -n MouseDown1Status 'select-pane -t = ; set -gF @hit "pane=#{pane_id}"' | Out-Null
+Redraw
+$got = Click 4 0
+Check "pane range: select-pane -t = picks $pa" $got "pane=$pa"
+$got = Click 8 0
+Check "range=session|`$99 (no such session) gives no key" $got "none"
+$got = Click 10 0
+Check "range=window|7 (no such window) gives no key" $got "none"
+# The built in MouseDown1Status (tmux's switch-client -t =) on a pane range.
+P bind -n MouseDown1Status 'switch-client -t =' | Out-Null
+P select-pane -t $pb | Out-Null
+Redraw
+Click 4 0 | Out-Null
+Start-Sleep -Milliseconds 600
+Check "built in MouseDown1Status on a pane range selects it" (P display -p '#{pane_id}').Trim() $pa
+
+Write-Host "`n=== Group 4: psmux's own status layout keeps every click and wheel ===" -ForegroundColor Cyan
+foreach ($k in "MouseDown1StatusLeft", "MouseDown1StatusRight", "MouseDown1StatusDefault", "MouseDown1Control3") {
+    P unbind -n $k | Out-Null
+}
+P set -gu status-format | Out-Null
+P set -g status-left "[LEFT] " | Out-Null
+P set -g status-right "RIGHTSIDE" | Out-Null
+P bind -n MouseDown1Status 'set -gF @hit "S range=[#{mouse_status_range}] x=[#{mouse_x}]"' | Out-Null
+Redraw
+Check "status-left, MouseDown1StatusLeft unbound: MouseDown1Status runs" (Click 1 0) "S range=[left] x=[1]"
+Check "status-right: MouseDown1Status runs" (Click 115 0) "S range=[right] x=[115]"
+Check "empty middle: MouseDown1Status runs" (Click 60 0) "S range=[] x=[60]"
+P bind -n MouseDown1StatusLeft 'set -gF @hit "L range=[#{mouse_status_range}]"' | Out-Null
+Redraw
+Check "status-left with MouseDown1StatusLeft bound: that key" (Click 1 0) "L range=[left]"
+P unbind -n MouseDown1StatusLeft | Out-Null
+P bind -n MouseDown1Status 'switch-client -t =' | Out-Null
+P select-window -t t:0 | Out-Null
+Redraw
+Feed @((Sgr 65 60 0 'M'))
+Start-Sleep -Milliseconds 900
+Check "wheel down on empty status space: next-window as before" (P display -p '#{window_index}').Trim() "1"
+Feed @((Sgr 64 1 0 'M'))
+Start-Sleep -Milliseconds 900
+Check "wheel up on status-left: previous-window as before" (P display -p '#{window_index}').Trim() "0"
+
+Write-Host "`n=== Group 5: with status-format, tmux's keys exactly ===" -ForegroundColor Cyan
+P set -g status-format[0] '#[range=window|0]WIN#[norange] #[range=left]LEFT#[norange] #[range=right]RIGHT#[norange] NORANGE' | Out-Null
+P select-window -t t:0 | Out-Null
+P bind -n MouseDown1Status 'set -gF @hit "S"' | Out-Null
+Redraw
+Check "NORANGE with only MouseDown1Status bound: no key (tmux StatusDefault)" (Click 17 0) "none"
+Feed @((Sgr 65 17 0 'M'))
+Start-Sleep -Milliseconds 900
+Check "wheel down on NORANGE, WheelDownStatusDefault unbound: nothing" (P display -p '#{window_index}').Trim() "0"
+P bind -n WheelDownStatusDefault 'set -gF @hit "WD range=[#{mouse_status_range}]"' | Out-Null
+Redraw
+P set -g "@hit" "none" | Out-Null
+Feed @((Sgr 65 17 0 'M'))
+Check "WheelDownStatusDefault bound: runs" (Wait-Opt "@hit") "WD range=[]"
+Feed @((Sgr 65 1 0 'M'))
+Start-Sleep -Milliseconds 900
+Check "wheel down on the window range: WheelDownStatus (next-window)" (P display -p '#{window_index}').Trim() "1"
+P select-window -t t:0 | Out-Null
+
+Write-Host "`n=== Group 6: other buttons, release and multi clicks ===" -ForegroundColor Cyan
+P bind -n MouseDown3StatusRight 'set -gF @hit "R3 range=[#{mouse_status_range}]"' | Out-Null
+P bind -n MouseUp1StatusLeft 'set -gF @up "U1 range=[#{mouse_status_range}]"' | Out-Null
+P bind -n DoubleClick1StatusLeft 'set -gF @dbl "D1 range=[#{mouse_status_range}]"' | Out-Null
+P bind -n M-MouseDown1StatusRight 'set -gF @hit "M-R1"' | Out-Null
+Redraw
+P set -g "@hit" "none" | Out-Null
+Feed @((Sgr 2 11 0 'M'), (Sgr 2 11 0 'm'))
+Check "right press on RIGHT: MouseDown3StatusRight" (Wait-Opt "@hit") "R3 range=[right]"
+P set -g "@up" "none" | Out-Null
+Feed @((Sgr 0 5 0 'M'), (Sgr 0 5 0 'm'))
+Check "release on LEFT: MouseUp1StatusLeft" (Wait-Opt "@up") "U1 range=[left]"
+P bind -n SecondClick1StatusLeft 'set -gF @sec "S1 range=[#{mouse_status_range}]"' | Out-Null
+Redraw
+P set -g "@dbl" "none" | Out-Null
+P set -g "@sec" "none" | Out-Null
+Feed @((Sgr 0 5 0 'M'), (Sgr 0 5 0 'm'), (Sgr 0 5 0 'M'), (Sgr 0 5 0 'm'))
+Check "second press on LEFT: SecondClick1StatusLeft" (Wait-Opt "@sec") "S1 range=[left]"
+Check "double click on LEFT: DoubleClick1StatusLeft" (Wait-Opt "@dbl") "D1 range=[left]"
+P set -g "@hit" "none" | Out-Null
+Feed @((Sgr 8 11 0 'M'), (Sgr 8 11 0 'm'))
+Check "Alt press on RIGHT: M-MouseDown1StatusRight" (Wait-Opt "@hit") "M-R1"
 
 # Clean up only this namespace.
 foreach ($id in $started) { try { Stop-Process -Id $id -Force -EA Stop } catch {} }
