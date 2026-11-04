@@ -35,8 +35,11 @@ const LOCATIONS: &[&str] = &[
     "Control0", "Control1", "Control2", "Control3", "Control4",
     "Control5", "Control6", "Control7", "Control8", "Control9",
 ];
-/// Room for each location in the encoding (LOCATIONS.len() fits).
-const LOC_SLOTS: u32 = 32;
+/// Room for each location in the encoding.
+const LOC_SLOTS: u32 = LOCATIONS.len() as u32;
+// The whole mouse key range has to stay below the user keys, which start at
+// U+F1000 (user_keys.rs): 10 events x 16 buttons x 20 locations is 3200.
+const _: () = assert!(BASE + (EVENTS.len() as u32) * 16 * LOC_SLOTS <= 0xF1000);
 
 pub const EV_MOUSE_DOWN: usize = 0;
 pub const EV_MOUSE_DRAG: usize = 2;
