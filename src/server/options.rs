@@ -2350,3 +2350,7 @@ mod tests_update_environment_array;
 #[cfg(test)]
 #[path = "../../tests-rs/test_terminal_features_array.rs"]
 mod tests_terminal_features_array;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_user_keys_array.rs"]
+mod tests_user_keys_array;

@@ -43,6 +43,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "copy-command" => "clip.exe",
         "terminal-features" => "xterm*:overline",
         "terminal-overrides" => "xterm*:smcup@:rmcup@",
+        "user-keys" => "zq",
         "command-alias" => "sp=split-window",
         "exit-empty" => "off",
         "prefix" => "C-a",
