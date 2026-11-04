@@ -260,6 +260,17 @@ Start-Sleep -Milliseconds 1200
 $n2 = @((P list-windows -F '#{window_index}') -split "`r?`n" | Where-Object { $_ }).Count
 Check "x button (control|2) closes one" ($n1 - $n2) 1
 
+Write-Host "`n=== Group 8: a status-format line with no ranges keeps every click and wheel ===" -ForegroundColor Cyan
+P unbind -n WheelDownStatusDefault | Out-Null
+P set -g status-format[0] 'PLAIN LINE #S #I' | Out-Null
+P bind -n MouseDown1Status 'set -gF @hit "S range=[#{mouse_status_range}] x=[#{mouse_x}]"' | Out-Null
+P select-window -t t:0 | Out-Null
+Redraw
+Check "click on a line with no ranges: MouseDown1Status runs" (Click 3 0) "S range=[] x=[3]"
+Feed @((Sgr 65 3 0 'M'))
+Start-Sleep -Milliseconds 900
+Check "wheel down on a line with no ranges: next-window as before" (P display -p '#{window_index}').Trim() "1"
+
 # Clean up only this namespace.
 foreach ($id in $started) { try { Stop-Process -Id $id -Force -EA Stop } catch {} }
 & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null

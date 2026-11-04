@@ -2339,8 +2339,8 @@ pub struct StatusMouse {
     /// The key, e.g. `MouseDown1StatusLeft`, `C-WheelUpStatus`,
     /// `MouseDown1Control3`.
     pub name: String,
-    /// The key to look up instead when `name` is unbound, for psmux's own
-    /// status layout (see the client).
+    /// The key to look up instead when `name` is unbound, on a status row
+    /// with no ranges (see the client).
     pub fallback: Option<String>,
     /// The mouse target: `:N` window, `:` current, `$N` session, `%N` pane.
     pub target: String,

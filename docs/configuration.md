@@ -311,7 +311,7 @@ bind -n MouseDown1Control1 new-window
 bind -n MouseDown1Control2 kill-window
 ```
 
-psmux's own status layout (no `status-format[0]`) has tmux's default ranges: status-left is `left`, each window tab is its `window`, status-right is `right`. There a `StatusLeft`, `StatusRight` or `StatusDefault` key that is not bound falls back to the `Status` key, so a click or wheel anywhere on that line keeps doing what it did before ranges were added.
+psmux's own status layout (no `status-format[0]`) has tmux's default ranges: status-left is `left`, each window tab is its `window`, status-right is `right`. On that line, and on any `status-format` line written without range markers, a `StatusLeft`, `StatusRight` or `StatusDefault` key that is not bound falls back to the `Status` key, so a config that uses no ranges keeps every click and wheel it had (tmux runs nothing there). A line with ranges follows tmux exactly: a click or wheel outside every range is `StatusDefault` and does nothing unless bound.
 
 **Window tabs.** Tab click targets in a custom line come from `#[range=window|N]`/`#[norange]` markers and nothing else: a window list written without them renders correctly but cannot be clicked, exactly as in tmux (tmux's shipped default `status-format[0]` carries these markers, which is why its window list is clickable out of the box). `N` is the window index itself, so `#[range=window|#{window_index}]` is the correct idiom at any `base-index`. Inside `#{W:inactive,current}` the comma separates the two loop arguments, so any other comma must be escaped as `#,` and combined styles are easier written as `#[fg=green]#[bold]` than `#[fg=green,bold]`. Ranges are honored on every status line, and clicks are hit-tested on every status row.
 
