@@ -48,4 +48,10 @@ pub(crate) struct ClientRenderOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "wsep")]
     pub word_separators: Option<String>,
+    /// `user-keys` elements as (N, sequence), which the client's VT and pipe
+    /// input reader turns into the key UserN (crate::user_keys). Skipped on
+    /// the wire while the option is empty (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "ukeys")]
+    pub user_keys: Option<Vec<(u32, String)>>,
 }

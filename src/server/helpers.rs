@@ -609,6 +609,19 @@ pub(crate) fn expand_status_formats(
                 Some(app.terminal_overrides.iter().map(|(_, entry)| entry.to_string()).collect())
             },
             word_separators: Some(app.word_separators.clone()),
+            // Only the numbered elements: tmux reads user-keys by number from
+            // 0 to KEYC_NUSER (tty-keys.c:533-540), so a named element is
+            // never a key; user_keys::matchable also leaves out an empty one
+            // and one holding U+FFFD.
+            user_keys: {
+                let keys: Vec<(u32, String)> = app
+                    .user_keys
+                    .numbered()
+                    .filter(|(n, s)| crate::user_keys::matchable(*n, s))
+                    .map(|(n, s)| (n, s.to_string()))
+                    .collect();
+                (!keys.is_empty()).then_some(keys)
+            },
         },
         status_format_json: status_format_json(app),
         // set-titles-string was expanded outside the guard on BOTH paths, so it

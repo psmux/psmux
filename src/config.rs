@@ -1805,6 +1805,17 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     let key = strip_wrapping_quotes(&toks[i].1).to_string();
     let key = key.as_str();
     let raw_value = match toks.get(i + 1) {
+        // A user-keys element is the byte sequence a terminal sends, written
+        // with tmux's escapes (`set -s user-keys[0] "\e[5;30012~"`, tmux.1).
+        // It is read here, from the line as written, the way tmux's lexer
+        // reads it: escapes unquoted and in double quotes, none in single
+        // quotes, each once. The command line's arguments are not read
+        // again, as tmux takes them as they are.
+        Some((off, _)) if crate::option_array::is_array_name(key)
+            .is_some_and(|spec| spec.name == crate::user_keys::OPTION) =>
+        {
+            crate::commands::tmux_escaped_word(&line[*off..])
+        }
         Some((off, _)) => extract_option_value(&line[*off..]),
         None => String::new(),
     };
@@ -3013,6 +3024,10 @@ pub fn normalize_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyM
     if crate::mouse_keys::is_mouse_key(&key) {
         return key;
     }
+    // So does a user key (M-User2 and User2 are distinct, key-string.c).
+    if crate::user_keys::is_user_key(&key) {
+        return key;
+    }
     let key = fold_nul_to_ctrl_space(key);
     match key.0 {
         KeyCode::Char(c) => {
@@ -3083,6 +3098,10 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
 
     // tmux mouse keys (WheelUpPane, C-MouseDown1Status, ...): see mouse_keys.
     if let Some(key) = crate::mouse_keys::parse(name) {
+        return Some(key);
+    }
+    // tmux user keys (User0 to User1000, M-User2): see user_keys.
+    if let Some(key) = crate::user_keys::parse(name) {
         return Some(key);
     }
 
@@ -3202,11 +3221,11 @@ pub fn is_unmodelled_tmux_key_name(name: &str) -> bool {
     if SPECIAL.contains(&lower.as_str()) {
         return true;
     }
-    // UserN
-    if let Some(n) = lower.strip_prefix("user") {
-        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
-            return true;
-        }
+    // User0 to User1000, spelled as tmux spells them (key-string.c reads
+    // `User%u` case sensitively and refuses a number above KEYC_NUSER), so
+    // User1001 and user0 are still diagnosed as tmux reports them.
+    if crate::user_keys::parse_base(rest).is_some() {
+        return true;
     }
 
     const LOCATIONS: &[&str] = &[
@@ -3846,6 +3865,9 @@ pub fn parse_key_string(key: &str) -> Option<(KeyCode, KeyModifiers)> {
     if let Some(mouse) = crate::mouse_keys::parse(key) {
         return Some(mouse);
     }
+    if let Some(user) = crate::user_keys::parse(key) {
+        return Some(user);
+    }
     let mut mods = KeyModifiers::empty();
     let mut key_part = key;
     
@@ -3968,6 +3990,12 @@ pub fn format_key_binding(key: &(KeyCode, KeyModifiers)) -> String {
     let key_str = match keycode {
         KeyCode::Char(c) if crate::mouse_keys::is_mouse_char(*c) => {
             crate::mouse_keys::name(*c).unwrap_or_else(|| "?".to_string())
+        }
+        // Spelled out in full: tmux 3.8 prints User1000 as "User100" in
+        // list-keys, which names a different key (key-string.c:422 writes
+        // it into `char tmp[8]`, key-string.c:331).
+        KeyCode::Char(c) if crate::user_keys::is_user_char(*c) => {
+            crate::user_keys::name(*c).unwrap_or_else(|| "?".to_string())
         }
         KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(c) => c.to_string(),

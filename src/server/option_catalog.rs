@@ -313,6 +313,9 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // The default array (option_array::ARRAY_OPTIONS) as `#{command-alias}`
     // reads it, the elements joined with a space.
     OptionDef { name: "command-alias", scope: Server, option_type: OptionType::String, default: "split-pane=split-window splitp=split-window server-info=show-messages -JT info=show-messages -JT choose-window=choose-tree -w choose-session=choose-tree -s", description: "Array of command aliases, each name=command; set one element with command-alias[N]" },
+    // An array (option_array::ARRAY_OPTIONS, tmux 3.8's options-table.c:734-743),
+    // empty by default: element N is the byte sequence of the key UserN.
+    OptionDef { name: "user-keys", scope: Server, option_type: OptionType::String, default: "", description: "Array of key sequences the outer terminal sends: user-keys[N] makes its sequence the key UserN for bind-key (comma separated, or one element with user-keys[N]); matched on the VT and pipe input routes only" },
     OptionDef { name: "exit-empty", scope: Server, option_type: Boolean, default: "on", description: "Exit server when no sessions remain" },
     OptionDef { name: "priority", scope: Server, option_type: Choice(Priority), default: "above-normal", description: "Scheduling class for psmux's own server and client processes (normal/above-normal/high). Pane children are never raised" },
     // tmux options-table.c:402 and :411, server scope, defaults `off` and

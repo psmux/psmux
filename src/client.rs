@@ -3638,6 +3638,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Last `codepoint-widths` array applied to this process's width table, so
     // a render frame that did not change the option costs nothing.
     let mut last_codepoint_widths: Vec<String> = Vec::new();
+    // Last `user-keys` handed to the input reader (crate::user_keys), so the
+    // table is only rebuilt when the server's option changes.
+    let mut last_user_keys: Vec<(u32, String)> = Vec::new();
     let mut win_status_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_current_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_sep: String = " ".to_string();
@@ -6168,6 +6171,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             match effective_code {
+                                // A user key (crate::user_keys) that no table bound
+                                // sends nothing: tmux ignores it on the way to the
+                                // pane (input-keys.c:676), and it is no text for a
+                                // prompt or a chooser either.
+                                KeyCode::Char(c) if crate::user_keys::is_user_char(c) => {}
                                 // A chooser's kill question takes the very next key, as
                                 // tmux's prompt does: it is set with PROMPT_SINGLE, so it
                                 // ends on one key (`window-tree.c:1306`), and its callback
@@ -8926,6 +8934,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if codepoint_widths != last_codepoint_widths.as_slice() {
             vt100::set_codepoint_widths(codepoint_widths);
             last_codepoint_widths = codepoint_widths.to_vec();
+        }
+        // user-keys: the VT and pipe input reader matches these sequences and
+        // hands the client the key UserN (crate::user_keys). The console route
+        // never sees the sequences (the console host parses them first).
+        let user_keys = state.client_render_options.user_keys.as_deref().unwrap_or(&[]);
+        if user_keys != last_user_keys.as_slice() {
+            crate::user_keys::set_sequences(user_keys);
+            last_user_keys = user_keys.to_vec();
         }
         // Issue #700: the first frame decides the host screen. The server's
         // `terminal-overrides` ride on it, and `smcup@` for this client's TERM

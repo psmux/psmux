@@ -2102,6 +2102,10 @@ pub struct AppState {
     /// on attach and at new-session (environ.c:186, environ_update), used in
     /// key order.
     pub update_environment: crate::option_array::OptionArray,
+    /// user-keys: server-scope ARRAY, element N the byte sequence of the key
+    /// UserN (crate::user_keys). The clients match the sequences on the VT and
+    /// pipe input routes; the render options carry them.
+    pub user_keys: crate::option_array::OptionArray,
     /// Environment variables set via set-environment
     pub environment: std::collections::HashMap<String, String>,
     /// Removal markers, hidden entries and shadowed global values that
@@ -3547,6 +3551,7 @@ impl AppState {
             update_environment: crate::option_array::OptionArray::with_default(
                 crate::option_array::spec("update-environment").expect("update-environment is in ARRAY_OPTIONS"),
             ),
+            user_keys: crate::option_array::OptionArray::default(),
             environment: std::collections::HashMap::new(),
             env_scopes: crate::environ::EnvScopes::default(),
             user_options: std::collections::HashMap::new(),
