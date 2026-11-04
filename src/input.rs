@@ -4311,6 +4311,11 @@ pub(crate) fn is_meta_escape_name(name: &str) -> bool {
 }
 
 pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
+    // A user key (UserN, crate::user_keys) never reaches the pane or a mode:
+    // tmux ignores it on the way to the pane (input-keys.c:676).
+    if crate::user_keys::parse(k).is_some() {
+        return Ok(());
+    }
     // In clock mode, any key exits back to passthrough
     if matches!(app.mode, Mode::ClockMode) {
         app.mode = Mode::Passthrough;

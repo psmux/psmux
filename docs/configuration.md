@@ -236,6 +236,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `copy-command` | Str | | Shell command for clipboard pipe |
 | `codepoint-widths` | Str | | Array of overrides for how many columns Unicode codepoints occupy, comma separated or one element with `codepoint-widths[N]` (see [Codepoint widths](#codepoint-widths)) |
 | `terminal-features` | Str | *(tmux 3.8 defaults)* | Array of `pattern:feature:feature` entries, comma separated or one element with `terminal-features[N]`, starting as tmux's `xterm*:clipboard:ccolour:cstyle:focus:title`, `screen*:title` and `rxvt*:ignorefkeys`. psmux keeps it for `set`, `show` and `#{terminal-features}` so a tmux config carries over, but takes a client's features from the client itself at attach, so the entries change nothing |
+| `user-keys` | Str | | Array of key sequences the outer terminal sends, comma separated or one element with `user-keys[N]`; the sequence of element N is the key `UserN` for `bind-key`. Read where psmux parses VT input itself, which the console input route does not (see [User keys](#user-keys)) |
 | `terminal-overrides` | Str | `linux*:AX@` | Array of `pattern:cap:cap` entries matched against the client's `TERM`. `smcup@` and `rmcup@` keep the attached client off the host terminal's alternate screen (see [Terminal overrides](#terminal-overrides)) |
 | `set-clipboard` | Str | `external` | Clipboard interaction (`on`/`off`/`external`). A copy mode yank reaches the Windows clipboard on every value, with OSC 52 to the outer terminal unless `off`. An application's own OSC 52 creates a paste buffer only on `on`, as in tmux; on `external` psmux still forwards it to the outer terminal and the Windows clipboard, where tmux ignores it; `off` ignores it |
 | `main-pane-width` | String | `80` | Main pane width in the main-vertical layout, in cells or a percentage such as `30%` |
@@ -1500,6 +1501,115 @@ If you are unsure whether your terminal treats a character as one column or
 two, print a row of them and see where it wraps: in an 80 column window, 80 of
 them filling exactly one line means one column each, and wrapping after 40
 means two.
+
+## User keys
+
+`user-keys` gives a name to a key sequence psmux does not know. Element N of
+the array is the sequence, and that sequence arriving from the terminal is the
+key `UserN` (`User0` to `User1000`), which binds like any other key. This is
+the example from the tmux manual:
+
+```tmux
+set -s user-keys[0] "\e[5;30012~"
+bind User0 resize-pane -L 3
+```
+
+A terminal that sends `ESC[5;30012~` for some key (a custom key mapping in
+WezTerm, for example) then resizes the pane on `prefix` and that key.
+
+It is a server option, so it is written with `set -s`, and it takes the same
+forms as the other array options:
+
+```tmux
+set -s user-keys "\e[99~,\eOz"     # replaces the whole array: [0] [1]
+set -sa user-keys "\e[98~"         # adds at the lowest free index: [2]
+set -s user-keys[10] "\e[97~"      # sets one element
+set -su user-keys[0]               # removes one; the others keep their index
+set -su user-keys                  # back to the default (no user keys)
+```
+
+In a config file, `source-file`, the command prompt or a bound command, the
+value reads tmux's escapes the way tmux's own parser does: unquoted and inside
+double quotes, `\e` and the octal `\033` are ESC, and `\uXXXX`, `\t`, `\r`,
+`\n` and the others mean what they mean in tmux; inside single quotes a
+backslash is literal, so `'\e'` stays the two characters. Other options keep a
+backslash as written, so Windows paths survive; this one turns the escapes into
+the bytes the terminal sends. An argument given on the shell's command line is
+taken as it is, as tmux takes it, so from PowerShell write the ESC itself:
+
+```powershell
+psmux set -s 'user-keys[0]' "`e[5;30012~"
+```
+
+When two elements hold the same sequence, the higher index wins, as in tmux,
+and a user key wins over a key psmux knows, so an element can take over a
+sequence such as `\e[5;2~` (Shift+PageUp). Only elements numbered 0 to 1000
+are read; a named element (`user-keys[mine]`) and an empty one are no key.
+A sequence is text, so a byte that is not UTF-8, such as `\377`, cannot be
+matched: on the VT route the console host turns every such byte into U+FFFD
+before psmux reads it, and the pipe route drops them. An element holding one
+is left out, where tmux matches the byte itself.
+
+A `UserN` with no binding sends nothing to the pane, and `send-keys User0`
+sends nothing either, both as in tmux. `C-`, `M-` and `S-` work as for other
+keys (`bind -n M-User2 ...` for a terminal that sends ESC before the
+sequence). `list-keys` prints `User1000` in full, where tmux 3.8 cuts it to
+`User100`.
+
+psmux keeps a user key as a character in the private use range U+F1000 to
+U+F13E8, which Nerd Fonts also uses for its Material Design icons. A glyph from
+that range that you type, paste or pick still reaches the pane: on the console
+route always, and on the VT route while `user-keys` is empty. With `user-keys`
+set, the VT route reads such a typed glyph as the user key of the same number.
+
+`show-options -s user-keys` prints one `user-keys[N] value` line per element,
+with ESC written as `\033`, a backslash doubled, and quoted as tmux quotes it
+(`user-keys[0] "\033[5;30012~"`); `-v` prints the bytes as they are.
+
+**The input route matters.** psmux reads user keys where it parses the
+terminal's VT input itself: WezTerm, Alacritty, JetBrains terminals, an SSH
+session, a pipe such as `ssh -T`, and any host where `PSMUX_VT_INPUT=1` is set
+before psmux starts. Windows Terminal and a plain console window take the
+console input route instead, and there the console host parses VT input
+before psmux reads it. Measured with conhost and OpenConsole, `ESC[5;30012~`
+arrives as PageUp with Shift and Alt held, and a sequence the console host
+does not know, such as `ESC[99~`, does not arrive at all. So on that route a
+user key never comes in, and a binding to it does not run.
+
+To use user keys in Windows Terminal, set `PSMUX_VT_INPUT=1` before psmux
+starts (in your PowerShell profile, or in the profile's `environment`
+setting) and give the key a `sendInput` action in the `actions` list of
+Windows Terminal's `settings.json`:
+
+```json
+{ "command": { "action": "sendInput", "input": "\u001b[5;30012~" }, "keys": "ctrl+alt+shift+9" }
+```
+
+With VT input on, the console host hands the client the bytes of a
+`sendInput` as they were written, and ordinary keys as VT sequences (Up as
+`ESC[A`, F1 as `ESC O P`). The cost is the keys plain VT has no form for.
+Measured in Windows Terminal 1.24:
+
+| Key | Arrives as | psmux reads |
+|-----|------------|-------------|
+| Ctrl+Enter | `0x0a` | `C-j`, so with a `C-j` prefix Ctrl+Enter is the prefix |
+| Ctrl+Backspace | `0x08` | `C-h` |
+| Ctrl+/ | `0x1f` | `C-_` |
+
+Typing, Backspace, function keys, Shift+Tab, Ctrl+Space, Alt+Enter,
+Ctrl+Left, completion, the mouse, pasting and IME input came through as on
+the console route. To keep the three keys apart, have Windows Terminal send
+them in the CSI u form, which psmux reads on the VT route:
+
+| Key | `sendInput` input | psmux reads |
+|-----|-------------------|-------------|
+| Ctrl+Enter | `\u001b[13;5u` | `C-Enter` |
+| Ctrl+Backspace | `\u001b[127;5u` | `C-BSpace` |
+| Ctrl+/ | `\u001b[47;5u` | `C-/` |
+| Shift+Enter | `\u001b[13;2u` | `S-Enter` |
+
+If you do not use user keys, leave Windows Terminal on the console route,
+where every key keeps its modifiers without any of this.
 
 ## Terminal overrides
 

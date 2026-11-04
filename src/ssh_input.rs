@@ -1659,6 +1659,20 @@ struct VtParser {
     /// enough to survive that.  It is bounded at all only so that a `C-j`
     /// pressed some time after an Enter still decodes (issue #642).
     prev_cr_at: Option<std::time::Instant>,
+    /// Characters held because they are the start of a `user-keys` sequence
+    /// (crate::user_keys). Empty unless the option has elements.
+    uk_held: String,
+    /// Where the `user-keys` sequences come from: nowhere (the default, so a
+    /// parser in a unit test never sees another test's table), the table the
+    /// client publishes (the live input readers), or a fixed one (tests).
+    uk_source: UserKeySource,
+}
+
+enum UserKeySource {
+    Off,
+    Live,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed(crate::user_keys::Table),
 }
 
 impl VtParser {
@@ -1679,6 +1693,31 @@ impl VtParser {
             hi_sur: None,
             last_text: None,
             prev_cr_at: None,
+            uk_held: String::new(),
+            uk_source: UserKeySource::Off,
+        }
+    }
+
+    /// A parser for a live input reader: it matches the `user-keys`
+    /// sequences the client publishes (crate::user_keys::set_sequences).
+    fn new_live() -> Self {
+        Self { uk_source: UserKeySource::Live, ..Self::new() }
+    }
+
+    /// A parser that matches a fixed `user-keys` table, for tests.
+    #[cfg(test)]
+    fn with_user_keys(entries: &[(u32, &str)]) -> Self {
+        let table: Vec<(u32, String)> = entries.iter().map(|(n, s)| (*n, s.to_string())).collect();
+        Self { uk_source: UserKeySource::Fixed(std::sync::Arc::new(table)), ..Self::new() }
+    }
+
+    /// The `user-keys` sequences to match now, if any.
+    #[inline]
+    fn user_key_table(&self) -> Option<crate::user_keys::Table> {
+        match &self.uk_source {
+            UserKeySource::Off => None,
+            UserKeySource::Live => crate::user_keys::table(),
+            UserKeySource::Fixed(t) => Some(t.clone()),
         }
     }
 
@@ -1701,8 +1740,93 @@ impl VtParser {
     }
 
     /// Feed one Unicode character into the parser, emitting events via `emit`.
+    ///
+    /// With `user-keys` set, characters that start one of its sequences are
+    /// held here first (crate::user_keys): a whole sequence becomes the key
+    /// UserN, and ESC and a whole sequence M-UserN. When the held text turns
+    /// out to be no sequence, its first character goes through the state
+    /// machine below and the rest is matched again ([`Self::release_held`]).
+    /// Only from the ground state, so nothing inside a CSI, an OSC or a
+    /// bracketed paste is ever a user key. What is held is bounded by the
+    /// longest sequence, since a character that makes the held text no
+    /// sequence's start releases it.
     #[inline]
     fn feed<F: FnMut(Event)>(&mut self, ch: char, emit: &mut F) {
+        if self.state != PS::Ground && self.uk_held.is_empty() {
+            self.feed_state(ch, emit);
+            return;
+        }
+        let Some(table) = self.user_key_table() else {
+            // No sequences (any more): whatever was held goes on as text.
+            for c in std::mem::take(&mut self.uk_held).chars() {
+                self.feed_state(c, emit);
+            }
+            self.feed_state(ch, emit);
+            return;
+        };
+        let mut again = Vec::new();
+        self.match_user_keys(&table, Some(ch), &mut again, emit);
+    }
+
+    /// Match `first`, then the characters a failed match hands back in
+    /// `again` (a stack, the next one on top), in a loop rather than by
+    /// recursion, so a long sequence that fails late costs no stack. `again`
+    /// allocates only when a match fails with characters to give back.
+    fn match_user_keys<F: FnMut(Event)>(
+        &mut self,
+        table: &[(u32, String)],
+        first: Option<char>,
+        again: &mut Vec<char>,
+        emit: &mut F,
+    ) {
+        let mut next = first;
+        while let Some(c) = next.take().or_else(|| again.pop()) {
+            if self.state != PS::Ground && self.uk_held.is_empty() {
+                self.feed_state(c, emit);
+                continue;
+            }
+            let mut held = std::mem::take(&mut self.uk_held);
+            held.push(c);
+            let (found, meta) = crate::user_keys::classify_meta_in(table, &held);
+            match found {
+                crate::user_keys::Match::Key(n) => {
+                    if let Some(ev) = crate::user_keys::key_event_with(n, meta) {
+                        emit(ev);
+                    }
+                }
+                crate::user_keys::Match::KeyOrLonger(_) | crate::user_keys::Match::Prefix => {
+                    self.uk_held = held;
+                }
+                crate::user_keys::Match::None => self.release_held(held, again, emit),
+            }
+        }
+    }
+
+    /// Held characters that are no user key (or a prefix that timed out):
+    /// the first goes through the state machine, and the rest go back on
+    /// `again` to be matched from the start, since a later one may begin
+    /// another sequence. tmux does the same: `tty_keys_next` takes one key off
+    /// the front of its buffer and looks at what is left afresh. With `abc`
+    /// and `bx` set, `abx` is the text `a` and then the key of `bx`. The rest
+    /// goes on top of `again`, in order, as it came before what is there.
+    /// Nothing longer than the longest sequence is ever held, so the retries
+    /// are bounded by it: a sequence of L characters that fails at its last
+    /// one is tried again from each of its L starts, as tmux's byte at a
+    /// time retry does, each step comparing the held text (at worst L cubed
+    /// character compares, for sequences that are a few bytes in practice).
+    fn release_held<F: FnMut(Event)>(&mut self, held: String, again: &mut Vec<char>, emit: &mut F) {
+        let mut chars = held.chars();
+        if let Some(first) = chars.next() {
+            self.feed_state(first, emit);
+        }
+        let start = again.len();
+        again.extend(chars);
+        again[start..].reverse();
+    }
+
+    /// The VT state machine for one character.
+    #[inline]
+    fn feed_state<F: FnMut(Event)>(&mut self, ch: char, emit: &mut F) {
         match self.state {
             PS::Ground   => self.on_ground(ch, emit),
             PS::Escape   => self.on_escape(ch, emit),
@@ -1722,13 +1846,44 @@ impl VtParser {
 
     /// True when the parser holds a pending `\x1b` that might be a standalone
     /// Escape key or the start of a longer sequence.
+    ///
+    /// Held `user-keys` characters count too: they wait the same
+    /// `escape-time`, as tmux waits for a partial key (tty-keys.c).
     #[inline(always)]
     fn has_pending_escape(&self) -> bool {
-        self.state == PS::Escape
+        self.state == PS::Escape || !self.uk_held.is_empty()
     }
 
     /// Emit a standalone Escape key if the timeout expired mid-sequence.
+    ///
+    /// Held `user-keys` characters are settled first: a whole sequence that a
+    /// longer one also starts with is that key, as nothing longer arrived; any
+    /// other held text gives up its first character and the rest is matched
+    /// again ([`Self::release_held`]), so a sequence that starts later in it
+    /// still counts (and, if it is itself unfinished, waits once more).
     fn flush_escape<F: FnMut(Event)>(&mut self, emit: &mut F) {
+        if !self.uk_held.is_empty() {
+            let held = std::mem::take(&mut self.uk_held);
+            match self.user_key_table() {
+                None => {
+                    for c in held.chars() {
+                        self.feed_state(c, emit);
+                    }
+                }
+                Some(table) => match crate::user_keys::classify_meta_in(&table, &held) {
+                    (crate::user_keys::Match::Key(n) | crate::user_keys::Match::KeyOrLonger(n), meta) => {
+                        if let Some(ev) = crate::user_keys::key_event_with(n, meta) {
+                            emit(ev);
+                        }
+                    }
+                    (crate::user_keys::Match::Prefix | crate::user_keys::Match::None, _) => {
+                        let mut again = Vec::new();
+                        self.release_held(held, &mut again, emit);
+                        self.match_user_keys(&table, None, &mut again, emit);
+                    }
+                },
+            }
+        }
         if self.state == PS::Escape {
             emit(make_key(KeyCode::Esc, KeyModifiers::empty()));
             self.state = PS::Ground;
@@ -1755,6 +1910,10 @@ impl VtParser {
     fn cancel_escape(&mut self) {
         if self.state == PS::Escape {
             self.state = PS::Ground;
+        }
+        // A held lone ESC is the same stale ESC.
+        if self.uk_held == "\x1b" {
+            self.uk_held.clear();
         }
     }
 
@@ -2845,7 +3004,7 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
         .name("ssh-vt-input".into())
         .spawn(move || {
             let handle = handle_val as *mut c_void;
-            let mut parser = VtParser::new();
+            let mut parser = VtParser::new_live();
             let mut records: Vec<INPUT_RECORD> = Vec::with_capacity(64);
             records.resize_with(64, || unsafe { std::mem::zeroed() });
 
@@ -3334,7 +3493,7 @@ fn start_pipe_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
 
     std::thread::spawn(move || {
         let handle = handle as *mut c_void;
-        let mut parser = VtParser::new();
+        let mut parser = VtParser::new_live();
         let mut pending = Vec::<u8>::new(); // incomplete UTF-8 tail
         let mut buf = [0u8; 4096];
         let mut emit = |evt: Event| {
@@ -3447,3 +3606,7 @@ mod test_issue658_frame_wake_escape;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue841_escape_no_hold.rs"]
 mod test_issue841_escape_no_hold;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_user_keys_vt.rs"]
+mod test_user_keys_vt;

@@ -1482,6 +1482,55 @@ pub fn parse_command_line_tmux(line: &str) -> Vec<String> {
     parse_command_line_impl(line, true)
 }
 
+/// The first word of `raw`, the text of a command line from where the word
+/// starts, read with tmux's quoting: a backslash is an escape (as
+/// [`decode_tmux_escape`] reads it: `\e`, `\033`, `\uXXXX`, `\\` and the
+/// rest) unquoted and inside double quotes, and literal inside single quotes
+/// (cmd-parse.y:1703-1707 at tag 3.8, `yylex_token`). Quoted and unquoted
+/// parts next to each other make one word, which ends at a space or tab
+/// outside quotes. A backslash tmux would reject is kept, and bytes that are
+/// no UTF-8 after an octal escape become U+FFFD.
+///
+/// psmux's own lexer ([`parse_command_line`]) keeps most backslashes for
+/// Windows paths, so this is for the one value that needs tmux's reading,
+/// a `user-keys` element (crate::user_keys), taken from the raw line where
+/// the quotes are still known, so each escape is read once.
+pub(crate) fn tmux_escaped_word(raw: &str) -> String {
+    let chars: Vec<char> = raw.trim_start().chars().collect();
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let push = |out: &mut Vec<u8>, c: char| {
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    };
+    let (mut single, mut double) = (false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if single {
+            if c == '\'' {
+                single = false;
+            } else {
+                push(&mut out, c);
+            }
+        } else if c == '\\' {
+            match decode_tmux_escape(&chars, i, &mut out) {
+                Some(used) => i += used,
+                None => push(&mut out, c),
+            }
+        } else if c == '"' {
+            double = !double;
+        } else if c == '\'' && !double {
+            single = true;
+        } else if (c == ' ' || c == '\t') && !double {
+            break;
+        } else {
+            push(&mut out, c);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Decode one tmux escape inside double quotes. `chars[i]` is the backslash.
 /// Pushes the decoded bytes and returns how many chars after the backslash
 /// were consumed, or `None` when tmux would reject the escape (bad octal,

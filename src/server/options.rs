@@ -63,6 +63,7 @@ fn array_option_mut<'a>(app: &'a mut AppState, base: &str) -> Option<&'a mut Opt
         "status-format" => Some(&mut app.status_format),
         "terminal-features" => Some(&mut app.terminal_features),
         "terminal-overrides" => Some(&mut app.terminal_overrides),
+        crate::user_keys::OPTION => Some(&mut app.user_keys),
         "update-environment" => Some(&mut app.update_environment),
         _ => None,
     }
@@ -75,6 +76,7 @@ fn array_option<'a>(app: &'a AppState, base: &str) -> Option<&'a OptionArray> {
         "status-format" => Some(&app.status_format),
         "terminal-features" => Some(&app.terminal_features),
         "terminal-overrides" => Some(&app.terminal_overrides),
+        crate::user_keys::OPTION => Some(&app.user_keys),
         "update-environment" => Some(&app.update_environment),
         _ => None,
     }
@@ -194,7 +196,7 @@ fn array_show_text(array: &OptionArray, base: &str, key: Option<crate::option_ar
         None => array.show_lines(base, values_only),
         Some(key) => match array.get(&key) {
             Some(value) if values_only => format!("{}\n", value),
-            Some(value) => format!("{}[{}] {}\n", base, key, crate::util::quote_arg_if_needed(value)),
+            Some(value) => format!("{}[{}] {}\n", base, key, crate::option_array::show_value(value)),
             // No such element: tmux still prints the line, its value the
             // empty string options_to_string gives (options.c:729-730) as
             // args_escape writes it (arguments.c:613-615), and with -v an
@@ -2348,3 +2350,7 @@ mod tests_update_environment_array;
 #[cfg(test)]
 #[path = "../../tests-rs/test_terminal_features_array.rs"]
 mod tests_terminal_features_array;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_user_keys_array.rs"]
+mod tests_user_keys_array;
