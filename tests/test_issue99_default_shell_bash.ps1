@@ -32,6 +32,16 @@ function Write-Test { param($msg) Write-Host "[TEST] $msg" -ForegroundColor Whit
 # Git bash needs 7 to 12 s to its first prompt on a machine where each MSYS
 # fork costs about 150 ms (measured outside psmux as well), so the fixed 1 s
 # waits after send-keys failed the sweep. Poll the pane for the expected line.
+function Wait-CurrentCommand {
+    param([string]$Target, [string]$Pattern, [int]$TimeoutMs = 25000)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Start-Sleep -Milliseconds 500
+        $c = (& $PSMUX display-message -t $Target -p '#{pane_current_command}' 2>&1) | Out-String
+    } while ($c -notmatch $Pattern -and $sw.ElapsedMilliseconds -lt $TimeoutMs)
+    return $c
+}
+
 function Wait-PaneOutput {
     param([string]$Target, [string]$Pattern, [int]$TimeoutMs = 25000)
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -229,11 +239,15 @@ if ($img1.Image -ieq $gitBash) {
 } else {
     Write-Fail "New window runs '$($img1.Image)', not the configured Git bash"
 }
-# And the shell really is a live Git bash: BASH_VERSION answers.
+# And the shell really is a live Git bash: BASH_VERSION answers. A login
+# Git bash takes 7 to 12 s to its first prompt where every MSYS fork is slow
+# (measured outside psmux too), and keys sent before readline is up can be
+# lost, so wait for the prompt, then for the answer.
+$null = Wait-PaneOutput $session '\$\s*$'
 & $PSMUX send-keys -t $session 'echo BASH_CHECK_$BASH_VERSION' Enter 2>&1 | Out-Null
 $sw99 = [System.Diagnostics.Stopwatch]::StartNew()
 $capOut = ""
-while ($sw99.ElapsedMilliseconds -lt 10000) {
+while ($sw99.ElapsedMilliseconds -lt 25000) {
     $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
     if ($capOut -match "BASH_CHECK_\d") { break }
     Start-Sleep -Milliseconds 500
@@ -356,9 +370,10 @@ if ($shellVal.Trim() -match "bash") {
 
 # Create a new window — this MUST use bash now
 & $PSMUX new-window -t $session 2>&1 | Out-Null
-Start-Sleep -Seconds 3
-
-$cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+# A login Git bash runs helpers such as `which` from its profile first, and
+# #{pane_current_command} names the foreground process (as tmux does), so
+# poll until the startup is over instead of sampling once.
+$cmd = Wait-CurrentCommand $session 'bash'
 Write-Info "  new-window after runtime set: $($cmd.Trim())"
 if ($cmd.Trim() -match "bash") {
     Write-Pass "New window uses bash after runtime default-shell change"
@@ -368,9 +383,7 @@ if ($cmd.Trim() -match "bash") {
 
 # Split window — also must use bash
 & $PSMUX split-window -t $session -v 2>&1 | Out-Null
-Start-Sleep -Seconds 2
-
-$cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+$cmd = Wait-CurrentCommand $session 'bash'
 Write-Info "  split-window after runtime set: $($cmd.Trim())"
 if ($cmd.Trim() -match "bash") {
     Write-Pass "Split pane uses bash after runtime default-shell change"

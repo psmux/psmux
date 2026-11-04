@@ -223,9 +223,11 @@ if ($hasGitBash) {
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 500
         $output = (& $PSMUX capture-pane -t bs_t9 -p 2>&1) | Out-String
-        if ($output -match "${marker9}_hello") { break }
+        # The echo's OUTPUT line, not the typed command line: matching the
+        # command moved on while bash (slow MSYS forks) was still running it.
+        if ($output -match "(?m)^${marker9}_hello") { break }
     }
-    if ($output -match "${marker9}_hello") {
+    if ($output -match "(?m)^${marker9}_hello") {
         Write-Pass "Bash pane: send-keys text delivered"
     } else {
         Write-Fail "Bash pane: text not found. Output: $($output.Substring(0, [Math]::Min(200, $output.Length)))"
@@ -234,9 +236,13 @@ if ($hasGitBash) {
     Write-Test "9b. Bash pane: backslash in send-keys"
     $marker9b = "BST9B_$(Get-Random)"
     & $PSMUX send-keys -t bs_t9 "echo ${marker9b}_bs\:test" Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
-    $output = (& $PSMUX capture-pane -t bs_t9 -p 2>&1) | Out-String
-    if ($output -match $marker9b) {
+    $output = ""
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Milliseconds 500
+        $output = (& $PSMUX capture-pane -t bs_t9 -p 2>&1) | Out-String
+        if ($output -match "(?m)^${marker9b}_bs") { break }
+    }
+    if ($output -match "(?m)^${marker9b}_bs") {
         Write-Pass "Bash pane: backslash content delivered"
     } else {
         Write-Fail "Bash pane: backslash test failed. Output: $($output.Substring(0, [Math]::Min(200, $output.Length)))"

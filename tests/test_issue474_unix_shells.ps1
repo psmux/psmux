@@ -178,11 +178,22 @@ if (Test-Path $gitBinBash) {
     $panes = (& $PSMUX display-message -t $S -p '#{window_panes}' 2>&1 | Out-String).Trim()
     if ($panes -eq "2") { Write-Pass "TUI: split-window created 2 bash panes" }
     else { Write-Fail "TUI: expected 2 panes, got $panes" }
+    # The split's bash is new: Git bash takes 7 to 12 s to its first prompt
+    # where every MSYS fork is slow, and keys sent before readline is up can
+    # be lost. Wait for the prompt, then poll for the echo's OUTPUT line.
+    for ($i = 0; $i -lt 60; $i++) {
+        if ((& $PSMUX capture-pane -t $S -p 2>&1 | Out-String) -match '\$\s*$') { break }
+        Start-Sleep -Milliseconds 500
+    }
     $marker = "M474T_" + (Get-Random -Maximum 99999)
     & $PSMUX send-keys -t $S "echo $marker" Enter
-    Start-Sleep -Seconds 3
-    $cap = (& $PSMUX capture-pane -t $S -p 2>&1 | Out-String)
-    if ($cap -match $marker) { Write-Pass "TUI: echo round-trip in attached window" }
+    $cap = ""
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 500
+        $cap = (& $PSMUX capture-pane -t $S -p 2>&1 | Out-String)
+        if ($cap -match "(?m)^$marker") { break }
+    }
+    if ($cap -match "(?m)^$marker") { Write-Pass "TUI: echo round-trip in attached window" }
     else { Write-Fail "TUI: echo never appeared" }
     & $PSMUX kill-session -t $S 2>&1 | Out-Null
     try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
