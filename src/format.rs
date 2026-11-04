@@ -1556,7 +1556,7 @@ fn no_session_var(var: &str) -> bool {
         "keypad_", "scroll_", "search_", "selection_",
     ];
     const NAMES: &[&str] = &[
-        "history_bytes", "history_size", "insert_flag", "line", "origin_flag", "wrap_flag",
+        "bracket_paste_flag", "history_bytes", "history_size", "insert_flag", "line", "origin_flag", "wrap_flag",
         "mouse_all_flag", "mouse_any_flag", "mouse_button_flag", "mouse_standard_flag",
         "mouse_utf8_flag", "mouse_line", "mouse_word", "mouse_x", "mouse_y",
     ];
@@ -2476,6 +2476,22 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 .and_then(|p| p.live_parser().lock().ok().map(|parser| parser.screen().extended_keys_mode()));
             mode.map(|m| crate::extended_keys::mode_name(m).to_string()).unwrap_or_default()
         }
+        // tmux 3.7 format.c format_cb_bracket_paste_flag (#985): whether the
+        // pane's program turned on bracketed paste (`ESC[?2004h`), read from
+        // the TARGET pane so `-t %N` and `list-panes -F` answer per pane.
+        // A pane in a mode reports 0: tmux reads wp->screen, which is then
+        // the mode's own screen, and psmux's paste into copy mode is plain
+        // text with no markers either (input.rs send_paste_to_active).
+        "bracket_paste_flag" => {
+            let Some(p) = target_pane() else { return "0".into() };
+            let in_mode = if crate::copy_mode::active_pane_id(app) == Some(p.id) {
+                app.mode.in_copy() || matches!(app.mode, Mode::ClockMode)
+            } else {
+                p.copy_state.is_some() || app.clock_panes.contains(&p.id)
+            };
+            let on = !in_mode && p.live_parser().lock().map_or(false, |parser| parser.screen().bracketed_paste());
+            if on { "1".into() } else { "0".into() }
+        }
         "alternate_on" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
                 if let Ok(parser) = p.term.lock() {
@@ -2764,6 +2780,10 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue662_mouse_flag_formats.rs"]
 mod tests_issue662_mouse_flag_formats;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue985_bracket_paste_flag.rs"]
+mod tests_issue985_bracket_paste_flag;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue272_format_shell_cache.rs"]

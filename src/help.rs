@@ -720,7 +720,7 @@ const FORMAT_GROUPS: &[(&str, &str)] = &[
     ("Buffer",  "buffer_name buffer_size buffer_sample buffer_created"),
     ("Client",  "client_width client_height client_name client_session client_prefix client_pid client_termname ..."),
     ("Server",  "pid version host hostname host_short"),
-    ("Misc",    "history_limit history_size alternate_on pane_mode pane_in_mode"),
+    ("Misc",    "history_limit history_size alternate_on bracket_paste_flag pane_mode pane_in_mode"),
     ("Mouse",   "mouse_any_flag mouse_standard_flag mouse_button_flag mouse_all_flag mouse_utf8_flag mouse_sgr_flag"),
 ];
 

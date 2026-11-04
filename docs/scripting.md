@@ -532,6 +532,7 @@ and produces an empty feature list.
 | `#{socket_path}` | The server that answered: `<psmux dir>/default`, `<psmux dir>/<label>` under `-L`, or the `-S` path |
 | `#{history_size}` | Lines currently held in the pane's scrollback |
 | `#{alternate_on}` | `1` if the pane is on the alternate screen |
+| `#{bracket_paste_flag}` | `1` if the pane's program turned on bracketed paste, DECSET 2004, so a paste reaches it wrapped in markers; `0` while the pane is in copy mode, as in tmux |
 | `#{mouse_any_flag}` | `1` if the pane has any mouse tracking mode on (DECSET 1000, 1002 or 1003) |
 | `#{mouse_standard_flag}` | `1` if the pane enabled normal tracking, DECSET 1000 (or X10 tracking, DECSET 9) |
 | `#{mouse_button_flag}` | `1` if the pane enabled button event tracking, DECSET 1002 |
