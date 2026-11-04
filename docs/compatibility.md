@@ -176,7 +176,7 @@ The following inline style directives are now rendered correctly in status-forma
 - `#[list]` for the window list region
 - `#[fill=colour]` for background fill
 - `#[align=left|centre|right]` for text alignment
-- `#[range=...]` for click regions
+- `#[range=...]` for click regions: `window|N`, `session|$N`, `pane|%N`, `user|X`, `left`, `right` and `control|N`, with the `Status`, `StatusLeft`, `StatusRight`, `StatusDefault` and `ControlN` mouse keys and `#{mouse_status_range}` / `#{mouse_status_line}` as tmux has them
 
 ### Format Variable Expansion in Bindings
 

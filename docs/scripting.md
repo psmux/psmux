@@ -429,9 +429,11 @@ bind-key -n C-h if-shell -F "#{pane_at_left}" "send-keys C-h" "select-pane -L"
 |----------|-------------|
 | `#{cursor_x}` / `#{cursor_y}` | Cursor position in the active pane, zero based |
 | `#{cursor_character}` | Character under the cursor |
-| `#{mouse_x}` / `#{mouse_y}` | Position of the last mouse event |
-| `#{mouse_line}` | Full line under the last mouse event |
-| `#{mouse_word}` | Word under the last mouse event |
+| `#{mouse_x}` / `#{mouse_y}` | Where the mouse event of the running binding happened: the cell in its pane, or the column and status line for a status line event; empty outside a mouse binding |
+| `#{mouse_line}` | Full line under the mouse event, in the pane it happened in |
+| `#{mouse_word}` | Word under the mouse event, in the pane it happened in |
+| `#{mouse_status_line}` | The status line a status line mouse event happened on, 0 for the first |
+| `#{mouse_status_range}` | The range clicked on the status line: `window`, `session`, `pane`, `left`, `right`, `control`, a `range=user|X` range's `X`, or empty outside every range |
 | `#{copy_cursor_x}` / `#{copy_cursor_y}` | Copy mode cursor position |
 | `#{copy_cursor_word}` / `#{copy_cursor_line}` | Word and line under the copy mode cursor |
 | `#{selection_present}` / `#{selection_active}` | `1` if a copy mode selection exists |
@@ -1560,7 +1562,6 @@ psmux mouse-drag 30 5
 psmux mouse-up 30 5
 ```
 
-Coordinates are client cell coordinates, zero based, the same space `#{mouse_x}` and
-`#{mouse_y}` report. These commands act on the client's view, so they need `mouse` to be on and a
+Coordinates are client cell coordinates, zero based. These commands act on the client's view, so they need `mouse` to be on and a
 client attached to have a visible effect.
 

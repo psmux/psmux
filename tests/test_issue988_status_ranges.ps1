@@ -244,6 +244,22 @@ P set -g "@hit" "none" | Out-Null
 Feed @((Sgr 8 11 0 'M'), (Sgr 8 11 0 'm'))
 Check "Alt press on RIGHT: M-MouseDown1StatusRight" (Wait-Opt "@hit") "M-R1"
 
+Write-Host "`n=== Group 7: the docs' control range buttons ===" -ForegroundColor Cyan
+P set -g status-format[0] '#[range=control|1] + #[norange] #[range=control|2] x #[norange]' | Out-Null
+P bind -n MouseDown1Control1 new-window | Out-Null
+P bind -n MouseDown1Control2 kill-window | Out-Null
+Redraw
+$n0 = @((P list-windows -F '#{window_index}') -split "`r?`n" | Where-Object { $_ }).Count
+Feed @((Sgr 0 1 0 'M'), (Sgr 0 1 0 'm'))
+Start-Sleep -Milliseconds 1200
+$n1 = @((P list-windows -F '#{window_index}') -split "`r?`n" | Where-Object { $_ }).Count
+Check "+ button (control|1) opens a window" ($n1 - $n0) 1
+Start-Sleep -Milliseconds 400
+Feed @((Sgr 0 5 0 'M'), (Sgr 0 5 0 'm'))
+Start-Sleep -Milliseconds 1200
+$n2 = @((P list-windows -F '#{window_index}') -split "`r?`n" | Where-Object { $_ }).Count
+Check "x button (control|2) closes one" ($n1 - $n2) 1
+
 # Clean up only this namespace.
 foreach ($id in $started) { try { Stop-Process -Id $id -Force -EA Stop } catch {} }
 & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null
