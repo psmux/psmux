@@ -557,30 +557,85 @@ pub static PSMUX_EXTRA_OPTION_NAMES: &[&str] = &["dim-predictions", "env-shim", 
 /// (`status-format[1]`, `command-alias[0]`) is judged by its base name.
 /// Everything else is what tmux calls an invalid option (issue #846).
 pub fn is_valid_option_name(name: &str) -> bool {
-    if name.starts_with('@') {
+    // A subscript tmux's options_parse refuses (an empty `[]`, text after the
+    // `]`, no `]`, a number too large) is no option at all, on every option,
+    // `@` ones included (options.c:759-784 at tag 3.8), so `set -u`, `show`
+    // and `set` all refuse `status-left[]` as they refuse
+    // `terminal-overrides[]`.
+    let Ok((base, _)) = crate::option_array::parse_name(name) else {
+        return false;
+    };
+    if base.starts_with('@') {
         return true;
     }
-    let base = match name.find('[') {
-        Some(at) if name.ends_with(']') => &name[..at],
-        Some(_) => return false,
-        None => name,
-    };
     if base.is_empty() {
-        return false;
-    }
-    // An array on crate::option_array whose index is no index
-    // (`terminal-overrides[x]`) is no option at all (options.c
-    // `options_parse`), so `set -u`, `show` and `set` all refuse it as tmux
-    // does, not only a set with a value.
-    if base.len() != name.len()
-        && crate::option_array::spec(base).is_some()
-        && crate::option_array::parse_name(name).is_err()
-    {
         return false;
     }
     is_known_option(base)
         || TMUX_OPTION_NAMES.contains(&base)
         || PSMUX_EXTRA_OPTION_NAMES.contains(&base)
+}
+
+/// The hooks tmux 3.8 runs on an event, each an array option like every hook
+/// (`OPTIONS_TABLE_IS_ARRAY|OPTIONS_TABLE_IS_HOOK`, options-table.c:246-273
+/// and the hook entries at :1927-2072 at tag 3.8). The `after-` hooks are
+/// the rest of that table.
+static TMUX_EVENT_HOOK_NAMES: &[&str] = &[
+    "alert-activity", "alert-bell", "alert-silence", "client-active",
+    "client-attached", "client-closed", "client-created", "client-dark-theme",
+    "client-detached", "client-focus-in", "client-focus-out",
+    "client-light-theme", "client-resized", "client-session-changed",
+    "command-error", "marked-pane-changed", "pane-activity", "pane-bell",
+    "pane-command-finished", "pane-command-started", "pane-created",
+    "pane-died", "pane-exited", "pane-focus-in", "pane-focus-out",
+    "pane-mode-changed", "pane-mode-entered", "pane-mode-exited", "pane-moved",
+    "pane-prompt-closed", "pane-prompt-opened", "pane-resized",
+    "pane-set-clipboard", "pane-shell-prompt", "pane-title-changed",
+    "session-added-to-group", "session-closed", "session-created",
+    "session-removed-from-group", "session-renamed", "session-window-changed",
+    "window-closed", "window-created", "window-layout-changed",
+    "window-linked", "window-pane-changed", "window-renamed", "window-resized",
+    "window-unlinked", "window-unzoomed", "window-zoomed",
+];
+
+/// True when tmux keeps `base` as an array: one of the array options
+/// (crate::option_array, under either spelling of pane-colours) or a hook
+/// (the event hooks, and the `after-` hooks and psmux's `before-` ones).
+fn is_array_option(base: &str) -> bool {
+    crate::option_array::is_array_name(base).is_some()
+        || TMUX_EVENT_HOOK_NAMES.contains(&base)
+        || base.starts_with("after-")
+        || base.starts_with("before-")
+}
+
+/// What `set-option` says to an element of an option that is no array:
+/// tmux refuses `status-left[x]`, `escape-time[0]` and `@user[0]` with
+/// "not an array: NAME" (cmd-set-option.c:295-298 at tag 3.8, `array_key !=
+/// NULL && (*name == '@' || !options_is_array(parent))`), with every flag,
+/// `-q` and `-u` included, and sets nothing. `None` for a name with no
+/// element, or an element of an array. Only `set-option` refuses it:
+/// `show-options` and a format read the option itself, as tmux does.
+pub fn not_an_array_error(name: &str) -> Option<String> {
+    let Ok((base, Some(_))) = crate::option_array::parse_name(name) else {
+        return None;
+    };
+    if !base.starts_with('@') && is_array_option(base) {
+        return None;
+    }
+    Some(format!("not an array: {}", name))
+}
+
+/// The option `show-options` and a format read for `name`. An element of an
+/// option that is no array reads the option itself, as options_to_string
+/// ignores the key of an option that is no array (options.c:720-756 at tag
+/// 3.8): `show -g 'status-left[0]'` prints status-left's value under the
+/// name as typed, and `#{status-left[0]}` is status-left. Any other name is
+/// read as it is.
+pub fn read_name(name: &str) -> &str {
+    match crate::option_array::parse_name(name) {
+        Ok((base, Some(_))) if not_an_array_error(name).is_some() => base,
+        _ => name,
+    }
 }
 
 /// Ordered names emitted by `show-options -w`, not every Window-scoped catalog entry.

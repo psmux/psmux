@@ -2122,6 +2122,12 @@ impl ParsedSetOptionArgs<'_> {
             return Err(format!("invalid option: {}", option));
         }
         crate::server::option_catalog::validate_local_window_override(option, local_window)?;
+        // An element of an option that is no array (`status-left[x]`) is
+        // "not an array: NAME", which -q does not silence
+        // (cmd-set-option.c:295-298 at tag 3.8).
+        if let Some(error) = crate::server::option_catalog::not_an_array_error(option) {
+            return Err(error);
+        }
         if pane_scope {
             if unset || self.positionals.len() >= 2 {
                 return Ok(());
