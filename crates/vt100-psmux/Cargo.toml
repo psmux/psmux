@@ -113,6 +113,10 @@ path = "tests/issue962_sgr_bold_dim_overline.rs"
 name = "replacement_character"
 path = "tests/replacement_character.rs"
 
+[[test]]
+name = "rep_autowrap_insert"
+path = "tests/rep_autowrap_insert.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 
