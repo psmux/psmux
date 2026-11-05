@@ -6,10 +6,11 @@
 //! and `send-keys User0` sends nothing either.
 //!
 //! psmux keys are `(KeyCode, KeyModifiers)` pairs, so a user key is stored as
-//! a `KeyCode::Char` in the supplementary private use plane, as `mouse_keys`
-//! stores the mouse keys (U+F0000 up). User keys take U+F1000 to U+F13E8,
-//! clear of the mouse range, so bind, unbind, list-keys and the client's
-//! binding sync carry them without a separate store.
+//! a `KeyCode::Char` in a private use area, right after the mouse keys
+//! (`key_base::user_base()`, U+10E000 + 3200 = U+10EC80 to U+10F068 by
+//! default, clear of the Nerd Fonts icons; `PSMUX_KEY_BASE` moves both), so
+//! bind, unbind, list-keys and the client's binding sync carry them without
+//! a separate store.
 //!
 //! Matching the sequences needs the bytes the outer terminal sent, which only
 //! the VT and pipe input routes have (`ssh_input::VtParser`). On the console
@@ -29,20 +30,21 @@ pub const OPTION: &str = "user-keys";
 /// tmux KEYC_NUSER: the highest user key number.
 pub const MAX_USER: u32 = 1000;
 
-const BASE: u32 = 0xF1000;
+// The user keys take key_base::USER_SPAN characters: User0 to User1000.
+const _: () = assert!(MAX_USER + 1 == crate::key_base::USER_SPAN);
 
 /// The stored character of `UserN`.
 pub fn char_for(n: u32) -> Option<char> {
     if n > MAX_USER {
         return None;
     }
-    char::from_u32(BASE + n)
+    char::from_u32(crate::key_base::user_base() + n)
 }
 
 /// True when `c` is the stored form of a user key.
 pub fn is_user_char(c: char) -> bool {
-    let v = c as u32;
-    (BASE..=BASE + MAX_USER).contains(&v)
+    let base = crate::key_base::user_base();
+    (base..=base + MAX_USER).contains(&(c as u32))
 }
 
 /// True when `key` is a user key, with any modifiers.
@@ -52,7 +54,7 @@ pub fn is_user_key(key: &(KeyCode, KeyModifiers)) -> bool {
 
 /// `UserN` for a stored user key character.
 pub fn name(c: char) -> Option<String> {
-    is_user_char(c).then(|| format!("User{}", c as u32 - BASE))
+    is_user_char(c).then(|| format!("User{}", c as u32 - crate::key_base::user_base()))
 }
 
 /// The user key a name without modifiers names: `User0` to `User1000`, read
@@ -134,15 +136,18 @@ pub fn any() -> bool {
 /// True when the client should drop `c` as an unbound user key rather than
 /// pass it on as text.
 ///
-/// The stored range U+F1000 to U+F13E8 is also real text: Nerd Fonts 3 puts
-/// its Material Design icons at U+F0001 to U+F1AF0, and an IME commit, a
-/// paste or the emoji picker delivers such a glyph as a key event for that
-/// character. Only the VT and pipe input reader ever turns a sequence into a
-/// user key, and only while `user-keys` has elements, so anywhere else the
-/// character is the glyph the user typed and goes on as master always sent
-/// it: on the console route (`vt_route` false, where the console host parses
-/// the sequences before psmux reads them), and on any route while the option
-/// is empty. `have_sequences` is [`any`], passed in so the rule is testable.
+/// The stored range is also real text: a font may draw a character there,
+/// and an IME commit, a paste or the emoji picker delivers such a glyph as a
+/// key event for that character. The default range (`key_base`) is clear of
+/// the Nerd Fonts and SF Symbols glyphs, but `PSMUX_KEY_BASE` may move it
+/// onto another font's (before it moved, it shared U+F1000 to U+F13E8 with
+/// the Nerd Fonts Material Design icons). Only the VT and pipe input reader
+/// ever turns a sequence into a user key, and only while `user-keys` has
+/// elements, so anywhere else the character is the glyph the user typed and
+/// goes on as text: on the console route (`vt_route` false, where the console
+/// host parses the sequences before psmux reads them), and on any route while
+/// the option is empty. `have_sequences` is [`any`], passed in so the rule is
+/// testable.
 pub fn drop_as_unbound(c: char, vt_route: bool, have_sequences: bool) -> bool {
     vt_route && have_sequences && is_user_char(c)
 }
