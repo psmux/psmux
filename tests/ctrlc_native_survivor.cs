@@ -72,7 +72,9 @@ static class CtrlcNativeSurvivor
         try
         {
             string n = Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
-            return n == "psmux" || n == "pmux" || n == "tmux";
+            // The test names a renamed build (an A/B binary) in this variable.
+            string extra = (Environment.GetEnvironmentVariable("PSMUX_T989_SERVER_NAME") ?? "").ToLowerInvariant();
+            return n == "psmux" || n == "pmux" || n == "tmux" || (extra.Length > 0 && n == extra);
         }
         catch { return false; }
     }
