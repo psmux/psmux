@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 
 const CHILD_ENV: &str = "PSMUX_T989_ATTACH_CHILD";
 const HANDLER_CHILD_ENV: &str = "PSMUX_T989_HANDLER_CHILD";
+const OUTSIDE_SERVER_CHILD_ENV: &str = "PSMUX_T989_OUTSIDE_SERVER_CHILD";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[link(name = "kernel32")]
@@ -197,6 +198,33 @@ fn server_keeps_handler_after_injection_and_failed_attach() {
         said,
         "attached=true after_attach=true failed_attach=false after_failed_attach=true after_injection=true"
     );
+}
+
+/// Body of the child: `detach_console` restores a handler in the server only.
+fn outside_server_child_body(marker: std::ffi::OsString) {
+    SERVER_PROCESS.store(false, std::sync::atomic::Ordering::Relaxed);
+    let report = unsafe {
+        SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 1);
+        let before = survival_handler_registered();
+        detach_console();
+        format!("before={} after={}", before, survival_handler_registered())
+    };
+    let _ = std::fs::write(marker, report);
+    std::process::exit(0);
+}
+
+/// Clients and CLI commands behave as they did before `detach_console`: they
+/// leave the console and FreeConsole empties the list.  Only the server, which
+/// has to outlive the injection, gets a handler back.
+#[test]
+fn detach_console_restores_no_handler_outside_the_server() {
+    if let Some(marker) = std::env::var_os(OUTSIDE_SERVER_CHILD_ENV) {
+        outside_server_child_body(marker);
+        return;
+    }
+    let (status, said) = run_child("detach_console_restores_no_handler_outside_the_server", OUTSIDE_SERVER_CHILD_ENV);
+    assert!(status.success(), "child failed with {:?}: {}", status.code(), said);
+    assert_eq!(said, "before=true after=false");
 }
 
 #[test]
