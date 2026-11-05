@@ -40,6 +40,12 @@ pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     /// `ESC P` + params + intermediates + `q` (from `hook`), the payload (from
     /// `put`), and a trailing `ST` (appended in `unhook`).
     dcs_buf: Vec<u8>,
+    /// The character REP (`CSI Ps b`) repeats: the last one printed, until
+    /// a control character, an escape, a CSI, an OSC or a DCS ends it, as
+    /// tmux's `ictx->last` and `INPUT_LAST` (input.c:1230-1250, :2859-2893
+    /// and the dispatchers' ends, :1383, :1459, :1895, :2549, :2694 at tag
+    /// 3.8).
+    last_printed: Option<char>,
 }
 
 impl WrappedScreen<()> {
@@ -63,6 +69,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             callbacks,
             dcs_active: false,
             dcs_buf: Vec::new(),
+            last_printed: None,
         }
     }
 
@@ -74,6 +81,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             callbacks,
             dcs_active: false,
             dcs_buf: Vec::new(),
+            last_printed: None,
         }
     }
 }
@@ -95,10 +103,12 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             self.callbacks.unhandled_char(&mut self.screen, c);
         } else {
             self.screen.text(c);
+            self.last_printed = Some(c);
         }
     }
 
     fn execute(&mut self, b: u8) {
+        self.last_printed = None;
         match b {
             7 => {
                 self.screen.audible_bell_count = self.screen.audible_bell_count.wrapping_add(1);
@@ -118,6 +128,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, b: u8) {
+        self.last_printed = None;
         if let Some(i) = intermediates.first() {
             self.callbacks.unhandled_escape(
                 &mut self.screen,
@@ -155,6 +166,8 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         _ignore: bool,
         c: char,
     ) {
+        // Only REP reads it, and every CSI, REP included, ends it.
+        let last_printed = self.last_printed.take();
         if let Some(query) = crate::queries::csi_query(params, intermediates, _ignore, c) {
             self.screen.query(query);
         }
@@ -190,7 +203,28 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'S' => self.screen.su(canonicalize_params_1(params, 1)),
                 'T' => self.screen.sd(canonicalize_params_1(params, 1)),
                 'X' => self.screen.ech(canonicalize_params_1(params, 1)),
+                // REP: the last character printed, n more times
+                // (input.c:1799-1818 at tag 3.8). Each goes through `print`,
+                // as tmux adds each through screen_write_collect_add.
+                //
+                // tmux stops at the right margin; the console hosts, the
+                // inbox conhost and OpenConsole alike, wrap and go on, as
+                // xterm does. psmux follows the console host, so the pane's
+                // screen and cursor stay where the host has them on the
+                // OpenConsole route, and the same as the inbox route, where
+                // the host repeats before psmux reads the output (Discussion
+                // #937). The count is a parameter, at most 65535.
+                'b' => {
+                    if let Some(last) = last_printed {
+                        for _ in 0..canonicalize_params_1(params, 1) {
+                            vte::Perform::print(self, last);
+                        }
+                        self.last_printed = None;
+                    }
+                }
                 'd' => self.screen.vpa(canonicalize_params_1(params, 1)),
+                'h' => self.screen.sm(params, unhandled),
+                'l' => self.screen.rm(params, unhandled),
                 'm' => self.screen.sgr(params, unhandled),
                 'n' => {
                     // DSR (Device Status Report) — in passthrough mode the
@@ -293,6 +327,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
+        self.last_printed = None;
         if let Some(query) = crate::queries::osc_query(params, self.screen.program_status_enabled()) {
             self.screen.query(query);
             return;
@@ -581,6 +616,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn unhook(&mut self) {
+        self.last_printed = None;
         if !self.dcs_active {
             return;
         }
