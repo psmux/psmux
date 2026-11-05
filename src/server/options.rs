@@ -297,6 +297,8 @@ pub(crate) fn lookup_user_option(
     target: &str,
     table: UserOptionTable,
 ) -> Option<(String, bool)> {
+    // `@u[0]` reads @u (option_catalog::read_name).
+    let name = crate::server::option_catalog::read_name(name);
     match table {
         UserOptionTable::Session => app.user_options.get(name).map(|v| (v.clone(), false)),
         UserOptionTable::GlobalWindow => {
@@ -333,6 +335,8 @@ pub(crate) fn render_user_option_line(name: &str, value: &str, inherited: bool, 
 /// `show-options -w [-g] <name>` for one target: the global window table for
 /// [`GLOBAL_WINDOW_TABLE`], the resolved window otherwise.
 pub(crate) fn window_option_value_for_target(app: &AppState, name: &str, target: &str) -> String {
+    // `mode-keys[0]` reads mode-keys (option_catalog::read_name).
+    let name = crate::server::option_catalog::read_name(name);
     if target == GLOBAL_WINDOW_TABLE {
         return app.global_window_user_options.get(name).cloned().unwrap_or_default();
     }
@@ -1105,6 +1109,8 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
 
 /// Get a single option's value by name (for `show-options -v name`).
 pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
+    // `status-left[0]` reads status-left (option_catalog::read_name).
+    let name = crate::server::option_catalog::read_name(name);
     let value = match name {
         "prefix" => crate::config::format_option_key(&app.prefix_key),
         "prefix2" => crate::config::format_option_key(&app.prefix2_key),
@@ -2146,6 +2152,8 @@ pub(crate) fn pane_user_option(
     pane: Option<&crate::types::Pane>,
     name: &str,
 ) -> Option<String> {
+    // `#{@u[0]}` reads @u (option_catalog::read_name).
+    let name = crate::server::option_catalog::read_name(name);
     if let Some(value) = pane.and_then(|p| p.pane_options.get(name)) {
         return Some(value.clone());
     }

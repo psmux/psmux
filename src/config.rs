@@ -1843,6 +1843,13 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
         warn_config(app, error);
         return;
     }
+    // An element of an option that is no array (`status-left[x]`): "not an
+    // array: NAME" with every flag, -q included (cmd-set-option.c:295-298 at
+    // tag 3.8). It used to be kept as text under that name.
+    if let Some(error) = crate::server::option_catalog::not_an_array_error(key) {
+        warn_config(app, error);
+        return;
+    }
 
     // #728: `-p` writes the target PANE's own table, through the same writer
     // the CLI and TCP routes use, so the command prompt and `source-file` land
