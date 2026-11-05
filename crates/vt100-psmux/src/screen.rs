@@ -53,6 +53,12 @@ const MODE_APPLICATION_CURSOR: u8 = 0b0000_0010;
 const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
+/// DECAWM reset (`CSI ? 7 l`): no wrap at the right margin. A bit for the
+/// mode that is not the default, so a new screen and RIS wrap, as tmux's
+/// MODE_WRAP is on from the start (screen-write.c:430 at tag 3.8).
+const MODE_NO_AUTOWRAP: u8 = 0b0010_0000;
+/// IRM (`CSI 4 h`): a printed character moves the rest of the line right.
+const MODE_INSERT: u8 = 0b0100_0000;
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -2075,6 +2081,20 @@ impl Screen {
             return;
         }
 
+        // With autowrap off, a wide character that does not fit before the
+        // right margin is dropped (screen-write.c:2695-2698 at tag 3.8).
+        let autowrap = !self.mode(MODE_NO_AUTOWRAP);
+        if !autowrap && width > 1 && pos.col != size.cols && pos.col > size.cols - width {
+            return;
+        }
+
+        // Insert mode makes room for the character at the cursor before the
+        // wrap is decided, as tmux does (screen-write.c:2701-2704); what
+        // moves past the right margin is lost.
+        if self.mode(MODE_INSERT) {
+            self.grid_mut().insert_cells(width);
+        }
+
         // it doesn't make any sense to wrap if the last column in a row
         // didn't already have contents. don't try to handle the case where a
         // character wraps because there was only one column left in the
@@ -2084,7 +2104,13 @@ impl Screen {
         // (xterm handles this by introducing the concept of triple width
         // cells, which i really don't want to do).
         let mut wrap = false;
-        if pos.col > size.cols - width {
+        if !autowrap {
+            // No wrap: the character replaces the last one that fits
+            // (screen-write.c:2707 wraps only with MODE_WRAP).
+            if pos.col > size.cols - width {
+                self.grid_mut().col_set(size.cols - width);
+            }
+        } else if pos.col > size.cols - width {
             let last_cell = self
                 .grid()
                 .drawing_cell(crate::grid::Pos {
@@ -2183,6 +2209,14 @@ impl Screen {
                 next_cell.set_wide_continuation(true);
             }
             self.grid_mut().col_inc(1);
+        }
+        // With no wrap the cursor stays on the last column, so the next
+        // character replaces it (screen-write.c:2790-2794 at tag 3.8).
+        if !autowrap {
+            let col = self.grid().pos().col;
+            if col > size.cols - 1 {
+                self.grid_mut().col_set(size.cols - 1);
+            }
         }
     }
 
@@ -2460,6 +2494,8 @@ impl Screen {
             match param {
                 [1] => self.set_mode(MODE_APPLICATION_CURSOR),
                 [6] => self.grid_mut().set_origin_mode(true),
+                // DECAWM (input.c:2043 at tag 3.8).
+                [7] => self.clear_mode(MODE_NO_AUTOWRAP),
                 [9] => self.set_mouse_mode(MouseProtocolMode::Press),
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
                 [47] => self.enter_alternate_grid(),
@@ -2498,6 +2534,8 @@ impl Screen {
             match param {
                 [1] => self.clear_mode(MODE_APPLICATION_CURSOR),
                 [6] => self.grid_mut().set_origin_mode(false),
+                // DECAWM (input.c:1946 at tag 3.8).
+                [7] => self.set_mode(MODE_NO_AUTOWRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
                 [47] => {
@@ -2523,6 +2561,35 @@ impl Screen {
                     self.decrc();
                 }
                 [2004] => self.clear_mode(MODE_BRACKETED_PASTE),
+                _ => unhandled(self),
+            }
+        }
+    }
+
+    // CSI h: of the ANSI modes only IRM, insert mode (input.c:2007 at tag
+    // 3.8); tmux's other one, 34, is a cursor style psmux does not keep.
+    pub(crate) fn sm(
+        &mut self,
+        params: &vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        for param in params {
+            match param {
+                [4] => self.set_mode(MODE_INSERT),
+                _ => unhandled(self),
+            }
+        }
+    }
+
+    // CSI l (input.c:1910 at tag 3.8).
+    pub(crate) fn rm(
+        &mut self,
+        params: &vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        for param in params {
+            match param {
+                [4] => self.clear_mode(MODE_INSERT),
                 _ => unhandled(self),
             }
         }
