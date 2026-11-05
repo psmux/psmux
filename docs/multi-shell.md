@@ -268,8 +268,8 @@ Ctrl+C presses in Git Bash, most easily with the stock Git for Windows prompt (i
 `PROMPT_COMMAND` runs native programs): every session vanished at once and the server exited with
 `0xC000013A`. Git Bash panes keep the console's Ctrl+C processing on, so conhost turns each press
 into a console Ctrl+C event, and when one arrived while psmux was briefly attached to that console
-to deliver input, the server took it as its own. psmux now ignores console Ctrl+C and Ctrl+Break
-events for the whole time it is attached to a pane's console
+to deliver input, or just as it left, the server took it as its own. psmux now ignores console
+Ctrl+C and Ctrl+Break events while it is attached to a pane's console and after it has left
 ([#989](https://github.com/psmux/psmux/issues/989)).
 
 ### Mouse in WSL programs
