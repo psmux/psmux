@@ -52,7 +52,7 @@ Usage:  pwsh tests\test_issue989_detach_ctrlc.ps1 [-Psmux <path>]
         Point -Psmux at a fresh build.  Raise -LateBursts to soak.
 #>
 param(
-    [string]$Psmux = (Get-Command psmux -EA Stop).Source,
+    [string]$Psmux = $(if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } elseif ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA Stop).Source }),
     [int]$Bursts = 2,
     [int]$PerBurst = 10,
     [int]$LateBursts = 6,
@@ -62,6 +62,7 @@ param(
     [int]$StockPresses = 300
 )
 $ErrorActionPreference = 'Continue'
+Remove-Item Env:SHELL -EA SilentlyContinue
 $script:Pass = 0; $script:Fail = 0
 function P($m){ Write-Host "  [PASS] $m" -ForegroundColor Green; $script:Pass++ }
 function F($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red;   $script:Fail++ }
@@ -95,7 +96,12 @@ if (-not (Test-Path $helper) -or (Get-Item $helper).LastWriteTime -lt (Get-Item 
     if (-not (Test-Path $helper)) { F "could not compile $src"; exit 1 }
 }
 
-$psmuxDir = "$env:USERPROFILE\.psmux"
+# A private data dir, so pid files, the debug log and every server of this
+# test stay out of the user's own data dir.
+$oldDataDir = $env:PSMUX_DATA_DIR
+$psmuxDir = Join-Path $env:TEMP ("psmux_t989d_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$null = New-Item -ItemType Directory -Force $psmuxDir
+$env:PSMUX_DATA_DIR = $psmuxDir
 $debugLog = "$psmuxDir\mouse_debug.log"
 function To-Msys([string]$p) {
     $p = $p.Replace('\', '/')
@@ -369,5 +375,7 @@ Test-Attach
 Test-Late
 Test-Inherit
 if ($Stock) { Test-Stock }
+$env:PSMUX_DATA_DIR = $oldDataDir
+Remove-Item $psmuxDir -Recurse -Force -EA SilentlyContinue
 Write-Host ("`nPassed: {0}  Failed: {1}  ({2:N1} s)" -f $script:Pass, $script:Fail, ($sw.ElapsedMilliseconds / 1000))
 if ($script:Fail -gt 0 -or $script:Pass -eq 0) { exit 1 } else { exit 0 }
