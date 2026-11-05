@@ -18,6 +18,7 @@ use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
 const CHILD_ENV: &str = "PSMUX_T989_ATTACH_CHILD";
+const HANDLER_CHILD_ENV: &str = "PSMUX_T989_HANDLER_CHILD";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[link(name = "kernel32")]
@@ -107,6 +108,95 @@ fn attached_process_survives_ctrl_c_on_the_pane_console() {
     let said = std::fs::read_to_string(&marker).unwrap_or_default();
     let _ = std::fs::remove_file(&marker);
     assert_eq!(said, "survived", "the child did not run the attach body");
+}
+
+/// True if the survival handler is registered: removing one that is not fails.
+/// Puts it back, so the check leaves the list as it found it.
+unsafe fn survival_handler_registered() -> bool {
+    let found = SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 0) != 0;
+    if found {
+        SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 1);
+    }
+    found
+}
+
+/// Run one test of this file in a child with its own hidden console.  Returns
+/// how it exited and what it wrote to the marker file named by `env`.
+fn run_child(leaf: &str, env: &str) -> (std::process::ExitStatus, String) {
+    let exe = std::env::current_exe().expect("current_exe");
+    let marker = std::env::temp_dir().join(format!("psmux_{}_{}.txt", leaf, std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let status = Command::new(exe)
+        .args(["--exact", &test_name(leaf), "--test-threads=1", "--nocapture"])
+        .env(env, &marker)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run child");
+    let said = std::fs::read_to_string(&marker).unwrap_or_default();
+    let _ = std::fs::remove_file(&marker);
+    (status, said)
+}
+
+/// Body of the child: every way off a console must leave the handler in place.
+fn handler_child_body(marker: std::ffi::OsString) {
+    crate::platform::clear_inherited_ctrl_c_ignore();
+    SERVER_PROCESS.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::platform::install_console_ctrl_handler();
+
+    let mut victim = Command::new(r"C:\Windows\System32\PING.EXE")
+        .args(["-t", "127.0.0.1"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn ping");
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
+    let (attached, after_attach, failed_attach, after_failed_attach) = {
+        let _g = portable_pty::console_state_lock();
+        unsafe {
+            let attached = free_and_attach(victim.id(), "t989");
+            let after_attach = survival_handler_registered();
+            // While still attached, so the failing attach's own FreeConsole has
+            // a console to leave and empties the list.  From no console it
+            // changes nothing and this would pass without the protection.
+            let failed_attach = free_and_attach(NONEXISTENT_PID, "t989");
+            (attached, after_attach, failed_attach, survival_handler_registered())
+        }
+    };
+    // A whole injection, which takes the console lock itself and ends in a detach.
+    send_ctrl_c_event(victim.id(), false);
+    let after_injection = unsafe { survival_handler_registered() };
+
+    let _ = victim.kill();
+    let _ = victim.wait();
+    let report = format!(
+        "attached={} after_attach={} failed_attach={} after_failed_attach={} after_injection={}",
+        attached, after_attach, failed_attach, after_failed_attach, after_injection
+    );
+    let _ = std::fs::write(marker, report);
+    std::process::exit(0);
+}
+
+/// Whether a late CTRL_C_EVENT finds the server off a console is a matter of
+/// timing.  Whether the handler is there to meet it is not, which makes this
+/// the deterministic half of tests/test_issue989_detach_ctrlc.ps1.
+#[test]
+fn server_keeps_handler_after_injection_and_failed_attach() {
+    if let Some(marker) = std::env::var_os(HANDLER_CHILD_ENV) {
+        handler_child_body(marker);
+        return;
+    }
+    let (status, said) = run_child("server_keeps_handler_after_injection_and_failed_attach", HANDLER_CHILD_ENV);
+    assert!(status.success(), "child failed with {:?}: {}", status.code(), said);
+    assert_eq!(
+        said,
+        "attached=true after_attach=true failed_attach=false after_failed_attach=true after_injection=true"
+    );
 }
 
 #[test]
