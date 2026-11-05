@@ -27,6 +27,7 @@ mod pane_border;
 mod clipboard;
 mod copy_mode;
 mod grid_reader;
+mod key_base;
 mod mouse_keys;
 mod user_keys;
 mod copy_prompt;

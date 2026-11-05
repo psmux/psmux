@@ -9,15 +9,14 @@
 //! them like any other key.
 //!
 //! psmux keys are `(KeyCode, KeyModifiers)` pairs.  A mouse key is stored as a
-//! `KeyCode::Char` in the supplementary private use plane (U+F0000 up), which
-//! no keyboard or IME produces as a single key event, so every existing table
+//! `KeyCode::Char` in a private use area, from `key_base::mouse_base()` up
+//! (U+10E000 by default, in Supplementary Private Use Area-B, clear of the
+//! Nerd Fonts icons; `PSMUX_KEY_BASE` moves it), so every existing table
 //! operation (bind, unbind, list-keys, notes, the client sync) carries mouse
 //! keys without a separate store.  `parse` / `name` convert to and from the
-//! tmux spelling.
+//! tmux spelling, and only names cross the wire.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-
-const BASE: u32 = 0xF0000;
 
 /// Event names, in tmux spelling.  The first seven take a button number.
 const EVENTS: &[&str] = &[
@@ -37,9 +36,9 @@ const LOCATIONS: &[&str] = &[
 ];
 /// Room for each location in the encoding.
 const LOC_SLOTS: u32 = LOCATIONS.len() as u32;
-// The whole mouse key range has to stay below the user keys, which start at
-// U+F1000 (user_keys.rs): 10 events x 16 buttons x 20 locations is 3200.
-const _: () = assert!(BASE + (EVENTS.len() as u32) * 16 * LOC_SLOTS <= 0xF1000);
+// The mouse keys take key_base::MOUSE_SPAN characters, and the user keys
+// start right after them: 10 events x 16 buttons x 20 locations is 3200.
+const _: () = assert!((EVENTS.len() as u32) * 16 * LOC_SLOTS == crate::key_base::MOUSE_SPAN);
 
 pub const EV_MOUSE_DOWN: usize = 0;
 pub const EV_MOUSE_DRAG: usize = 2;
@@ -59,13 +58,14 @@ pub const LOC_BORDER: usize = 8;
 
 fn encode(event: usize, button: u32, location: usize) -> char {
     let code = ((event as u32 * 16 + button) * LOC_SLOTS) + location as u32;
-    char::from_u32(BASE + code).expect("mouse key code is a valid scalar")
+    char::from_u32(crate::key_base::mouse_base() + code).expect("mouse key code is a valid scalar")
 }
 
 /// True when `c` is the stored form of a mouse key.
 pub fn is_mouse_char(c: char) -> bool {
     let v = c as u32;
-    v >= BASE && v < BASE + (EVENTS.len() as u32) * 16 * LOC_SLOTS
+    let base = crate::key_base::mouse_base();
+    v >= base && v < base + crate::key_base::MOUSE_SPAN
 }
 
 /// True when `c` is a mouse key on the status line: `Status`,
@@ -74,7 +74,7 @@ pub fn is_status_char(c: char) -> bool {
     if !is_mouse_char(c) {
         return false;
     }
-    let location = ((c as u32 - BASE) % LOC_SLOTS) as usize;
+    let location = ((c as u32 - crate::key_base::mouse_base()) % LOC_SLOTS) as usize;
     (1..=4).contains(&location) || location >= 10
 }
 
@@ -88,7 +88,7 @@ pub fn name(c: char) -> Option<String> {
     if !is_mouse_char(c) {
         return None;
     }
-    let code = c as u32 - BASE;
+    let code = c as u32 - crate::key_base::mouse_base();
     let location = (code % LOC_SLOTS) as usize;
     let button = (code / LOC_SLOTS) % 16;
     let event = (code / (16 * LOC_SLOTS)) as usize;
