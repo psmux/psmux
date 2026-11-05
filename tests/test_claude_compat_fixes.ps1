@@ -330,11 +330,18 @@ if ($bashPath) {
         if ($paneId -match "^%\d+$") {
             Pass "3.3: Claude Code split pattern returned pane ID: $($paneId.Trim())"
 
+            # Git bash can need 20 s to its first prompt on a machine where each
+            # MSYS fork costs 300 to 400 ms (git-prompt.sh forks many times;
+            # measured the same on builds before and after #989), so wait for
+            # the prompt before typing, then poll for the echo.
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                Start-Sleep -Milliseconds 500
+                $cap = & $PSMUX capture-pane -t "${SESSION}:0.1" -p 2>&1 | Out-String
+            } while ($cap -notmatch '\$\s*$' -and $sw.ElapsedMilliseconds -lt 45000)
+
             # Now send a command to that pane using session:window.pane format
             & $PSMUX send-keys -t "${SESSION}:0.1" "echo TEAMMATE_SPAWN_OK" Enter
-            # Git bash needs 7 to 12 s to its first prompt on a machine where
-            # each MSYS fork costs about 150 ms (measured outside psmux too), so
-            # a fixed 2 s wait failed the sweep. Poll for the echo instead.
             $sw = [Diagnostics.Stopwatch]::StartNew()
             do {
                 Start-Sleep -Milliseconds 500
