@@ -108,3 +108,7 @@ pub fn mouse_base() -> u32 {
 pub fn user_base() -> u32 {
     base() + MOUSE_SPAN
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_key_base.rs"]
+mod tests_key_base;
