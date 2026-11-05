@@ -773,3 +773,7 @@ mod tests_option_default_parity;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue846_option_probe.rs"]
 mod tests_issue846_option_probe;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_not_an_array.rs"]
+mod tests_not_an_array;
