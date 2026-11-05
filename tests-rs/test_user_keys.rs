@@ -135,13 +135,20 @@ fn an_unknown_user_name_is_diagnosed_as_tmux_reports_it() {
 
 #[test]
 fn a_nerd_font_glyph_is_text_where_no_user_key_can_come_from() {
-    // U+F1000 is User0's stored form and also a Nerd Fonts 3 Material Design
+    // U+F1000 was User0's stored form and is a Nerd Fonts 3 Material Design
     // icon (nf-md range U+F0001 to U+F1AF0), which the console route delivers
     // as a key event for that character after an IME commit, a paste or the
-    // emoji picker. Measured on the PR as first written: the glyph reached the
-    // pane on master and was dropped by the client.
+    // emoji picker. The keys now sit in Supplementary Private Use Area-B
+    // (key_base), so that glyph is no user key at all.
+    for v in [0xF0001u32, 0xF1000, 0xF1234, 0xF1AF0] {
+        let nf = char::from_u32(v).unwrap();
+        assert!(!is_user_char(nf), "U+{v:X}");
+        assert!(!drop_as_unbound(nf, true, true), "U+{v:X}");
+    }
+    // A character that is a user key's stored form is still dropped only
+    // where a user key can come from.
     let glyph = char_for(0).unwrap();
-    assert_eq!(glyph as u32, 0xF1000);
+    assert_eq!(glyph as u32, crate::key_base::user_base());
     // The console route never produces a user key: the glyph is text, with or
     // without user-keys set.
     assert!(!drop_as_unbound(glyph, false, false));
@@ -151,8 +158,9 @@ fn a_nerd_font_glyph_is_text_where_no_user_key_can_come_from() {
     // Only the VT route with sequences set drops an unbound user key.
     assert!(drop_as_unbound(glyph, true, true));
     assert!(drop_as_unbound(char_for(1000).unwrap(), true, true));
-    // Neighbouring glyphs outside the user range are never dropped.
-    for v in [0xF0FFFu32, 0xF13E9, 0xF2000] {
+    // Neighbouring characters outside the user range are never dropped.
+    let base = crate::key_base::user_base();
+    for v in [base - 1, base + 1001, 0xF2000] {
         assert!(!drop_as_unbound(char::from_u32(v).unwrap(), true, true), "U+{v:X}");
     }
 }

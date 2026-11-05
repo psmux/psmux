@@ -1,6 +1,9 @@
-# Issue #986 follow up: user keys are stored as U+F1000 to U+F13E8, which is
-# also where Nerd Fonts 3 puts Material Design icons (U+F0001 to U+F1AF0). A
-# glyph from that range that the user types must still reach the pane.
+# Issue #986 follow up: user keys were stored as U+F1000 to U+F13E8, which is
+# also where Nerd Fonts 3 puts Material Design icons (U+F0001 to U+F1AF0), and
+# the mouse keys right below them. They now sit in Supplementary Private Use
+# Area-B (src/key_base.rs). A glyph from the Nerd Fonts range that the user
+# types must still reach the pane, and must not run a binding of User0 (whose
+# stored form U+F1000 used to be).
 #
 # The console route (Windows Terminal, a console window) delivers an IME commit,
 # a paste or a Win+. emoji pick of a character outside the BMP as a key down
@@ -10,13 +13,21 @@
 #
 # Expectations: the glyphs U+F1000 and U+F1234 arrive, with and without
 # user-keys set, as they do on master. The PR as first written dropped them in
-# the client as unbound user keys. send-keys of the glyph arrives too.
+# the client as unbound user keys. send-keys of the glyph arrives too. With
+# `bind -n User0` set, typing U+F1000 runs no binding: while the keys sat in
+# the Nerd Fonts range it ran the binding and the glyph was lost.
+#
+# Each session is its own server, so the config goes to both `sk` and `con`
+# with -f; given to `sk` alone, `con` (where the glyphs are typed) had no
+# user-keys and no binding at all.
 #
 # Isolation: private USERPROFILE and PSMUX_DATA_DIR, a -L namespace, cleanup
 # by `-L <ns> kill-server` and by the PIDs this script started.
 # Binary: $env:PSMUX_EXE, else ..\target\release\psmux.exe.
 
 $ErrorActionPreference = "Continue"
+# capture-pane's text is read as UTF-8 whatever the console's code page is.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 foreach ($name in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'PSMUX_*' -and $_.Name -ne 'PSMUX_EXE' -or $_.Name -like 'TMUX*' } | ForEach-Object Name)) {
     Remove-Item "Env:$name"
 }
@@ -76,7 +87,7 @@ function Run-Case($label, $confLines) {
     $conf = Join-Path $TempHome "$ns.conf"
     Set-Content -Path $conf -Encoding ascii -Value (@('set -g status-left ""') + $confLines)
     & $PSMUX -L $ns -f $conf new-session -d -s sk "pwsh -NoLogo -NoProfile" 2>&1 | Out-Null
-    & $PSMUX -L $ns new-session -d -s con "pwsh -NoLogo -NoProfile" 2>&1 | Out-Null
+    & $PSMUX -L $ns -f $conf new-session -d -s con "pwsh -NoLogo -NoProfile" 2>&1 | Out-Null
     if (-not ((Wait-Prompt $ns "sk") -and (Wait-Prompt $ns "con"))) {
         Write-Fail "$label : the pane shells never showed a prompt"
         & $PSMUX -L $ns kill-server 2>&1 | Out-Null
@@ -99,6 +110,7 @@ function Run-Case($label, $confLines) {
         $u16 = (("$g1$g2").ToCharArray() | ForEach-Object { ([int]$_).ToString("X4") }) -join ","
         Start-Process -FilePath $INJ -ArgumentList @("$($c.Id)", "A{UTF16:$u16}B") -WindowStyle Hidden -Wait | Out-Null
         Check "$label : the glyphs typed on the console route reach the pane" (Wait-Line $ns "con" $want) $want
+        Check "$label : the typed glyphs run no binding" ((& $PSMUX -L $ns show -t con -gqv '@hit' 2>&1) -join '') ""
         try { Stop-Process -Id $c.Id -Force -EA SilentlyContinue } catch {}
     }
     & $PSMUX -L $ns kill-server 2>&1 | Out-Null

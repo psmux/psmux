@@ -159,7 +159,8 @@ fn control_keys_are_mouse_keys() {
         assert!(is_status_char(match key.0 { crossterm::event::KeyCode::Char(c) => c, _ => unreachable!() }));
     }
     assert!(parse("MouseDown1Control10").is_none());
-    // The largest mouse key is still not a user key (U+F1000 up).
+    // The largest mouse key is still not a user key (they start right after
+    // the mouse keys, key_base::user_base()).
     let top = parse("MouseMoveControl9").unwrap();
     let crossterm::event::KeyCode::Char(c) = top.0 else { unreachable!() };
     assert!(!crate::user_keys::is_user_char(c));
