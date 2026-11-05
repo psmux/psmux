@@ -4,18 +4,16 @@
 # from there, typed, pasted or picked, is a key event for that character, so a
 # binding of the key it stood for ran and the glyph never reached the pane
 # (`bind -n WheelUpPane ...` and U+F08C0, `bind -n User0 ...` and U+F1000).
-# The keys now start at U+10E000 in Supplementary Private Use Area-B, and
-# PSMUX_KEY_BASE moves them (src/key_base.rs).
+# The keys now start at U+10E000 in Supplementary Private Use Area-B
+# (src/key_base.rs).
 #
 #   [1] the console route: Nerd Font glyphs at the old places of User0,
 #       WheelUpPane and MouseDown1Pane reach the pane and run no binding
 #   [2] the VT route: the keys still work at their new place, a user-keys
 #       sequence runs `bind -n User0` and a wheel over the pane runs
 #       `bind -n WheelUpPane`, and list-keys names them
-#   [3] the same with PSMUX_KEY_BASE=F1AF1; typed on the console route, the
-#       default place of User0 is text then and the moved one is the key
-#   [4] PSMUX_KEY_BASE=zz is refused with a startup warning, and the keys
-#       stay at the default
+#   [3] typed on the console route, the old place of User0 (U+F1000) is text
+#       and the new one (U+10EC80) is the key, the limit the docs give
 #
 # The console client is attached in a window of its own and typed into with
 # tests\injector.cs; the VT client runs under tests\conpty_vt_keys.cs with
@@ -100,13 +98,11 @@ function Start-VtClient($ns, $conf, $steps) {
     return $p
 }
 
-# [2] and [3]: the keys run at their place, with PSMUX_KEY_BASE as $base.
-function Keys-Run($label, $base) {
+# [2]: the keys run at their place.
+function Keys-Run($label) {
     $ns = NewNs
     $conf = Conf @("set -s user-keys[0] `"\e[5;30012~`"", 'bind -n User0 set -g @hu yes', 'bind -n WheelUpPane set -g @hw yes')
-    if ($base) { $env:PSMUX_KEY_BASE = $base }
     $p = Start-VtClient $ns $conf "$(Hex $SEQ0),w800,$(Hex $WHEEL)"
-    Remove-Item Env:PSMUX_KEY_BASE -EA SilentlyContinue
     Start-Sleep -Milliseconds 11000
     Check "$label : the user-keys sequence runs bind -n User0" (Opt $ns '@hu') "yes"
     Check "$label : a wheel over the pane runs bind -n WheelUpPane" (Opt $ns '@hw') "yes"
@@ -152,48 +148,33 @@ try {
         & $PSMUX -L $ns kill-server 2>&1 | Out-Null
 
         Write-Host "`n[2] The keys still work at their new place (VT route)" -ForegroundColor Yellow
-        Keys-Run "default" $null
+        Keys-Run "new place"
 
-        Write-Host "`n[3] PSMUX_KEY_BASE=F1AF1 moves them" -ForegroundColor Yellow
-        Keys-Run "F1AF1" "F1AF1"
-        # Typed on the console route with the keys moved: the default place of
-        # User0 (U+10EC80) is text now, and the moved one (U+F1AF1 + 3200 =
-        # U+F2771) is the key, so it runs the binding, the limit the docs give.
+        Write-Host "`n[3] Typed on the console route, the old place is text and the new one the key" -ForegroundColor Yellow
+        # The old place of User0 (U+F1000) is a Nerd Font glyph and reaches the
+        # pane; the new one (U+10E000 + 3200 = U+10EC80) is the key, so it runs
+        # the binding, the limit the docs give.
         $ns = NewNs
         $conf = Conf @('bind -n User0 set -g @hu yes')
-        $env:PSMUX_KEY_BASE = "F1AF1"
         & $PSMUX -L $ns -f $conf new-session -d -s con 2>&1 | Out-Null
         if (Wait-Prompt $ns "con") {
             Start-Sleep 1
             $c = Start-Process -FilePath $PSMUX -ArgumentList @("-L", $ns, "attach", "-t", "con") -WindowStyle Minimized -PassThru
             $script:OpenedPids += $c.Id
-            Remove-Item Env:PSMUX_KEY_BASE -EA SilentlyContinue
             Start-Sleep 5
-            Start-Process -FilePath $INJ -ArgumentList @("$($c.Id)", "A{UTF16:$(U16 0x10EC80)}B") -WindowStyle Hidden -Wait | Out-Null
+            Start-Process -FilePath $INJ -ArgumentList @("$($c.Id)", "A{UTF16:$(U16 0xF1000)}B") -WindowStyle Hidden -Wait | Out-Null
             Start-Sleep 2
-            Check "F1AF1 : the default place of User0 (U+10EC80) is text" (Edit-Line $ns "con") "U+41 U+10EC80 U+42"
-            Check "F1AF1 : and runs no binding" (Opt $ns '@hu') ""
-            Start-Process -FilePath $INJ -ArgumentList @("$($c.Id)", "{UTF16:$(U16 0xF2771)}") -WindowStyle Hidden -Wait | Out-Null
+            Check "the old place of User0 (U+F1000) is text" (Edit-Line $ns "con") "U+41 U+F1000 U+42"
+            Check "and runs no binding" (Opt $ns '@hu') ""
+            # Cleared, so the check below sees only what U+10EC80 does.
+            & $PSMUX -L $ns set -gu '@hu' 2>&1 | Out-Null
+            Start-Process -FilePath $INJ -ArgumentList @("$($c.Id)", "{UTF16:$(U16 0x10EC80)}") -WindowStyle Hidden -Wait | Out-Null
             Start-Sleep 2
-            Check "F1AF1 : the moved User0 (U+F2771) runs bind -n User0" (Opt $ns '@hu') "yes"
+            Check "the new place of User0 (U+10EC80) runs bind -n User0" (Opt $ns '@hu') "yes"
             try { Stop-Process -Id $c.Id -Force -EA SilentlyContinue } catch {}
         } else {
-            Remove-Item Env:PSMUX_KEY_BASE -EA SilentlyContinue
-            Write-Fail "F1AF1 : the pane shell never showed a prompt"
+            Write-Fail "[3] the pane shell never showed a prompt"
         }
-        & $PSMUX -L $ns kill-server 2>&1 | Out-Null
-
-        Write-Host "`n[4] A value the keys do not fit in is refused" -ForegroundColor Yellow
-        $ns = NewNs
-        $conf = Conf @('bind -n WheelUpPane set -g @hw yes')
-        $env:PSMUX_KEY_BASE = "zz"
-        $out = (& $PSMUX -L $ns -f $conf new-session -d -s w 2>&1 | ForEach-Object { "$_" }) -join "`n"
-        Remove-Item Env:PSMUX_KEY_BASE -EA SilentlyContinue
-        Start-Sleep 2
-        $log = Join-Path $TempHome "config-warnings.log"
-        $text = $out + "`n" + ((Get-Content $log -EA SilentlyContinue) -join "`n")
-        Check "the startup warning names PSMUX_KEY_BASE=zz and the default kept" ([bool]($text -match 'PSMUX_KEY_BASE=zz' -and $text -match 'U\+10E000')) "True"
-        Check "the bindings keep their names" ([bool](((& $PSMUX -L $ns list-keys -T root 2>&1) -join "`n") -match '-T root +WheelUpPane +set')) "True"
         & $PSMUX -L $ns kill-server 2>&1 | Out-Null
     }
 }

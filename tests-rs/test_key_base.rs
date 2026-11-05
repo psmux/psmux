@@ -1,7 +1,7 @@
 // Where the mouse keys and the user keys are stored (crate::key_base): U+10E000
-// in Supplementary Private Use Area-B by default, clear of the icon fonts,
-// and PSMUX_KEY_BASE moves them. The font ranges are the ones counted from
-// Nerd Fonts 3.5.1's glyphnames.json and from an SF Symbols 5.1 export.
+// in Supplementary Private Use Area-B, clear of the icon fonts. The font
+// ranges are the ones counted from Nerd Fonts 3.5.1's glyphnames.json and
+// from an SF Symbols 5.1 export.
 
 use super::*;
 
@@ -16,8 +16,8 @@ fn overlaps(a: (u32, u32), b: (u32, u32)) -> bool {
 }
 
 #[test]
-fn the_default_range_is_clear_of_the_icon_fonts() {
-    let keys = (DEFAULT, DEFAULT + TOTAL - 1);
+fn the_range_is_clear_of_the_icon_fonts() {
+    let keys = (BASE, BASE + TOTAL - 1);
     assert_eq!(keys, (0x10E000, 0x10F068));
     for font in NERD_FONTS.iter().copied().chain([SF_SYMBOLS]) {
         assert!(!overlaps(keys, font), "U+{:X}..U+{:X} meets U+{:X}..U+{:X}", keys.0, keys.1, font.0, font.1);
@@ -26,53 +26,9 @@ fn the_default_range_is_clear_of_the_icon_fonts() {
 }
 
 #[test]
-fn unset_or_empty_keeps_the_default() {
-    assert_eq!(parse(None), Ok(DEFAULT));
-    assert_eq!(parse(Some("")), Ok(DEFAULT));
-    assert_eq!(parse(Some("  ")), Ok(DEFAULT));
-}
-
-#[test]
-fn a_hex_value_in_either_supplementary_area_moves_the_keys() {
-    for (text, want) in [
-        ("10E000", 0x10E000),
-        ("0x10E000", 0x10E000),
-        ("U+10E000", 0x10E000),
-        ("u+f1af1", 0xF1AF1),
-        ("F1AF1", 0xF1AF1),
-        (" F0000 ", 0xF0000),
-        // The last start that still fits: the last key is U+FFFFD.
-        ("FEF95", 0xFFFFD - (TOTAL - 1)),
-        ("100000", 0x100000),
-        ("10EF95", 0x10FFFD - (TOTAL - 1)),
-    ] {
-        assert_eq!(parse(Some(text)), Ok(want), "{text}");
-    }
-}
-
-#[test]
-fn a_value_the_keys_do_not_fit_in_is_refused() {
-    for text in [
-        "zz",           // not hex
-        "-1",
-        "E000",         // the BMP private use area is too small and full of icons
-        "EFFFF",        // just before Area-A
-        "FEF96",        // the last key would be U+FFFFE, a noncharacter
-        "FFFF0",        // runs from Area-A into Area-B
-        "10EF96",       // the last key would be past U+10FFFD
-        "110000",       // past Unicode
-        "FFFFFFFF",
-    ] {
-        let why = parse(Some(text)).expect_err(text);
-        assert!(why.starts_with(&format!("{}={}", ENV, text.trim())), "{why}");
-        assert!(why.contains("U+10E000"), "names the default kept: {why}");
-    }
-}
-
-#[test]
 fn mouse_keys_come_first_and_user_keys_right_after() {
-    assert_eq!(mouse_base(), base());
-    assert_eq!(user_base(), base() + MOUSE_SPAN);
+    assert_eq!(mouse_base(), BASE);
+    assert_eq!(user_base(), BASE + MOUSE_SPAN);
     // The two ranges meet and do not overlap.
     let last_mouse = char::from_u32(user_base() - 1).unwrap();
     let first_user = char::from_u32(user_base()).unwrap();
@@ -81,17 +37,14 @@ fn mouse_keys_come_first_and_user_keys_right_after() {
     assert!(crate::user_keys::is_user_char(first_user));
     assert!(!crate::mouse_keys::is_mouse_char(first_user));
     assert_eq!(crate::user_keys::char_for(0), Some(first_user));
-    assert_eq!(crate::user_keys::char_for(1000).map(|c| c as u32), Some(base() + TOTAL - 1));
+    assert_eq!(crate::user_keys::char_for(1000).map(|c| c as u32), Some(BASE + TOTAL - 1));
 }
 
 #[test]
 fn the_old_ranges_are_text_now() {
     // Before the move the mouse keys were U+F0000 up and the user keys U+F1000
-    // to U+F13E8, inside the Nerd Fonts Material Design range. Unless
-    // PSMUX_KEY_BASE puts them back there, those characters are no keys.
-    if base() != DEFAULT {
-        return;
-    }
+    // to U+F13E8, inside the Nerd Fonts Material Design range. Those
+    // characters are no keys now.
     for v in [0xF0000u32, 0xF0010, 0xF08C0, 0xF1000, 0xF13E8, 0xF1AF0] {
         let c = char::from_u32(v).unwrap();
         assert!(!crate::mouse_keys::is_mouse_char(c), "U+{v:X}");

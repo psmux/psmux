@@ -10,8 +10,8 @@
 //!
 //! psmux keys are `(KeyCode, KeyModifiers)` pairs.  A mouse key is stored as a
 //! `KeyCode::Char` in a private use area, from `key_base::mouse_base()` up
-//! (U+10E000 by default, in Supplementary Private Use Area-B, clear of the
-//! Nerd Fonts icons; `PSMUX_KEY_BASE` moves it), so every existing table
+//! (U+10E000, in Supplementary Private Use Area-B, clear of the Nerd Fonts
+//! icons), so every existing table
 //! operation (bind, unbind, list-keys, notes, the client sync) carries mouse
 //! keys without a separate store.  `parse` / `name` convert to and from the
 //! tmux spelling, and only names cross the wire.

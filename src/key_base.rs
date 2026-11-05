@@ -17,20 +17,13 @@
 //! - Apple's SF Symbols 5.1: 5359 symbols packed from U+100000 to U+1022CF,
 //!   in Supplementary Private Use Area-B.
 //!
-//! The keys start at U+10E000 in Supplementary Private Use Area-B by default,
-//! far from both, and `PSMUX_KEY_BASE` (hex) moves them for a font that does
-//! use that spot. Every key's name, not its character, is what crosses the
-//! wire (the binding sync, `list-keys`, the config), so a client and a server
-//! that read different values still agree on every binding.
+//! The keys take U+10E000 to U+10F068, near the end of Supplementary Private
+//! Use Area-B, far from both. Every key's name, not its character, is what
+//! crosses the wire (the binding sync, `list-keys`, the config), so the place
+//! can move again without breaking a client or a server of another version.
 
-use std::sync::OnceLock;
-
-/// The environment variable that moves the keys: the first character, in
-/// hex (`10E000`, `0x10E000` or `U+10E000`).
-pub const ENV: &str = "PSMUX_KEY_BASE";
-
-/// The first character by default.
-pub const DEFAULT: u32 = 0x10E000;
+/// The first character: the first mouse key.
+pub const BASE: u32 = 0x10E000;
 
 /// How many characters the mouse keys take: 10 events x 16 buttons x 20
 /// locations (`mouse_keys`, which checks this at compile time).
@@ -43,70 +36,20 @@ pub const USER_SPAN: u32 = 1001;
 /// Every character the keys take, from the first one on.
 pub const TOTAL: u32 = MOUSE_SPAN + USER_SPAN;
 
-/// The private use areas a whole block of keys may sit in.
-const AREAS: [(u32, u32); 2] = [
-    (0xF0000, 0xFFFFD),   // Supplementary Private Use Area-A
-    (0x100000, 0x10FFFD), // Supplementary Private Use Area-B
-];
-
-/// The first character `value` (the variable's text, `None` when unset)
-/// asks for. Every one of the `TOTAL` characters from there must sit inside
-/// one supplementary private use area; anything else is refused with the
-/// reason, and the caller keeps `DEFAULT`.
-pub fn parse(value: Option<&str>) -> Result<u32, String> {
-    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(DEFAULT);
-    };
-    let hex = raw
-        .strip_prefix("U+")
-        .or_else(|| raw.strip_prefix("u+"))
-        .or_else(|| raw.strip_prefix("0x"))
-        .or_else(|| raw.strip_prefix("0X"))
-        .unwrap_or(raw);
-    let first = u32::from_str_radix(hex, 16)
-        .map_err(|_| format!("{}={}: not a hex code point; the keys stay at U+{:X}", ENV, raw, DEFAULT))?;
-    let last = first.saturating_add(TOTAL - 1);
-    if AREAS.iter().any(|&(lo, hi)| first >= lo && last <= hi) {
-        Ok(first)
-    } else {
-        Err(format!(
-            "{}={}: U+{:X} to U+{:X} is not inside one supplementary private use area \
-             (U+F0000 to U+FFFFD, or U+100000 to U+10FFFD); the keys stay at U+{:X}",
-            ENV, raw, first, last, DEFAULT
-        ))
-    }
-}
-
-fn resolved() -> &'static (u32, Option<String>) {
-    static BASE: OnceLock<(u32, Option<String>)> = OnceLock::new();
-    BASE.get_or_init(|| match parse(std::env::var(ENV).ok().as_deref()) {
-        Ok(first) => (first, None),
-        Err(why) => (DEFAULT, Some(why)),
-    })
-}
-
-/// The first character of the keys for this process, read once.
-#[inline]
-pub fn base() -> u32 {
-    resolved().0
-}
-
-/// Why `PSMUX_KEY_BASE` was refused, when it was: the server lists it with
-/// the config warnings at startup.
-pub fn refused() -> Option<&'static str> {
-    resolved().1.as_deref()
-}
+// Every key stays inside Supplementary Private Use Area-B (U+100000 to
+// U+10FFFD), so each one is a valid scalar and none is a noncharacter.
+const _: () = assert!(BASE >= 0x100000 && BASE + TOTAL - 1 <= 0x10FFFD);
 
 /// The first mouse key character.
 #[inline]
-pub fn mouse_base() -> u32 {
-    base()
+pub const fn mouse_base() -> u32 {
+    BASE
 }
 
 /// The first user key character, right after the mouse keys.
 #[inline]
-pub fn user_base() -> u32 {
-    base() + MOUSE_SPAN
+pub const fn user_base() -> u32 {
+    BASE + MOUSE_SPAN
 }
 
 #[cfg(test)]

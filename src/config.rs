@@ -377,11 +377,6 @@ pub fn load_config(app: &mut AppState) {
     app.ppm_declared = false;
     IN_STARTUP_LOAD.with(|c| c.set(true));
     let _startup_guard = StartupLoadGuard;
-    // A PSMUX_KEY_BASE the keys could not move to (crate::key_base) is said
-    // here, once per load, with the other startup warnings.
-    if let Some(why) = crate::key_base::refused() {
-        app.config_warnings.push(why.to_string());
-    }
 
     // If -f flag was used, load that specific config file instead of default search
     if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {

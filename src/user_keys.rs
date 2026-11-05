@@ -7,9 +7,8 @@
 //!
 //! psmux keys are `(KeyCode, KeyModifiers)` pairs, so a user key is stored as
 //! a `KeyCode::Char` in a private use area, right after the mouse keys
-//! (`key_base::user_base()`, U+10E000 + 3200 = U+10EC80 to U+10F068 by
-//! default, clear of the Nerd Fonts icons; `PSMUX_KEY_BASE` moves both), so
-//! bind, unbind, list-keys and the client's binding sync carry them without
+//! (`key_base::user_base()`, U+10E000 + 3200 = U+10EC80 to U+10F068, clear
+//! of the Nerd Fonts icons), so bind, unbind, list-keys and the client's binding sync carry them without
 //! a separate store.
 //!
 //! Matching the sequences needs the bytes the outer terminal sent, which only
@@ -138,10 +137,10 @@ pub fn any() -> bool {
 ///
 /// The stored range is also real text: a font may draw a character there,
 /// and an IME commit, a paste or the emoji picker delivers such a glyph as a
-/// key event for that character. The default range (`key_base`) is clear of
-/// the Nerd Fonts and SF Symbols glyphs, but `PSMUX_KEY_BASE` may move it
-/// onto another font's (before it moved, it shared U+F1000 to U+F13E8 with
-/// the Nerd Fonts Material Design icons). Only the VT and pipe input reader
+/// key event for that character. The range (`key_base`) is clear of the
+/// Nerd Fonts and SF Symbols glyphs (before it moved, it shared U+F1000 to
+/// U+F13E8 with the Nerd Fonts Material Design icons), but another font may
+/// still draw there. Only the VT and pipe input reader
 /// ever turns a sequence into a user key, and only while `user-keys` has
 /// elements, so anywhere else the character is the glyph the user typed and
 /// goes on as text: on the console route (`vt_route` false, where the console

@@ -1023,7 +1023,6 @@ hatch you want for one invocation rather than forever.
 | `PSMUX_BARE_ENV` | Spawn panes with a bare environment instead of inheriting yours. Useful when a broken inherited variable stops shells from starting |
 | `PSMUX_FORCE_MOUSE` | Overrides the ConPTY mouse safety gate. On Windows builds below 22523 psmux refuses to enable mouse reporting, because on Windows 10 era conhost the first click could fast fail the console host and take the pane down with it. Some later builds under that threshold, Windows Server 2022 (20348) among them, handle mouse perfectly well but still need psmux to write the enable sequence itself. Set to `1` there to get the mouse back. Set to `0` to force it off on a newer build whose console host misbehaves. Accepts `1`, `on`, `true`, `yes` and their negatives. If your session dies the moment you click, unset it |
 | `PSMUX_FORCE_WHEEL` | Set to `1` to forward the wheel into every pane on this server regardless of whether its application registered for the mouse. This is the server wide last resort; prefer the pane scoped `set-option -p -t %N @mouse-force on`, which is the scope the decision belongs at. psmux normally forwards only to a pane that asked, and it now keeps that authorization for as long as the process that earned it is alive, so a `node` child entering raw mode no longer takes it away. Reach for this only when an application registers through neither channel psmux can see and the wheel is dead in the pane from its first instant. Leave it unset if you run programs that do not read the mouse: they receive the report as literal keystrokes, which is what the gate exists to prevent. Accepts `1`, `on`, `true`, `yes`; anything else keeps the gate |
-| `PSMUX_KEY_BASE` | Where psmux keeps the keys it stores as characters: the mouse keys (`WheelUpPane` and the rest) and then the user keys (`User0` to `User1000`), 4201 characters in a private use area. The default is `10E000` (U+10E000 to U+10F068, in Supplementary Private Use Area-B), clear of the Nerd Fonts icons and Apple's SF Symbols. A glyph equal to one of these characters that you type or paste would run the binding of that key, so set this, in hex (`10E000`, `0x10E000` or `U+10E000`), only for a font that draws characters there. The 4201 characters must fit inside U+F0000 to U+FFFFD or U+100000 to U+10FFFD; any other value is refused with a startup warning and the default is kept. Each process reads it once, and names, not characters, cross between the client and the server, so the two may differ |
 
 ### Set inside panes by psmux
 
@@ -1567,13 +1566,12 @@ keys (`bind -n M-User2 ...` for a terminal that sends ESC before the
 sequence). `list-keys` prints `User1000` in full, where tmux 3.8 cuts it to
 `User100`.
 
-psmux keeps a user key as a character in a private use area, U+10EC80 to
-U+10F068 by default, right after the mouse keys (see `PSMUX_KEY_BASE` in
-[Environment Variables](#environment-variables)). No common icon font draws
-there: the Nerd Fonts icons are in the BMP private use area and at U+F0001 to
-U+F1AF0, and Apple's SF Symbols start at U+100000. A character from that range
-that you type or paste runs the binding of the key it stands for, so if a font
-you use does draw there, move the keys with `PSMUX_KEY_BASE`.
+psmux keeps the mouse keys and the user keys as characters near the end of
+Supplementary Private Use Area-B, U+10E000 to U+10F068 (the user keys from
+U+10EC80). No common icon font draws there: the Nerd Fonts icons are in the
+BMP private use area and at U+F0001 to U+F1AF0, and Apple's SF Symbols take
+U+100000 to U+1022CF. A character from that range that you type or paste runs
+the binding of the key it stands for.
 
 `show-options -s user-keys` prints one `user-keys[N] value` line per element,
 with ESC written as `\033`, a backslash doubled, and quoted as tmux quotes it
