@@ -196,3 +196,30 @@ fn a_config_line_on_an_array_element_has_no_warning() {
     assert!(app.config_warnings.is_empty(), "{:?}", app.config_warnings);
     assert_eq!(app.status_format.get_index(1), Some("second"));
 }
+
+#[test]
+fn a_set_hook_config_line_on_an_element_of_no_array_sets_nothing() {
+    // set-hook is set-option in tmux (cmd-set-option.c:65, 295-298), so
+    // `set-hook -g status-left[0] cmd` is "not an array" and no hook is kept.
+    let mut app = fresh_app();
+    for line in [
+        "set-hook -g 'status-left[0]' 'display x'",
+        "set-hook -g @u[0] 'display x'",
+        "set-hook -ga status-left[1] 'display x'",
+        "set-hook -gu @u[0]",
+    ] {
+        app.config_warnings.clear();
+        crate::config::parse_config_line(&mut app, line);
+        assert!(
+            app.config_warnings.iter().any(|w| w.contains("not an array: ")),
+            "{}: {:?}",
+            line,
+            app.config_warnings
+        );
+    }
+    assert!(!app.hooks.keys().any(|k| k.contains('[') && !k.starts_with("after-")), "{:?}", app.hooks.keys().collect::<Vec<_>>());
+    crate::config::parse_config_line(&mut app, "set-hook -g after-new-window[3] 'display x'");
+    crate::config::parse_config_line(&mut app, "set-hook -g pane-exited[2] 'display y'");
+    assert!(app.hooks.contains_key("after-new-window[3]"), "{:?}", app.hooks.keys().collect::<Vec<_>>());
+    assert!(app.hooks.contains_key("pane-exited[2]"), "{:?}", app.hooks.keys().collect::<Vec<_>>());
+}

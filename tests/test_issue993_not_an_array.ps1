@@ -146,6 +146,33 @@ try {
     Start-Sleep -Milliseconds 800
     Check "show -g lists nothing from the config or the hook" (Stray) ""
     Kill-Ns
+
+    # set-hook is set-option in tmux (cmd-set-option.c:65), so the same
+    # check holds there: `set-hook -g status-left[0] cmd` is "not an array"
+    # and no hook is kept, while a hook element is set.
+    Write-Host "[5] set-hook refuses an element of an option that is no array" -ForegroundColor Cyan
+    New-Ns @("set-hook -g 'status-right[c]' 'display c'", 'set -g @after yes')
+    foreach ($case in @(
+            @('set-hook', '-g', 'status-left[0]', 'display x'),
+            @('set-hook', '-g', '@u[0]', 'display x'),
+            @('set-hook', '-ga', 'escape-time[1]', 'display x'),
+            @('set-hook', '-gu', '@u[0]'))) {
+        $out = P @case
+        $rc = $LASTEXITCODE
+        $label = $case -join ' '
+        if ($rc -ne 0 -and $out -match [regex]::Escape("not an array: $($case[2])")) {
+            Write-Pass "$label : rc=$rc '$out'"
+        } else {
+            Write-Fail "$label : rc=$rc '$out'"
+        }
+    }
+    $cc = (("set-hook -g 'status-left[cc]' 'display x'`n" | & $PSMUX -L $script:NS -C attach -t s 2>&1 | ForEach-Object { "$_" }) -join "|")
+    if ($cc -match 'not an array: status-left\[cc\]\|%error') { Write-Pass "control mode set-hook status-left[cc] is %error" } else { Write-Fail "control mode set-hook: '$cc'" }
+    Check "set-hook -g pane-exited[3] is set" (Rc set-hook -g 'pane-exited[3]' 'display y') "0"
+    $hooks = (& $PSMUX -L $script:NS show-hooks -g 2>&1 | ForEach-Object { "$_" })
+    Check "show-hooks lists no element of an option that is no array" (($hooks | Where-Object { $_ -match '^(status-left|status-right|escape-time|@u)\[' }) -join "|") ""
+    Check "show-hooks lists pane-exited[3]" ([bool]($hooks | Where-Object { $_ -match '^pane-exited\[3\]' })) $true
+    Kill-Ns
 } finally {
     Kill-Ns
     Remove-Item -Recurse -Force $TempHome -EA SilentlyContinue
