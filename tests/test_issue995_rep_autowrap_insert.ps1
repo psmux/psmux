@@ -125,6 +125,36 @@ function Run-Cases($route) {
     Start-Sleep -Milliseconds 500
 }
 
+# DECRQM for DECAWM and IRM: 1 set, 2 reset, as tmux answers from MODE_WRAP
+# and MODE_INSERT (input.c:1641-1643 and :1662-1664 at tag 3.8). The inbox
+# conhost answers itself; through OpenConsole psmux answers, and said 0, "not
+# recognised", for both before it kept the modes.
+$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$probe = "$TempHome\decrqm_probe.exe"
+if (Test-Path $csc) { & $csc /nologo /out:$probe (Join-Path $PSScriptRoot "decrqm_mode_probe_child.cs") 2>&1 | Out-Null }
+$rqmWant = [ordered]@{
+    awm_default = 'ESC[?7;1$y'; awm_off = 'ESC[?7;2$y'; awm_on_again = 'ESC[?7;1$y'
+    irm_default = 'ESC[4;2$y'; irm_on = 'ESC[4;1$y'; irm_off_again = 'ESC[4;2$y'
+}
+function Run-Decrqm($route) {
+    if (-not (Test-Path $probe)) { Write-Info "${route}: DECRQM skipped, the probe did not compile"; return }
+    $log = "$TempHome\decrqm.txt"
+    Remove-Item $log -Force -EA SilentlyContinue
+    $script:NS = "rai_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
+    P new-session -d -s q -x 80 -y 20 "$($probe.Replace('\', '/')) $($log.Replace('\', '/'))" | Out-Null
+    $deadline = (Get-Date).AddSeconds(40)
+    while ((Get-Date) -lt $deadline -and -not (Test-Path $log)) { Start-Sleep -Milliseconds 250 }
+    Start-Sleep -Milliseconds 300
+    $got = @{}
+    foreach ($line in @(Get-Content $log -EA SilentlyContinue)) {
+        $k, $v = $line -split ' = ', 2
+        $got[$k] = "$v".Trim()
+    }
+    foreach ($k in $rqmWant.Keys) { Check "${route}: DECRQM $k" $got[$k] $rqmWant[$k] }
+    P kill-server | Out-Null
+    Start-Sleep -Milliseconds 500
+}
+
 Write-Host "`n=== REP, autowrap off and insert mode ===" -ForegroundColor Cyan
 Write-Host "  Binary: $PSMUX"
 Write-Host "  $((& $PSMUX -V) -join ' ')"
@@ -132,11 +162,13 @@ Write-Host "  $((& $PSMUX -V) -join ' ')"
 try {
     Write-Host "`n[1] the inbox conhost" -ForegroundColor Yellow
     Run-Cases 'inbox conhost'
+    Run-Decrqm 'inbox conhost'
 
     Write-Host "`n[2] OpenConsole" -ForegroundColor Yellow
     if ($ConptyDir -and (Test-Path (Join-Path $ConptyDir 'conpty.dll'))) {
         $env:PSMUX_CONPTY_DIR = $ConptyDir
         Run-Cases 'OpenConsole'
+        Run-Decrqm 'OpenConsole'
         Remove-Item Env:PSMUX_CONPTY_DIR
     } else {
         Write-Info "skipped: set PSMUX_TEST_CONPTY_DIR to a folder holding conpty.dll and OpenConsole.exe"
