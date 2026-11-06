@@ -234,8 +234,32 @@ fn decrqm_2026_reports_set_inside_an_open_update() {
 #[test]
 fn decrqm_for_an_unknown_mode_reports_zero() {
     assert_eq!(reply_for(b"\x1b[?31337$p", &fresh()), "\x1b[?31337;0$y");
-    // Every ANSI mode is unknown to psmux, including tmux's one tracked mode.
-    assert_eq!(reply_for(b"\x1b[4$p", &fresh()), "\x1b[4;0$y");
+    // Every ANSI mode but IRM is unknown to psmux, as to tmux.
+    assert_eq!(reply_for(b"\x1b[20$p", &fresh()), "\x1b[20;0$y");
+}
+
+// Issue #995: vt100 keeps DECAWM and IRM now, so their DECRQM answers say
+// what the pane has, as tmux's do (input.c:1641-1643, :1662-1664 at tag 3.8).
+#[test]
+fn decrqm_reports_autowrap_and_insert_mode() {
+    assert_eq!(reply_for(b"\x1b[?7$p", &fresh()), "\x1b[?7;1$y");
+    assert_eq!(reply_for(b"\x1b[4$p", &fresh()), "\x1b[4;2$y");
+    let st = DecrqmState { autowrap_off: true, insert_mode: true, ..fresh() };
+    assert_eq!(reply_for(b"\x1b[?7$p", &st), "\x1b[?7;2$y");
+    assert_eq!(reply_for(b"\x1b[4$p", &st), "\x1b[4;1$y");
+}
+
+#[test]
+fn decrqm_state_reads_autowrap_and_insert_mode_from_the_screen() {
+    let mut p = vt100::Parser::new(5, 20, 0);
+    let st = DecrqmState::from_screen(p.screen());
+    assert!(!st.autowrap_off && !st.insert_mode);
+    p.process(b"\x1b[?7l\x1b[4h");
+    let st = DecrqmState::from_screen(p.screen());
+    assert!(st.autowrap_off && st.insert_mode);
+    p.process(b"\x1b[?7h\x1b[4l");
+    let st = DecrqmState::from_screen(p.screen());
+    assert!(!st.autowrap_off && !st.insert_mode);
 }
 
 #[test]

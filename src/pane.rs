@@ -4233,6 +4233,11 @@ pub(crate) struct DecrqmState {
     pub mouse_all: bool,
     pub mouse_utf8: bool,
     pub mouse_sgr: bool,
+    /// Autowrap is off (DECAWM reset). The default, false, is a new screen,
+    /// which wraps.
+    pub autowrap_off: bool,
+    /// Insert mode (IRM) is on.
+    pub insert_mode: bool,
     /// A synchronized update (DECSET 2026) is open in the pane's `SyncGate`.
     pub synchronized_output: bool,
     /// The pane's size in cells, for the XTWINOPS size reports (issue #841).
@@ -4252,6 +4257,8 @@ impl DecrqmState {
             mouse_all: s.mouse_all_flag(),
             mouse_utf8: s.mouse_utf8_flag(),
             mouse_sgr: s.mouse_sgr_flag(),
+            autowrap_off: !s.autowrap(),
+            insert_mode: s.insert_mode(),
             synchronized_output: false,
             rows: s.size().0,
             cols: s.size().1,
@@ -4266,6 +4273,7 @@ fn decrqm_private_value(mode: u16, st: &DecrqmState) -> u8 {
     match mode {
         1 => onoff(st.application_cursor),          // DECCKM
         3 => 4,                                     // DECCOLM, permanently reset
+        7 => onoff(!st.autowrap_off),               // DECAWM
         25 => onoff(st.cursor_visible),             // DECTCEM
         47 | 1047 | 1049 => onoff(st.alternate_screen),
         1000 => onoff(st.mouse_standard),
@@ -4286,9 +4294,14 @@ fn decrqm_private_value(mode: u16, st: &DecrqmState) -> u8 {
     }
 }
 
-/// DECRQM for an ANSI mode.  psmux tracks none of them (tmux answers only IRM,
-/// input.c:1637-1649), so every mode reports 0, "not recognised".
-fn decrqm_ansi_value(_mode: u16) -> u8 { 0 }
+/// DECRQM for an ANSI mode.  Like tmux, only IRM is known (input.c:1638-1649
+/// at tag 3.8); every other mode reports 0, "not recognised".
+fn decrqm_ansi_value(mode: u16, st: &DecrqmState) -> u8 {
+    match mode {
+        4 => if st.insert_mode { 1 } else { 2 },
+        _ => 0,
+    }
+}
 
 /// Fixed OSC 7501 capability reply or tmux-compatible device reply.
 /// Empty for a zero-mode DECRQM, matching tmux's `if (m > 0)` guard.
@@ -4306,7 +4319,7 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
             format!("\x1b[?{};{}$y", m, decrqm_private_value(m, st))
         }
         DeviceQuery::DecrqmAnsi(m) if m > 0 => {
-            format!("\x1b[{};{}$y", m, decrqm_ansi_value(m))
+            format!("\x1b[{};{}$y", m, decrqm_ansi_value(m, st))
         }
         DeviceQuery::WindowReport(op) => window_report(op, st.rows, st.cols),
         _ => String::new(),

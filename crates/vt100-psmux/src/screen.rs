@@ -1020,6 +1020,18 @@ impl Screen {
         self.mode(MODE_BRACKETED_PASTE)
     }
 
+    /// Whether autowrap (DECAWM, `CSI ? 7 h`) is on; it is from the start.
+    #[must_use]
+    pub fn autowrap(&self) -> bool {
+        !self.mode(MODE_NO_AUTOWRAP)
+    }
+
+    /// Whether insert mode (IRM, `CSI 4 h`) is on.
+    #[must_use]
+    pub fn insert_mode(&self) -> bool {
+        self.mode(MODE_INSERT)
+    }
+
     /// Whether the output stream has asked for win32 input mode
     /// (`CSI ?9001h`) at any point.  See the field for why it is sticky.
     #[must_use]
