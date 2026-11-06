@@ -3238,8 +3238,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     // scripts to capture the created pane; printing the error
                     // text to stdout with exit 0 hands the caller a bogus
                     // "id" it cannot distinguish from success (psmux-resurrect
-                    // silently lost every split this way).
-                    if resp.trim_start().starts_with("ERROR") {
+                    // silently lost every split this way). A refused split
+                    // answers with the same text as without -P (#1000).
+                    let head = resp.trim_start();
+                    if head.starts_with("ERROR") || head.starts_with("psmux: split-window: ") {
                         eprint!("{}", resp);
                         std::process::exit(1);
                     }

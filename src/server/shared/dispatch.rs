@@ -248,7 +248,7 @@ pub(crate) fn dispatch(
                     }
                     // -T: the just-created pane is currently active in this
                     // window, so set its title before any detached revert.
-                    if let Some(t) = title {
+                    if let Some(t) = title.filter(|_| split_succeeded) {
                         let win = &mut app.windows[app.active_idx];
                         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
                             p.title_locked = !t.is_empty();
@@ -294,7 +294,8 @@ pub(crate) fn dispatch(
                     // runs at the loop top during an idle gap (Tier 3), so a burst
                     // of window-creates never chains blocking spawns that stall
                     // other clients' commands.
-                    resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
+                    resize_all_panes(&mut app); meta_dirty = true;
+                    if split_succeeded { hook_event = Some("after-split-window"); }
                     }
                 }
                 // copied from server/mod.rs run_server (line 3402 at 86a78100)
@@ -307,10 +308,12 @@ pub(crate) fn dispatch(
                     // CtrlReq::NewWindow above.
                     let prev_pane_id = crate::tree::get_active_pane_id(&app.windows[app.active_idx].root, &app.windows[app.active_idx].active_path);
                     let keep = split_size.keep.clone();
+                    let mut refused: Option<String> = None;
                     let split_succeeded = match crate::pane::split_active_placed(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets, split_size) {
                         Err(e) => {
-                            app.status_message = Some((format!("split-window: {e}"), std::time::Instant::now(), None));
-                            eprintln!("psmux: split-window error: {e}");
+                            let msg = format!("split-window: {e}");
+                            app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                            refused = Some(format!("psmux: {msg}"));
                             false
                         }
                         Ok(()) => true,
@@ -320,7 +323,7 @@ pub(crate) fn dispatch(
                         crate::pane::apply_split_keep(&mut app, &keep);
                     }
                     // -T: set the new (currently active) pane's title.
-                    if let Some(t) = title {
+                    if let Some(t) = title.filter(|_| split_succeeded) {
                         let win = &mut app.windows[app.active_idx];
                         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
                             p.title_locked = !t.is_empty();
@@ -356,13 +359,14 @@ pub(crate) fn dispatch(
                         resize_all_panes(&mut app);
                         toggle_zoom(&mut app);
                     }
-                    let _ = resp.send(pane_info);
+                    let _ = resp.send(refused.unwrap_or(pane_info));
                     // Replenish warm pane
                     // Warm-pane replenish is deferred OFF the command path: it
                     // runs at the loop top during an idle gap (Tier 3), so a burst
                     // of window-creates never chains blocking spawns that stall
                     // other clients' commands.
-                    resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
+                    resize_all_panes(&mut app); meta_dirty = true;
+                    if split_succeeded { hook_event = Some("after-split-window"); }
                 }
                 // copied from server/mod.rs run_server (line 3463 at 86a78100)
                 CtrlReq::KillPane => {

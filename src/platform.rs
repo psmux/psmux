@@ -1472,6 +1472,25 @@ pub mod mouse_inject {
             handler: Option<unsafe extern "system" fn(u32) -> i32>,
             add: i32,
         ) -> i32;
+        fn SetStdHandle(std_handle: u32, handle: *mut c_void) -> i32;
+    }
+
+    /// Issue #1000.  The server stays detached after an injection, but its std
+    /// handles still name the console it just left (its own hidden console from
+    /// `spawn_server_hidden`, or the pane's).  A write to such a handle fails
+    /// with err 87 or 5, and `eprintln!` panics on any failure except an
+    /// invalid handle, so the next error line the server printed (a refused
+    /// `split-window -P`) took the server and every pane down.  Null them, which
+    /// is the state a server started with `-d` has from birth: Rust drops a
+    /// write to a null std handle as a success, and a ConPTY spawn inherits no
+    /// freed console handle (#450).
+    unsafe fn forget_console_std_handles() {
+        const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        for h in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            SetStdHandle(h, std::ptr::null_mut());
+        }
     }
 
     /// Console input mode flags
@@ -1772,6 +1791,8 @@ pub mod mouse_inject {
         }
         if server {
             SetConsoleCtrlHandler(None, 0);
+            // A failed attach leaves the server detached with nothing to undo.
+            if !attached { forget_console_std_handles(); }
         }
         attached
     }
@@ -1793,6 +1814,7 @@ pub mod mouse_inject {
         SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 0);
         SetConsoleCtrlHandler(Some(survive_ctrl_c_while_attached), 1);
         SetConsoleCtrlHandler(None, 0);
+        forget_console_std_handles();
     }
 
     /// The handler `free_and_attach` registers on every attach, and
