@@ -2779,6 +2779,9 @@ pub mod mouse_inject {
         // established interrupt behavior (#338 line-cancel, #346 ping).  This
         // process-tree walk does not touch our console, so it is done before
         // the FreeConsole/AttachConsole dance below.
+        // One fresh process table for this whole decision; every
+        // classifier below reads it instead of walking the system again.
+        let _pinned = crate::platform::process_info::pin_fresh();
         let fg_is_shell = crate::platform::process_info::foreground_is_shell(child_pid)
             .unwrap_or(true);
 
@@ -2830,6 +2833,7 @@ pub mod mouse_inject {
                 // stripping the flag then silences its interrupt (measured).
                 let mut pids = [0u32; 64];
                 let n = GetConsoleProcessList(pids.as_mut_ptr(), 64) as usize;
+                crate::platform::process_info::repin_unless_known(&pids[..n.min(64)]);
                 if n > 0 && crate::platform::process_info::console_has_plain_native_app(&pids[..n.min(64)]) {
                     log("plain native app on pane console: keep PROCESSED_INPUT so its interrupt still fires");
                     detach_console();
@@ -2961,6 +2965,7 @@ pub mod mouse_inject {
                 console_pids.resize(n as usize, 0);
                 n = GetConsoleProcessList(console_pids.as_mut_ptr(), console_pids.len() as u32);
             }
+            crate::platform::process_info::repin_unless_known(&console_pids[..(n as usize).min(console_pids.len())]);
             {
                 let members: Vec<String> = console_pids[..(n as usize).min(console_pids.len())].iter()
                     .map(|p| crate::platform::process_info::classify_console_member(*p))
@@ -5022,6 +5027,63 @@ pub mod process_info {
             const { std::cell::Cell::new(0) };
     }
 
+    thread_local! {
+        /// A fresh table pinned for the duration of ONE Ctrl+C routing
+        /// decision (`pin_fresh`). While set, every `Duration::ZERO` caller on
+        /// this thread is served it instead of walking again.
+        static PINNED_TABLE: std::cell::RefCell<Option<ProcTable>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Restores the previous pin (normally none) when dropped.
+    pub struct PinnedTable {
+        prev: Option<ProcTable>,
+    }
+
+    impl Drop for PinnedTable {
+        fn drop(&mut self) {
+            let prev = self.prev.take();
+            PINNED_TABLE.with(|p| *p.borrow_mut() = prev);
+        }
+    }
+
+    /// Take ONE fresh walk and answer every live-tree question on this thread
+    /// from it until the guard drops.
+    ///
+    /// The Ctrl+C router asks about a dozen questions of the process tree
+    /// (foreground leaf, its pid, bridge leaf, bridge descendant, childless
+    /// fallback, recent bridge, then one per console member and the bridge
+    /// and native-app checks over the membership). Each used to be its own
+    /// `Duration::ZERO` walk at 9-11ms, so one Ctrl+C took 9 walks, 94-103ms,
+    /// measured with `PSMUX_PTY_TRACE` `W` lines, all on the server thread that
+    /// writes keystrokes into ConPTY: the 0x03 and every key typed behind it
+    /// waited that long. Answering them from one table is also what the router
+    /// already wants: a verdict and the identity it was based on should describe
+    /// the same moment.
+    pub fn pin_fresh() -> PinnedTable {
+        let fresh = walk_process_table();
+        let prev = PINNED_TABLE.with(|p| std::mem::replace(&mut *p.borrow_mut(), fresh));
+        PinnedTable { prev }
+    }
+
+    /// Re-walk the pinned table when it does not know one of `pids`.
+    ///
+    /// The console membership is enumerated after attaching, i.e. after the
+    /// pin was taken, so a process that joined the console in between (a
+    /// bridge launched that instant) would be invisible to the bridge checks.
+    /// Only then is a second walk paid. No-op without a pin.
+    pub fn repin_unless_known(pids: &[u32]) {
+        let missing = PINNED_TABLE.with(|p| {
+            p.borrow().as_ref().is_some_and(|t| {
+                pids.iter().any(|pid| !t.iter().any(|(p2, _, _)| p2 == pid))
+            })
+        });
+        if missing {
+            let fresh = walk_process_table();
+            PINNED_TABLE.with(|p| *p.borrow_mut() = fresh);
+        }
+    }
+
     /// Enumerate every process on the machine, with an optional freshness bound.
     ///
     /// `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` walks the whole system —
@@ -5047,6 +5109,13 @@ pub mod process_info {
     /// Returns `None` only when the snapshot itself fails. Failures are never
     /// cached.
     fn process_table(max_age: std::time::Duration) -> Option<ProcTable> {
+        if max_age.is_zero() {
+            // Inside one Ctrl+C routing decision every live-tree question is
+            // answered from the table that decision pinned; see `pin_fresh`.
+            if let Some(table) = PINNED_TABLE.with(|p| p.borrow().clone()) {
+                return Some(table);
+            }
+        }
         if !max_age.is_zero() {
             // Recover a poisoned lock rather than skipping the cache. The inner
             // value is only ever a fully-published entry or None (the critical
