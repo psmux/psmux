@@ -98,7 +98,11 @@ static class CtrlcNativeSurvivor
             }
             if (now && !attached && GenerateConsoleCtrlEvent(0 /* CTRL_C_EVENT */, 0)) Log("fire");
             attached = now;
-            Thread.Sleep(1);
+            // No sleep: since the Ctrl+C router answers from one process
+            // table, the server stays attached for about a millisecond, and a
+            // 1 ms sleep let most attaches pass unseen (20 of 20 caught before,
+            // 4 to 13 after).  Yield instead, for at most max-seconds.
+            Thread.Yield();
         }
         return 0;
     }
