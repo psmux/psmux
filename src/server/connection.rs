@@ -6180,11 +6180,17 @@ match cmd {
                 CtrlReq::SetHook(name, _) | CtrlReq::AppendHook(name, _) | CtrlReq::RemoveHook(name) => name.as_str(),
                 _ => "",
             };
-            if is_hook_name(name) {
-                let _ = tx.send(req);
-            } else {
+            if !is_hook_name(name) {
                 let _ = writeln!(write_stream, "ERROR: invalid option: {}", name);
                 let _ = write_stream.flush();
+            } else if let Some(error) = crate::server::option_catalog::not_an_array_error(name) {
+                // set-hook is set-option in tmux, so an element of an
+                // option that is no array (`@u[0]`, `status-left[0]`) is
+                // "not an array: NAME" there too (cmd-set-option.c:295-298).
+                let _ = writeln!(write_stream, "ERROR: {}", error);
+                let _ = write_stream.flush();
+            } else {
+                let _ = tx.send(req);
             }
         }
     }
@@ -8399,6 +8405,15 @@ fn dispatch_control_command(
             // The one shot route's parser: `-u` unsets, and one quoted
             // command argument is stored without its quotes.
             if let Some(req) = set_hook_request(args) {
+                let name = match &req {
+                    CtrlReq::SetHook(name, _) | CtrlReq::AppendHook(name, _) | CtrlReq::RemoveHook(name) => name.as_str(),
+                    _ => "",
+                };
+                // "not an array: NAME", as on the other routes.
+                if let Some(error) = crate::server::option_catalog::not_an_array_error(name) {
+                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", error));
+                    return true;
+                }
                 let _ = tx.send(req);
             }
             let _ = resp_tx.send(String::new());
