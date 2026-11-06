@@ -4884,6 +4884,7 @@ pub enum CtrlReq {
     /// path (same path as keybindings and command prompt).  Response channel
     /// carries "OK" on success or an error string.
     RunCommand(String, mpsc::Sender<String>),
+    ForwardToOtherSession(String, mpsc::Sender<bool>),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.
