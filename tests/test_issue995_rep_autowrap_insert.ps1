@@ -17,18 +17,21 @@
 # PSMUX_TEST_CONPTY_DIR names a folder holding conpty.dll, skipped otherwise.
 #
 # Private USERPROFILE, PSMUX_DATA_DIR and config, a -L namespace per server;
-# cleanup is `-L <ns> kill-server`. PSMUX_EXE picks the binary (defaults to
-# target\release\psmux.exe).
+# cleanup is `-L <ns> kill-server`. PSMUX_TEST_BIN or PSMUX_EXE picks the
+# binary (defaults to target\release\psmux.exe); PSMUX_CONPTY_DIR_FOR_TEST,
+# which the sweep sets, names the OpenConsole folder as well.
 
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-foreach ($name in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'PSMUX_*' -and $_.Name -ne 'PSMUX_EXE' -and $_.Name -ne 'PSMUX_TEST_CONPTY_DIR' -or $_.Name -like 'TMUX*' } | ForEach-Object Name)) {
+$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { $env:PSMUX_EXE }
+$ConptyDir = if ($env:PSMUX_TEST_CONPTY_DIR) { $env:PSMUX_TEST_CONPTY_DIR } elseif ($env:PSMUX_CONPTY_DIR_FOR_TEST) { $env:PSMUX_CONPTY_DIR_FOR_TEST } else { '' }
+foreach ($name in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'PSMUX_*' -or $_.Name -like 'TMUX*' } | ForEach-Object Name)) {
     Remove-Item "Env:$name"
 }
-$PSMUX = $env:PSMUX_EXE
+# The panes run pwsh commands; SHELL would make psmux start them in bash.
+Remove-Item Env:SHELL -EA SilentlyContinue
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -EA SilentlyContinue).Path }
 if (-not $PSMUX) { Write-Error "psmux binary not found"; exit 1 }
-$ConptyDir = if ($env:PSMUX_TEST_CONPTY_DIR) { $env:PSMUX_TEST_CONPTY_DIR } else { '' }
 
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -97,7 +100,7 @@ function Run-Cases($route) {
     P new-session -d -s s -x 20 -y 10 | Out-Null
     Start-Sleep -Milliseconds 2000
     foreach ($c in $cases) {
-        P new-window -d -t s -n $c[0] "$pwsh -NoProfile -File $fwd/show.ps1 $fwd/p/$($c[0]).bin" | Out-Null
+        P new-window -d -t s -n $c[0] "& '$pwsh' -NoProfile -File $fwd/show.ps1 $fwd/p/$($c[0]).bin" | Out-Null
     }
     $deadline = (Get-Date).AddSeconds(40)
     while ((Get-Date) -lt $deadline -and @(Get-ChildItem "$TempHome\p\*.host" -EA SilentlyContinue).Count -lt $cases.Count) {
