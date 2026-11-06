@@ -88,8 +88,40 @@ fn commands_whose_target_is_not_in_their_session_never_route() {
 fn lists_and_clusters_are_left_alone() {
     let r = refs();
     assert_eq!(sibling_for_line("new-window -t B: ; new-window -t A:", 1, &r), None);
-    assert_eq!(sibling_for_line("new-window -dt B:", 1, &r), None);
+    assert_eq!(sibling_for_line("new-window -dt B:", 1, &r), Some(2));
     assert_eq!(sibling_for_line("new-window -- -t B:", 1, &r), None);
+}
+
+#[test]
+fn the_target_is_read_where_the_sessions_handler_reads_it() {
+    let r = refs();
+    for line in [
+        "bind -n F7 send-keys -t B: -l XQ",
+        "bind-key -T root F7 new-window -t B:",
+        "set-hook -g after-split-window new-window -t B:",
+        "confirm-before -p x kill-session -t B:",
+        "kill-session -at B",
+        "send-keys -lt B: x",
+        "new-window -- -t B:",
+        "send-keys -t A: -tB: x",
+        "send-keys -t A: x -tB: -t",
+    ] {
+        assert_eq!(sibling_for_line(line, 1, &r), None, "{line}");
+    }
+    for line in [
+        "new-window -dt B:",
+        "kill-pane -at B:1",
+        "set @x v -t B:",
+        "set -t B: @x 1",
+        "new-window x -t B:",
+        "display -p -t$2: x",
+        "new-window -dt A: -t B:",
+        "new-window -t A: -t B:",
+        "send-keys -tA: -t B: x",
+        "send-keys -t A: -t=B: x",
+    ] {
+        assert_eq!(sibling_for_line(line, 1, &r), Some(2), "{line}");
+    }
 }
 
 #[test]

@@ -75,26 +75,43 @@ const SESSION_TARGET: &[&str] = &[
     "set-environment", "setenv", "show-environment", "showenv",
 ];
 
-/// The `-t` value of one command's words: `-t VALUE` or `-tVALUE`. Flag
-/// clusters (`-dt VALUE`) are not read, so such a line is never moved.
-fn target_value(words: &[String]) -> Option<&str> {
-    let mut i = 1;
-    while i < words.len() {
-        let w = words[i].as_str();
-        if w == "--" {
-            return None;
-        }
+/// The `-t` value of one command's words: `-t VALUE` or `-tVALUE`.
+fn target_value(words: &[String]) -> Option<String> {
+    let words = crate::cli::normalize_flag_equals(words.to_vec());
+    let (name, rest) = words.split_first()?;
+    let args: Vec<&str> = rest.iter().map(String::as_str).collect();
+    let split: Vec<String>;
+    let args: Vec<&str> = if crate::cli::splits_flag_clusters(name) {
+        split = crate::cli::expand_flag_clusters(name, &args);
+        split.iter().map(String::as_str).collect()
+    } else {
+        args
+    };
+    if matches!(
+        name.as_str(),
+        "set-option" | "set" | "set-window-option" | "setw"
+    ) {
+        return crate::cli::parse_set_option_args(&args)
+            .target
+            .map(str::to_string);
+    }
+    let end = crate::cli::outer_target_scan_end(name, &args).min(args.len());
+    let mut detached = None;
+    let mut attached = None;
+    let mut i = 0;
+    while i < end {
+        let w = args[i];
         if w == "-t" {
-            return words.get(i + 1).map(String::as_str);
+            detached = args.get(i + 1).map(|v| v.to_string()).or(detached);
+            i += 2;
+            continue;
         }
-        if let Some(v) = w.strip_prefix("-t") {
-            if !v.is_empty() {
-                return Some(v);
-            }
+        if let Some(v) = w.strip_prefix("-t").filter(|v| !v.is_empty()) {
+            attached = Some(v.to_string());
         }
         i += 1;
     }
-    None
+    detached.or(attached)
 }
 
 /// The session part a command line's target names explicitly, if the line
@@ -110,7 +127,8 @@ pub fn session_spec_of_line(line: &str) -> Option<String> {
     if NOT_ROUTED.contains(&name) {
         return None;
     }
-    let t = target_value(&words)?.trim();
+    let value = target_value(&words)?;
+    let t = value.trim();
     let bare = crate::cli::strip_exact_match_prefix(t);
     if bare.starts_with('%') || bare.starts_with('@') {
         return None;
