@@ -70,11 +70,18 @@ function Send-Tcp([string]$cmd) {
     try { $null = $rd.ReadToEnd() } catch {}
     $tcp.Close()
 }
+# Each check splits the same 80x24 window.  A split that does not fit is
+# refused and, as in tmux, fires no after-split-window (#1000), so keep the
+# window at one pane and let every check's split really happen.
+function Split-Fresh {
+    P kill-pane -a -t demo | Out-Null
+    P split-window -t demo | Out-Null
+}
 function Hook-Line([string]$name) { return ((P show-hooks -g) | Where-Object { "$_" -match "^$name " } | Select-Object -First 1) }
 function Check-Hook([string]$label, [string]$expectWin) {
     $hl = "$(Hook-Line 'after-split-window')"
     if ($hl -match "-> new-window -d -n $expectWin$") { Write-Pass "$label stored '$hl'" } else { Write-Fail "$label stored '$hl'" }
-    P split-window -t demo | Out-Null
+    Split-Fresh
     if (Wait-Until { (Names) -contains $expectWin } 4000) { Write-Pass "$label hook ran (window $expectWin)" } else { Write-Fail "$label hook did not run: windows $((Names) -join ',')" }
     P set-hook -gu after-split-window | Out-Null
 }
@@ -102,7 +109,7 @@ try {
     Write-Host "`n[5] a quoted argument inside the command survives" -ForegroundColor Yellow
     Invoke-CC "set-hook -g after-split-window `"rename-window 'two words'`"" | Out-Null
     $hl = "$(Hook-Line 'after-split-window')"
-    P split-window -t demo | Out-Null
+    Split-Fresh
     if (Wait-Until { (Names) -contains 'two words' } 4000) { Write-Pass "hook renamed the window to 'two words' ($hl)" } else { Write-Fail "hook with a quoted argument: '$hl', windows $((Names) -join ',')" }
     P set-hook -gu after-split-window | Out-Null
 } catch {

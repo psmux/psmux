@@ -30,6 +30,15 @@ function State {
     }
     $state
 }
+# The worker polls the control file every 10 ms, so a write can land while it
+# holds the file open for reading. Retry the sharing violation instead of
+# failing the suite on it.
+function Set-Control([string]$Path, [string]$Text) {
+    for ($try = 0; ; $try++) {
+        try { [IO.File]::WriteAllText($Path, $Text); return }
+        catch { if ($try -ge 100) { throw }; Start-Sleep -Milliseconds 5 }
+    }
+}
 function Assert($condition, $message) {
     if (-not $condition) { throw $message }
     Write-Host "PASS: $message"
@@ -97,7 +106,7 @@ while ($true) {
 }
 '@ | Set-Content -LiteralPath $worker -Encoding utf8
     $control = Join-Path $work 'report.txt'
-    'state=working:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=working:app=test'
     $command = 'pwsh -NoLogo -NoProfile -NonInteractive -File "' + $worker + '" -Control "' + $control + '"'
     P -f NUL new-session -d -s $session -x 100 -y 25 $command
     $created = $true
@@ -159,13 +168,13 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     } else {
         Write-Host 'SKIP: this console host answers device queries itself and swallows OSC replies (set PSMUX_CONPTY_DIR to an OpenConsole build to see them)'
     }
-    'output' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'output'
     Start-Sleep -Milliseconds 200
-    'state=working:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=working:app=test'
     $state = Wait-State { param($s) $s.windows[0].ps_panes.Count -gt 0 } 'application reports reach the server'
     Assert ($state.windows[0].ps_status.state -eq 'working' -and -not $state.windows[0].activity) 'working is summarized without output activity'
     $pane = $state.windows[0].ps_panes[0].pane
-    'state=blocked:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=blocked:app=test'
     $state = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'blocked' } 'stock tabs leave blocked status inspectable'
     $stockFormat = '#I:#W#{?window_flags,#{window_flags}, }'
     Assert ((P show-options -g -v window-status-format).Trim() -eq $stockFormat) 'inactive default matches tmux'
@@ -194,7 +203,7 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     $state = State
     Assert ($state.windows[0].tab_text -match '\[blocked\]') 'global format can opt in to existing status'
     Assert ($state.windows[0].tab_text -notmatch '  ') "the documented recipe never doubles a space: '$($state.windows[0].tab_text)'"
-    'state=working:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=working:app=test'
     $state = Wait-State { param($s) $s.windows[0].ps_panes[0].records[0].state -eq 'working' } 'working report after opt-in'
     Assert ($state.windows[0].tab_text -match '\[working\]' -and -not $state.windows[0].activity) 'working is displayed without output activity'
     P new-window -t "${session}:" 'pwsh -NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 600"'
@@ -204,7 +213,7 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     foreach ($client in $clients) {
         Wait-Frame $client { param($s) $s.windows.Count -gt 0 -and -not $s.windows[0].ps_panes } 'client receives initial state without record text'
     }
-    'state=done:app=test:msg=UmVhZHk=' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=done:app=test:msg=UmVhZHk='
     $state = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'done' } 'background completion appears with a silent foreground'
     Assert ($state.windows[0].tab_text -match '\[done\]') 'completion is a visible text indicator'
     Assert (-not $state.windows[0].activity) 'completion does not set output activity'
@@ -212,13 +221,13 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
         Wait-Frame $client { param($s) $s.windows[0].ps_status.state -eq 'done' } 'background completion is pushed to both clients without polling'
     }
     P copy-mode
-    'state=blocked:kind=permission:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=blocked:kind=permission:app=test'
     $state = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'blocked' } 'blocked status updates while foreground is in copy mode'
     Assert ($state.windows[0].tab_text -match '\[blocked\]') 'needs-input indicator is visible'
     P select-window -t "${session}:$firstWindow"
     $state = State
     Assert ($state.windows[0].ps_status.state -eq 'blocked' -and -not $state.windows[0].ps_status.seen) 'return does not acknowledge blocked'
-    'state=error:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=error:app=test'
     $null = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'error' -and -not $s.windows[0].ps_status.seen } 'error arriving in the focused pane remains unseen'
     P select-window -t "${session}:$foreground"
     P select-window -t "${session}:$firstWindow"
@@ -232,7 +241,7 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     # The selected pane has a seen error; work in an unselected sibling must
     # represent this window and push progress/state changes to both clients.
     $control2 = Join-Path $work 'background.txt'
-    'state=working:progress=0:app=build' | Set-Content -LiteralPath $control2 -NoNewline
+    Set-Control $control2 'state=working:progress=0:app=build'
     $command2 = 'pwsh -NoLogo -NoProfile -NonInteractive -File "' + $worker + '" -Control "' + $control2 + '"'
     $background = (P split-window -d -t "%$pane" -P -F '#{pane_id}' $command2).Trim()
     $state = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'working' -and $s.windows[0].ps_status.app -eq 'build' } 'unselected pane working replaces a seen result'
@@ -240,26 +249,26 @@ while ($sw.ElapsedMilliseconds -lt 2000) {
     Assert (-not $state.windows[0].activity) 'background work does not set output activity'
     Assert ($null -eq $state.windows[0].ps_status.PSObject.Properties['attention']) 'summary has no separate attention category'
     Assert ((P display-message -p '#{pane_id}').Trim() -eq "%$pane") 'split preserved the selected pane'
-    'state=working:progress=75:app=build' | Set-Content -LiteralPath $control2 -NoNewline
+    Set-Control $control2 'state=working:progress=75:app=build'
     foreach ($client in $clients) {
         Wait-Frame $client { param($s) $s.windows[0].ps_status.state -eq 'working' -and $s.windows[0].ps_status.progress -eq 75 } 'background progress is pushed to both clients'
     }
-    'state=idle:app=build' | Set-Content -LiteralPath $control2 -NoNewline
+    Set-Control $control2 'state=idle:app=build'
     foreach ($client in $clients) {
         Wait-Frame $client { param($s) $s.windows[0].ps_status.state -eq 'idle' } 'background idle is pushed to both clients'
     }
     P kill-pane -t $background
     $state = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'error' -and $s.windows[0].ps_status.seen } 'removing the background pane reveals the preserved seen result'
 
-    'state=working' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=working'
     $null = Wait-State { param($s) $s.windows[0].ps_panes[0].records[0].state -eq 'working' } 'next run begins'
-    'state=error:app=test' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=error:app=test'
     $null = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'error' -and -not $s.windows[0].ps_status.seen } 'same result after a new run is unseen'
-    'state=clear' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=clear'
     $state = Wait-State { param($s) -not $s.windows[0].ps_status -and -not $s.windows[0].ps_panes } 'clear withdraws status and records'
-    'state=done' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'state=done'
     $null = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'done' } 'completion before attached process exit'
-    'exit' | Set-Content -LiteralPath $control -NoNewline
+    Set-Control $control 'exit'
     $null = Wait-State { param($s) $s.windows[0].ps_status.state -eq 'done' -and ((P display-message -p -t "%$pane" '#{pane_dead}').Trim() -eq '1') } 'completion survives attached process exit'
     P respawn-pane -E -t "%$pane"
     $null = Wait-State { param($s) -not $s.windows[0].ps_panes } 'respawn withdraws old records and seen state'
