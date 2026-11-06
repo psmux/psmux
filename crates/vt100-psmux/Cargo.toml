@@ -117,6 +117,10 @@ path = "tests/replacement_character.rs"
 name = "rep_autowrap_insert"
 path = "tests/rep_autowrap_insert.rs"
 
+[[test]]
+name = "line_drawing_charset"
+path = "tests/line_drawing_charset.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 
