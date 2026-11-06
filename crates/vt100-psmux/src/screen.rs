@@ -121,6 +121,14 @@ pub struct Screen {
     /// DECSET 1049 restored the app's colors instead of the shell's, and every
     /// line printed afterwards inherited them.
     alternate_saved_attrs: crate::attrs::Attrs,
+    /// The character sets G0 and G1 hold and the one in use (the line drawing
+    /// set, `crate::charset`). DECSC saves them with the cursor and DECRC puts
+    /// them back, one slot per screen as for the attributes, as tmux's
+    /// `input_save_state` copies the whole cell, sets included (input.c:
+    /// 849-871 at tag 3.8).
+    charsets: crate::charset::Charsets,
+    saved_charsets: crate::charset::Charsets,
+    alternate_saved_charsets: crate::charset::Charsets,
     /// Where the cursor was on the main screen when the alternate screen was
     /// entered, `None` while it is not in use (tmux's `saved_cx`/`saved_cy`,
     /// set by screen_alternate_on and reset by screen_alternate_off).
@@ -370,6 +378,9 @@ impl Screen {
             attrs: crate::attrs::Attrs::default(),
             saved_attrs: crate::attrs::Attrs::default(),
             alternate_saved_attrs: crate::attrs::Attrs::default(),
+            charsets: crate::charset::Charsets::default(),
+            saved_charsets: crate::charset::Charsets::default(),
+            alternate_saved_charsets: crate::charset::Charsets::default(),
             alternate_saved_cursor: None,
 
             modes: 0,
@@ -1790,6 +1801,7 @@ impl Screen {
         // Start the alternate screen's DECSC slot clean so a value left by a
         // previous alternate-screen session cannot surface in this one.
         self.alternate_saved_attrs = crate::attrs::Attrs::default();
+        self.alternate_saved_charsets = crate::charset::Charsets::default();
     }
 
     fn exit_alternate_grid(&mut self) {
@@ -1864,18 +1876,37 @@ impl Screen {
         // the two screens cannot overwrite each other (issue #502).
         if self.mode(MODE_ALTERNATE_SCREEN) {
             self.alternate_saved_attrs = self.attrs;
+            self.alternate_saved_charsets = self.charsets;
         } else {
             self.saved_attrs = self.attrs;
+            self.saved_charsets = self.charsets;
         }
     }
 
     fn restore_cursor(&mut self) {
         self.grid_mut().restore_cursor();
-        self.attrs = if self.mode(MODE_ALTERNATE_SCREEN) {
-            self.alternate_saved_attrs
+        (self.attrs, self.charsets) = if self.mode(MODE_ALTERNATE_SCREEN) {
+            (self.alternate_saved_attrs, self.alternate_saved_charsets)
         } else {
-            self.saved_attrs
+            (self.saved_attrs, self.saved_charsets)
         };
+    }
+
+    /// `ESC ( 0` / `ESC ( B` into G0 (`g1` false), `ESC ) 0` / `ESC ) B`
+    /// into G1.
+    pub(crate) fn designate_charset(&mut self, g1: bool, line_drawing: bool) {
+        self.charsets.designate(g1, line_drawing);
+    }
+
+    /// SO (`shifted`) chooses G1, SI chooses G0.
+    pub(crate) fn shift_charset(&mut self, shifted: bool) {
+        self.charsets.shift(shifted);
+    }
+
+    /// The character a printed `c` stands for in the set in use.
+    #[inline]
+    pub(crate) fn charset_map(&self, c: char) -> char {
+        self.charsets.map(c)
     }
 
     fn set_mode(&mut self, mode: u8) {

@@ -55,6 +55,7 @@ extern crate self as vt100;
 mod attrs;
 mod callbacks;
 mod cell;
+mod charset;
 mod grid;
 pub mod image;
 mod palette;

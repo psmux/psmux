@@ -102,7 +102,10 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         if ('\u{80}'..'\u{a0}').contains(&c) {
             self.callbacks.unhandled_char(&mut self.screen, c);
         } else {
-            self.screen.text(c);
+            // The line drawing set turns `q` into `─` here; REP repeats the
+            // letter, so the set in use when it repeats applies, as in tmux
+            // (input.c:1811-1815 at tag 3.8) and the console hosts.
+            self.screen.text(self.screen.charset_map(c));
             self.last_printed = Some(c);
         }
     }
@@ -120,15 +123,23 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             11 => self.screen.vt(),
             12 => self.screen.ff(),
             13 => self.screen.cr(),
-            // we don't implement shift in/out alternate character sets, but
-            // it shouldn't count as an "error"
-            14 | 15 => {}
+            // SO chooses G1 and SI G0 (input.c:1372-1377 at tag 3.8).
+            14 => self.screen.shift_charset(true),
+            15 => self.screen.shift_charset(false),
             _ => self.callbacks.unhandled_control(&mut self.screen, b),
         }
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, b: u8) {
         self.last_printed = None;
+        // `ESC ( 0` and `ESC ) 0` put the line drawing set into G0 or G1,
+        // `ESC ( B` and `ESC ) B` ASCII (input.c:241-249, :1442-1453 at tag
+        // 3.8). Any other set (`ESC ( A`, the UK one) stays unhandled, as in
+        // tmux.
+        if let ([g @ (b'(' | b')')], b'0' | b'B') = (intermediates, b) {
+            self.screen.designate_charset(*g == b')', b == b'0');
+            return;
+        }
         if let Some(i) = intermediates.first() {
             self.callbacks.unhandled_escape(
                 &mut self.screen,
