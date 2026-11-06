@@ -2847,8 +2847,7 @@ fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bo
         Some((i, at)) if parts[1 + i][at..] != resolved => {
             let mut rebuilt: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
             rebuilt[1 + i] = format!("{}{}", &parts[1 + i][..at], resolved);
-            let refs: Vec<&str> = rebuilt.iter().map(String::as_str).collect();
-            requote(&refs)
+            rebuilt.iter().map(|word| crate::util::quote_arg_for_handler(word)).collect::<Vec<_>>().join(" ")
         }
         _ => cmd.to_string(),
     };

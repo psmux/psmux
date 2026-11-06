@@ -737,6 +737,15 @@ pub fn quote_arg_if_needed(s: &str) -> String {
     }
 }
 
+pub fn quote_arg_for_handler(word: &str) -> String {
+    let quoted = quote_arg_if_needed(word);
+    if crate::config::split_chained_commands_pub(&quoted) == [quoted.as_str()] {
+        quoted
+    } else {
+        quote_arg(word)
+    }
+}
+
 /// An argv as one wire line whose arguments the server reads back unchanged:
 /// each argument that needs it is quoted ([`quote_arg_if_needed`]), so one
 /// holding `cmd1 \; cmd2` stays one argument instead of being cut at the
@@ -1643,3 +1652,7 @@ mod tests_issue712_util_audit;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue750_prompt_emoji_width.rs"]
 mod test_issue750_prompt_emoji_width;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_forward_split_word.rs"]
+mod tests_forward_split_word;
