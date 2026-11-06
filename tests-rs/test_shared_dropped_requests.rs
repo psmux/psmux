@@ -127,6 +127,24 @@ fn internal_requests_stay_silent() {
 }
 
 #[test]
+fn a_forward_request_of_the_handler_stays_silent() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("tdrops".to_string());
+    let mut ids = ServerIds::new();
+    let mut a = session("A");
+    let (reply_sender, reply_receiver) = mpsc::channel();
+    let line = "set -t B: -- @probe v".to_string();
+    let request = CtrlReq::ForwardToOtherSession(line, reply_sender);
+    send(&mut a, &mut ids, &ns, request);
+    assert_eq!(status(&a.app), None, "a set with a target shows no refusal");
+    assert!(
+        reply_receiver.recv().is_err(),
+        "the handler gets no answer and runs its own set"
+    );
+}
+
+#[test]
 fn the_ported_commands_run_as_one_shot_commands_too() {
     for ok in ["select-layout", "selectl", "next-layout", "nextl", "previous-layout", "prevl",
         "rotate-window", "rotatew", "swap-pane", "swapp", "respawn-pane", "respawnp",

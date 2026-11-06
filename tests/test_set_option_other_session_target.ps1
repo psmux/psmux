@@ -337,8 +337,13 @@ try {
     Check ($watch.ElapsedMilliseconds -lt 2000) "r13 shared reply comes in 2s" "(took $($watch.ElapsedMilliseconds) ms)"
     Check ($threadsAfter -eq $threadsBefore) "r13 shared server thread count stays the same" "(threads $threadsBefore then $threadsAfter)"
     Check ($statusA13 -ceq 'mark13A') "r13 shared A status message is still the mark" "(got $(Shown-Value $statusA13))"
-    Check ($statusB13 -ceq 'not supported in shared server mode yet: this command') "r13 shared B status message is the refusal of the forward request" "(got $(Shown-Value $statusB13))"
+    Check ($statusB13 -ceq 'mark13B') "r13 shared B status message is still the mark" "(got $(Shown-Value $statusB13))"
     Check-Values 'r13' @{ 'A' = $null; 'B' = 'p13' }
+    $cli13 = P @('set-option', '-t', 'A', '@own13', 'c13')
+    $statusCli13 = Status-Message 'A'
+    Check ($cli13.Code -eq 0) "r13 shared CLI set-option -t A exits 0" "(exit $($cli13.Code) [$($cli13.Text)])"
+    Check ($statusCli13 -ceq 'mark13A') "r13 shared A status message is still the mark after CLI set-option -t A" "(got $(Shown-Value $statusCli13))"
+    Check-Values 'r13' @{ 'A.@own13' = 'c13' }
 } catch {
     $script:Failures++
     Write-Output "FAIL: script error $($_.Exception.Message)"
