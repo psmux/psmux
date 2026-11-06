@@ -2093,19 +2093,16 @@ impl Screen {
             return;
         }
 
-        // With autowrap off, a wide character that does not fit before the
-        // right margin is dropped (screen-write.c:2695-2698 at tag 3.8).
-        let autowrap = !self.mode(MODE_NO_AUTOWRAP);
-        if !autowrap && width > 1 && pos.col != size.cols && pos.col > size.cols - width {
-            return;
-        }
-
-        // Insert mode makes room for the character at the cursor before the
-        // wrap is decided, as tmux does (screen-write.c:2701-2704); what
-        // moves past the right margin is lost.
-        if self.mode(MODE_INSERT) {
-            self.grid_mut().insert_cells(width);
-        }
+        // Autowrap off and insert mode are rare, so one test of the mode
+        // bits keeps them off the path of every other printed character.
+        let autowrap = if self.modes & (MODE_NO_AUTOWRAP | MODE_INSERT) == 0 {
+            true
+        } else {
+            match self.text_modes(width) {
+                Some(autowrap) => autowrap,
+                None => return,
+            }
+        };
 
         // it doesn't make any sense to wrap if the last column in a row
         // didn't already have contents. don't try to handle the case where a
@@ -2116,13 +2113,7 @@ impl Screen {
         // (xterm handles this by introducing the concept of triple width
         // cells, which i really don't want to do).
         let mut wrap = false;
-        if !autowrap {
-            // No wrap: the character replaces the last one that fits
-            // (screen-write.c:2707 wraps only with MODE_WRAP).
-            if pos.col > size.cols - width {
-                self.grid_mut().col_set(size.cols - width);
-            }
-        } else if pos.col > size.cols - width {
+        if autowrap && pos.col > size.cols - width {
             let last_cell = self
                 .grid()
                 .drawing_cell(crate::grid::Pos {
@@ -2225,10 +2216,44 @@ impl Screen {
         // With no wrap the cursor stays on the last column, so the next
         // character replaces it (screen-write.c:2790-2794 at tag 3.8).
         if !autowrap {
-            let col = self.grid().pos().col;
-            if col > size.cols - 1 {
-                self.grid_mut().col_set(size.cols - 1);
-            }
+            self.text_stay_on_last_column();
+        }
+    }
+
+    /// The part of `text` for autowrap off or insert mode, before the
+    /// character is placed. `None` drops the character; otherwise whether
+    /// autowrap is on.
+    #[cold]
+    #[inline(never)]
+    fn text_modes(&mut self, width: u16) -> Option<bool> {
+        let pos = self.grid().pos();
+        let size = self.grid().size();
+        let autowrap = !self.mode(MODE_NO_AUTOWRAP);
+        // With autowrap off, a wide character that does not fit before the
+        // right margin is dropped (screen-write.c:2695-2698 at tag 3.8).
+        if !autowrap && width > 1 && pos.col != size.cols && pos.col > size.cols - width {
+            return None;
+        }
+        // Insert mode makes room for the character at the cursor before the
+        // wrap is decided, as tmux does (screen-write.c:2701-2704); what
+        // moves past the right margin is lost.
+        if self.mode(MODE_INSERT) {
+            self.grid_mut().insert_cells(width);
+        }
+        // No wrap: the character replaces the last one that fits
+        // (screen-write.c:2707 wraps only with MODE_WRAP).
+        if !autowrap && pos.col > size.cols - width {
+            self.grid_mut().col_set(size.cols - width);
+        }
+        Some(autowrap)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn text_stay_on_last_column(&mut self) {
+        let cols = self.grid().size().cols;
+        if self.grid().pos().col > cols - 1 {
+            self.grid_mut().col_set(cols - 1);
         }
     }
 
