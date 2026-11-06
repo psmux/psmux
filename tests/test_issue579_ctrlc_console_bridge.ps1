@@ -94,7 +94,17 @@ if ($hasWsl) {
     Write-Host "[Arm 2] git-bash pane, foreground wsl, WSL survives Ctrl+C" -ForegroundColor Yellow
     $p2 = New-Pane "t579a2" @($bash,"-i")
     & $PSMUX send-keys -t "t579a2" "wsl.exe" Enter
-    Start-Sleep -Seconds 6
+    # Wait for the guest shell itself: a cold WSL start took 21 s here (the
+    # distro stops when idle, and a "systemd user session" failure adds to
+    # it), so a fixed pause typed `sleep 100` before Linux was up.  The
+    # arithmetic only expands in the guest, so the echoed line cannot match.
+    & $PSMUX send-keys -t "t579a2" 'echo WSL_UP_$((500+79))' Enter
+    $swUp = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($swUp.ElapsedMilliseconds -lt 90000) {
+        $capUp = & $PSMUX capture-pane -t "t579a2" -p 2>&1 | Out-String
+        if ($capUp -match '(?m)^WSL_UP_579\s*$') { break }
+        Start-Sleep -Milliseconds 500
+    }
     & $PSMUX send-keys -t "t579a2" "sleep 100" Enter
     Start-Sleep -Seconds 2
     $before = @(Get-Process wsl -EA SilentlyContinue).Count

@@ -266,13 +266,14 @@ if ($output -match "PSMUX=.+") {
     Write-Pass "WSL env var test completed (PSMUX_SESSION may require WSLENV config)"
 }
 
-# Verify the pane is really running Linux. Poll up to 45 s: WSL shuts an
-# idle distro down, and its cold start was measured at 10 s on a quiet
-# machine (0.5 s warm), longer while a sweep loads the box.
+# Verify the pane is really running Linux. Poll up to 90 s: WSL shuts an
+# idle distro down, and its cold start was measured at 10 s, later 21 s on a
+# quiet machine (0.5 s warm), and failed a 45 s window twice while a sweep
+# loaded the box; with the distro warm the same suite passes.
 & $PSMUX send-keys -t $session 'uname -s' Enter 2>&1 | Out-Null
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $output = ""
-while ($sw.ElapsedMilliseconds -lt 45000) {
+while ($sw.ElapsedMilliseconds -lt 90000) {
     $output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
     if ($output -match "Linux") { break }
     Start-Sleep -Milliseconds 500
