@@ -119,7 +119,7 @@ pub(crate) fn sync_held_marker(app: &AppState) {
 /// One body for both kill-server routes — the one-shot CLI request and an
 /// attached client's namespace-wide kill (which fans out to its peers first,
 /// then lands here) — so the shutdown sequence cannot drift between them.
-fn shutdown_this_server(app: &mut AppState) -> ! {
+fn shutdown_this_server(app: &mut AppState, session_guard: &mut Option<crate::platform::SessionMutex>) -> ! {
     crate::warm_trace!(
         "shutdown: pooled spares={} inflight={} pending={:?}",
         app.warm_pane.len(),
@@ -154,6 +154,7 @@ fn shutdown_this_server(app: &mut AppState) -> ! {
     let _ = std::fs::remove_file(&regpath);
     let _ = std::fs::remove_file(&keypath);
     let _ = std::fs::remove_file(crate::paths::held_file(app.port_file_base()));
+    release_session_name(session_guard);
     // Kill all child processes using a single process snapshot
     tree::kill_all_children_batch(&mut app.windows);
     // ...and the panes this server hosts for other sessions (join-pane).
@@ -1982,6 +1983,19 @@ fn move_window_request(
     app.move_window(src, dst, detach, renumber, after, before)
 }
 
+/// Give up this server's claim on its session name the moment it stops
+/// advertising it. Every teardown deletes the `.port` first, so `has-session`
+/// already says the session is gone, but the process then spends up to seconds
+/// killing pane shells and spares before it exits, and the named mutex used to
+/// be held for all of that. A `new-session` of the same name in that window
+/// (a hook running `kill-session -t D` and the next command making D again)
+/// started a server that found the mutex owned, took itself for a duplicate and
+/// exited, so the client said "failed to create session". tmux frees the name
+/// as soon as the session is destroyed; so does this.
+fn release_session_name(guard: &mut Option<crate::platform::SessionMutex>) {
+    *guard = None; // drop releases and closes the mutex
+}
+
 fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_base: &str) {
     *guard = None; // drop releases + closes the old name's mutex
     *guard = crate::platform::acquire_session_mutex(new_base);
@@ -3199,7 +3213,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::session::remove_session_registry_files(std::path::Path::new(
                     &crate::paths::port_file(&app.port_file_base()),
                 ));
-                shutdown_this_server(&mut app);
+                shutdown_this_server(&mut app, &mut session_guard);
             }
         }
 
@@ -4178,6 +4192,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let _ = std::fs::remove_file(&regpath);
                             let _ = std::fs::remove_file(&keypath);
                             crate::session::remove_session_id_file(&app.port_file_base());
+                            release_session_name(&mut session_guard);
                             crate::types::shutdown_persistent_streams();
                             tree::kill_all_children_batch(&mut app.windows);
                             app.warm_pane.kill_all();
@@ -5549,6 +5564,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::session::remove_session_id_file(&app.port_file_base());
+                    release_session_name(&mut session_guard);
                     // A control client of a destroyed session gets a bare
                     // `%exit` (tmux server_destroy_session sets CLIENT_EXIT,
                     // MSG_EXIT carries no message: client.c:416-421), not a
@@ -5692,7 +5708,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             have, want
                         ));
                         let _ = resp.send("ERR: warm server uses another console host (PSMUX_CONPTY_DIR)\n".to_string());
-                        shutdown_this_server(&mut app);
+                        shutdown_this_server(&mut app, &mut session_guard);
                     } else {
                     warm_debug(&format!("CLAIM ACCEPT: __warm__ (port={:?}) -> '{}'", app.control_port, name));
                     // The `new-session -n NAME` window name is applied FIRST,
@@ -7511,6 +7527,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::session::remove_session_id_file(&app.port_file_base());
+                        release_session_name(&mut session_guard);
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         app.warm_pane.kill_all();
@@ -7610,6 +7627,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::session::remove_session_id_file(&app.port_file_base());
+                        release_session_name(&mut session_guard);
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         app.warm_pane.kill_all();
@@ -7665,6 +7683,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::session::remove_session_id_file(&app.port_file_base());
+                        release_session_name(&mut session_guard);
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         app.warm_pane.kill_all();
@@ -8092,10 +8111,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         scope,
                         Some(&own_base),
                     );
-                    shutdown_this_server(&mut app);
+                    shutdown_this_server(&mut app, &mut session_guard);
                 }
                 CtrlReq::KillServer => {
-                    shutdown_this_server(&mut app);
+                    shutdown_this_server(&mut app, &mut session_guard);
                 }
                 CtrlReq::WaitFor(channel, op) => {
                     match op {
@@ -9496,6 +9515,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::session::remove_session_registry_files(std::path::Path::new(
                     &crate::paths::port_file(&app.port_file_base()),
                 ));
+                release_session_name(&mut session_guard);
                 if crate::types::send_directive_to_all_clients("DETACH") > 0 {
                     std::thread::sleep(Duration::from_millis(50));
                 }
