@@ -61,7 +61,10 @@ param(
     # nine walk router, 36 to 37 ms with one walk.
     [double]$MaxCtrlCFirstMs = 80,
     [int]$CtrlCRepeats = 6,
-    [switch]$SkipDirect
+    [switch]$SkipDirect,
+    # Set PSMUX_PTY_TRACE=<TraceDir>\trace for the client and the server it
+    # starts, so a slow key can be followed hop by hop (src/pty_trace.rs).
+    [string]$TraceDir = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -133,7 +136,9 @@ try {
     # ── phase 1: through psmux ──────────────────────────────────────────
     Write-Host "`n=== PHASE 1: typing through psmux (client screen) ===" -ForegroundColor Yellow
     Add-PerfLoadSample "start" | Out-Null
+    if ($TraceDir) { New-Item -ItemType Directory -Force -Path $TraceDir | Out-Null; $env:PSMUX_PTY_TRACE = Join-Path $TraceDir "trace" }
     $client = Start-Process -FilePath $Binary -ArgumentList @("-L", $NS, "new-session", "-s", $S) -PassThru
+    Remove-Item Env:\PSMUX_PTY_TRACE -EA SilentlyContinue
     Write-Info "client pid $($client.Id), namespace $NS"
     $ready = $false
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -158,7 +163,11 @@ try {
         if ($r.Miss.Count -eq 1 -and $r.Miss[0] -eq $sentence.Length) { $held++; $note = " (final char held)" }
         elseif ($r.Miss.Count -gt 0) { $lost += $r.Miss.Count; $note = " MISSING $($r.Miss.Count) chars from #$($r.Miss[0])" }
         $st = Get-PerfStats $r.Lat 1
-        $psmuxRows += [ordered]@{ sentence = $n; chars = $sentence.Length; seen = $r.Lat.Count; p50 = $st.p50; p99 = $st.p99; max = $st.max; missing = @($r.Miss) }
+        $row = [ordered]@{ sentence = $n; chars = $sentence.Length; seen = $r.Lat.Count; p50 = $st.p50; p99 = $st.p99; max = $st.max; missing = @($r.Miss) }
+        # Keep every key of a sentence that had a slow one, so the shape (one
+        # held burst, or a slow drift) is in the record, not just its max.
+        if ($null -ne $st.max -and $st.max -gt 200) { $row["per_char_ms"] = $r.Lat }
+        $psmuxRows += $row
         Write-Host ("  sentence {0,2}: seen {1}/{2} p50={3}ms p99={4}ms max={5}ms{6}" -f $n, $r.Lat.Count, $sentence.Length, $st.p50, $st.p99, $st.max, $note) -ForegroundColor $(if ($note -match "MISSING") { "Red" } else { "Gray" })
     }
     Add-PerfLoadSample "after_typing" | Out-Null
