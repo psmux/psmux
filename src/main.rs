@@ -3389,6 +3389,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 let mut literal = false;
                 let mut has_x = false;
                 let mut has_hex = false;
+                let mut reset = false;
                 let mut repeat: Option<String> = None;
                 let mut keys: Vec<String> = Vec::new();
                 // Getopt-style parsing: -t consumes next arg, -l/-R/-X/-H are flags
@@ -3396,7 +3397,9 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-l" => { literal = true; }
-                        "-R" => { keys.push("__RESET__".to_string()); }
+                        // A flag, reset the pane first (tmux); it used to
+                        // become a key named __RESET__ that the shell got as text.
+                        "-R" => { reset = true; }
                         "-X" => { has_x = true; }
                         "-H" => { has_hex = true; }
                         "-t" => { i += 1; } // consume target value (already handled globally)
@@ -3413,6 +3416,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 if literal { cmd.push_str(" -l"); }
                 if has_x { cmd.push_str(" -X"); }
                 if has_hex { cmd.push_str(" -H"); }
+                if reset { cmd.push_str(" -R"); }
                 if let Some(n) = repeat.as_deref() {
                     cmd.push_str(&format!(" -N {}", crate::util::quote_arg_if_needed(n)));
                 }

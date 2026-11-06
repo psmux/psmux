@@ -4247,6 +4247,21 @@ pub fn break_pane_to_window(app: &mut AppState) {
 /// mode gone. That ordering is load bearing: while copy mode is up `pane.term`
 /// is the frozen snapshot, so clearing it would wipe the screen the user is
 /// reading and leave the live scrollback untouched.
+/// `send-keys -R` (tmux cmd-send-keys.c: colour_palette_clear and
+/// input_reset(wp->ictx, 1)): the pane's terminal state goes back to what a
+/// new program starts with, the screen is cleared and the program is sent
+/// nothing. That is what RIS does to psmux's parser, including the OSC 4
+/// palette and keeping the pane-colours defaults, so the reset is an RIS fed
+/// to the parser only; the history stays, as in tmux.
+pub fn reset_active_pane_terminal(app: &mut AppState) {
+    let win = &mut app.windows[app.active_idx];
+    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+        if let Ok(mut parser) = p.term.lock() {
+            parser.process(&[0x1b, b'c']); // RIS
+        }
+    }
+}
+
 pub fn clear_active_pane_history(app: &mut AppState) {
     if app.mode.in_copy() {
         exit_copy_mode(app);

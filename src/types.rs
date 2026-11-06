@@ -4706,6 +4706,10 @@ pub enum CtrlReq {
     SuspendClient,
     CopyModePageUp,
     ClearHistory,
+    /// `send-keys -R`: reset the target pane's terminal state as RIS does
+    /// (tmux colour_palette_clear plus input_reset(wp->ictx, 1)), sending
+    /// the program nothing.
+    ResetPaneTerminal,
     /// TEST ONLY: sleep the server loop this many milliseconds.  Sent by the
     /// hidden `debug-stall <ms>` wire command, which the connection thread
     /// accepts only when the server was started with

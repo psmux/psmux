@@ -850,7 +850,7 @@ fn send_keys_requests(args: &[&str], tx: &TargetedSender, client_id: u64) -> Res
         if let Some(prev) = args.get(i - 1) {
             if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
                 if let Some(last) = prev.chars().last() {
-                    return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
+                    return matches!(last, 't' | 'T' | 'N' | 'c');
                 }
             }
         }
@@ -890,6 +890,12 @@ fn send_keys_requests(args: &[&str], tx: &TargetedSender, client_id: u64) -> Res
     // tmux send-keys -M: forward the mouse event of the running mouse
     // binding (see window_ops::send_mouse_event). It sends no keys.
     let mouse_mode = flag_has('M');
+    // tmux send-keys -R resets the pane's terminal state first, and with no
+    // keys that is all it does (cmd-send-keys.c). -R takes no value: tmux's
+    // getopt string is "c:FHKlMN:Rt:T:X".
+    if flag_has('R') {
+        let _ = tx.send(CtrlReq::ResetPaneTerminal);
+    }
     // Parse -N <count> for repeat (look for any cluster ending in 'N')
     let mut repeat_count: usize = 1;
     if let Some(n_pos) = args.iter().enumerate().position(|(i, a)| !is_marker(i) && !past_opts(i) && a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
@@ -1015,7 +1021,7 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
         if let Some(prev) = args.get(i - 1) {
             if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
                 if let Some(last) = prev.chars().last() {
-                    return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
+                    return matches!(last, 't' | 'T' | 'N' | 'c');
                 }
             }
         }
