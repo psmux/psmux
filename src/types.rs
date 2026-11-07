@@ -4884,7 +4884,9 @@ pub enum CtrlReq {
     /// path (same path as keybindings and command prompt).  Response channel
     /// carries "OK" on success or an error string.
     RunCommand(String, mpsc::Sender<String>),
-    ForwardToOtherSession(String, mpsc::Sender<bool>),
+    /// Ok(true): sent to the session the line names; Ok(false): this
+    /// session's; Err: tmux's error for the target (nothing ran).
+    ForwardToOtherSession(String, mpsc::Sender<Result<bool, String>>),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.

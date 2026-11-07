@@ -8911,12 +8911,25 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ForwardToOtherSession(line, resp) => {
                     let words = crate::commands::parse_command_line(&line);
                     let parts: Vec<&str> = words.iter().map(String::as_str).collect();
-                    let forwarded = !parts.is_empty()
-                        && crate::commands::forward_to_other_session(&mut app, &parts, &line);
-                    if forwarded {
+                    let route = if parts.is_empty() {
+                        crate::commands::OtherSessionRoute::Local
+                    } else {
+                        crate::commands::route_to_other_session(&mut app, &parts, &line)
+                    };
+                    let reply = match route {
+                        crate::commands::OtherSessionRoute::Local => Ok(false),
+                        crate::commands::OtherSessionRoute::Forwarded => Ok(true),
+                        // The connection answers ERROR; the status line says
+                        // it too, as for any refused target.
+                        crate::commands::OtherSessionRoute::Refused(msg) => {
+                            app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                            Err(msg)
+                        }
+                    };
+                    if reply != Ok(false) {
                         state_dirty = true;
                     }
-                    let _ = resp.send(forwarded);
+                    let _ = resp.send(reply);
                 }
             }
             // A claim just made the standby a session: its hooks see it.

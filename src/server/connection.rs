@@ -738,10 +738,33 @@ pub(crate) fn explicit_target_session(cmd: &str, raw_target: Option<&str>) -> Op
         return None;
     }
     let raw = crate::cli::strip_exact_match_prefix(raw_target?);
-    if !raw.contains(':') && !raw.starts_with('$') {
+    if !raw.contains(':') && !raw.starts_with('$') && !(bare_target_is_session(cmd) && crate::cli::bare_target_token(raw)) {
         return None;
     }
     parse_target(raw).session.filter(|s| !s.is_empty())
+}
+
+/// Commands whose -t is a session (tmux CMD_FIND_SESSION): a bare word there
+/// is a session name, never a window, so one that is not this server's is
+/// "can't find session" instead of the command acting on this session.
+fn bare_target_is_session(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "list-windows" | "lsw" | "lock-session" | "locks"
+            | "set-environment" | "setenv" | "show-environment" | "showenv"
+    )
+}
+
+/// tmux's wording for a session target that names nothing: the environment
+/// commands say "no such session" (cmd-set-environment.c,
+/// cmd-show-environment.c), the rest "can't find session" (cmd-find.c).
+fn session_error_wording(cmd: &str, error: String) -> String {
+    match error.strip_prefix("can't find session: ") {
+        Some(name) if matches!(cmd, "set-environment" | "setenv" | "show-environment" | "showenv") => {
+            format!("no such session: {}", name)
+        }
+        _ => error,
+    }
 }
 
 /// Commands that resolve the pane of their `-t` themselves, so the generic
@@ -2164,26 +2187,31 @@ pub(crate) fn forward_set_line(
     words.join(" ")
 }
 
+/// Ok(true): the line ran on the session its -t names; Ok(false): it is this
+/// session's; Err: tmux's error for a target that names no session.
 fn forwarded_set_to_other_session(
     request_sender: &mpsc::Sender<CtrlReq>,
     cmd: &str,
     parsed: &crate::cli::ParsedSetOptionArgs,
-) -> bool {
+) -> Result<bool, String> {
     let Some(target) = parsed.target else {
-        return false;
+        return Ok(false);
     };
     let words_come_back = std::iter::once(target)
         .chain(parsed.positionals.iter().copied())
         .all(|word| parse_command_line(&crate::util::quote_arg_for_handler(word)) == [word]);
     if !words_come_back {
-        return false;
+        return Ok(false);
     }
     let (reply_sender, reply_receiver) = mpsc::channel();
     let line = forward_set_line(cmd, parsed, target);
-    request_sender
+    if request_sender
         .send(CtrlReq::ForwardToOtherSession(line, reply_sender))
-        .is_ok()
-        && reply_receiver.recv().unwrap_or(false)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    reply_receiver.recv().unwrap_or(Ok(false))
 }
 
 /// Handle a single TCP connection from a client.
@@ -3013,7 +3041,7 @@ if control_echo || control_quiet || control_noecho {
                         Ok(_) => {}
                         // tmux CMD_FIND_CANFAIL: the command runs, with no target.
                         Err(_) if target_can_fail(cmd_name) => { ctrl_target_failed = true; }
-                        Err(e) => focus_err = Some(e),
+                        Err(e) => focus_err = Some(session_error_wording(cmd_name, e)),
                     }
                 }
             }
@@ -3530,10 +3558,22 @@ if set_option_command {
         line.clear();
         continue;
     }
-    if matches!(cmd, "set-option" | "set") && forwarded_set_to_other_session(&tx, cmd, &parsed_set) {
-        if !persistent && pending_chain.is_empty() { break; }
-        line.clear();
-        continue;
+    if matches!(cmd, "set-option" | "set") {
+        match forwarded_set_to_other_session(&tx, cmd, &parsed_set) {
+            Ok(false) => {}
+            Ok(true) => {
+                if !persistent && pending_chain.is_empty() { break; }
+                line.clear();
+                continue;
+            }
+            Err(error) => {
+                let _ = writeln!(write_stream, "ERROR: {}", error);
+                let _ = write_stream.flush();
+                if !persistent { break; }
+                line.clear();
+                continue;
+            }
+        }
     }
 }
 // tmux parity (#592): `select-pane -T`/`-P` is a title/style-only
@@ -3726,7 +3766,7 @@ if is_focus_cmd {
             Err(e) => {
                 // Unresolvable target: report (tmux: "can't find window: X",
                 // exit 1, zero side effects) and skip the command entirely.
-                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = writeln!(write_stream, "ERROR: {}", session_error_wording(cmd, e));
                 let _ = write_stream.flush();
                 if !persistent { break; }
                 line.clear();
@@ -4445,10 +4485,27 @@ match cmd {
         }
     }
     "has-session" => {
-        let (rtx, rrx) = mpsc::channel::<bool>();
-        let _ = tx.send(CtrlReq::HasSession(rtx));
-        if let Ok(exists) = rrx.recv() {
-            if !exists { std::process::exit(1); }
+        // A -t naming another session of this namespace that exists is a
+        // yes, as is this session; anything else is tmux's "can't find
+        // session" (the line used to answer OK for any name).
+        if let Some(ref tgt) = raw_target {
+            let spec = crate::cli::strip_exact_match_prefix(tgt);
+            let spec = spec.split(':').next().unwrap_or(spec).to_string();
+            let base = crate::session::namespaced_session_base(
+                crate::server::server_namespace().as_deref(), &spec);
+            let other_exists = !spec.is_empty()
+                && crate::session::registry_case_variant(&base).is_none()
+                && std::fs::metadata(crate::paths::port_file(&base)).is_ok();
+            if !other_exists {
+                let ours = crate::types::TempTarget { session: Some(spec.clone()), ..Default::default() };
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SessionInfo(rtx));
+                let own = rrx.recv().ok().map(|line| line.split(':').next().unwrap_or("").trim().to_string());
+                if own.as_deref() != Some(spec.as_str()) && validate_target(tx.inner, ours).is_err() {
+                    let _ = writeln!(write_stream, "ERROR: can't find session: {}", spec);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "rename-session" | "rename" => {

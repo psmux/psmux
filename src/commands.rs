@@ -2782,56 +2782,104 @@ pub(crate) const KILL_PANE_F_WITHOUT_A: &str = "-f only valid with -a";
 /// cmd-find.c:1093-1110). Ids (`$`, `@`, `%`) and `window.pane` forms stay
 /// with the arms below. Returns true when the line was handled here.
 pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bool {
+    match route_to_other_session(app, parts, cmd) {
+        OtherSessionRoute::Local => false,
+        OtherSessionRoute::Forwarded => true,
+        OtherSessionRoute::Refused(msg) => {
+            app.status_message = Some((msg, Instant::now(), None));
+            true
+        }
+    }
+}
+
+/// What [`route_to_other_session`] did with a line.
+#[derive(Debug, PartialEq)]
+pub(crate) enum OtherSessionRoute {
+    /// The target is this session's (or there is none): run it here.
+    Local,
+    /// Sent to the session it names.
+    Forwarded,
+    /// tmux's error for the target; nothing runs.
+    Refused(String),
+}
+
+/// tmux's error for a bare `-t` word that names no session, for the commands
+/// that read such a word as a session (cmd-find.c CMD_FIND_SESSION, and the
+/// option and environment commands, which report "no such session"). None
+/// for every other command: there a bare word may be a window or pane name,
+/// which the arms below resolve or refuse themselves.
+fn missing_bare_session_error(app: &AppState, command: &str, name: &str) -> Option<String> {
+    let wording = match command {
+        "list-windows" | "lsw" | "has-session" | "has" | "lock-session" | "locks" => "can't find session",
+        "set-environment" | "setenv" | "show-environment" | "showenv" => "no such session",
+        // A pane target: a bare word is a window of this session first.
+        "set-option" | "set" | "show-options" | "show" => {
+            if app.resolve_window_target(name).is_ok() {
+                return None;
+            }
+            "no such session"
+        }
+        _ => return None,
+    };
+    Some(format!("{}: {}", wording, name))
+}
+
+pub(crate) fn route_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> OtherSessionRoute {
+    use OtherSessionRoute::{Forwarded, Local, Refused};
     let command = parts[0];
     if keeps_other_session_target_local(command) {
-        return false;
+        return Local;
     }
     let Some(target) = own_target_flag(command, &parts[1..]) else {
-        return false;
+        return Local;
     };
     let coerced = crate::cli::coerce_bare_window_target(command, target);
     if coerced != target {
-        return false;
+        return Local;
     }
     let plain = crate::cli::strip_exact_match_prefix(target);
     if plain.is_empty() || plain.starts_with(['@', '%']) {
-        return false;
+        return Local;
     }
     // `kill-session -a -t B` keeps B and ends the others: it is not B's to run.
     if matches!(command, "kill-session" | "kill-ses") && own_flag_set(command, &parts[1..], 'a') {
-        return false;
+        return Local;
     }
     // The session part and what follows it (`:1.0`, or nothing). A bare name
     // or `$id` is all session part; `w.p` without a colon is a window here.
     let bare = crate::cli::bare_target_token(target) || (plain.starts_with('$') && !plain.contains(':'));
     let (spec, rest) = match target.find(':') {
         Some(colon) if !crate::cli::strip_exact_match_prefix(&target[..colon]).is_empty() => target.split_at(colon),
-        Some(_) => return false,
+        Some(_) => return Local,
         None if bare => (target, ""),
-        None => return false,
+        None => return Local,
     };
     let name = match resolve_named_session(app, spec) {
-        NamedSession::Own => return false,
+        NamedSession::Own => return Local,
         NamedSession::Other(name) => name,
-        // A bare word that is no session is a window or pane name of this
-        // session, or tmux's own error, which the arms below give.
-        NamedSession::Missing if bare && !plain.starts_with('$') => return false,
+        // A bare word that is no session: tmux's error for a command that
+        // reads it as a session, else a window or pane name of this session
+        // (or tmux's own error), which the arms below give.
+        NamedSession::Missing if bare && !plain.starts_with('$') => {
+            return match missing_bare_session_error(app, command, plain) {
+                Some(msg) => Refused(msg),
+                None => Local,
+            };
+        }
         NamedSession::Missing => {
             let shown = crate::cli::strip_exact_match_prefix(spec);
-            app.status_message = Some((format!("can't find session: {}", shown), Instant::now(), None));
-            return true;
+            return Refused(format!("can't find session: {}", shown));
         }
     };
     if bare && !plain.starts_with('$') && app.resolve_window_target(plain).is_ok() {
-        return false;
+        return Local;
     }
     let base = crate::session::session_name_base(app.socket_name.as_deref(), &name);
     let Some(port) = std::fs::read_to_string(crate::paths::port_file(&base))
         .ok()
         .and_then(|text| text.trim().parse::<u16>().ok())
     else {
-        app.status_message = Some((format!("can't find session: {}", name), Instant::now(), None));
-        return true;
+        return Refused(format!("can't find session: {}", name));
     };
     // The receiving server reads the target again, by exact name: a prefix,
     // pattern or `$id` resolved here is spelled out. A session command takes
@@ -2856,12 +2904,7 @@ pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: 
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, FORWARD_CONNECT_LIMIT)
     else {
-        app.status_message = Some((
-            format!("can't connect to session: {}", name),
-            Instant::now(),
-            None,
-        ));
-        return true;
+        return Refused(format!("can't connect to session: {}", name));
     };
     let _ = stream.set_nodelay(true);
     let _ = writeln!(stream, "AUTH {}", key);
@@ -2869,7 +2912,7 @@ pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: 
     let _ = stream.flush();
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
     let _ = std::io::Read::read(&mut stream, &mut [0u8; 64]);
-    true
+    Forwarded
 }
 
 /// Kill every window but the one at `keep`, as tmux's `kill-window -a`
@@ -5201,6 +5244,10 @@ mod tests_hook_kill_session_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_hook_rename_session_target.rs"]
 mod tests_hook_rename_session_target;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_missing_session_targets.rs"]
+mod tests_missing_session_targets;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue938_arg_parsing.rs"]
