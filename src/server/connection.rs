@@ -4452,7 +4452,20 @@ match cmd {
         }
     }
     "rename-session" | "rename" => {
-        if let Some(name) = crate::cli::first_operand("rename-session", &args) {
+        // tmux reads -t as a session (CMD_FIND_SESSION): one that is not
+        // this server's is "can't find session", and nothing is renamed.
+        let target_session = raw_target
+            .as_deref()
+            .and_then(|raw| parse_target(crate::cli::strip_exact_match_prefix(raw)).session)
+            .filter(|s| !s.is_empty());
+        let refused = target_session.and_then(|s| {
+            let spec = crate::types::TempTarget { session: Some(s), ..Default::default() };
+            validate_target(tx.inner, spec).err()
+        });
+        if let Some(e) = refused {
+            let _ = writeln!(write_stream, "ERROR: {}", e);
+            let _ = write_stream.flush();
+        } else if let Some(name) = crate::cli::first_operand("rename-session", &args) {
             let _ = tx.send(CtrlReq::RenameSession(name.to_string()));
         }
     }

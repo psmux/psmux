@@ -3814,7 +3814,19 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "detach-client" | "detach" => {
             // handled by caller to set quit flag
         }
-        "rename-session" => {
+        "rename-session" | "rename" => {
+            // tmux reads -t as a session (cmd-rename-session.c, CMD_FIND_SESSION).
+            // Another session that exists was forwarded to its own server
+            // above; one that does not is "can't find session", and this
+            // session keeps its name.
+            if let Some(target) = own_target_flag(parts[0], &parts[1..]) {
+                let spec = target.split(':').next().unwrap_or(target);
+                if resolve_named_session(app, spec) != NamedSession::Own {
+                    let shown = crate::cli::strip_exact_match_prefix(spec);
+                    app.status_message = Some((format!("can't find session: {}", shown), Instant::now(), None));
+                    return Ok(());
+                }
+            }
             if let Some(name) = crate::cli::first_operand("rename-session", &parts[1..]) {
                 // A name the server refuses must not become this client's
                 // name either.
@@ -3822,10 +3834,15 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     app.status_message = Some((msg, Instant::now(), None));
                     return Ok(());
                 }
-                app.session_name = name.to_string();
-                // Forward to server so external queries see the new session name
                 if let Some(port) = app.control_port {
-                    let _ = send_control_to_port(port, &format!("rename-session {}\n", crate::util::quote_arg(name)), &app.session_key);
+                    // The server's rename moves the registry files from the
+                    // CURRENT name and refuses a duplicate, so the name must
+                    // still be the old one when it runs. Setting it here first
+                    // left the old .port behind (ls listed the session twice)
+                    // and let a rename onto a live session overwrite its files.
+                    let _ = send_control_to_port(port, &format!("rename-session -- {}\n", crate::util::quote_arg(name)), &app.session_key);
+                } else {
+                    app.session_name = name.to_string();
                 }
             }
         }
@@ -5180,6 +5197,10 @@ mod tests_refresh_client_l_server_route;
 #[cfg(test)]
 #[path = "../tests-rs/test_hook_kill_session_target.rs"]
 mod tests_hook_kill_session_target;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_hook_rename_session_target.rs"]
+mod tests_hook_rename_session_target;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue938_arg_parsing.rs"]
