@@ -213,3 +213,95 @@ fn check_server_start_per_session_arm_is_masters() {
         None => std::env::remove_var("PSMUX_SERVER_MODE"),
     }
 }
+
+#[test]
+fn queue_loop_start_outside_the_shared_server_queues_nothing() {
+    let _lock = crate::util::lock_test_env();
+    let saved = std::env::var("PSMUX_SERVER_MODE").ok();
+    assert!(
+        !crate::server::shared::server::in_shared_server(),
+        "a test process is no shared server"
+    );
+
+    for mode in ["per-session", "shared"] {
+        std::env::set_var("PSMUX_SERVER_MODE", mode);
+        let env = vec![("K".to_string(), "V".to_string())];
+        let queued = crate::server::shared::queue_loop_start(
+            Some("X"),
+            None,
+            Some("sub"),
+            None,
+            &env,
+            (80, 24),
+            7,
+        );
+        assert!(!queued, "mode {mode}: the caller goes on to master's path");
+        assert_eq!(
+            crate::server::shared::server::queued_starts(),
+            0,
+            "mode {mode}: nothing is queued"
+        );
+    }
+
+    match saved {
+        Some(v) => std::env::set_var("PSMUX_SERVER_MODE", v),
+        None => std::env::remove_var("PSMUX_SERVER_MODE"),
+    }
+}
+
+#[test]
+fn prepare_hook_start_needs_a_usable_hook_session_directory() {
+    use crate::server::shared::router::NewSessionArgs;
+    use crate::server::shared::server::prepare_hook_start;
+    let dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(dir.is_absolute() && dir.is_dir());
+    let missing = dir.join("psmux-798-no-such-directory");
+    let relative = std::path::PathBuf::from("relative-directory");
+    let with_dir = |start_dir: Option<&str>| NewSessionArgs {
+        start_dir: start_dir.map(str::to_string),
+        ..Default::default()
+    };
+
+    for bad in [None, Some(relative.as_path()), Some(missing.as_path())] {
+        for start_dir in [None, Some("sub")] {
+            let mut args = with_dir(start_dir);
+            assert!(
+                prepare_hook_start(&mut args, bad).is_err(),
+                "{bad:?} with -c {start_dir:?}"
+            );
+            assert_eq!(
+                args,
+                with_dir(start_dir),
+                "{bad:?} with -c {start_dir:?} leaves the arguments"
+            );
+        }
+    }
+
+    let mut args = with_dir(None);
+    assert_eq!(prepare_hook_start(&mut args, Some(&dir)), Ok(()));
+    assert_eq!(args.start_dir, None);
+    assert_eq!(args.cwd.as_deref(), Some(dir.to_string_lossy().as_ref()));
+
+    let mut args = with_dir(Some("sub"));
+    assert_eq!(prepare_hook_start(&mut args, Some(&dir)), Ok(()));
+    assert_eq!(
+        args.start_dir.as_deref(),
+        Some(dir.join("sub").to_string_lossy().as_ref())
+    );
+    assert_eq!(args.cwd.as_deref(), Some(dir.to_string_lossy().as_ref()));
+
+    let absolute = missing.to_string_lossy().into_owned();
+    for hook_dir in [None, Some(relative.as_path())] {
+        let mut args = with_dir(Some(&absolute));
+        assert_eq!(
+            prepare_hook_start(&mut args, hook_dir),
+            Ok(()),
+            "an absolute -c needs no hook directory"
+        );
+        assert_eq!(args, with_dir(Some(&absolute)));
+    }
+}
