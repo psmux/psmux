@@ -121,6 +121,10 @@ path = "tests/rep_autowrap_insert.rs"
 name = "line_drawing_charset"
 path = "tests/line_drawing_charset.rs"
 
+[[test]]
+name = "title_semicolon_stack"
+path = "tests/title_semicolon_stack.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 
