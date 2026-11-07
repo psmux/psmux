@@ -90,6 +90,46 @@ fn take_forward() -> bool {
     true
 }
 
+thread_local! {
+    static HOOK_STARTS: std::cell::RefCell<Vec<(usize, NewSessionArgs)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn queue_start(hook_sid: usize, args: NewSessionArgs) {
+    HOOK_STARTS.with(|q| q.borrow_mut().push((hook_sid, args)));
+}
+
+#[cfg(test)]
+pub(crate) fn queued_starts() -> usize {
+    HOOK_STARTS.with(|q| q.borrow().len())
+}
+
+pub(crate) fn prepare_hook_start(
+    args: &mut NewSessionArgs,
+    hook_cwd: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if let Some(dir) = args.start_dir.as_deref() {
+        if std::path::Path::new(dir).is_absolute() {
+            return Ok(());
+        }
+    }
+    let base = match hook_cwd {
+        Some(dir) if dir.is_absolute() && dir.is_dir() => dir,
+        Some(dir) => {
+            return Err(format!(
+                "new-session: the hook session's start directory is not usable: {}",
+                dir.display()
+            ))
+        }
+        None => return Err("new-session: the hook session has no start directory".to_string()),
+    };
+    if let Some(dir) = args.start_dir.take() {
+        args.start_dir = Some(base.join(dir).to_string_lossy().into_owned());
+    }
+    args.cwd = Some(base.to_string_lossy().into_owned());
+    Ok(())
+}
+
 /// The control reply to a `forwarded-session` nothing expected.
 pub(crate) const FORWARD_NOT_EXPECTED: &str = "no session start is expected";
 
@@ -583,6 +623,17 @@ fn run(ns: Option<String>) -> ! {
             if flow == Flow::EndSession {
                 ended.push((sid, "exit-empty"));
             }
+        }
+        if run_hook_starts(
+            &mut sessions,
+            &mut ids,
+            &mut bufs,
+            &ns,
+            &msg_tx,
+            &*pty_system,
+            &globals,
+        ) {
+            had_session = true;
         }
         for (sid, _why) in ended {
             if let Some(s) = sessions.remove(&sid) {
@@ -1177,6 +1228,71 @@ fn create_session_guarded(
     .unwrap_or_else(|_| Err("create session failed: internal error (see crash.log)".to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_hook_starts(
+    sessions: &mut BTreeMap<usize, Session>,
+    ids: &mut ServerIds,
+    bufs: &mut ServerBuffers,
+    ns: &Option<String>,
+    msg_tx: &mpsc::Sender<Msg>,
+    pty_system: &dyn portable_pty::PtySystem,
+    globals: &Arc<Globals>,
+) -> bool {
+    let starts = HOOK_STARTS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    let mut made = false;
+    for (hook_sid, args) in starts {
+        made |= run_hook_start(
+            sessions, hook_sid, args, ids, bufs, ns, msg_tx, pty_system, globals,
+        );
+    }
+    made
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_hook_start(
+    sessions: &mut BTreeMap<usize, Session>,
+    hook_sid: usize,
+    mut args: NewSessionArgs,
+    ids: &mut ServerIds,
+    bufs: &mut ServerBuffers,
+    ns: &Option<String>,
+    msg_tx: &mpsc::Sender<Msg>,
+    pty_system: &dyn portable_pty::PtySystem,
+    globals: &Arc<Globals>,
+) -> bool {
+    let Some(hook_cwd) = sessions.get(&hook_sid).map(|s| s.cwd.clone()) else {
+        log_hook_start(&format!(
+            "new-session from a hook dropped: session {hook_sid} is gone"
+        ));
+        return false;
+    };
+    let result = prepare_hook_start(&mut args, hook_cwd.as_deref())
+        .and_then(|()| create_session_guarded(&args, ids, bufs, ns, msg_tx, pty_system, globals));
+    let msg = match result {
+        Ok(s) => {
+            let sid = s.app.session_id;
+            let name = s.app.session_name.clone();
+            sessions.insert(sid, s);
+            let globals = globals.clone();
+            thread::spawn(move || replay_globals(&globals, &name));
+            return true;
+        }
+        Err(msg) => msg,
+    };
+    log_hook_start(&format!("new-session from a hook failed: {msg}"));
+    if let Some(s) = sessions.get_mut(&hook_sid) {
+        s.app.status_message = Some((msg, Instant::now(), None));
+        s.lp.state_dirty = true;
+    }
+    false
+}
+
+fn log_hook_start(text: &str) {
+    if crate::debug_log::server_log_enabled() {
+        crate::debug_log::server_log("shared", text);
+    }
+}
+
 /// `new_session_output` guarded (#894): the `-P -F` expansion of a session
 /// that was made. A panic in it loses only the printed text; the reply still
 /// names the session, so the CLI attaches to it.
@@ -1626,6 +1742,20 @@ fn refuse(stream: std::net::TcpStream, outcome: &Outcome, opening_lines: usize) 
 /// `AUTH <key>`, then `new-session` followed by `field=value` lines (values
 /// escaped by `router::encode_field`) and `end`, or `ping`. The reply is
 /// written by `reply::reply_text`.
+fn replay_globals(globals: &Globals, name: &str) {
+    let peer = globals
+        .peers
+        .read()
+        .ok()
+        .and_then(|p| p.iter().find(|p| p.name == name).cloned());
+    if let Some(peer) = peer {
+        let writes: Vec<String> = globals.replay.lock().map(|r| r.clone()).unwrap_or_default();
+        for w in &writes {
+            deliver(&peer, w);
+        }
+    }
+}
+
 fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>, globals: &Globals) {
     use std::io::BufRead;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1697,15 +1827,8 @@ fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>, 
     // server) are tried on a new session from this thread, so the loop is
     // free to serve them, before the CLI hears it was made.
     if let Outcome::Done(ref text) = outcome {
-        let name = text.lines().next().and_then(|l| l.strip_prefix("session="));
-        let peer = name.and_then(|n| {
-            globals.peers.read().ok().and_then(|p| p.iter().find(|p| p.name == n).cloned())
-        });
-        if let Some(peer) = peer {
-            let writes: Vec<String> = globals.replay.lock().map(|r| r.clone()).unwrap_or_default();
-            for w in &writes {
-                deliver(&peer, w);
-            }
+        if let Some(name) = text.lines().next().and_then(|l| l.strip_prefix("session=")) {
+            replay_globals(globals, name);
         }
     }
     let mut text = String::from("OK\n");
