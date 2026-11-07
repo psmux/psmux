@@ -1009,11 +1009,6 @@ pub(crate) fn named_target_session(target: Option<&str>) -> Option<String> {
     (!session.is_empty()).then(|| session.to_string())
 }
 
-/// Whether a `-t` asks for an exact name (`=NAME`), so a prefix never matches.
-fn target_has_exact_prefix(target: Option<&str>) -> bool {
-    target.is_some_and(|t| t.trim().starts_with('='))
-}
-
 fn process_command_index(args: &[String]) -> Option<usize> {
     let mut i = 1;
     while i < args.len() {
@@ -6178,22 +6173,17 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 // No-op on Windows — no terminal locking concept. A
                 // lock-session -t still names a session, which tmux finds
                 // first: one that is not running is "can't find session".
-                if matches!(cmd, "lock-session" | "locks") {
-                    let lock_args: Vec<&str> = cmd_args[1..].iter().map(|s| s.as_str()).collect();
-                    if let Some(name) = named_target_session(crate::commands::own_flag_value(cmd, &lock_args, 't')) {
-                        // The name, or a prefix of one, in this namespace.
-                        let ns = l_socket_name.as_deref();
-                        let wanted = crate::session::session_name_base(ns, &name);
-                        let exact = target_has_exact_prefix(crate::commands::own_flag_value(cmd, &lock_args, 't'));
-                        let known = crate::session::list_session_names_ns(ns)
-                            .iter()
-                            // Without -L a base holding `__` is another namespace's.
-                            .filter(|base| ns.is_some() || !base.contains("__"))
-                            .any(|base| *base == wanted || (!exact && base.starts_with(&wanted)));
-                        if !known {
-                            eprintln!("can't find session: {}", name);
-                            std::process::exit(1);
-                        }
+                // The routing above consumed the -t and pointed
+                // PSMUX_TARGET_SESSION at the session it names.
+                if matches!(cmd, "lock-session" | "locks") && explicit_session_target {
+                    let base = env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+                    if !std::path::Path::new(&crate::paths::port_file(&base)).exists() {
+                        let name = match l_socket_name.as_deref() {
+                            Some(ns) => base.strip_prefix(&format!("{}__", ns)).unwrap_or(&base).to_string(),
+                            None => base.clone(),
+                        };
+                        eprintln!("can't find session: {}", name);
+                        std::process::exit(1);
                     }
                 }
                 return Ok(());
