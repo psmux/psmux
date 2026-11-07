@@ -186,7 +186,11 @@ try {
     Set-DefaultShell $BASH
     Kill-Session "${SESSION}_bash"
     & $PSMUX new-session -d -s "${SESSION}_bash" -x 120 -y 30 2>&1 | Out-Null
-    $base = Wait-Prompt "${SESSION}_bash" '\$ '
+    # The one cold Git Bash login of this suite (later sessions claim a warm
+    # server whose shell is already up). Its git prompt costs about 14 MSYS
+    # forks, and a fork can take 150 ms on a busy machine with no psmux in the
+    # picture at all, so a login of 15 to 23 s is the shell, not psmux.
+    $base = Wait-Prompt "${SESSION}_bash" '\$ ' -TimeoutMs 60000
     if ($base -match '\$') { Write-Pass "bash session created" } else { Write-Fail "bash session did not start: $base" }
     Start-Sleep -Milliseconds $WarmLoadMs   # let the warm pane finish loading
 
