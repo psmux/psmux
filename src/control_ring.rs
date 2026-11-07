@@ -22,11 +22,23 @@
 //! spare) keeps the old bounded behaviour and never blocks its reader, and a
 //! ring is emptied when it starts being consumed, so a control client that
 //! attaches is sent only output written after it attached, as in tmux.
+//!
+//! That wait must not outlive the loop itself. On Windows the loop makes
+//! synchronous calls into the pane's console host (AttachConsole to deliver a
+//! Ctrl+C or inject a key, ResizePseudoConsole), and the host cannot answer
+//! while its write to the pipe this reader stopped reading is blocked. So a
+//! reader waiting for the loop while the loop waits for the host is a cycle
+//! nothing breaks: the server stops answering and the pane's program hangs on
+//! its write. A loop that keeps passing without draining is the deliberate
+//! case above (every client is behind) and the reader goes on waiting. A loop
+//! that stopped passing for `LOOP_STUCK_AFTER` is the cycle, or something
+//! equally unable to drain: the reader goes back to reading and the ring keeps
+//! its newest `RING_HIGH` bytes until the loop passes again.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub type Ring = Arc<Mutex<VecDeque<u8>>>;
 
@@ -37,6 +49,16 @@ pub const RING_HIGH: usize = 1 << 20;
 /// Largest `%output` payload sent in one line. The old ring never held more
 /// than 64 KiB, so no line was ever longer; keep it that way.
 pub const OUTPUT_CHUNK_MAX: usize = 65536;
+/// A reader waiting on a full ring takes the loop for stuck after this long
+/// without a pass. The loop's longest idle wait is 50 ms and the waiting
+/// reader keeps waking it, so a live loop passes far more often than this.
+const LOOP_STUCK_AFTER: Duration = Duration::from_secs(2);
+
+/// Passes of the server loop, counted by `set_consumed`.
+static LOOP_PASSES: AtomicU64 = AtomicU64::new(0);
+/// The value of `LOOP_PASSES` when a reader last found the loop stuck. While
+/// it still matches, the loop has not moved since and no reader waits for it.
+static STUCK_AT_PASS: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The rings the server loop currently drains for control clients, by
 /// address. Rebuilt by the loop on every pass from the panes in the window
@@ -64,9 +86,15 @@ fn is_consumed(set: &Option<HashSet<usize>>, k: usize) -> bool {
     set.as_ref().map_or(false, |s| s.contains(&k))
 }
 
+fn keep_newest(buf: &mut VecDeque<u8>) {
+    let over = buf.len().saturating_sub(RING_HIGH);
+    buf.drain(..over);
+}
+
 /// Reader side: append freshly read pane output. A consumed ring never drops
-/// bytes; once it holds `RING_HIGH` this waits until the server loop drained
-/// it (or stopped consuming it, or the pane is gone).
+/// bytes while the server loop runs; once it holds `RING_HIGH` this waits
+/// until the loop drained it (or stopped consuming it, or the pane is gone).
+/// A loop that stopped passing is not waited for, see the module comment.
 pub fn push(ring: &Ring, data: &[u8]) {
     let k = key(ring);
     let consumed = is_consumed(&consumed_set(), k);
@@ -86,9 +114,15 @@ pub fn push(ring: &Ring, data: &[u8]) {
         if buf.len() < RING_HIGH {
             return;
         }
+        if STUCK_AT_PASS.load(Ordering::Acquire) == LOOP_PASSES.load(Ordering::Acquire) {
+            keep_newest(&mut buf);
+            return;
+        }
     }
     // Full: hold this pane's reader (and so its program) until the loop has
     // taken the bytes, as tmux stops reading a pane its clients cannot take.
+    let mut passes = LOOP_PASSES.load(Ordering::Acquire);
+    let mut last_pass = Instant::now();
     loop {
         crate::types::PTY_DATA_READY.store(true, Ordering::Release);
         crate::types::wake_server_loop();
@@ -99,6 +133,19 @@ pub fn push(ring: &Ring, data: &[u8]) {
             return;
         }
         if ring.lock().map_or(0, |b| b.len()) < RING_HIGH {
+            return;
+        }
+        let now = LOOP_PASSES.load(Ordering::Acquire);
+        if now != passes {
+            passes = now;
+            last_pass = Instant::now();
+        } else if last_pass.elapsed() >= LOOP_STUCK_AFTER {
+            STUCK_AT_PASS.store(now, Ordering::Release);
+            keep_newest(&mut ring.lock().unwrap_or_else(|e| e.into_inner()));
+            crate::debug_log::server_log(
+                "control_ring",
+                "server loop stuck with a full ring: reading the pane again and dropping its oldest %output",
+            );
             return;
         }
         let _ = DRAINED.wait_timeout(set, Duration::from_millis(10));
@@ -123,6 +170,7 @@ pub fn notify_drained() {
 /// after it attached. A pane created later joins the set without being
 /// emptied, so its first output (the shell's prompt) is kept.
 pub fn set_consumed(rings: &[&Ring], attach: bool) {
+    LOOP_PASSES.fetch_add(1, Ordering::AcqRel);
     let mut set = consumed_set();
     let old = set.take().unwrap_or_default();
     let first = attach && old.is_empty();
