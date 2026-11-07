@@ -917,6 +917,16 @@ pub fn normalize_attached_target_flag(args: Vec<String>) -> Vec<String> {
     normalize_argv_flags(args, false, true)
 }
 
+/// The flag spellings a command line from the server's own handler takes the
+/// way the CLI does (main.rs): `-t=NAME` (#196), then an attached `-tNAME`.
+/// An attached client's key binding, mouse binding and command prompt reach
+/// the server as a line that the CLI never normalized, and its arms match the
+/// `-t` token alone: `rename-window -t:0 X` renamed the active window and
+/// `kill-session -tK2` killed the client's own session (#1005).
+pub fn normalize_command_words(words: Vec<String>) -> Vec<String> {
+    normalize_attached_target_flag(normalize_flag_equals(words))
+}
+
 pub fn deferred_command_start<S: AsRef<str>>(command: &str, args: &[S]) -> Option<usize> {
     let value_options: &[&str] = match command {
         "bind-key" | "bind" => &["-T", "-N"],

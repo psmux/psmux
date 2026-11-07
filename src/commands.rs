@@ -3023,6 +3023,15 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // named the window `'TEST'`, quotes included, and `'a b'` became `'a`
     // (#789 follow up). Arms that hand `cmd` on whole are unaffected.
     let mut tokens = parse_command_line(cmd);
+    // An attached target is the target: tmux's getopt reads `-t:0` as
+    // `-t :0`, and the CLI splits it before it forwards (main.rs). The arms
+    // below and the forward to another session match the `-t` token alone, so
+    // a hook's `rename-window -t:0 X` renamed the ACTIVE window and a
+    // prompt's `kill-session -tK2` killed the current session (#1005).
+    let split = crate::cli::normalize_attached_target_flag(tokens.clone());
+    if split != tokens {
+        return execute_unaliased_command(app, &crate::command_alias::command_line(&split));
+    }
     // `-t s:1.` is `-t s:1` (tmux reads an empty pane part as none). The line
     // is rebuilt, so the arms that hand `cmd` on whole carry it too.
     if crate::cli::canonicalize_target_values(&mut tokens) {
@@ -5175,6 +5184,10 @@ mod tests_hook_kill_session_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue938_arg_parsing.rs"]
 mod tests_issue938_arg_parsing;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1005_attached_target.rs"]
+mod tests_issue1005_attached_target;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue964_kill_pane_all.rs"]
