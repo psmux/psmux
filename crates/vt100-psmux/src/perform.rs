@@ -264,6 +264,19 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                                 *x.first().unwrap_or(&screen_cols)
                             });
                         self.callbacks.resize(&mut self.screen, (rows, cols));
+                    } else if op == Some(22) || op == Some(23) {
+                        // Save (22) or restore (23) the title, for both
+                        // titles (0) or the window title (2); the icon name
+                        // alone (1), or no second parameter, does nothing
+                        // (input.c:2187-2209 at tag 3.8).
+                        let which = params_iter.next().and_then(|x| x.first().copied());
+                        if matches!(which, Some(0 | 2)) {
+                            if op == Some(22) {
+                                self.screen.push_title();
+                            } else {
+                                self.screen.pop_title();
+                            }
+                        }
                     } else {
                         self.callbacks.unhandled_csi(
                             &mut self.screen,
@@ -344,17 +357,24 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             return;
         }
         match params {
-            [b"0", s] => {
-                self.callbacks.set_window_icon_name(&mut self.screen, s);
-                self.callbacks.set_window_title(&mut self.screen, s);
-                self.screen.set_title(s);
+            // A title is everything after the first `;`, more `;` included
+            // (input_exit_osc, input.c:2714-2731 at tag 3.8): vte splits the
+            // string on every `;`, so the pieces are joined back. vte keeps
+            // sixteen pieces at most, so the end of a title holding more than
+            // fourteen `;` is lost.
+            [b"0", rest @ ..] if !rest.is_empty() => {
+                let s = osc_rest(rest);
+                self.callbacks.set_window_icon_name(&mut self.screen, &s);
+                self.callbacks.set_window_title(&mut self.screen, &s);
+                self.screen.set_title(&s);
             }
-            [b"1", s] => {
-                self.callbacks.set_window_icon_name(&mut self.screen, s);
+            [b"1", rest @ ..] if !rest.is_empty() => {
+                self.callbacks.set_window_icon_name(&mut self.screen, &osc_rest(rest));
             }
-            [b"2", s] => {
-                self.callbacks.set_window_title(&mut self.screen, s);
-                self.screen.set_title(s);
+            [b"2", rest @ ..] if !rest.is_empty() => {
+                let s = osc_rest(rest);
+                self.callbacks.set_window_title(&mut self.screen, &s);
+                self.screen.set_title(&s);
             }
             // ---- OSC 4 : set one or more palette entries (issue #685) ----
             // `\e]4;<i>;<colour>[;<i>;<colour>]*\e\\`.  vte splits on ';', so
@@ -1141,6 +1161,11 @@ fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
         _ => {}
     }
     Some(out)
+}
+
+/// The OSC string after its number, with the `;` vte split it on put back.
+fn osc_rest(rest: &[&[u8]]) -> Vec<u8> {
+    rest.join(&b';')
 }
 
 fn canonicalize_params_1(params: &vte::Params, default: u16) -> u16 {

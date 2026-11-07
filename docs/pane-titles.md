@@ -10,8 +10,12 @@ Programs running inside a pane can change its title by sending **OSC (Operating 
 |----------|------|--------|
 | `ESC ] 0 ; <title> BEL` | OSC 0 | Sets both the window icon name and the pane title |
 | `ESC ] 2 ; <title> BEL` | OSC 2 | Sets the pane title |
+| `ESC [ 22 ; 0 t` | XTPUSHTITLE | Saves the title (`22 ; 2 t` too) |
+| `ESC [ 23 ; 0 t` | XTPOPTITLE | Restores the title saved last (`23 ; 2 t` too) |
 
 When psmux receives one of these from a child process, it updates `pane_title` so that format variables, status bar, and border labels all reflect the new value.
+
+As in tmux, the title is everything after the first `;`, so `ESC ] 2 ; a;b BEL` sets `a;b`. Up to ten titles are saved, and the oldest goes when an eleventh is saved. Restoring a title saved before any was set gives the pane its first title, the host name, back. RIS and `send-keys -R` keep the title and the saved ones. The inbox console host passes these two sequences on at once but holds a title for its next screen update, so a save, a title and a restore written in one go reach psmux in another order. Written apart, as a program saves at its start and restores at its end, they work on both console hosts.
 
 Two more OSC sequences are understood, and they never touch the title. They tell psmux where the shell is:
 
