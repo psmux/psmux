@@ -250,8 +250,13 @@ pub fn check_server_start() -> Result<(), String> {
             // `psmux server -s NAME` process it spawns hands the session to
             // this server (`gate_server_process`) and the thread waits for the
             // session's files while the loop makes it. On the loop thread (a
-            // hook's new-session) the caller would wait for a session only
-            // this same thread can make, so it stays refused. Should the
+            // hook's `new-session`), the caller cannot wait for the session,
+            // because only this same thread can make it. Thus the
+            // `new-session` arm puts that start in the queue of the loop
+            // (`queue_loop_start`), and the start does not come here. A start
+            // comes here on the loop thread only when the mode that the arm
+            // read was not `shared`. If this read gives `shared`, the function
+            // returns the error. Should the
             // shared server ever resolve PerSession (the config flipped while
             // it runs), the arm above answers Ok exactly as master does.
             if server::in_shared_server() && !server::on_loop_thread() {
@@ -262,6 +267,39 @@ pub fn check_server_start() -> Result<(), String> {
         }
         Err(e) => Err(e),
     }
+}
+
+pub fn queue_loop_start(
+    name: Option<&str>,
+    window_name: Option<&str>,
+    start_dir: Option<&str>,
+    command: Option<&str>,
+    env: &[(String, String)],
+    size: (u16, u16),
+    hook_sid: usize,
+) -> bool {
+    if !server::in_shared_server() || !server::on_loop_thread() {
+        return false;
+    }
+    if !matches!(resolve_for_this_process(), Ok(ServerMode::Shared)) {
+        return false;
+    }
+    let (width, height) = size;
+    let sized = width > 1 && height > 1;
+    server::queue_start(
+        hook_sid,
+        router::NewSessionArgs {
+            name: name.map(str::to_string),
+            window_name: window_name.map(str::to_string),
+            start_dir: start_dir.map(str::to_string),
+            command: command.map(str::to_string),
+            env: env.to_vec(),
+            width: sized.then_some(width),
+            height: sized.then_some(height),
+            ..Default::default()
+        },
+    );
+    true
 }
 
 /// Called at the very top of the internal `psmux server` process, the one

@@ -917,6 +917,29 @@ pub fn normalize_attached_target_flag(args: Vec<String>) -> Vec<String> {
     normalize_argv_flags(args, false, true)
 }
 
+/// One command's words, already split from its list and parsed, with its flag
+/// region read the way the CLI reads it (main.rs): an attached `-tNAME` is
+/// `-t NAME`, and with `equals` `-x=VALUE` is `-x VALUE` (#196).
+///
+/// A key binding, a mouse binding and the command prompt reach the server's
+/// handler as a line the CLI never saw, and hooks and source-file lines run
+/// in the server route; the arms on both paths match the `-t` token alone, so
+/// `rename-window -t:0 X` renamed the active window and `kill-session -tK2`
+/// killed the client's own session (#1005). Only the first command's flags
+/// are read: a word that ends in `;` here is data, the list was split before.
+/// A command the flag table does not know (an alias) is left as it is; its
+/// expansion is normalized when it runs.
+pub fn normalize_command_words(words: Vec<String>, equals: bool) -> Vec<String> {
+    let Some(command) = words.first() else { return words };
+    if args_template(command).is_none() {
+        return words;
+    }
+    let mut out = Vec::with_capacity(words.len() + 2);
+    out.push(command.clone());
+    normalize_command_flags(command, &words[1..], equals, true, &mut out);
+    out
+}
+
 pub fn deferred_command_start<S: AsRef<str>>(command: &str, args: &[S]) -> Option<usize> {
     let value_options: &[&str] = match command {
         "bind-key" | "bind" => &["-T", "-N"],
@@ -1261,6 +1284,17 @@ pub fn command_list_reply(reply: &str) -> (String, Vec<String>) {
         }
     }
     (out, errors)
+}
+
+/// A refused split-window's reply as the CLI prints it on stderr. The server
+/// answers a one-shot refusal with `ERROR: split-window: <why>` (#1013), and
+/// a lone split-window printed it as `psmux: split-window: <why>` (#1000),
+/// which stays its wording. Any other reply is printed as it came.
+pub fn split_window_error_text(reply: &str) -> std::borrow::Cow<'_, str> {
+    match reply.trim_start().strip_prefix("ERROR: split-window: ") {
+        Some(why) => std::borrow::Cow::Owned(format!("psmux: split-window: {}", why)),
+        None => std::borrow::Cow::Borrowed(reply),
+    }
 }
 
 /// Same as [`normalize_flag_equals`] but operates on `Vec<&str>`, returning

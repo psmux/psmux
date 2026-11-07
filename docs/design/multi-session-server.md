@@ -512,7 +512,7 @@ had it: the switch is never planted in it.
 window or pane of another session, `choose-tree` and the session chooser;
 `rename-session`;
 cross session move-window/join-pane/swap-pane/link-window and session groups
-(`new-session -t` is refused); `new-session` from a hook, binding or prompt;
+(`new-session -t` is refused);
 run-shell, if-shell, source-file, buffers, popups, menus and the rest of the
 command set (refused with the unknown command reply); `update-environment` from a
 later session's client (panes inherit the server's start environment); warm
@@ -529,6 +529,18 @@ unsupported command answers `ERROR: unknown command: <name>`; whether the CLI th
 exits 1 depends on that command's CLI path, exactly as for any `ERROR` reply
 today. A crash that `catch_unwind` cannot catch (stack overflow, abort, a native
 fault) ends every session of the namespace (section 8).
+
+A hook's `new-session` makes its session after the hook, in the same loop cycle
+or in the next cycle. Thus a subsequent command of the same hook cannot find the new session.
+The session is always made as with `-d`, and the client stays in its session.
+When the start is correct, no message shows, as in `tmux` without `-P`. The
+`per-session` mode shows `created session 'NAME'`.
+
+When the start is not correct, the error shows on the status line of the hook's
+session at the next frame of that session. With no `-c` or a relative `-c`, the
+start directory of the hook's session must be an absolute directory that is on
+the disk. If it is not, the start gives an error, but the `per-session` mode
+makes the session.
 
 **Measured** (`tests/perf_issue798_shared_vs_per_session.ps1`, 5 rounds of three
 `new-session -d` in a fresh namespace, Windows 11 26200, metrics JSON in
@@ -810,11 +822,12 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    * Commands the in server route runs in place rather than sending them to
      the listener (`set -t B: ...`, `kill-window -t B:1`, ...) from a hook:
      they act on, or fail in, the hook's own session.
-   * `new-session` from a hook: it runs on the loop thread, and the in
-     server route then waits for the new session's files, which only that
-     same thread can make. It stays refused (`new-session from a hook or the
-     config is not supported yet`). It needs a narrow hook in `commands.rs`
-     that hands the arguments to the shared server.
+   * `new-session` from a hook: the call in `commands.rs`
+     (`queue_loop_start`) puts the start in a queue of the loop. The loop
+     makes the session after the hook, in the same loop cycle or in the next
+     cycle. Thus the loop
+     thread does not wait for a session that it must make, and the start is
+     not stopped.
    * The config: on the shared server its command lines do not run at all,
      not even for their own session (`config.rs` keeps no startup source
      job for the shared server, and the shared loop runs none), so there is

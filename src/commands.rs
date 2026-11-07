@@ -2852,7 +2852,23 @@ pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: 
         _ => cmd.to_string(),
     };
     let key = crate::session::read_session_key(&base).unwrap_or_default();
-    let _ = send_control_to_port(port, &format!("{}\n", line), &key);
+    const FORWARD_CONNECT_LIMIT: std::time::Duration = std::time::Duration::from_millis(200);
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, FORWARD_CONNECT_LIMIT)
+    else {
+        app.status_message = Some((
+            format!("can't connect to session: {}", name),
+            Instant::now(),
+            None,
+        ));
+        return true;
+    };
+    let _ = stream.set_nodelay(true);
+    let _ = writeln!(stream, "AUTH {}", key);
+    let _ = stream.write_all(format!("{}\n", line).as_bytes());
+    let _ = stream.flush();
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+    let _ = std::io::Read::read(&mut stream, &mut [0u8; 64]);
     true
 }
 
@@ -3007,6 +3023,15 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // named the window `'TEST'`, quotes included, and `'a b'` became `'a`
     // (#789 follow up). Arms that hand `cmd` on whole are unaffected.
     let mut tokens = parse_command_line(cmd);
+    // An attached target is the target: tmux's getopt reads `-t:0` as
+    // `-t :0`, and the CLI splits it before it forwards (main.rs). The arms
+    // below and the forward to another session match the `-t` token alone, so
+    // a hook's `rename-window -t:0 X` renamed the ACTIVE window and a
+    // prompt's `kill-session -tK2` killed the current session (#1005).
+    let split = crate::cli::normalize_command_words(tokens.clone(), false);
+    if split != tokens {
+        return execute_unaliased_command(app, &crate::command_alias::command_line(&split));
+    }
     // `-t s:1.` is `-t s:1` (tmux reads an empty pane part as none). The line
     // is rebuilt, so the arms that hand `cmd` on whole carry it too.
     if crate::cli::canonicalize_target_values(&mut tokens) {
@@ -4589,6 +4614,17 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     i += 1;
                 }
             }
+            if crate::server::shared::queue_loop_start(
+                session_name.as_deref(),
+                window_name.as_deref(),
+                start_dir.as_deref(),
+                initial_command.as_deref(),
+                &env_vars,
+                (app.client_area.width, app.client_area.height),
+                app.session_id,
+            ) {
+                return Ok(());
+            }
 
             // Generate session name if not provided
             let ns_prefix = app.socket_name.as_deref();
@@ -5148,6 +5184,10 @@ mod tests_hook_kill_session_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue938_arg_parsing.rs"]
 mod tests_issue938_arg_parsing;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1005_attached_target.rs"]
+mod tests_issue1005_attached_target;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue964_kill_pane_all.rs"]

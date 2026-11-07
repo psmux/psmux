@@ -163,7 +163,7 @@ try {
     Check (WaitFor { (Att A) -eq '0' } 6000) "choose-tree -s moves the client to the session chosen" "A=$(Att A) B=$(Att B)"
     BackToA
 
-    # 6. still refused, with the new wording: new-session from a hook
+    # 6. the `new-session` of a hook makes the session in the same server
     P set -g display-time 8000 | Out-Null
     P set-hook -t A after-select-window 'new-session -d -s FROMHOOK' | Out-Null
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -173,8 +173,10 @@ try {
     Start-Sleep -Milliseconds 300
     $dump = (P dump-state -t A) -join ''
     $sm = if ($dump -match '"status_message":"([^"]*)"') { $Matches[1] } else { '' }
-    Check (-not (Has FROMHOOK)) "a hook's new-session is still not run" ""
-    Check ($sm -match 'new-session from a hook') "and says so on A's status line" "'$sm'"
+    Check (WaitFor { Has FROMHOOK }) "a hook's new-session makes the session" ""
+    $ph = (P display -p -t FROMHOOK '#{pid}') -join ''
+    Check ($ph -eq $pa) "in the same shared server" "pid=$ph server=$pa"
+    Check ($sm -notmatch 'new-session from a hook') "and A's status line does not refuse it" "'$sm'"
     Check ($ms -lt 2000) "without stalling the loop ($ms ms)" "$ms ms"
 } finally {
     P kill-server | Out-Null

@@ -138,7 +138,11 @@ try {
         # shared server sets; a per session server never sets it, so its jobs
         # take JOB_ENV exactly as before (unit test
         # without_a_connection_identity_the_job_env_is_unchanged).
-        $allowed = @('780c995a src/commands.rs')
+        # 21c6f5b6 (#1006): new-session asks queue_loop_start first, which
+        # returns false on its first check (IN_SHARED_SERVER, set only by the
+        # shared server's run) before touching anything, so a per session
+        # server creates the session exactly as before.
+        $allowed = @('780c995a src/commands.rs', '21c6f5b6 src/commands.rs')
         $outside = @()
         foreach ($c in $commits) {
             $outside += @(git -C $repo diff-tree --no-commit-id --name-only -r $c -- src ':!src/server/shared' | ForEach-Object { "$($c.Substring(0, 8)) $_" } | Where-Object { $allowed -notcontains $_ })
