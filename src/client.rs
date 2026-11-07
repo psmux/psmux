@@ -3951,6 +3951,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         #[serde(default)]
         status_style: Option<String>,
         #[serde(default)]
+        message_command_style: Option<String>,
+        #[serde(default)]
         status_left: Option<String>,
         #[serde(default)]
         status_right: Option<String>,
@@ -10307,7 +10309,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
             if command_input {
                 let title = command_prompt_label.as_deref().unwrap_or("command");
-                let overlay = Block::default().borders(Borders::ALL).title(title);
+                let command_style = crate::style::parse_tmux_style(
+                    state.message_command_style
+                        .as_deref()
+                        .unwrap_or("bg=black,fg=yellow"),
+                );
+                let overlay = Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .style(command_style)
+                    .border_style(command_style);
                 let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
@@ -10329,7 +10340,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 let avail = inner.width.saturating_sub(2) as usize; // after ": "
                 let (shown, cur_col) =
                     crate::util::prompt_window(&command_buf, at, avail);
-                let para = Paragraph::new(format!(": {}", shown));
+                let para = Paragraph::new(format!(": {}", shown)).style(command_style);
                 f.render_widget(para, inner);
                 let cx = inner.x + 2 + cur_col as u16;
                 f.set_cursor_position((cx, inner.y));
