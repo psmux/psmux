@@ -449,6 +449,7 @@ pub(crate) struct StatusFormats {
     pub window_status_current_style: String,
     pub mode_style: String,
     pub message_style: String,
+    pub message_command_style: String,
     pub client_render_options: ClientRenderOptions,
     /// Pre-built JSON array for the multi-line status bar.
     pub status_format_json: String,
@@ -565,6 +566,7 @@ pub(crate) fn expand_status_formats(
         window_status_current_style: expand_format(&app.window_status_current_style, app),
         mode_style: expand_format(&app.mode_style, app),
         message_style: expand_format(&app.message_style, app),
+        message_command_style: expand_format(&app.message_command_style, app),
         client_render_options: ClientRenderOptions {
             status_left_style: Some(expand_format(&app.status_left_style, app)),
             status_right_style: Some(expand_format(&app.status_right_style, app)),
