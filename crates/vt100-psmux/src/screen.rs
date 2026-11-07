@@ -60,6 +60,9 @@ const MODE_NO_AUTOWRAP: u8 = 0b0010_0000;
 /// IRM (`CSI 4 h`): a printed character moves the rest of the line right.
 const MODE_INSERT: u8 = 0b0100_0000;
 
+/// tmux keeps at most ten saved titles (screen.c:298 at tag 3.8).
+const TITLE_STACK_MAX: usize = 10;
+
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MouseProtocolMode {
@@ -149,6 +152,16 @@ pub struct Screen {
 
     /// Window title set by the application via OSC 0 or OSC 2.
     osc_title: String,
+    /// Titles saved by `CSI 22 ; 0 t`, the newest last, at most
+    /// `TITLE_STACK_MAX` (tmux's `screen_push_title`, screen.c:292-314 at tag
+    /// 3.8, drops the oldest beyond ten).
+    title_stack: Vec<String>,
+    /// `CSI 23 ; 0 t` restored a title saved before the program set any, so
+    /// the pane's title goes back to its first one (the host name, as tmux's
+    /// `window_pane_create` gives it, window.c:1479-1480). An empty `osc_title`
+    /// alone means "no title set" to psmux, so the server needs to hear of it
+    /// once: [`take_title_reset`](Self::take_title_reset).
+    title_reset: bool,
 
     /// Path announced by the shell via OSC 7 (`\e]7;file://host/path\a`).
     /// Used as a fallback for CWD when PEB walking fails (SSH, WSL).
@@ -388,6 +401,8 @@ impl Screen {
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
             mouse_encoding_flags: 0,
             osc_title: String::new(),
+            title_stack: Vec::new(),
+            title_reset: false,
             osc7_path: None,
             osc94_progress: None,
             program_status: crate::ProgramStatuses::default(),
@@ -1162,6 +1177,31 @@ impl Screen {
         if let Ok(s) = std::str::from_utf8(raw) {
             self.osc_title = s.to_string();
         }
+    }
+
+    /// `CSI 22 ; 0 t` / `CSI 22 ; 2 t`: save the title (input.c:2187-2196
+    /// at tag 3.8). At most ten are kept, and the oldest goes first.
+    pub(crate) fn push_title(&mut self) {
+        if self.title_stack.len() >= TITLE_STACK_MAX {
+            self.title_stack.remove(0);
+        }
+        self.title_stack.push(self.osc_title.clone());
+    }
+
+    /// `CSI 23 ; 0 t` / `CSI 23 ; 2 t`: restore the newest saved title, or
+    /// nothing when none is saved (input.c:2198-2209, screen.c:321-337).
+    pub(crate) fn pop_title(&mut self) {
+        if let Some(title) = self.title_stack.pop() {
+            self.title_reset = title.is_empty();
+            self.osc_title = title;
+        }
+    }
+
+    /// True once after `CSI 23 ; 0 t` restored a title saved before any was
+    /// set: the pane's title is to go back to its first one. Taking it
+    /// clears it.
+    pub fn take_title_reset(&mut self) -> bool {
+        std::mem::take(&mut self.title_reset)
     }
 
     /// Returns the path announced by the shell via OSC 7, if any.
@@ -2365,6 +2405,14 @@ impl Screen {
         let capture = self.capture_queries;
         let program_status_enabled = self.program_status_enabled;
         let win32_input_requested = self.win32_input_requested;
+        // The title and the saved titles stay, as in tmux, whose RIS and
+        // `send-keys -R` go through screen_write_reset, which touches neither
+        // (input.c:1407-1411 at tag 3.8; `screen_free_titles` is only in
+        // `screen_reinit`). An OSC 2 and an RIS in one burst used to lose the
+        // title, before the server had copied it to the pane.
+        let osc_title = std::mem::take(&mut self.osc_title);
+        let title_stack = std::mem::take(&mut self.title_stack);
+        let title_reset = self.title_reset;
         // RIS drops the OSC 4 entries only; the pane-colours defaults belong
         // to the pane's options, not to the program (input.c:1407 clears
         // `p->palette` and leaves `p->default_palette`).
@@ -2378,6 +2426,9 @@ impl Screen {
         self.capture_queries = capture;
         self.program_status_enabled = program_status_enabled;
         self.win32_input_requested = win32_input_requested;
+        self.osc_title = osc_title;
+        self.title_stack = title_stack;
+        self.title_reset = title_reset;
     }
 
     // csi codes
