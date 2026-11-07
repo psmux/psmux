@@ -525,7 +525,29 @@ if ($null -eq $poolInfo) {
     # Let the pool fill AND let its shells finish starting. A spare is only
     # worth anything once its shell is up; measuring before that would test the
     # settle time rather than the pool.
-    Start-Sleep -Milliseconds 4500
+    # A fixed 4.5 s was enough on a quiet machine, but under a sweep's load five
+    # pwsh spares were still starting, and the first creations measured their
+    # boot ([102, 106, 253, 36, 35]). Wait instead until the server has the
+    # pane's shell plus five spare shells and none of them is still using CPU,
+    # i.e. they sit at their prompts. Bounded, so a broken pool still fails below.
+    $minWait = [System.Diagnostics.Stopwatch]::StartNew()
+    Start-Sleep -Milliseconds 1500
+    $serverPid = [int](((& $PSMUX display-message -p -t $poolSess '#{pid}' 2>&1) -join '').Trim())
+    $settled = $false
+    while (-not $settled -and $minWait.ElapsedMilliseconds -lt 30000) {
+        $procs = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name -EA SilentlyContinue)
+        $kids = @{}; foreach ($p in $procs) { if (-not $kids.ContainsKey([int]$p.ParentProcessId)) { $kids[[int]$p.ParentProcessId] = @() }; $kids[[int]$p.ParentProcessId] += $p }
+        $shells = @(); $queue = [System.Collections.Generic.Queue[int]]::new(); $queue.Enqueue($serverPid)
+        while ($queue.Count) { $id = $queue.Dequeue(); foreach ($c in @($kids[$id])) { if ($c) { $queue.Enqueue([int]$c.ProcessId); if ($c.Name -match '^(pwsh|powershell)\.exe$') { $shells += [int]$c.ProcessId } } } }
+        if ($shells.Count -ge 6) {
+            $cpu1 = @($shells | ForEach-Object { (Get-Process -Id $_ -EA SilentlyContinue).TotalProcessorTime.TotalMilliseconds })
+            Start-Sleep -Milliseconds 700
+            $cpu2 = @($shells | ForEach-Object { (Get-Process -Id $_ -EA SilentlyContinue).TotalProcessorTime.TotalMilliseconds })
+            $busy = 0; for ($j = 0; $j -lt $cpu1.Count; $j++) { if (($cpu2[$j] - $cpu1[$j]) -gt 15) { $busy++ } }
+            $settled = $busy -eq 0
+        } else { Start-Sleep -Milliseconds 300 }
+    }
+    Write-Host ("    pool settled: {0} after {1} ms" -f $settled, $minWait.ElapsedMilliseconds) -ForegroundColor DarkGray
 
     $poolWin = @()
     for ($i = 0; $i -lt 5; $i++) {

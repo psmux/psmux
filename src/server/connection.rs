@@ -2112,6 +2112,56 @@ fn is_read_retry(e: &io::Error) -> bool {
     ) || matches!(e.raw_os_error(), Some(997) | Some(10004) | Some(10060))
 }
 
+pub(crate) fn forward_set_line(
+    cmd: &str,
+    parsed: &crate::cli::ParsedSetOptionArgs,
+    target: &str,
+) -> String {
+    let flags: String = parsed
+        .flag_chars
+        .chars()
+        .filter(|flag| *flag != 't')
+        .collect();
+    let mut words = vec![cmd.to_string()];
+    if !flags.is_empty() {
+        words.push(format!("-{}", flags));
+    }
+    words.extend([
+        "-t".to_string(),
+        crate::util::quote_arg_for_handler(target),
+        "--".to_string(),
+    ]);
+    words.extend(
+        parsed
+            .positionals
+            .iter()
+            .map(|word| crate::util::quote_arg_for_handler(word)),
+    );
+    words.join(" ")
+}
+
+fn forwarded_set_to_other_session(
+    request_sender: &mpsc::Sender<CtrlReq>,
+    cmd: &str,
+    parsed: &crate::cli::ParsedSetOptionArgs,
+) -> bool {
+    let Some(target) = parsed.target else {
+        return false;
+    };
+    let words_come_back = std::iter::once(target)
+        .chain(parsed.positionals.iter().copied())
+        .all(|word| parse_command_line(&crate::util::quote_arg_for_handler(word)) == [word]);
+    if !words_come_back {
+        return false;
+    }
+    let (reply_sender, reply_receiver) = mpsc::channel();
+    let line = forward_set_line(cmd, parsed, target);
+    request_sender
+        .send(CtrlReq::ForwardToOtherSession(line, reply_sender))
+        .is_ok()
+        && reply_receiver.recv().unwrap_or(false)
+}
+
 /// Handle a single TCP connection from a client.
 /// Parses auth, optional TARGET/PERSISTENT flags, then dispatches commands
 /// to the main server event loop via the `tx` channel.
@@ -3453,6 +3503,11 @@ if set_option_command {
         let _ = writeln!(write_stream, "ERROR: {}", error);
         let _ = write_stream.flush();
         if !persistent { break; }
+        line.clear();
+        continue;
+    }
+    if matches!(cmd, "set-option" | "set") && forwarded_set_to_other_session(&tx, cmd, &parsed_set) {
+        if !persistent && pending_chain.is_empty() { break; }
         line.clear();
         continue;
     }
@@ -9068,3 +9123,7 @@ mod tests_prompt_error_status_line;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue954_command_list_stops.rs"]
 mod tests_issue954_command_list_stops;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_set_option_forward_line.rs"]
+mod tests_set_option_forward_line;

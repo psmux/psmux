@@ -111,7 +111,9 @@ Start-Sleep -Milliseconds 500
 Write-Host "`n[Test Group 2] split-window -P full format engine" -ForegroundColor Magenta
 
 # Create a session first
-& $exe new-session -d -s test-splitfmt 2>$null
+# Room for four vertical splits: each halves the active pane, and at the
+# default 24 rows the fourth is refused (pane too small), as in tmux.
+& $exe new-session -d -s test-splitfmt -x 200 -y 80 2>$null
 Start-Sleep -Milliseconds 800
 
 # Test 2.1: split-window -P default format (tmux: #{session_name}:#{window_index}.#{pane_index})

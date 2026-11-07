@@ -507,3 +507,54 @@ fn pane_current_command_query_route_sees_a_process_the_cache_does_not() {
         "the query route must name the live descendant; got {fresh:?}"
     );
 }
+
+/// One Ctrl+C routing decision pins a single fresh walk: the dozen live-tree
+/// questions the router asks are answered from it instead of each walking the
+/// system again (measured: nine walks, 94-103ms, on the keystroke thread).
+#[test]
+fn a_pinned_table_serves_every_zero_age_question_from_one_walk() {
+    let _g = lock();
+    let me = std::process::id();
+    let before = walks();
+    {
+        let _pin = pin_fresh();
+        let _ = foreground_is_shell(me);
+        let _ = foreground_leaf_pid(me);
+        let _ = foreground_is_vt_bridge(me);
+        let _ = has_vt_bridge_descendant(me);
+        let _ = foreground_fell_back_to_root(me);
+        let _ = recently_started_vt_bridge(Duration::from_secs(5));
+        let _ = console_has_plain_native_app(&[me]);
+        let _ = console_broadcast_hits_bridge(&[me]);
+        let _ = classify_console_member(me);
+        // Every pid here is in the pinned table: no second walk.
+        repin_unless_known(&[me]);
+    }
+    assert_eq!(walks() - before, 1, "one pinned walk for the whole decision");
+
+    // The pin is gone with its guard: a ZERO caller walks live again.
+    let before = walks();
+    let _ = process_table(Duration::ZERO);
+    assert_eq!(walks() - before, 1);
+}
+
+/// A console member the pinned table has never seen (it joined after the pin)
+/// forces exactly one re-walk, so the bridge checks still see it.
+#[test]
+fn a_member_missing_from_the_pin_forces_one_re_walk() {
+    let _g = lock();
+    let before = walks();
+    let _pin = pin_fresh();
+    // pid 3 is never a real process id on Windows (ids are multiples of 4).
+    repin_unless_known(&[std::process::id(), 3]);
+    assert_eq!(walks() - before, 2);
+}
+
+/// Without a pin, `repin_unless_known` must not walk at all.
+#[test]
+fn repin_without_a_pin_is_a_no_op() {
+    let _g = lock();
+    let before = walks();
+    repin_unless_known(&[3]);
+    assert_eq!(walks() - before, 0);
+}

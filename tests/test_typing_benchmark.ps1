@@ -1,35 +1,111 @@
-# PSMUX vs Direct PowerShell Typing Benchmark
-# Types 10 long sentences with spaces at realistic speed
-# Measures per-character render latency for both environments
-# Uses screen buffer polling for fair comparison
+# test_typing_benchmark.ps1 - per character typing latency, psmux vs a plain shell
+#
+# WHAT IT MEASURES
+# ----------------
+# For every typed character: the time from WriteConsoleInput into the window
+# that owns the keyboard (the psmux CLIENT) to that character being visible in
+# the same window's console buffer. Both stamps are taken by ONE process
+# (tests\typing_latency_probe.cs) on the same QueryPerformanceCounter clock, and
+# the screen is read every 1 ms, so the number is the latency a user sees with
+# nothing of the harness folded into it.
+#
+# WHY IT WAS REWRITTEN (2026-11-07)
+# ---------------------------------
+# The old suite counted a "stall" when two capture-pane polls that saw growth
+# were more than 200 ms apart, and every poll was a new psmux.exe started from a
+# PowerShell Start-Job. Its "P50 gap" was the polling period, and every stall it
+# reported (11 over 80 sentences in an isolated reproduction) was ONE capture-pane
+# call that took 211 to 575 ms, nearly all of it Windows launching the process
+# from the job before psmux's main() ran (PSMUX_STARTUP_TRACE cli.entry). Over the
+# same runs the client screen never took more than 35 ms for any character.
+# Its direct PowerShell baseline also never measured anything: it summed every
+# non-empty cell in five rows and stopped as soon as that reached the text length,
+# so text already on the screen ended it at the first sample (render=0 for 9 of 10
+# sentences in every log). Both are fixed here: no process spawn per sample, and
+# both phases match the typed text from the cursor cell recorded before typing.
+#
+# THE CTRL+C CASE
+# ---------------
+# Every Ctrl+C used to take nine full CreateToolhelp32Snapshot walks (about 10 ms
+# each) on the server thread that writes keystrokes into ConPTY before the 0x03
+# reached the pane, so the first key typed after Ctrl+C was held 114 to 131 ms
+# (p50). With one pinned walk per decision it is 36 to 37 ms. The third phase
+# presses Ctrl+C in the client and types at once, and gates the median latency of
+# that first key.
+#
+# KNOWN WINDOWS BEHAVIOUR, TOLERATED ONCE
+# ---------------------------------------
+# conhost occasionally holds the LAST input written to a ConPTY until the next
+# input arrives (about 1 in 6000 to 25000 writes, reproduced with no psmux). A
+# sentence whose only unseen character is its final one is reported as "held"
+# and one such sentence per run is tolerated. Any other missing character fails.
+#
+# ISOLATION
+# ---------
+# Own namespace (-L typbench<pid>) and a private PSMUX_DATA_DIR; it never touches
+# the default namespace or ~/.psmux, kills nothing by name, and closes the two
+# windows it opens by PID. Binary: -Binary, else PSMUX_TEST_EXE, else
+# PSMUX_TEST_BIN, else psmux on PATH.
+#
+# Metrics JSON: %USERPROFILE%\.psmux-test-data\metrics\typing-benchmark-*.json
+# (tests\perf_metrics_common.ps1 envelope).
+
+param(
+    [string]$Binary = "",
+    [int]$IntervalMs = 40,
+    # Generous so a loaded sweep does not trip them. Measured on a quiet box:
+    # per char p99 26 to 28 ms and max 35 ms; a real stall is over 200 ms.
+    [double]$MaxP99Ms = 150,
+    [double]$MaxCharMs = 400,
+    # First key after Ctrl+C, median over the repeats. 114 to 131 ms with the
+    # nine walk router, 36 to 37 ms with one walk.
+    [double]$MaxCtrlCFirstMs = 80,
+    [int]$CtrlCRepeats = 6,
+    [switch]$SkipDirect,
+    # Set PSMUX_PTY_TRACE=<TraceDir>\trace for the client and the server it
+    # starts, so a slow key can be followed hop by hop (src/pty_trace.rs).
+    [string]$TraceDir = ""
+)
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
-$psmuxDir = "$env:USERPROFILE\.psmux"
-$SESSION = "bench_typing"
+. "$PSScriptRoot\perf_metrics_common.ps1"
+$script:TestsPassed = 0
+$script:TestsFailed = 0
+function Write-Pass($m) { Write-Host "  [PASS] $m" -ForegroundColor Green; $script:TestsPassed++ }
+function Write-Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:TestsFailed++ }
+function Write-Info($m) { Write-Host "  [INFO] $m" -ForegroundColor DarkCyan }
 
-# Compile tools
-$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-$benchExe = "$env:TEMP\psmux_typing_benchmark.exe"
-$injectorExe = "$env:TEMP\psmux_injector.exe"
-$timedExe = "$env:TEMP\psmux_timed_injector.exe"
-
-Write-Host "Compiling benchmark tools..." -ForegroundColor DarkGray
-& $csc /nologo /optimize /out:$benchExe "$PSScriptRoot\typing_benchmark.cs" 2>&1 | Out-Null
-if (-not (Test-Path $benchExe)) {
-    Write-Host "FAILED to compile typing_benchmark.cs" -ForegroundColor Red
-    exit 1
+if (-not $Binary) {
+    $Binary = if ($env:PSMUX_TEST_EXE) { $env:PSMUX_TEST_EXE } elseif ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA SilentlyContinue).Source }
 }
-& $csc /nologo /optimize /out:$injectorExe "$PSScriptRoot\injector.cs" 2>&1 | Out-Null
-& $csc /nologo /optimize /out:$timedExe "$PSScriptRoot\timed_injector.cs" 2>&1 | Out-Null
+if (-not $Binary -or -not (Test-Path $Binary)) { Write-Fail "psmux binary not found ($Binary)"; exit 1 }
+Write-Info "binary under test: $Binary"
 
-Write-Host ""
-Write-Host ("=" * 75) -ForegroundColor Cyan
-Write-Host "PSMUX vs DIRECT POWERSHELL TYPING BENCHMARK" -ForegroundColor Cyan
-Write-Host "10 long sentences, realistic typing speed, render latency comparison" -ForegroundColor Cyan
-Write-Host ("=" * 75) -ForegroundColor Cyan
+foreach ($v in @('PSMUX_SESSION', 'PSMUX_SESSION_NAME', 'PSMUX_SOCKET', 'PSMUX_PANE_ID', 'PSMUX_PTY_TRACE', 'TMUX', 'TMUX_PANE')) {
+    Remove-Item "Env:\$v" -EA SilentlyContinue
+}
 
-# 10 realistic long sentences with spaces (40-80 chars each)
+# ── probe ────────────────────────────────────────────────────────────────
+$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$probeSrc = Join-Path $PSScriptRoot "typing_latency_probe.cs"
+$probe = Join-Path $env:TEMP "psmux_typing_latency_probe.exe"
+if ((-not (Test-Path $probe)) -or ((Get-Item $probeSrc).LastWriteTime -gt (Get-Item $probe).LastWriteTime)) {
+    & $csc /nologo /optimize "/out:$probe" $probeSrc | Out-Null
+}
+if (-not (Test-Path $probe)) { Write-Fail "could not build typing_latency_probe.exe"; exit 1 }
+
+function Invoke-Probe {
+    param([string[]]$ProbeArgs)
+    $out = @(& $probe @ProbeArgs 2>&1 | ForEach-Object { $_.ToString() })
+    $lat = [System.Collections.Generic.List[double]]::new()
+    $miss = [System.Collections.Generic.List[int]]::new()
+    foreach ($l in $out) {
+        if ($l -match '^LAT (\d+) ([\d.]+)$') { $lat.Add([double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)) }
+        elseif ($l -match '^MISS (\d+)$') { $miss.Add([int]$Matches[1]) }
+    }
+    return [pscustomobject]@{ Lat = $lat.ToArray(); Miss = $miss.ToArray(); Raw = $out }
+}
+
 $sentences = @(
     "the quick brown fox jumps over the lazy dog and runs back home again"
     "pack my box with five dozen liquor jugs before the party starts tonight"
@@ -43,361 +119,153 @@ $sentences = @(
     "playing a quiet game of chess with the king requires very careful moves"
 )
 
-$INTERVAL_MS = 40  # ~150 WPM, fast realistic typing
+$NS = "typbench$PID"
+$S = "bench"
+$DATA = Join-Path $env:TEMP "psmux_typbench_$PID"
+New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+$prevDataDir = $env:PSMUX_DATA_DIR
+$env:PSMUX_DATA_DIR = $DATA
 
-function Cleanup-Psmux {
-    & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 500
-}
+$psmuxRows = @(); $ctrlcFirst = @(); $directRows = @()
+$psmuxAll = [System.Collections.Generic.List[double]]::new()
+$directAll = [System.Collections.Generic.List[double]]::new()
+$held = 0; $lost = 0
+$client = $null; $direct = $null
 
-function Parse-BenchmarkOutput {
-    param([string[]]$Lines)
-    $summary = $null
-    $csvData = @()
-    foreach ($line in $Lines) {
-        if ($line -match "^SUMMARY ") {
-            $summary = @{}
-            $parts = $line -replace "^SUMMARY ", "" -split " "
-            foreach ($p in $parts) {
-                $kv = $p -split "="
-                if ($kv.Length -eq 2) {
-                    $summary[$kv[0]] = $kv[1]
-                }
-            }
-        } elseif ($line -match "^\d+,\d+,") {
-            $csvData += $line
-        }
+try {
+    # ── phase 1: through psmux ──────────────────────────────────────────
+    Write-Host "`n=== PHASE 1: typing through psmux (client screen) ===" -ForegroundColor Yellow
+    Add-PerfLoadSample "start" | Out-Null
+    if ($TraceDir) { New-Item -ItemType Directory -Force -Path $TraceDir | Out-Null; $env:PSMUX_PTY_TRACE = Join-Path $TraceDir "trace" }
+    $client = Start-Process -FilePath $Binary -ArgumentList @("-L", $NS, "new-session", "-s", $S) -PassThru
+    Remove-Item Env:\PSMUX_PTY_TRACE -EA SilentlyContinue
+    Write-Info "client pid $($client.Id), namespace $NS"
+    $ready = $false
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 30) {
+        Start-Sleep -Milliseconds 500
+        $cap = & $Binary -L $NS capture-pane -t $S -p 2>&1 | Out-String
+        if ($cap -match "PS [A-Z]:\\|>\s*$") { $ready = $true; break }
     }
-    return @{ Summary = $summary; CSV = $csvData }
-}
-
-# =========================================================================
-# PHASE 1: PSMUX Benchmark (capture-pane based monitoring)
-# =========================================================================
-Write-Host "`n"
-Write-Host ("=" * 75) -ForegroundColor Yellow
-Write-Host "PHASE 1: PSMUX (through multiplexer)" -ForegroundColor Yellow
-Write-Host ("=" * 75) -ForegroundColor Yellow
-
-Cleanup-Psmux
-Remove-Item "$psmuxDir\input_debug.log" -Force -EA SilentlyContinue
-
-$env:PSMUX_INPUT_DEBUG = "1"
-$psmuxProc = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$SESSION -PassThru
-$env:PSMUX_INPUT_DEBUG = $null
-$PID_TUI = $psmuxProc.Id
-Write-Host "Launched psmux TUI PID: $PID_TUI" -ForegroundColor Cyan
-Start-Sleep -Seconds 5
-
-& $PSMUX has-session -t $SESSION 2>$null
-if ($LASTEXITCODE -ne 0) { Write-Host "Session FAILED" -ForegroundColor Red; exit 1 }
-for ($i = 0; $i -lt 40; $i++) {
-    Start-Sleep -Milliseconds 500
-    $cap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-    if ($cap -match "PS [A-Z]:\\") { break }
-}
-Write-Host "Session ready.`n" -ForegroundColor Green
-
-$psmuxResults = @()
-$sentenceNum = 0
-
-foreach ($sentence in $sentences) {
-    $sentenceNum++
-    Write-Host "  Sentence $sentenceNum/$($sentences.Count): '$($sentence.Substring(0, [Math]::Min(50, $sentence.Length)))...'" -ForegroundColor White -NoNewline
-
-    # Clear and prepare
-    & $PSMUX send-keys -t $SESSION C-c 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 200
-    & $PSMUX send-keys -t $SESSION "clear" Enter 2>&1 | Out-Null
+    if (-not $ready) { Write-Fail "the psmux pane never showed a prompt"; throw "no prompt" }
     Start-Sleep -Seconds 1
 
-    # Get baseline
-    $baseCap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-    $baseLen = 0
-    foreach ($l in ($baseCap -split "`n")) {
-        if ($l.Trim()) { $baseLen = $l.TrimEnd().Length }
+    $n = 0
+    foreach ($sentence in $sentences) {
+        $n++
+        & $Binary -L $NS send-keys -t $S C-c 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 200
+        & $Binary -L $NS send-keys -t $S "clear" Enter 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 1000
+        $r = Invoke-Probe @("type", "$($client.Id)", $sentence, "$IntervalMs")
+        foreach ($x in $r.Lat) { $psmuxAll.Add($x) }
+        $note = ""
+        if ($r.Miss.Count -eq 1 -and $r.Miss[0] -eq $sentence.Length) { $held++; $note = " (final char held)" }
+        elseif ($r.Miss.Count -gt 0) { $lost += $r.Miss.Count; $note = " MISSING $($r.Miss.Count) chars from #$($r.Miss[0])" }
+        $st = Get-PerfStats $r.Lat 1
+        $row = [ordered]@{ sentence = $n; chars = $sentence.Length; seen = $r.Lat.Count; p50 = $st.p50; p99 = $st.p99; max = $st.max; missing = @($r.Miss) }
+        # Keep every key of a sentence that had a slow one, so the shape (one
+        # held burst, or a slow drift) is in the record, not just its max.
+        if ($null -ne $st.max -and $st.max -gt 200) { $row["per_char_ms"] = $r.Lat }
+        $psmuxRows += $row
+        Write-Host ("  sentence {0,2}: seen {1}/{2} p50={3}ms p99={4}ms max={5}ms{6}" -f $n, $r.Lat.Count, $sentence.Length, $st.p50, $st.p99, $st.max, $note) -ForegroundColor $(if ($note -match "MISSING") { "Red" } else { "Gray" })
     }
+    Add-PerfLoadSample "after_typing" | Out-Null
 
-    # Start monitor job (polls capture-pane every 20ms)
-    $monJob = Start-Job -ScriptBlock {
-        param($PSMUX, $SESSION, $baseLen, $totalChars, $timeoutMs)
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $prevLen = $baseLen
-        $firstMs = 0
-        $lastMs = 0
-        $lastChangeMs = 0
-        $maxGap = 0
-        $stallCount = 0
-        $burstCount = 0
-        $gaps = [System.Collections.ArrayList]::new()
-        $allSeen = $false
-
-        while ($sw.ElapsedMilliseconds -lt $timeoutMs -and -not $allSeen) {
-            $cap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-            $ts = $sw.ElapsedMilliseconds
-
-            # Concatenate all non-empty lines to handle wrapping
-            $allText = ""
-            $lines = $cap -split "`n"
-            $foundPrompt = $false
-            foreach ($l in $lines) {
-                $trimmed = $l.TrimEnd()
-                if ($trimmed -match "^.*PS [A-Z]:\\" -and -not $foundPrompt) {
-                    $foundPrompt = $true
-                    $allText = $trimmed
-                } elseif ($foundPrompt -and $trimmed -and $trimmed -notmatch "^.*PS [A-Z]:\\") {
-                    $allText += $trimmed
-                } elseif ($foundPrompt -and $trimmed -match "^.*PS [A-Z]:\\") {
-                    break
-                }
-            }
-
-            $curLen = $allText.Length
-            if ($curLen -ne $prevLen -and $curLen -gt $prevLen) {
-                $delta = $curLen - $prevLen
-                if ($firstMs -eq 0) { $firstMs = $ts }
-                $lastMs = $ts
-
-                if ($lastChangeMs -gt 0) {
-                    $gap = $ts - $lastChangeMs
-                    $null = $gaps.Add($gap)
-                    if ($gap -gt $maxGap) { $maxGap = $gap }
-                    if ($gap -gt 200) { $stallCount++ }
-                    if ($delta -gt 5) { $burstCount++ }
-                }
-                $lastChangeMs = $ts
-                $prevLen = $curLen
-            }
-
-            if (($curLen - $baseLen) -ge $totalChars) { $allSeen = $true }
-            Start-Sleep -Milliseconds 20
-        }
-
-        $sortedGaps = @($gaps | Sort-Object)
-        $p50 = if ($sortedGaps.Count -gt 0) { $sortedGaps[[Math]::Floor($sortedGaps.Count * 0.5)] } else { 0 }
-        $p90 = if ($sortedGaps.Count -gt 0) { $sortedGaps[[Math]::Floor($sortedGaps.Count * 0.9)] } else { 0 }
-        $p99 = if ($sortedGaps.Count -gt 0) { $sortedGaps[[Math]::Floor($sortedGaps.Count * 0.99)] } else { 0 }
-        $avg = if ($sortedGaps.Count -gt 0) { [Math]::Round(($gaps | Measure-Object -Average).Average, 1) } else { 0 }
-
-        return @{
-            FirstMs   = $firstMs
-            LastMs    = $lastMs
-            RenderMs  = $lastMs - $firstMs
-            Samples   = $gaps.Count
-            Stalls    = $stallCount
-            Bursts    = $burstCount
-            MaxGapMs  = $maxGap
-            AvgGapMs  = $avg
-            P50Ms     = $p50
-            P90Ms     = $p90
-            P99Ms     = $p99
-            AllSeen   = $allSeen
-        }
-    } -ArgumentList $PSMUX, $SESSION, $baseLen, $sentence.Length, (($sentence.Length * $INTERVAL_MS) + 8000)
-
-    Start-Sleep -Milliseconds 100
-
-    # Inject the sentence
-    & $timedExe $PID_TUI $sentence $INTERVAL_MS 2>&1 | Out-Null
-
-    # Wait for monitor to finish
-    $result = $monJob | Wait-Job -Timeout 30 | Receive-Job
-    Remove-Job $monJob -Force -EA SilentlyContinue
-
-    if ($result) {
-        $psmuxResults += [PSCustomObject]@{
-            Num      = $sentenceNum
-            Chars    = $sentence.Length
-            RenderMs = $result.RenderMs
-            AvgGap   = $result.AvgGapMs
-            P50      = $result.P50Ms
-            P90      = $result.P90Ms
-            P99      = $result.P99Ms
-            MaxGap   = $result.MaxGapMs
-            Stalls   = $result.Stalls
-            Bursts   = $result.Bursts
-            AllSeen  = $result.AllSeen
-        }
-        $stallStr = if ($result.Stalls -gt 0) { " STALLS=$($result.Stalls)" } else { "" }
-        Write-Host " | render=$($result.RenderMs)ms max_gap=$($result.MaxGapMs)ms p90=$($result.P90Ms)ms$stallStr" -ForegroundColor $(if ($result.Stalls -gt 0) {"Red"} else {"Green"})
-    } else {
-        Write-Host " | FAILED (no data)" -ForegroundColor Red
-        $psmuxResults += [PSCustomObject]@{
-            Num = $sentenceNum; Chars = $sentence.Length; RenderMs = -1
-            AvgGap = -1; P50 = -1; P90 = -1; P99 = -1; MaxGap = -1
-            Stalls = -1; Bursts = -1; AllSeen = $false
-        }
-    }
-}
-
-# Collect psmux debug log stats
-$inputLog = "$psmuxDir\input_debug.log"
-$psmuxStage2 = 0
-$psmuxSuppressed = 0
-if (Test-Path $inputLog) {
-    $logLines = Get-Content $inputLog -EA SilentlyContinue
-    $psmuxStage2 = @($logLines | Where-Object { $_ -match "stage2:" -and $_ -match "chars in 20ms" }).Count
-    $psmuxSuppressed = @($logLines | Where-Object { $_ -match "suppressed char" }).Count
-}
-
-Cleanup-Psmux
-try { if (-not $psmuxProc.HasExited) { Stop-Process -Id $psmuxProc.Id -Force -EA SilentlyContinue } } catch {}
-
-# =========================================================================
-# PHASE 2: Direct PowerShell (screen buffer monitoring)
-# =========================================================================
-Write-Host "`n"
-Write-Host ("=" * 75) -ForegroundColor Yellow
-Write-Host "PHASE 2: DIRECT POWERSHELL (no multiplexer)" -ForegroundColor Yellow
-Write-Host ("=" * 75) -ForegroundColor Yellow
-
-# Launch a plain pwsh in a new console window
-$pwshProc = Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile","-NoExit","-Command","function prompt { 'BENCH> ' }" -PassThru
-$PID_PWSH = $pwshProc.Id
-Write-Host "Launched direct pwsh PID: $PID_PWSH" -ForegroundColor Cyan
-Start-Sleep -Seconds 4
-
-$directResults = @()
-$sentenceNum = 0
-
-foreach ($sentence in $sentences) {
-    $sentenceNum++
-    Write-Host "  Sentence $sentenceNum/$($sentences.Count): '$($sentence.Substring(0, [Math]::Min(50, $sentence.Length)))...'" -ForegroundColor White -NoNewline
-
-    # Clear screen first via injector
-    & $injectorExe $PID_PWSH "clear{ENTER}"
-    Start-Sleep -Seconds 1
-
-    # Run the benchmark tool (injects + monitors screen buffer)
-    $benchOutput = & $benchExe $PID_PWSH $sentence $INTERVAL_MS 2>&1
-    $parsed = Parse-BenchmarkOutput -Lines ($benchOutput | ForEach-Object { $_.ToString() })
-
-    if ($parsed.Summary) {
-        $s = $parsed.Summary
-        $directResults += [PSCustomObject]@{
-            Num      = $sentenceNum
-            Chars    = $sentence.Length
-            RenderMs = [int]$s["render_ms"]
-            AvgGap   = [int]$s["avg_gap_ms"]
-            P50      = [int]$s["p50_ms"]
-            P90      = [int]$s["p90_ms"]
-            P99      = [int]$s["p99_ms"]
-            MaxGap   = [int]$s["max_gap_ms"]
-            Stalls   = [int]$s["stalls"]
-            Bursts   = [int]$s["bursts"]
-            AllSeen  = $s["all_seen"] -eq "True"
-        }
-        $stallStr = if ([int]$s["stalls"] -gt 0) { " STALLS=$($s["stalls"])" } else { "" }
-        Write-Host " | render=$($s["render_ms"])ms max_gap=$($s["max_gap_ms"])ms p90=$($s["p90_ms"])ms$stallStr" -ForegroundColor $(if ([int]$s["stalls"] -gt 0) {"Red"} else {"Green"})
-    } else {
-        Write-Host " | FAILED (no summary)" -ForegroundColor Red
-        $directResults += [PSCustomObject]@{
-            Num = $sentenceNum; Chars = $sentence.Length; RenderMs = -1
-            AvgGap = -1; P50 = -1; P90 = -1; P99 = -1; MaxGap = -1
-            Stalls = -1; Bursts = -1; AllSeen = $false
-        }
-    }
-
-    # Small gap between sentences
-    Start-Sleep -Milliseconds 500
-}
-
-# Kill direct pwsh
-try { Stop-Process -Id $PID_PWSH -Force -EA SilentlyContinue } catch {}
-
-# =========================================================================
-# COMPARISON TABLE
-# =========================================================================
-Write-Host "`n"
-Write-Host ("=" * 75) -ForegroundColor Cyan
-Write-Host "HEAD TO HEAD COMPARISON" -ForegroundColor Cyan
-Write-Host ("=" * 75) -ForegroundColor Cyan
-Write-Host "Typing speed: ${INTERVAL_MS}ms between chars (~$([Math]::Round(1000/$INTERVAL_MS * 60 / 5)) WPM)" -ForegroundColor White
-Write-Host ""
-
-Write-Host "PSMUX RESULTS (through multiplexer):" -ForegroundColor Yellow
-$psmuxResults | Format-Table Num, Chars, RenderMs, AvgGap, P50, P90, P99, MaxGap, Stalls, Bursts -AutoSize
-Write-Host ""
-Write-Host "DIRECT POWERSHELL RESULTS (no multiplexer):" -ForegroundColor Yellow
-$directResults | Format-Table Num, Chars, RenderMs, AvgGap, P50, P90, P99, MaxGap, Stalls, Bursts -AutoSize
-
-# Aggregate stats
-$validPsmux = @($psmuxResults | Where-Object { $_.RenderMs -ge 0 })
-$validDirect = @($directResults | Where-Object { $_.RenderMs -ge 0 })
-
-Write-Host ""
-Write-Host ("=" * 75) -ForegroundColor Cyan
-Write-Host "AGGREGATE STATISTICS" -ForegroundColor Cyan
-Write-Host ("=" * 75) -ForegroundColor Cyan
-
-if ($validPsmux.Count -gt 0) {
-    $pAvgRender = [Math]::Round(($validPsmux | Measure-Object -Property RenderMs -Average).Average)
-    $pAvgP90    = [Math]::Round(($validPsmux | Measure-Object -Property P90 -Average).Average)
-    $pAvgP99    = [Math]::Round(($validPsmux | Measure-Object -Property P99 -Average).Average)
-    $pMaxGap    = ($validPsmux | Measure-Object -Property MaxGap -Maximum).Maximum
-    $pTotalStalls = ($validPsmux | Measure-Object -Property Stalls -Sum).Sum
-    $pTotalBursts = ($validPsmux | Measure-Object -Property Bursts -Sum).Sum
-
-    Write-Host ""
-    Write-Host "  PSMUX:" -ForegroundColor Yellow
-    Write-Host "    Avg render span:   ${pAvgRender}ms" -ForegroundColor White
-    Write-Host "    Avg P90 gap:       ${pAvgP90}ms" -ForegroundColor White
-    Write-Host "    Avg P99 gap:       ${pAvgP99}ms" -ForegroundColor White
-    Write-Host "    Worst single gap:  ${pMaxGap}ms" -ForegroundColor $(if ($pMaxGap -gt 200) {"Red"} else {"Green"})
-    Write-Host "    Total stalls:      $pTotalStalls" -ForegroundColor $(if ($pTotalStalls -gt 0) {"Red"} else {"Green"})
-    Write-Host "    Total bursts:      $pTotalBursts" -ForegroundColor $(if ($pTotalBursts -gt 0) {"Yellow"} else {"Green"})
-    Write-Host "    Stage2 triggers:   $psmuxStage2" -ForegroundColor $(if ($psmuxStage2 -gt 0) {"Yellow"} else {"Green"})
-    Write-Host "    Chars suppressed:  $psmuxSuppressed" -ForegroundColor $(if ($psmuxSuppressed -gt 0) {"Red"} else {"Green"})
-}
-
-if ($validDirect.Count -gt 0) {
-    $dAvgRender = [Math]::Round(($validDirect | Measure-Object -Property RenderMs -Average).Average)
-    $dAvgP90    = [Math]::Round(($validDirect | Measure-Object -Property P90 -Average).Average)
-    $dAvgP99    = [Math]::Round(($validDirect | Measure-Object -Property P99 -Average).Average)
-    $dMaxGap    = ($validDirect | Measure-Object -Property MaxGap -Maximum).Maximum
-    $dTotalStalls = ($validDirect | Measure-Object -Property Stalls -Sum).Sum
-    $dTotalBursts = ($validDirect | Measure-Object -Property Bursts -Sum).Sum
-
-    Write-Host ""
-    Write-Host "  DIRECT POWERSHELL:" -ForegroundColor Yellow
-    Write-Host "    Avg render span:   ${dAvgRender}ms" -ForegroundColor White
-    Write-Host "    Avg P90 gap:       ${dAvgP90}ms" -ForegroundColor White
-    Write-Host "    Avg P99 gap:       ${dAvgP99}ms" -ForegroundColor White
-    Write-Host "    Worst single gap:  ${dMaxGap}ms" -ForegroundColor $(if ($dMaxGap -gt 200) {"Red"} else {"Green"})
-    Write-Host "    Total stalls:      $dTotalStalls" -ForegroundColor $(if ($dTotalStalls -gt 0) {"Red"} else {"Green"})
-    Write-Host "    Total bursts:      $dTotalBursts" -ForegroundColor $(if ($dTotalBursts -gt 0) {"Yellow"} else {"Green"})
-}
-
-if ($validPsmux.Count -gt 0 -and $validDirect.Count -gt 0) {
-    Write-Host ""
-    Write-Host ("=" * 75) -ForegroundColor Cyan
-    Write-Host "DELTA (PSMUX OVERHEAD)" -ForegroundColor Cyan
-    Write-Host ("=" * 75) -ForegroundColor Cyan
-    $renderOverhead = $pAvgRender - $dAvgRender
-    $p90Overhead = $pAvgP90 - $dAvgP90
-    Write-Host "    Render span overhead: +${renderOverhead}ms per sentence" -ForegroundColor $(if ($renderOverhead -gt 500) {"Red"} elseif ($renderOverhead -gt 100) {"Yellow"} else {"Green"})
-    Write-Host "    P90 gap overhead:     +${p90Overhead}ms" -ForegroundColor $(if ($p90Overhead -gt 50) {"Red"} elseif ($p90Overhead -gt 20) {"Yellow"} else {"Green"})
-    $maxGapDelta = $pMaxGap - $dMaxGap
-    Write-Host "    Max gap overhead:     +${maxGapDelta}ms" -ForegroundColor $(if ($maxGapDelta -gt 100) {"Red"} elseif ($maxGapDelta -gt 50) {"Yellow"} else {"Green"})
-
-    if ($pTotalStalls -gt 0 -and $dTotalStalls -eq 0) {
-        Write-Host "`n    VERDICT: PSMUX has $pTotalStalls stall(s) that direct PowerShell does NOT have." -ForegroundColor Red
-        Write-Host "    The user's reported 'freeze feeling' is measurably real." -ForegroundColor Red
-        Write-Host "[FAIL] Typing benchmark: Stalls detected" -ForegroundColor Red
-        exit 1
-    } elseif ($pTotalStalls -eq 0 -and $dTotalStalls -eq 0) {
-        Write-Host "`n    VERDICT: No stalls in either environment." -ForegroundColor Green
-        if ($p90Overhead -gt 30) {
-            Write-Host "    However, psmux P90 is ${p90Overhead}ms higher, which may feel sluggish." -ForegroundColor Yellow
-            Write-Host "[PASS] Typing benchmark: No stalls (acceptable overhead)" -ForegroundColor Green
+    # ── phase 2: Ctrl+C then type at once ───────────────────────────────
+    Write-Host "`n=== PHASE 2: Ctrl+C in the client, then type at once ===" -ForegroundColor Yellow
+    for ($i = 1; $i -le $CtrlCRepeats; $i++) {
+        & $Binary -L $NS send-keys -t $S C-c 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 300
+        & $Binary -L $NS send-keys -t $S "clear" Enter 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 1200
+        $text = "~$($i)qzj~ typed after ctrl c"
+        $r = Invoke-Probe @("ctrlc", "$($client.Id)", $text, "$IntervalMs", "0")
+        if ($r.Lat.Count -ge 1) {
+            $ctrlcFirst += $r.Lat[0]
+            Write-Host ("  repeat {0}: first key after Ctrl+C {1}ms, keys 2-4 {2}" -f $i, $r.Lat[0], (($r.Lat | Select-Object -Skip 1 -First 3) -join "/")) -ForegroundColor Gray
         } else {
-            Write-Host "    Psmux overhead is minimal and should not be perceptible." -ForegroundColor Green
-            Write-Host "[PASS] Typing benchmark: Minimal overhead" -ForegroundColor Green
+            Write-Host "  repeat ${i}: the typed text never appeared" -ForegroundColor Red
         }
-    } else {
-        Write-Host "`n    VERDICT: Both environments show stalls (possible system load)." -ForegroundColor Yellow
-        Write-Host "[PASS] Typing benchmark: Equal stall profiles" -ForegroundColor Green
+    }
+    Add-PerfLoadSample "after_ctrlc" | Out-Null
+} finally {
+    & $Binary -L $NS kill-server 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    if ($client) { try { if (-not $client.HasExited) { Stop-Process -Id $client.Id -Force -EA SilentlyContinue } } catch { } }
+    if ($null -eq $prevDataDir) { Remove-Item Env:\PSMUX_DATA_DIR -EA SilentlyContinue } else { $env:PSMUX_DATA_DIR = $prevDataDir }
+    Remove-Item -Recurse -Force $DATA -EA SilentlyContinue
+}
+
+# ── phase 3: the same sentences straight into a shell ───────────────────
+if (-not $SkipDirect) {
+    Write-Host "`n=== PHASE 3: baseline, the same typing into a plain shell ===" -ForegroundColor Yellow
+    $shell = (Get-Command pwsh -EA SilentlyContinue).Source
+    if (-not $shell) { $shell = "powershell.exe" }
+    try {
+        $direct = Start-Process -FilePath $shell -ArgumentList "-NoProfile", "-NoExit", "-Command", "function prompt { 'BENCH> ' }" -PassThru
+        Start-Sleep -Seconds 4
+        $n = 0
+        foreach ($sentence in $sentences) {
+            $n++
+            # Escape reverts the line PSReadLine is holding, then clear runs.
+            & $probe line "$($direct.Id)" ([string][char]27 + "clear") | Out-Null
+            Start-Sleep -Milliseconds 1000
+            $r = Invoke-Probe @("type", "$($direct.Id)", $sentence, "$IntervalMs")
+            foreach ($x in $r.Lat) { $directAll.Add($x) }
+            $st = Get-PerfStats $r.Lat 1
+            $directRows += [ordered]@{ sentence = $n; chars = $sentence.Length; seen = $r.Lat.Count; p50 = $st.p50; p99 = $st.p99; max = $st.max }
+            Write-Host ("  sentence {0,2}: seen {1}/{2} p50={3}ms p99={4}ms max={5}ms" -f $n, $r.Lat.Count, $sentence.Length, $st.p50, $st.p99, $st.max) -ForegroundColor Gray
+        }
+    } finally {
+        if ($direct) { try { if (-not $direct.HasExited) { Stop-Process -Id $direct.Id -Force -EA SilentlyContinue } } catch { } }
     }
 }
 
-Write-Host ""
+# ── verdicts ────────────────────────────────────────────────────────────
+Write-Host "`n=== VERDICT ===" -ForegroundColor Cyan
+$pStats = Get-PerfStats $psmuxAll.ToArray() 1
+$dStats = Get-PerfStats $directAll.ToArray() 1
+$cStats = Get-PerfStats $ctrlcFirst 1
+$totalChars = ($sentences | Measure-Object -Property Length -Sum).Sum
+Write-Info ("psmux per char: n={0} p50={1}ms p90={2}ms p99={3}ms max={4}ms" -f $pStats.n, $pStats.p50, $pStats.p90, $pStats.p99, $pStats.max)
+if (-not $SkipDirect) {
+    Write-Info ("direct per char: n={0} p50={1}ms p90={2}ms p99={3}ms max={4}ms" -f $dStats.n, $dStats.p50, $dStats.p90, $dStats.p99, $dStats.max)
+    if ($dStats.n -lt $totalChars) { Write-Host "  [WARN] the direct baseline saw $($dStats.n) of $totalChars chars; its numbers are partial" -ForegroundColor Yellow }
+    elseif ($null -ne $pStats.p50) { Write-Info ("psmux overhead: p50 +{0}ms, p99 +{1}ms" -f [math]::Round($pStats.p50 - $dStats.p50, 1), [math]::Round($pStats.p99 - $dStats.p99, 1)) }
+}
+
+if ($lost -eq 0 -and $held -le 1) {
+    Write-Pass "every typed character reached the client screen ($($pStats.n) of $totalChars, $held sentence(s) with the final char held by conhost)"
+} else {
+    Write-Fail "characters never reached the client screen: $lost lost, $held sentence(s) with the final char held (one is tolerated)"
+}
+if ($null -ne $pStats.p99 -and $pStats.p99 -le $MaxP99Ms) { Write-Pass "per char p99 $($pStats.p99)ms <= ${MaxP99Ms}ms" }
+else { Write-Fail "per char p99 $($pStats.p99)ms > ${MaxP99Ms}ms" }
+if ($null -ne $pStats.max -and $pStats.max -le $MaxCharMs) { Write-Pass "slowest character $($pStats.max)ms <= ${MaxCharMs}ms" }
+else { Write-Fail "slowest character $($pStats.max)ms > ${MaxCharMs}ms: a key took that long to appear in the client" }
+if ($cStats.n -ge [math]::Ceiling($CtrlCRepeats / 2) -and $cStats.p50 -le $MaxCtrlCFirstMs) {
+    Write-Pass "first key after Ctrl+C: median $($cStats.p50)ms <= ${MaxCtrlCFirstMs}ms over $($cStats.n) presses"
+} else {
+    Write-Fail "first key after Ctrl+C: median $($cStats.p50)ms over $($cStats.n) presses > ${MaxCtrlCFirstMs}ms (the Ctrl+C router holds the server's input thread)"
+}
+
+$jsonPath = Write-PerfMetrics -Suite "test_typing_benchmark" -Binary $Binary -FileStem "typing-benchmark" -Data ([ordered]@{
+    interval_ms           = $IntervalMs
+    thresholds            = [ordered]@{ max_p99_ms = $MaxP99Ms; max_char_ms = $MaxCharMs; max_ctrlc_first_ms = $MaxCtrlCFirstMs }
+    psmux_per_char        = $pStats
+    psmux_sentences       = $psmuxRows
+    psmux_held_final_char = $held
+    psmux_lost_chars      = $lost
+    ctrlc_first_key       = $cStats
+    ctrlc_first_key_ms    = $ctrlcFirst
+    direct_per_char       = $dStats
+    direct_sentences      = $directRows
+    failed                = $script:TestsFailed
+})
+if ($jsonPath) { Write-Info "metrics: $jsonPath" }
+
+Write-Host "`n=== Results ===" -ForegroundColor Cyan
+Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
+Write-Host "  Failed: $($script:TestsFailed)" -ForegroundColor $(if ($script:TestsFailed -gt 0) { "Red" } else { "Green" })
+exit $script:TestsFailed
