@@ -19,6 +19,10 @@ fn xt() -> String { xtversion_reply() }
 const DA1: &str = "\x1b[?1;2;4c";
 const FG: &str = "\x1b]10;rgb:cccc/cccc/cccc\x1b\\";
 const BG: &str = "\x1b]11;rgb:0c0c/0c0c/0c0c\x1b\\";
+// A colour reply ends the way its query did, BEL or ST (tmux's
+// input_osc_colour_reply takes ictx->input_end).
+const FG_BEL: &str = "\x1b]10;rgb:cccc/cccc/cccc\x07";
+const BG_BEL: &str = "\x1b]11;rgb:0c0c/0c0c/0c0c\x07";
 const DARK: &str = "\x1b[?997;1n";
 const CELL: &str = "\x1b[6;20;10t";
 
@@ -42,10 +46,10 @@ fn a_startup_probe_is_answered_in_its_own_order() {
 fn colour_replies_follow_the_order_asked() {
     // Limit two: the colour replies used to come in a fixed order, the scheme
     // first and the palette by index.
-    assert_eq!(texts(b"\x1b]11;?\x07\x1b[?996n"), vec![BG.to_string(), DARK.to_string()]);
+    assert_eq!(texts(b"\x1b]11;?\x07\x1b[?996n"), vec![BG_BEL.to_string(), DARK.to_string()]);
     assert_eq!(
         texts(b"\x1b]4;2;?\x07\x1b]4;1;?\x07"),
-        vec!["\x1b]4;2;rgb:1313/a1a1/0e0e\x1b\\".to_string(), "\x1b]4;1;rgb:c5c5/0f0f/1f1f\x1b\\".to_string()]
+        vec!["\x1b]4;2;rgb:1313/a1a1/0e0e\x07".to_string(), "\x1b]4;1;rgb:c5c5/0f0f/1f1f\x07".to_string()]
     );
 }
 
@@ -75,21 +79,21 @@ fn the_burst_does_not_answer_a_colour_twice() {
     // it was asked, once.
     let out = texts(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?\x07");
     assert_eq!(out.len(), 3);
-    assert_eq!(&out[..2], &[FG.to_string(), BG.to_string()]);
+    assert_eq!(&out[..2], &[FG_BEL.to_string(), BG_BEL.to_string()]);
     let out = texts(b"\x1b]11;?\x07\x1b]4;0;?\x07\x1b]4;0;?\x07");
     assert_eq!(out.iter().filter(|r| r.starts_with("\x1b]10;")).count(), 1);
     assert_eq!(out.iter().filter(|r| r.starts_with("\x1b]11;")).count(), 1);
-    assert_eq!(out[1], FG, "the missing foreground goes before index 0");
+    assert_eq!(out[1], FG_BEL, "the missing foreground goes before index 0, ended as that query is");
 }
 
 #[test]
 fn a_single_palette_index_gets_exactly_its_reply() {
-    assert_eq!(texts(b"\x1b]4;5;?\x07"), vec!["\x1b]4;5;rgb:8888/1717/9898\x1b\\".to_string()]);
+    assert_eq!(texts(b"\x1b]4;5;?\x07"), vec!["\x1b]4;5;rgb:8888/1717/9898\x07".to_string()]);
 }
 
 #[test]
 fn the_panes_own_palette_wins() {
-    assert_eq!(texts(b"\x1b]4;4;#000080\x07\x1b]4;4;?\x07"), vec!["\x1b]4;4;rgb:0000/0000/8080\x1b\\".to_string()]);
+    assert_eq!(texts(b"\x1b]4;4;#000080\x07\x1b]4;4;?\x07"), vec!["\x1b]4;4;rgb:0000/0000/8080\x07".to_string()]);
 }
 
 #[test]
@@ -107,7 +111,7 @@ fn a_palette_reply_is_the_colour_when_asked_not_when_the_batch_ends() {
     // Set red, ask, set blue, ask, in one batch: tmux answers red then blue.
     assert_eq!(
         texts(b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;1;?\x07\x1b]4;1;rgb:00/00/ff\x07\x1b]4;1;?\x07"),
-        vec!["\x1b]4;1;rgb:ffff/0000/0000\x1b\\".to_string(), "\x1b]4;1;rgb:0000/0000/ffff\x1b\\".to_string()]
+        vec!["\x1b]4;1;rgb:ffff/0000/0000\x07".to_string(), "\x1b]4;1;rgb:0000/0000/ffff\x07".to_string()]
     );
 }
 

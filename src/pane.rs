@@ -4436,10 +4436,11 @@ pub(crate) fn pane_replies(
     let colour = |text: Option<String>, bit: u32| {
         text.map(|text| PaneReply { text, fallback: ReplyFallback::Colour(bit), console_host: false })
     };
-    let fg = || colour(foreground_reply(colours), COLOR_QUERY_FG);
-    let bg = || colour(background_reply(colours), COLOR_QUERY_BG);
-    let mut burst = !queries.contains(&DeviceQuery::ForegroundColour)
-        || !queries.contains(&DeviceQuery::BackgroundColour);
+    let fg = |bel| colour(foreground_reply(colours, bel), COLOR_QUERY_FG);
+    let bg = |bel| colour(background_reply(colours, bel), COLOR_QUERY_BG);
+    let asked_fg = queries.iter().any(|q| matches!(q, DeviceQuery::ForegroundColour { .. }));
+    let asked_bg = queries.iter().any(|q| matches!(q, DeviceQuery::BackgroundColour { .. }));
+    let mut burst = !asked_fg || !asked_bg;
     let mut out = Vec::with_capacity(queries.len());
     for &q in queries {
         let reply = match q {
@@ -4449,16 +4450,26 @@ pub(crate) fn pane_replies(
                 console_host: false,
             }),
             DeviceQuery::ColourScheme => colour(Some(scheme_reply(colours)), COLOR_QUERY_SCHEME),
-            DeviceQuery::ForegroundColour => fg(),
-            DeviceQuery::BackgroundColour => bg(),
-            DeviceQuery::PaletteColour { index, own } => {
+            DeviceQuery::ForegroundColour { bel } => fg(bel),
+            DeviceQuery::BackgroundColour { bel } => bg(bel),
+            DeviceQuery::PaletteColour { index, own, bel } => {
                 let i = usize::from(index);
                 if i == 0 && burst {
+                    // The burst's own OSC 10 and 11 never arrived, so they
+                    // end the way its palette query did.
                     burst = false;
-                    if !queries.contains(&DeviceQuery::ForegroundColour) { out.extend(fg()); }
-                    if !queries.contains(&DeviceQuery::BackgroundColour) { out.extend(bg()); }
+                    if !asked_fg { out.extend(fg(bel)); }
+                    if !asked_bg { out.extend(bg(bel)); }
                 }
-                colour(palette_reply(i, colours, own), 1 << i)
+                let text = palette_reply(i, colours, own, bel);
+                if i < 16 {
+                    colour(text, 1 << i)
+                } else {
+                    // The colour path's bits hold only the sixteen ANSI
+                    // colours, and it would ask the outer terminal's value,
+                    // which psmux does not have for this index.
+                    text.map(|text| PaneReply { text, fallback: ReplyFallback::Lost("OSC 4"), console_host: false })
+                }
             }
             _ => {
                 let console_host = q == DeviceQuery::Da1 && std::mem::take(console_host_da1_open);

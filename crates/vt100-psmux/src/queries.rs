@@ -39,11 +39,11 @@ pub(crate) fn csi_query(
     }
 }
 
-pub(crate) fn osc_query(params: &[&[u8]], program_status: bool) -> Option<TerminalQuery> {
+pub(crate) fn osc_query(params: &[&[u8]], program_status: bool, bel: bool) -> Option<TerminalQuery> {
     match params {
         [b"7501", b"?"] if program_status => Some(TerminalQuery::ProgramStatus),
-        [b"10", b"?"] => Some(TerminalQuery::ForegroundColour),
-        [b"11", b"?"] => Some(TerminalQuery::BackgroundColour),
+        [b"10", b"?"] => Some(TerminalQuery::ForegroundColour { bel }),
+        [b"11", b"?"] => Some(TerminalQuery::BackgroundColour { bel }),
         // OSC 4 can hold several queries among its sets, so the live parser
         // takes them pair by pair (`palette_pairs`), not here.
         _ => None,
@@ -61,16 +61,20 @@ pub(crate) fn palette_pairs<'a>(
 }
 
 /// Whether an `OSC 4` pair asks for a colour psmux answers: a `?` for one
-/// of the sixteen ANSI colours, the ones it knows the outer terminal's
-/// values for.
-pub(crate) fn is_palette_query(index: u8, spec: &[u8]) -> bool {
-    spec == b"?" && index < 16
+/// of the sixteen ANSI colours, whose outer terminal values the client
+/// reports, or for any index the pane has its own entry for (`own`), which
+/// tmux's `input_osc_4` answers from `colour_palette_get` (input.c:2947 at
+/// tag 3.8).
+pub(crate) fn is_palette_query(index: u8, spec: &[u8], own: Option<(u8, u8, u8)>) -> bool {
+    spec == b"?" && (index < 16 || own.is_some())
 }
 
-/// Whether an OSC asks for any palette colour psmux answers.
+/// Whether an OSC may ask for a palette colour psmux answers. The detector
+/// has no palette, so any `?` counts: a query it flags that the live parser
+/// then leaves unanswered only releases held synchronized output early.
 fn asks_palette(params: &[&[u8]]) -> bool {
     match params {
-        [b"4", rest @ ..] => palette_pairs(rest).any(|(i, spec)| is_palette_query(i, spec)),
+        [b"4", rest @ ..] => palette_pairs(rest).any(|(_, spec)| spec == b"?"),
         _ => false,
     }
 }
@@ -117,7 +121,7 @@ impl vte::Perform for ReplyRequests {
         self.pending |= csi_query(params, intermediates, ignore, action).is_some();
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.pending |= osc_query(params, self.program_status).is_some() || asks_palette(params);
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.pending |= osc_query(params, self.program_status, bell_terminated).is_some() || asks_palette(params);
     }
 }
