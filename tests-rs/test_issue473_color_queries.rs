@@ -18,14 +18,14 @@ use vt100::TerminalQuery as Q;
 fn scan_detects_each_palette_index() {
     for i in 0..16u8 {
         let q = format!("\x1b]4;{};?\x1b\\", i);
-        assert_eq!(scan_device_queries(q.as_bytes()), vec![Q::PaletteColour { index: i, own: None }], "index {}", i);
+        assert_eq!(scan_device_queries(q.as_bytes()), vec![Q::PaletteColour { index: i, own: None, bel: false }], "index {}", i);
     }
 }
 
 #[test]
 fn scan_detects_fg_bg_and_scheme() {
-    assert_eq!(scan_device_queries(b"\x1b]10;?\x1b\\"), vec![Q::ForegroundColour]);
-    assert_eq!(scan_device_queries(b"\x1b]11;?\x1b\\"), vec![Q::BackgroundColour]);
+    assert_eq!(scan_device_queries(b"\x1b]10;?\x1b\\"), vec![Q::ForegroundColour { bel: false }]);
+    assert_eq!(scan_device_queries(b"\x1b]11;?\x1b\\"), vec![Q::BackgroundColour { bel: false }]);
     assert_eq!(scan_device_queries(b"\x1b[?996n"), vec![Q::ColourScheme]);
 }
 
@@ -37,8 +37,8 @@ fn scan_detects_copilot_burst() {
     for i in 0..16 {
         burst.push_str(&format!("\x1b]4;{};?\x1b\\", i));
     }
-    let mut expected = vec![Q::ColourScheme, Q::ForegroundColour, Q::BackgroundColour];
-    expected.extend((0..16u8).map(|index| Q::PaletteColour { index, own: None }));
+    let mut expected = vec![Q::ColourScheme, Q::ForegroundColour { bel: false }, Q::BackgroundColour { bel: false }];
+    expected.extend((0..16u8).map(|index| Q::PaletteColour { index, own: None, bel: false }));
     assert_eq!(scan_device_queries(burst.as_bytes()), expected);
 }
 
@@ -62,7 +62,7 @@ fn scanner_detects_query_split_across_batches() {
     for split in 1..q.len() {
         let mut s = DeviceQueryScanner::new();
         assert!(s.scan(&q[..split]).is_empty(), "split at {}", split);
-        assert_eq!(s.scan(&q[split..]), vec![Q::PaletteColour { index: 7, own: None }], "split at {}", split);
+        assert_eq!(s.scan(&q[split..]), vec![Q::PaletteColour { index: 7, own: None, bel: true }], "split at {}", split);
     }
 }
 
@@ -71,7 +71,7 @@ fn scanner_does_not_double_count_completed_query() {
     // A query answered in batch N must not come back in batch N+1, which
     // would answer it twice.
     let mut s = DeviceQueryScanner::new();
-    assert_eq!(s.scan(b"\x1b]4;3;?\x07"), vec![Q::PaletteColour { index: 3, own: None }]);
+    assert_eq!(s.scan(b"\x1b]4;3;?\x07"), vec![Q::PaletteColour { index: 3, own: None, bel: true }]);
     assert!(s.scan(b"more output").is_empty());
 }
 

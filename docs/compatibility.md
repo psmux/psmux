@@ -350,6 +350,8 @@ ESC]104 ESC\                   put every index back
 ESC]4;4;? ESC\                 answered from this pane's entry, then from the host terminal
 ```
 
+A query for any index from 0 to 255 is answered from the pane's entry, set by OSC 4 or by `pane-colours`, as tmux answers it from `colour_palette_get`. With no entry, the sixteen ANSI colours are answered from the host terminal, whose values the client reports; tmux also asks the host terminal for the other indexes, which psmux does not do yet, so they go unanswered. Each reply ends the way its query did, BEL or ST, as tmux's `input_osc_colour_reply` ends it, and so do the OSC 10 and OSC 11 replies.
+
 This matters most for Windows console applications. A pane child on ConPTY announces its console colour table as OSC 4 and then paints with indexed SGR rather than true colour, so Far Manager's panels are `ESC[48;5;4m` against an OSC 4 that says index 4 is `#000080`. Before #685 psmux dropped the palette and re rendered the cell as a plain `ESC[44m`, which Windows Terminal painted with its own Campbell `#0037DA`. Far inside psmux now paints `#000080`, `#008080` and `#00FFFF` exactly as Far outside psmux does.
 
 Three deliberate choices:

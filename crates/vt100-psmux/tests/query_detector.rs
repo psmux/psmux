@@ -32,11 +32,11 @@ fn detector_and_live_parser_share_queries_at_every_split() {
         (&b"\x1b[>0q"[..], TerminalQuery::Xtversion),
         (&b"\x1b[>0;0q"[..], TerminalQuery::Xtversion),
         (&b"\x1b[?996n"[..], TerminalQuery::ColourScheme),
-        (&b"\x1b]10;?\x07"[..], TerminalQuery::ForegroundColour),
-        (&b"\x1b]10;?\x1b\\"[..], TerminalQuery::ForegroundColour),
-        (&b"\x1b]11;?\x1b\\"[..], TerminalQuery::BackgroundColour),
-        (&b"\x1b]4;0;?\x1b\\"[..], TerminalQuery::PaletteColour { index: 0, own: None }),
-        (&b"\x1b]4;15;?\x07"[..], TerminalQuery::PaletteColour { index: 15, own: None }),
+        (&b"\x1b]10;?\x07"[..], TerminalQuery::ForegroundColour { bel: true }),
+        (&b"\x1b]10;?\x1b\\"[..], TerminalQuery::ForegroundColour { bel: false }),
+        (&b"\x1b]11;?\x1b\\"[..], TerminalQuery::BackgroundColour { bel: false }),
+        (&b"\x1b]4;0;?\x1b\\"[..], TerminalQuery::PaletteColour { index: 0, own: None, bel: false }),
+        (&b"\x1b]4;15;?\x07"[..], TerminalQuery::PaletteColour { index: 15, own: None, bel: true }),
     ] {
         for cut in 0..=bytes.len() {
             let mut detector = detector();
@@ -66,10 +66,10 @@ fn reports_paint_and_unrelated_sequences_do_not_request_release() {
         // `CSI > 1 q` is not a version request, and DECSCUSR shares the
         // final byte without the `>`.
         &b"\x1b[>1q\x1b[5 q\x1b[0 q"[..],
-        // Colour sets, a palette index past the sixteen ANSI colours, a `?`
-        // after a bad index, and an index with no colour are not queries.
+        // Colour sets, a `?` after a bad index (256 is one), and an index
+        // with no colour are not queries.
         &b"\x1b]10;#ff0000\x07\x1b]11;rgb:00/00/00\x1b\\"[..],
-        &b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;16;?\x07\x1b]4;256;?\x07"[..],
+        &b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;256;?\x07"[..],
         &b"\x1b]10;?;?\x07\x1b]4;x;?\x07\x1b]4;x;?;1;?\x07\x1b]4;1\x07"[..],
         &b"\x1b]7501;state=blocked:app=test\x07"[..],
         &b"\x1b]7501;?;extra\x07"[..],
@@ -165,18 +165,19 @@ fn colour_and_version_queries_come_in_stream_order_with_the_others() {
         vec![
             TerminalQuery::Da1,
             TerminalQuery::Xtversion,
-            TerminalQuery::BackgroundColour,
+            TerminalQuery::BackgroundColour { bel: false },
             TerminalQuery::ColourScheme,
-            TerminalQuery::PaletteColour { index: 2, own: None },
-            TerminalQuery::PaletteColour { index: 1, own: None },
+            TerminalQuery::PaletteColour { index: 2, own: None, bel: true },
+            TerminalQuery::PaletteColour { index: 1, own: None, bel: true },
             TerminalQuery::WindowReport(16),
-            TerminalQuery::ForegroundColour,
+            TerminalQuery::ForegroundColour { bel: true },
         ]
     );
 }
 
+/// A palette query ended in BEL, as most of these tests write them.
 fn palette(index: u8, own: Option<(u8, u8, u8)>) -> TerminalQuery {
-    TerminalQuery::PaletteColour { index, own }
+    TerminalQuery::PaletteColour { index, own, bel: true }
 }
 
 #[test]
@@ -193,15 +194,16 @@ fn every_query_pair_of_one_osc_4_is_taken_in_order() {
     // (input.c:2935-2958 in tmux 3.8).
     let mut parser = live();
     parser.process(b"\x1b]4;1;?;2;?\x1b\\");
-    assert_eq!(parser.screen_mut().take_queries(), vec![palette(1, None), palette(2, None)]);
+    let st = |index| TerminalQuery::PaletteColour { index, own: None, bel: false };
+    assert_eq!(parser.screen_mut().take_queries(), vec![st(1), st(2)]);
     // A set and a query mixed: the query reports the set before it.
     parser.process(b"\x1b]4;3;rgb:ff/00/00;3;?;5;?\x07");
     assert_eq!(
         parser.screen_mut().take_queries(),
         vec![palette(3, Some((0xff, 0, 0))), palette(5, None)]
     );
-    // Past the sixteen colours a pair is skipped and the rest still read; a
-    // bad index ends the OSC, as in tmux.
+    // Past the sixteen colours a pair the pane has no entry for is skipped
+    // and the rest still read; a bad index ends the OSC, as in tmux.
     parser.process(b"\x1b]4;16;?;2;?;x;?;6;?\x07");
     assert_eq!(parser.screen_mut().take_queries(), vec![palette(2, None)]);
 }
@@ -245,7 +247,7 @@ fn a_flood_of_queries_is_captured_up_to_the_bound_until_the_next_drain() {
     parser.process(b"\x1b[>q\x1b]11;?\x07");
     assert_eq!(
         parser.screen_mut().take_queries(),
-        vec![TerminalQuery::Xtversion, TerminalQuery::BackgroundColour]
+        vec![TerminalQuery::Xtversion, TerminalQuery::BackgroundColour { bel: true }]
     );
 }
 

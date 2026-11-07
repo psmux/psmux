@@ -90,6 +90,10 @@ name = "issue980_pane_colours"
 path = "tests/issue980_pane_colours.rs"
 
 [[test]]
+name = "palette_queries"
+path = "tests/palette_queries.rs"
+
+[[test]]
 name = "issue749_emoji_clusters"
 path = "tests/issue749_emoji_clusters.rs"
 

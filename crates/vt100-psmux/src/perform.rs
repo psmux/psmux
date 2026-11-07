@@ -350,9 +350,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bel_terminated: bool) {
         self.last_printed = None;
-        if let Some(query) = crate::queries::osc_query(params, self.screen.program_status_enabled()) {
+        if let Some(query) = crate::queries::osc_query(params, self.screen.program_status_enabled(), bel_terminated) {
             self.screen.query(query);
             return;
         }
@@ -381,17 +381,24 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // the pairs arrive as flat params.  tmux parses exactly the same
             // shape in `input_osc_4` (input.c:2927), and so does
             // `palette_pairs`, which stops at a bad index (input.c:2941
-            // `bad = 1; break;`).  A `?` for one of the sixteen ANSI colours
-            // is a QUERY, taken in the order written with the pane's own entry
-            // as it stands at that pair, so a set before it in the same OSC
-            // is what it reports, as in tmux.  psmux answers it in stream
-            // order with the other queries (issue #473).
+            // `bad = 1; break;`).  A `?` is a QUERY, taken in the order
+            // written with the pane's own entry as it stands at that pair, so
+            // a set before it in the same OSC is what it reports, as in tmux.
+            // psmux answers one of the sixteen ANSI colours from the outer
+            // terminal when the pane has no entry, and any other index only
+            // from the pane's entry; tmux asks the outer terminal for those
+            // (input_add_request, input.c:2956), psmux does not yet.  The
+            // answers go in stream order with the other queries (#473).
             [b"4", rest @ ..] if !rest.is_empty() => {
                 for (idx, spec) in crate::queries::palette_pairs(rest) {
                     if spec == b"?" {
-                        if crate::queries::is_palette_query(idx, spec) {
-                            let own = self.screen.palette_entry(idx);
-                            self.screen.query(crate::TerminalQuery::PaletteColour { index: idx, own });
+                        let own = self.screen.palette_entry(idx);
+                        if crate::queries::is_palette_query(idx, spec, own) {
+                            self.screen.query(crate::TerminalQuery::PaletteColour {
+                                index: idx,
+                                own,
+                                bel: bel_terminated,
+                            });
                         }
                         continue;
                     }
@@ -455,7 +462,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"7501", body @ ..] if self.screen.program_status_enabled() => {
                 // vte excludes OSC/ST and semicolon separators from params.
                 let sequence_len = 2 + params.iter().map(|p| p.len()).sum::<usize>()
-                    + params.len().saturating_sub(1) + if _bel_terminated { 1 } else { 2 };
+                    + params.len().saturating_sub(1) + if bel_terminated { 1 } else { 2 };
                 if sequence_len <= 4096 {
                     self.screen.program_status_mut().report(&body.join(&b';'));
                 }

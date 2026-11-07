@@ -327,18 +327,28 @@ pub enum TerminalQuery {
     /// Light or dark colour scheme (`CSI ? 996 n`).
     ColourScheme,
     /// Default foreground colour (`OSC 10 ; ?`).
-    ForegroundColour,
+    ForegroundColour {
+        /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
+        bel: bool,
+    },
     /// Default background colour (`OSC 11 ; ?`).
-    BackgroundColour,
-    /// One of the sixteen ANSI palette colours (an `index ; ?` pair of an
-    /// `OSC 4`).
+    BackgroundColour {
+        /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
+        bel: bool,
+    },
+    /// A palette colour (an `index ; ?` pair of an `OSC 4`): one of the
+    /// sixteen ANSI colours, or any index the pane has its own entry for.
     PaletteColour {
-        /// The palette index asked for, 0 to 15.
+        /// The palette index asked for, 0 to 255.
         index: u8,
         /// The pane's own entry for it when the query was met, set by an
-        /// earlier `OSC 4`, so the reply is the colour at that point of the
-        /// stream, as tmux's `input_osc_4` answers it.
+        /// earlier `OSC 4` or by `pane-colours`, so the reply is the colour at
+        /// that point of the stream, as tmux's `input_osc_4` answers it.
         own: Option<(u8, u8, u8)>,
+        /// The query ended in BEL, not ST. tmux ends the reply the same way
+        /// (`input_osc_colour_reply` takes `ictx->input_end`, input.c at tag
+        /// 3.8).
+        bel: bool,
     },
 }
 

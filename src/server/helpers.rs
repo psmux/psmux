@@ -1549,19 +1549,27 @@ pub(crate) fn build_color_replies_for_pane(
     };
     let mut osc = String::new();
     let burst = bits & 1 != 0; // palette index 0 queried → full-burst app
+    // A bit does not say how its query ended, so these replies end in ST.
     if bits & crate::types::COLOR_QUERY_FG != 0 || burst {
-        osc.push_str(&foreground_reply(colors).unwrap_or_default());
+        osc.push_str(&foreground_reply(colors, false).unwrap_or_default());
     }
     if bits & crate::types::COLOR_QUERY_BG != 0 || burst {
-        osc.push_str(&background_reply(colors).unwrap_or_default());
+        osc.push_str(&background_reply(colors, false).unwrap_or_default());
     }
     for i in 0..16usize {
         if bits & (1u32 << i) != 0 {
             let own = pane_palette.and_then(|p| p[i]);
-            osc.push_str(&palette_reply(i, colors, own).unwrap_or_default());
+            osc.push_str(&palette_reply(i, colors, own, false).unwrap_or_default());
         }
     }
     (scheme, osc)
+}
+
+/// How a colour reply ends: the way its query did, BEL or ST, as tmux's
+/// `input_osc_colour_reply` ends it with `ictx->input_end` (input.c at tag
+/// 3.8).
+fn osc_end(bel: bool) -> &'static str {
+    if bel { "\x07" } else { "\x1b\\" }
 }
 
 /// The light or dark scheme reply to `CSI ? 996 n`: `CSI ? 997 ; 1 n` for a
@@ -1570,25 +1578,30 @@ pub(crate) fn scheme_reply(colors: &crate::types::HostColors) -> String {
     format!("\x1b[?997;{}n", if colors.is_dark() { 1 } else { 2 })
 }
 
-/// The `OSC 10` reply, when the outer terminal's foreground is known.
-pub(crate) fn foreground_reply(colors: &crate::types::HostColors) -> Option<String> {
-    colors.fg.map(|rgb| format!("\x1b]10;{}\x1b\\", x11_rgb(rgb)))
+/// The `OSC 10` reply, when the outer terminal's foreground is known, ended
+/// in BEL when `bel` (the query was) and in ST otherwise.
+pub(crate) fn foreground_reply(colors: &crate::types::HostColors, bel: bool) -> Option<String> {
+    colors.fg.map(|rgb| format!("\x1b]10;{}{}", x11_rgb(rgb), osc_end(bel)))
 }
 
-/// The `OSC 11` reply, when the outer terminal's background is known.
-pub(crate) fn background_reply(colors: &crate::types::HostColors) -> Option<String> {
-    colors.bg.map(|rgb| format!("\x1b]11;{}\x1b\\", x11_rgb(rgb)))
+/// The `OSC 11` reply, when the outer terminal's background is known, ended
+/// as [`foreground_reply`] is.
+pub(crate) fn background_reply(colors: &crate::types::HostColors, bel: bool) -> Option<String> {
+    colors.bg.map(|rgb| format!("\x1b]11;{}{}", x11_rgb(rgb), osc_end(bel)))
 }
 
-/// The `OSC 4` reply for palette index `i`.  The pane's own entry (`own`)
-/// wins, the outer terminal's is the fallback (issue #685).
+/// The `OSC 4` reply for palette index `i`, ended as [`foreground_reply`] is.
+/// The pane's own entry (`own`) wins, the outer terminal's is the fallback
+/// (issue #685); the client reports only the sixteen ANSI colours of the
+/// outer terminal, so a higher index has a reply only from `own`.
 pub(crate) fn palette_reply(
     i: usize,
     colors: &crate::types::HostColors,
     own: Option<(u8, u8, u8)>,
+    bel: bool,
 ) -> Option<String> {
-    own.or(*colors.palette.get(i)?)
-        .map(|rgb| format!("\x1b]4;{};{}\x1b\\", i, x11_rgb(rgb)))
+    own.or_else(|| colors.palette.get(i).copied().flatten())
+        .map(|rgb| format!("\x1b]4;{};{}{}", i, x11_rgb(rgb), osc_end(bel)))
 }
 
 /// Issue #473: walk a pane tree and answer any pending terminal color queries.
