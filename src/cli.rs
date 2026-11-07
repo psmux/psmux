@@ -1263,6 +1263,17 @@ pub fn command_list_reply(reply: &str) -> (String, Vec<String>) {
     (out, errors)
 }
 
+/// A refused split-window's reply as the CLI prints it on stderr. The server
+/// answers a one-shot refusal with `ERROR: split-window: <why>` (#1013), and
+/// a lone split-window printed it as `psmux: split-window: <why>` (#1000),
+/// which stays its wording. Any other reply is printed as it came.
+pub fn split_window_error_text(reply: &str) -> std::borrow::Cow<'_, str> {
+    match reply.trim_start().strip_prefix("ERROR: split-window: ") {
+        Some(why) => std::borrow::Cow::Owned(format!("psmux: split-window: {}", why)),
+        None => std::borrow::Cow::Borrowed(reply),
+    }
+}
+
 /// Same as [`normalize_flag_equals`] but operates on `Vec<&str>`, returning
 /// owned strings (needed where the caller already has borrowed slices).
 pub fn normalize_flag_equals_borrowed(args: &[&str]) -> Vec<String> {

@@ -3242,14 +3242,14 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     // answers with the same text as without -P (#1000).
                     let head = resp.trim_start();
                     if head.starts_with("ERROR") || head.starts_with("psmux: split-window: ") {
-                        eprint!("{}", resp);
+                        eprint!("{}", crate::cli::split_window_error_text(&resp));
                         std::process::exit(1);
                     }
                     print!("{}", resp);
                 } else {
                     let resp = send_control_with_response(cmd_line)?;
                     if !resp.is_empty() {
-                        eprint!("{}", resp);
+                        eprint!("{}", crate::cli::split_window_error_text(&resp));
                         std::process::exit(1);
                     }
                 }

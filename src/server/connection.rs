@@ -256,6 +256,30 @@ pub(crate) fn is_error_reply(text: &str) -> bool {
     text.starts_with("ERROR")
 }
 
+/// The error of a refused split-window, `split-window: <why>`, from the
+/// `psmux: split-window: <why>` the server loop answers it with (#1000).
+pub(crate) fn split_refusal(reply: &str) -> Option<&str> {
+    reply.strip_prefix("psmux: ").filter(|m| m.starts_with("split-window: "))
+}
+
+/// Write a split-window reply. A refusal on a one-shot connection is the
+/// command's error reply, `ERROR: split-window: <why>`, so the rest of a
+/// list does not run and the CLI exits 1 with it on stderr, as tmux stops a
+/// list at a failed command (#1013); as plain text it read as output. A
+/// persistent connection keeps the text it had (the server loop already
+/// shows the refusal on the status line) and ends the list there too.
+fn write_split_reply(write_stream: &mut ReplyStream, reply: &str, persistent: bool) {
+    match split_refusal(reply) {
+        Some(msg) if !persistent => { let _ = writeln!(write_stream, "ERROR: {}", msg); }
+        Some(_) => {
+            let _ = write!(write_stream, "{}\n", reply);
+            write_stream.mark_error();
+        }
+        None => { let _ = write!(write_stream, "{}\n", reply); }
+    }
+    let _ = write_stream.flush();
+}
+
 /// Queued after the commands of an if-shell branch, so the queue knows where
 /// that list ends. Never a command: a line is read from the client or the
 /// CLI, and none of them can hold a NUL.
@@ -3825,8 +3849,7 @@ match cmd {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title, env_sets, zoom_after_split));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
-                let _ = write!(write_stream, "{}\n", text);
-                let _ = write_stream.flush();
+                write_split_reply(&mut write_stream, &text, persistent);
             }
             if !persistent && pending_chain.is_empty() { break; }
         } else {
@@ -3834,8 +3857,7 @@ match cmd {
             let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title, env_sets, zoom_after_split));
             if let Ok(err_msg) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 if !err_msg.is_empty() {
-                    let _ = write!(write_stream, "{}\n", err_msg);
-                    let _ = write_stream.flush();
+                    write_split_reply(&mut write_stream, &err_msg, persistent);
                 }
             }
         }
@@ -7523,6 +7545,11 @@ fn dispatch_control_command(
                 let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title, env_sets, zoom_after_split));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                // A refused split is the command's %error, as in tmux (#1013).
+                let text = match split_refusal(&text) {
+                    Some(msg) => format!("\u{0001}ERR\u{0001}{}", msg),
+                    None => text,
+                };
                 let _ = resp_tx.send(text);
             }
             true
@@ -9119,6 +9146,10 @@ mod tests_issue943_prompt_error_spin;
 #[cfg(test)]
 #[path = "../../tests-rs/test_prompt_error_status_line.rs"]
 mod tests_prompt_error_status_line;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue1013_split_refusal_list.rs"]
+mod tests_issue1013_split_refusal_list;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue954_command_list_stops.rs"]
