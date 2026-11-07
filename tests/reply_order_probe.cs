@@ -1,4 +1,4 @@
-// reply_order_probe.exe <outFile> [queries]
+// reply_order_probe.exe <outFile> [queries] [raw]
 //
 // Asks the console what a terminal probe asks (yazi sends these at start up)
 // in one write: XTVERSION `ESC [ > q`, OSC 11 `ESC ] 11 ; ? ESC \`, the cell
@@ -17,7 +17,8 @@
 //   AREA       ESC [ 4 ; h ; w t
 //   DA1        ESC [ ? ... c
 //
-// Anything else is written as it came, with ESC shown as `\e`.
+// Anything else is written as it came, with ESC shown as `\e`.  With `raw`,
+// the replies are written as they came instead of named, BEL shown as `\a`.
 //
 // Compile: csc /nologo /optimize /out:reply_order_probe.exe reply_order_probe.cs
 using System;
@@ -67,6 +68,13 @@ class ReplyOrderProbe
                 if (recs[i].EventType == 1 && recs[i].KeyDown != 0 && recs[i].UChar != 0) got.Append(recs[i].UChar);
         }
         SetConsoleMode(hin, orig);
+        if (args.Length > 2 && args[2] == "raw")
+        {
+            // What came back as it came, ESC as \e and BEL as \a, to see how
+            // each reply ends.
+            File.WriteAllText(args[0], got.ToString().Replace("\x1b", "\\e").Replace("\x07", "\\a") + "\n");
+            return;
+        }
         var names = new List<string>();
         foreach (Match m in Regex.Matches(got.ToString(), "\x1bP[^\x1b]*\x1b\\\\|\x1b\\][^\x1b\x07]*(\x1b\\\\|\x07)|\x1b\\[[0-?]*[ -/]*[@-~]"))
         {
