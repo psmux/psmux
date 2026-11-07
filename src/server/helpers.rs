@@ -1316,13 +1316,24 @@ fn propagate_osc_titles_in_tree(node: &mut Node, dirty: &mut bool) {
             if p.dead || p.title_locked {
                 return;
             }
-            if let Ok(parser) = p.term.lock() {
+            if let Ok(mut parser) = p.term.lock() {
+                // CSI 23 ; 0 t restored a title saved before the program set
+                // any: back to the pane's first title, the host name, as in
+                // tmux (window.c:1479-1480 at tag 3.8). An empty title alone
+                // still means "none set" and changes nothing.
+                let reset = parser.screen_mut().take_title_reset();
                 let osc = parser.screen().title();
-                if !osc.is_empty() {
-                    let osc_owned = osc.to_string();
-                    drop(parser);
-                    if p.title != osc_owned {
-                        p.title = osc_owned;
+                let title = if !osc.is_empty() {
+                    Some(osc.to_string())
+                } else if reset {
+                    Some(crate::format::hostname_cached())
+                } else {
+                    None
+                };
+                drop(parser);
+                if let Some(title) = title {
+                    if p.title != title {
+                        p.title = title;
                         *dirty = true;
                     }
                 }
