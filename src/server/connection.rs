@@ -2706,7 +2706,7 @@ if control_echo || control_quiet || control_noecho {
             None => (trimmed, false),
         };
         let mut parsed = crate::cli::normalize_command_words(
-            crate::commands::parse_command_line_tmux(trimmed));
+            crate::commands::parse_command_line_tmux(trimmed), true);
         // `command-alias`: the alias's first command answers this block, the
         // rest are queued next, each with its own block.
         if !alias_output {
@@ -2717,7 +2717,7 @@ if control_echo || control_quiet || control_noecho {
                 for words in rest.iter().rev() {
                     pending.push_front(crate::command_alias::queued_line(words));
                 }
-                parsed = crate::cli::normalize_command_words(first);
+                parsed = crate::cli::normalize_command_words(first, true);
             }
         }
         let raw_cmd = parsed.first().map(|s| s.as_str()).unwrap_or("");
@@ -3356,7 +3356,7 @@ loop {
     } else {
         effective_line = line.trim().to_string();
     }
-    let mut parsed = crate::cli::normalize_command_words(parse_command_line(&effective_line));
+    let mut parsed = crate::cli::normalize_command_words(parse_command_line(&effective_line), true);
     // `command-alias` (tmux cmd_parse_expand_alias): the alias's first command
     // runs here and the rest go ahead of whatever is already queued. The old
     // whitespace split kept quotes in words (`rename-window "Q Q"` named the
@@ -3373,7 +3373,7 @@ loop {
             let rest: Vec<String> = commands.map(|words| crate::command_alias::queued_line(&words)).collect();
             in_command_list |= !rest.is_empty();
             pending_chain.splice(0..0, rest);
-            parsed = crate::cli::normalize_command_words(first);
+            parsed = crate::cli::normalize_command_words(first, true);
         }
     }
     // `-t s:1.` is `-t s:1`: tmux reads an empty pane part as none

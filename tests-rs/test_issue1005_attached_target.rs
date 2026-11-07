@@ -169,20 +169,20 @@ fn kill_session_attached_target_reaches_the_named_session() {
 fn handler_words_split_an_attached_target() {
     // The server's command handler (connection.rs) takes these words.
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["kill-session", "-tK2"])),
+        crate::cli::normalize_command_words(words(&["kill-session", "-tK2"]), true),
         words(&["kill-session", "-t", "K2"])
     );
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["rename-window", "-tA:0", "X"])),
+        crate::cli::normalize_command_words(words(&["rename-window", "-tA:0", "X"]), true),
         words(&["rename-window", "-t", "A:0", "X"])
     );
     // `-t=NAME` (#196) still works and an already split line is unchanged.
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["kill-session", "-t=K2"])),
+        crate::cli::normalize_command_words(words(&["kill-session", "-t=K2"]), true),
         words(&["kill-session", "-t", "K2"])
     );
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["rename-window", "-t", ":0", "X"])),
+        crate::cli::normalize_command_words(words(&["rename-window", "-t", ":0", "X"]), true),
         words(&["rename-window", "-t", ":0", "X"])
     );
 }
@@ -191,20 +191,36 @@ fn handler_words_split_an_attached_target() {
 fn handler_words_keep_values_and_operands() {
     // A value of another flag and anything after the first operand is data.
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["display-message", "-F", "-tx", "-t:1", "hi"])),
+        crate::cli::normalize_command_words(words(&["display-message", "-F", "-tx", "-t:1", "hi"]), true),
         words(&["display-message", "-F", "-tx", "-t", ":1", "hi"])
     );
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["send-keys", "-t:1", "hi", "-tliteral"])),
+        crate::cli::normalize_command_words(words(&["send-keys", "-t:1", "hi", "-tliteral"]), true),
         words(&["send-keys", "-t", ":1", "hi", "-tliteral"])
     );
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["set-option", "@k", "-tfoo"])),
+        crate::cli::normalize_command_words(words(&["set-option", "@k", "-tfoo"]), true),
         words(&["set-option", "@k", "-tfoo"])
     );
     // A binding's command is the binding's own line, read when the key runs.
     assert_eq!(
-        crate::cli::normalize_command_words(words(&["bind-key", "-n", "F5", "rename-window", "-t:0", "B"])),
+        crate::cli::normalize_command_words(words(&["bind-key", "-n", "F5", "rename-window", "-t:0", "B"]), true),
         words(&["bind-key", "-n", "F5", "rename-window", "-t:0", "B"])
+    );
+}
+
+#[test]
+fn handler_words_read_only_the_first_command() {
+    // The list was split before: a word ending in `;` is the message here.
+    let line = words(&["display-message", "-p", "a;", "rename-window", "-tz"]);
+    assert_eq!(crate::cli::normalize_command_words(line.clone(), true), line);
+    // A name the flag table does not know (an alias) is expanded first.
+    let alias = words(&["myalias", "-tz", "x"]);
+    assert_eq!(crate::cli::normalize_command_words(alias.clone(), true), alias);
+    // Without `equals` (the in server route) `-t=K2` is tmux's reading,
+    // `-t =K2`, the exact match target its resolver knows.
+    assert_eq!(
+        crate::cli::normalize_command_words(words(&["kill-session", "-t=K2"]), false),
+        words(&["kill-session", "-t", "=K2"])
     );
 }

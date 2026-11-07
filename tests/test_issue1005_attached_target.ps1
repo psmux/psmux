@@ -102,6 +102,14 @@ foreach ($t in @(':0', 'A:0')) {
     }
 }
 
+# `-t=A:0` is tmux's `-t =A:0`, an exact match target.
+Reset-A
+P set-hook -t A after-new-window 'rename-window -t=A:0 E' | Out-Null
+P new-window -d -t A: | Out-Null
+$ok = WaitFor { (Names) -match '^0=E ' }
+P set-hook -u -t A after-new-window | Out-Null
+Check $ok "hook 'rename-window -t=A:0 E' renamed window 0" "hook 'rename-window -t=A:0 E' gave '$(Names)'"
+
 # ======================================================================
 Write-Head "source-file (in server route)"
 # ======================================================================

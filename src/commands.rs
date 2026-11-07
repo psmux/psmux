@@ -3028,7 +3028,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // below and the forward to another session match the `-t` token alone, so
     // a hook's `rename-window -t:0 X` renamed the ACTIVE window and a
     // prompt's `kill-session -tK2` killed the current session (#1005).
-    let split = crate::cli::normalize_attached_target_flag(tokens.clone());
+    let split = crate::cli::normalize_command_words(tokens.clone(), false);
     if split != tokens {
         return execute_unaliased_command(app, &crate::command_alias::command_line(&split));
     }
