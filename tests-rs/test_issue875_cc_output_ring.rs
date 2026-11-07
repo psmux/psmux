@@ -130,6 +130,98 @@ fn reader_waiting_on_a_closed_pane_is_released() {
     set_consumed(&[], false);
 }
 
+// The server loop stuck while a reader waits on a full ring: on Windows that
+// is a cycle, since the loop's AttachConsole and ResizePseudoConsole wait for
+// a console host that is itself waiting on the pipe this reader stopped
+// reading. No test here calls set_consumed after the start, which is what a
+// loop that stopped passing looks like to the reader.
+#[test]
+fn reader_stops_waiting_for_a_stuck_loop() {
+    let _g = serial();
+    let r = ring();
+    set_consumed(&[&r], true);
+    let r2 = r.clone();
+    let t0 = Instant::now();
+    let writer = std::thread::spawn(move || {
+        push(&r2, &vec![b'a'; RING_HIGH + 10]);
+    });
+    std::thread::sleep(LOOP_STUCK_AFTER / 2);
+    assert!(!writer.is_finished(), "a reader must wait for a loop that may still come back");
+    while !writer.is_finished() && t0.elapsed() < LOOP_STUCK_AFTER + Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(writer.is_finished(), "reader stays blocked on a stuck loop");
+    assert!(t0.elapsed() >= LOOP_STUCK_AFTER, "gave up before the limit");
+    assert_eq!(len(&r), RING_HIGH);
+    set_consumed(&[], false);
+}
+
+#[test]
+fn while_the_loop_stays_stuck_more_output_does_not_wait_and_keeps_the_newest() {
+    let _g = serial();
+    let r = ring();
+    set_consumed(&[&r], true);
+    let r2 = r.clone();
+    std::thread::spawn(move || push(&r2, &vec![b'a'; RING_HIGH + 10])).join().unwrap();
+    // The reader already found the loop stuck: these neither wait nor grow.
+    let t0 = Instant::now();
+    for i in 0..50u8 {
+        push(&r, &vec![i; 1000]);
+    }
+    assert!(t0.elapsed() < LOOP_STUCK_AFTER, "a read must not wait again while the loop is stuck");
+    assert_eq!(len(&r), RING_HIGH);
+    let kept: Vec<u8> = r.lock().unwrap().iter().copied().collect();
+    assert_eq!(kept[kept.len() - 1000..], vec![49u8; 1000][..]);
+    assert_eq!(kept[0], b'a', "the oldest bytes are the ones dropped");
+    set_consumed(&[], false);
+}
+
+// All clients behind: flush_pane_output keeps passing and leaves the ring
+// alone on purpose (#875). A timeout alone would turn this hold into dropped
+// output after two seconds.
+#[test]
+fn reader_keeps_waiting_while_the_loop_passes_without_draining() {
+    let _g = serial();
+    let r = ring();
+    set_consumed(&[&r], true);
+    let r2 = r.clone();
+    let writer = std::thread::spawn(move || {
+        push(&r2, &vec![b'b'; RING_HIGH + 10]);
+    });
+    let t0 = Instant::now();
+    while t0.elapsed() < LOOP_STUCK_AFTER + Duration::from_secs(1) {
+        set_consumed(&[&r], false);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!writer.is_finished(), "a reader must wait for a live loop however long it holds back");
+    assert_eq!(len(&r), RING_HIGH + 10, "nothing is dropped while the loop runs");
+    let mut got = drain(&r).len();
+    notify_drained();
+    writer.join().unwrap();
+    got += drain(&r).len();
+    assert_eq!(got, RING_HIGH + 10);
+    set_consumed(&[], false);
+}
+
+#[test]
+fn a_loop_that_passes_again_is_waited_for_again() {
+    let _g = serial();
+    let r = ring();
+    set_consumed(&[&r], true);
+    let r2 = r.clone();
+    std::thread::spawn(move || push(&r2, &vec![b'c'; RING_HIGH + 10])).join().unwrap();
+    // The loop came back, without draining yet.
+    set_consumed(&[&r], false);
+    let r2 = r.clone();
+    let writer = std::thread::spawn(move || push(&r2, b"more"));
+    std::thread::sleep(LOOP_STUCK_AFTER / 2);
+    assert!(!writer.is_finished(), "a live loop's full ring holds the reader again");
+    assert_eq!(drain(&r).len(), RING_HIGH + 4);
+    notify_drained();
+    writer.join().unwrap();
+    set_consumed(&[], false);
+}
+
 #[test]
 fn first_attach_empties_the_rings_but_a_later_pane_keeps_its_output() {
     let _g = serial();
