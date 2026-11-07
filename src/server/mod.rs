@@ -8908,6 +8908,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Err(e) => { let _ = resp.send(format!("error: {}", e)); }
                     }
                 }
+                CtrlReq::ForwardToOtherSession(line, resp) => {
+                    let words = crate::commands::parse_command_line(&line);
+                    let parts: Vec<&str> = words.iter().map(String::as_str).collect();
+                    let forwarded = !parts.is_empty()
+                        && crate::commands::forward_to_other_session(&mut app, &parts, &line);
+                    if forwarded {
+                        state_dirty = true;
+                    }
+                    let _ = resp.send(forwarded);
+                }
             }
             // A claim just made the standby a session: its hooks see it.
             crate::format::set_sessionless(app.is_held_standby());

@@ -2781,7 +2781,7 @@ pub(crate) const KILL_PANE_F_WITHOUT_A: &str = "-f only valid with -a";
 /// answers to it (tmux reads a bare window or pane target here first,
 /// cmd-find.c:1093-1110). Ids (`$`, `@`, `%`) and `window.pane` forms stay
 /// with the arms below. Returns true when the line was handled here.
-fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bool {
+pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bool {
     let command = parts[0];
     if keeps_other_session_target_local(command) {
         return false;
