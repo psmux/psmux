@@ -992,6 +992,28 @@ fn main() {
     }
 }
 
+/// The session a `-t` names by name (`NAME`, `=NAME`, `NAME:...`), for the
+/// "no such session" / "can't find session" report when no server runs for
+/// it. None for an id (`%N`, `@N`, `$N`), a `window.pane` form, or no -t.
+pub(crate) fn named_target_session(target: Option<&str>) -> Option<String> {
+    let t = crate::cli::strip_exact_match_prefix(target?.trim());
+    if t.is_empty() || t.starts_with(['%', '@', '$']) {
+        return None;
+    }
+    let session = match t.find(':') {
+        Some(colon) => &t[..colon],
+        None if t.contains('.') => return None,
+        None => t,
+    };
+    let session = crate::cli::strip_exact_match_prefix(session);
+    (!session.is_empty()).then(|| session.to_string())
+}
+
+/// Whether a `-t` asks for an exact name (`=NAME`), so a prefix never matches.
+fn target_has_exact_prefix(target: Option<&str>) -> bool {
+    target.is_some_and(|t| t.trim().starts_with('='))
+}
+
 fn process_command_index(args: &[String]) -> Option<usize> {
     let mut i = 1;
     while i < args.len() {
@@ -5136,6 +5158,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         }
                         Err(e) if e.to_string().contains("no session")
                             || e.to_string().contains("no server running") => {
+                            if let Some(name) = named_target_session(parsed_set.target) {
+                                eprintln!("no such session: {}", name);
+                                std::process::exit(1);
+                            }
                             eprintln!("warning: no active session; option will take effect when set inside a session or via config file");
                         }
                         Err(e) => return Err(e),
@@ -5156,6 +5182,13 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     }
                     Err(e) if e.to_string().contains("no session")
                         || e.to_string().contains("no server running") => {
+                        // tmux (cmd-set-option.c): a -t naming no session is
+                        // "no such session: NAME" at exit 1. Without one there
+                        // is no session to set it in yet.
+                        if let Some(name) = named_target_session(parsed_set.target) {
+                            eprintln!("no such session: {}", name);
+                            std::process::exit(1);
+                        }
                         eprintln!("warning: no active session; option will take effect when set inside a session or via config file");
                     }
                     Err(e) => return Err(e),
@@ -6142,7 +6175,27 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             }
             // lock-client / lock-server / lock-session (no-op on Windows)
             "lock-client" | "lockc" | "lock-server" | "lock" | "lock-session" | "locks" => {
-                // No-op on Windows — no terminal locking concept
+                // No-op on Windows — no terminal locking concept. A
+                // lock-session -t still names a session, which tmux finds
+                // first: one that is not running is "can't find session".
+                if matches!(cmd, "lock-session" | "locks") {
+                    let lock_args: Vec<&str> = cmd_args[1..].iter().map(|s| s.as_str()).collect();
+                    if let Some(name) = named_target_session(crate::commands::own_flag_value(cmd, &lock_args, 't')) {
+                        // The name, or a prefix of one, in this namespace.
+                        let ns = l_socket_name.as_deref();
+                        let wanted = crate::session::session_name_base(ns, &name);
+                        let exact = target_has_exact_prefix(crate::commands::own_flag_value(cmd, &lock_args, 't'));
+                        let known = crate::session::list_session_names_ns(ns)
+                            .iter()
+                            // Without -L a base holding `__` is another namespace's.
+                            .filter(|base| ns.is_some() || !base.contains("__"))
+                            .any(|base| *base == wanted || (!exact && base.starts_with(&wanted)));
+                        if !known {
+                            eprintln!("can't find session: {}", name);
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 return Ok(());
             }
             // resize-window - Resize window
