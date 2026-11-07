@@ -4589,6 +4589,17 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     i += 1;
                 }
             }
+            if crate::server::shared::queue_loop_start(
+                session_name.as_deref(),
+                window_name.as_deref(),
+                start_dir.as_deref(),
+                initial_command.as_deref(),
+                &env_vars,
+                (app.client_area.width, app.client_area.height),
+                app.session_id,
+            ) {
+                return Ok(());
+            }
 
             // Generate session name if not provided
             let ns_prefix = app.socket_name.as_deref();
