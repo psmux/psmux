@@ -2852,7 +2852,23 @@ pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: 
         _ => cmd.to_string(),
     };
     let key = crate::session::read_session_key(&base).unwrap_or_default();
-    let _ = send_control_to_port(port, &format!("{}\n", line), &key);
+    const FORWARD_CONNECT_LIMIT: std::time::Duration = std::time::Duration::from_millis(200);
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, FORWARD_CONNECT_LIMIT)
+    else {
+        app.status_message = Some((
+            format!("can't connect to session: {}", name),
+            Instant::now(),
+            None,
+        ));
+        return true;
+    };
+    let _ = stream.set_nodelay(true);
+    let _ = writeln!(stream, "AUTH {}", key);
+    let _ = stream.write_all(format!("{}\n", line).as_bytes());
+    let _ = stream.flush();
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+    let _ = std::io::Read::read(&mut stream, &mut [0u8; 64]);
     true
 }
 
