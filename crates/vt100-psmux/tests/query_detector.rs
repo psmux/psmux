@@ -32,6 +32,11 @@ fn detector_and_live_parser_share_queries_at_every_split() {
         (&b"\x1b[>0q"[..], TerminalQuery::Xtversion),
         (&b"\x1b[>0;0q"[..], TerminalQuery::Xtversion),
         (&b"\x1b[?996n"[..], TerminalQuery::ColourScheme),
+        (&b"\x1b[?1;1;0S"[..], TerminalQuery::GraphicsAttribute { item: 1, action: 1, value: 0 }),
+        (&b"\x1b[?2;3;7S"[..], TerminalQuery::GraphicsAttribute { item: 2, action: 3, value: 7 }),
+        (&b"\x1b[?S"[..], TerminalQuery::GraphicsAttribute { item: 0, action: 0, value: 0 }),
+        (&b"\x1b[?;1S"[..], TerminalQuery::GraphicsAttribute { item: 0, action: 1, value: 0 }),
+        (&b"\x1b[?1:2;1:3;0:4S"[..], TerminalQuery::GraphicsAttribute { item: -1, action: -1, value: -1 }),
         (&b"\x1b]10;?\x07"[..], TerminalQuery::ForegroundColour { bel: true }),
         (&b"\x1b]10;?\x1b\\"[..], TerminalQuery::ForegroundColour { bel: false }),
         (&b"\x1b]11;?\x1b\\"[..], TerminalQuery::BackgroundColour { bel: false }),
@@ -57,6 +62,16 @@ fn detector_and_live_parser_share_queries_at_every_split() {
 }
 
 #[test]
+fn a_graphics_attribute_query_does_not_scroll_as_csi_s_does() {
+    let mut parser = Parser::new(3, 10, 0);
+    parser.process(b"one\r\ntwo\r\nthree");
+    parser.process(b"\x1b[?1;1;0S");
+    assert_eq!(parser.screen().contents(), "one\ntwo\nthree");
+    parser.process(b"\x1b[1S");
+    assert_eq!(parser.screen().contents(), "two\nthree");
+}
+
+#[test]
 fn reports_paint_and_unrelated_sequences_do_not_request_release() {
     for bytes in [
         &b"\x1b[?25l\x1b[2J\x1b[38;5;12mhello\x1b[0m"[..],
@@ -66,6 +81,9 @@ fn reports_paint_and_unrelated_sequences_do_not_request_release() {
         // `CSI > 1 q` is not a version request, and DECSCUSR shares the
         // final byte without the `>`.
         &b"\x1b[>1q\x1b[5 q\x1b[0 q"[..],
+        // More than three parameters is no XTSMGRAPHICS, as in tmux, and SU
+        // shares the final byte without the `?`.
+        &b"\x1b[?1;1;0;0S\x1b[?1;1;0;S\x1b[1;1;0S\x1b[S\x1b[>1S"[..],
         // Colour sets, a `?` after a bad index (256 is one), and an index
         // with no colour are not queries.
         &b"\x1b]10;#ff0000\x07\x1b]11;rgb:00/00/00\x1b\\"[..],
