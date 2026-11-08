@@ -391,13 +391,90 @@ pub fn kill_leaf(node: &mut Node, path: &Vec<usize>) {
 /// Kill a node and all its child processes before dropping it.
 /// Uses platform-specific process tree killing to ensure all descendant
 /// processes (shells, sub-processes, servers, etc.) are terminated.
-pub fn kill_node(mut n: Node) {
-    match &mut n {
-        Node::Leaf(p) => { process_kill::kill_process_tree(&mut p.child); }
+///
+/// The node is already out of the layout, so the kill itself runs on the pane
+/// kill worker (`pane_kill`): a tree kill is two full process snapshot walks,
+/// 11 to 28 ms each on a busy machine, and doing them here held the server loop
+/// 50 to 100 ms on every `kill-pane` while tmux returns at once.
+pub fn kill_node(n: Node) {
+    match n {
+        Node::Leaf(p) => pane_kill::kill_in_background(p),
         Node::Split { children, .. } => {
-            for child in children.iter_mut() {
-                kill_all_children(child);
+            for child in children {
+                kill_node(child);
             }
+        }
+    }
+}
+
+/// The worker that kills a removed pane's process tree off the server loop.
+///
+/// One thread, fed in order, so a burst of kills cannot become a burst of
+/// threads. It runs the very same `kill_process_tree` (descendants leaf first
+/// in two passes, then the root, each guarded by creation time) and only then
+/// drops the pane, so the ConPTY is still closed after its processes are dead,
+/// as before. The pane keeps its `Child`, whose open process handle keeps the
+/// root's pid from being reused until the walk is over.
+pub mod pane_kill {
+    use super::process_kill;
+    use crate::types::Pane;
+    use std::sync::mpsc;
+    use std::sync::OnceLock;
+
+    enum Job {
+        Kill(Box<Pane>),
+        Flush(mpsc::Sender<()>),
+    }
+
+    fn worker() -> Option<&'static mpsc::Sender<Job>> {
+        static TX: OnceLock<Option<mpsc::Sender<Job>>> = OnceLock::new();
+        TX.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("psmux-pane-kill".into())
+                .spawn(move || {
+                    for job in rx {
+                        match job {
+                            Job::Kill(mut p) => {
+                                process_kill::kill_process_tree(&mut p.child);
+                                drop(p);
+                            }
+                            Job::Flush(ack) => {
+                                let _ = ack.send(());
+                            }
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        })
+        .as_ref()
+    }
+
+    /// Kill `p`'s process tree on the worker, or right here when there is no
+    /// worker (its thread could not be started).
+    pub fn kill_in_background(p: Pane) {
+        let job = Job::Kill(Box::new(p));
+        let job = match worker() {
+            Some(tx) => match tx.send(job) {
+                Ok(()) => return,
+                Err(mpsc::SendError(job)) => job,
+            },
+            None => job,
+        };
+        if let Job::Kill(mut p) = job {
+            process_kill::kill_process_tree(&mut p.child);
+        }
+    }
+
+    /// Wait until every kill queued so far has run, up to `timeout`. Called
+    /// before the server exits: `process::exit` would otherwise end the worker
+    /// halfway and leave a queued pane's shell running.
+    pub fn flush(timeout: std::time::Duration) {
+        let Some(tx) = worker() else { return };
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if tx.send(Job::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv_timeout(timeout);
         }
     }
 }
@@ -739,6 +816,9 @@ pub fn kill_all_children_batch(windows: &mut [crate::types::Window]) {
     if !all_children.is_empty() {
         process_kill::kill_process_trees_batch(&mut all_children);
     }
+    // Every teardown path runs this right before it exits: finish the panes
+    // already removed from the layout whose kill is still queued.
+    pane_kill::flush(std::time::Duration::from_secs(3));
 }
 
 /// Returns borders as (path, kind, idx, pixel_pos, total_pixels_along_axis).

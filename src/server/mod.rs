@@ -9581,6 +9581,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // a teardown during a surge left the shells born a few milliseconds
                 // later parented to a dead psmux, idle at a prompt forever (#686).
                 crate::warm_pane_sync::reap_inflight_spares();
+                // Panes removed just before the end whose kill is still queued.
+                tree::pane_kill::flush(Duration::from_secs(3));
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 app.pipe_panes.clear();
                 std::process::exit(0);
