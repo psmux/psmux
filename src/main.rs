@@ -1009,6 +1009,18 @@ pub(crate) fn named_target_session(target: Option<&str>) -> Option<String> {
     (!session.is_empty()).then(|| session.to_string())
 }
 
+/// tmux's message for a `-t` naming no session, for the CLI commands that
+/// read it as a session: cmd-find.c's "can't find session" for list-windows,
+/// and the environment and option commands' "no such session".
+pub(crate) fn missing_session_cli_wording(cmd: &str) -> Option<&'static str> {
+    match cmd {
+        "list-windows" | "lsw" => Some("can't find session"),
+        "set-environment" | "setenv" | "show-environment" | "showenv"
+        | "show-options" | "show" | "show-option" => Some("no such session"),
+        _ => None,
+    }
+}
+
 fn process_command_index(args: &[String]) -> Option<usize> {
     let mut i = 1;
     while i < args.len() {
@@ -1657,6 +1669,15 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 }
                 env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
                 explicit_session_target = true;
+                // tmux's own error for a session command whose -t names no
+                // session, at exit 1, instead of "no server running on
+                // session '<ns>__NAME'".
+                if let Some(wording) = command_index.and_then(|i| missing_session_cli_wording(&args[i])) {
+                    if !std::path::Path::new(&crate::paths::port_file(&port_file_base)).exists() {
+                        eprintln!("psmux: {}: {}", wording, session);
+                        std::process::exit(1);
+                    }
+                }
             }
     }
     if !explicit_session_target {
@@ -4173,6 +4194,14 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         // was merely slow to accept) exits 1 without touching the
                         // registry: has-session is a predicate, not a reaper (#622).
                     }
+                }
+                // tmux says which session it could not find (cmd-find.c) for a
+                // -t that names one; with no -t its error is about the server.
+                if explicit_session_target {
+                    eprintln!(
+                        "psmux: can't find session: {}",
+                        crate::session::display_session_name(l_socket_name.as_deref(), &target)
+                    );
                 }
                 std::process::exit(1);
             }

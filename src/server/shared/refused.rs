@@ -66,6 +66,7 @@ pub(crate) fn command_name(req: &CtrlReq) -> Option<&'static str> {
         | CtrlReq::PaneForwardResize(..)
         | CtrlReq::PaneForwardStatus(..)
         | CtrlReq::ForwardToOtherSession(..)
+        | CtrlReq::DecideOtherSession(..)
         | CtrlReq::ControlRegister { .. }
         | CtrlReq::ControlDeregister { .. }
         | CtrlReq::ControlSubscribe { .. }
