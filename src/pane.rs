@@ -5006,6 +5006,10 @@ mod tests_issue597_da_replies;
 mod tests_issue841_winops_replies;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_graphics_attribute_replies.rs"]
+mod test_graphics_attribute_replies;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue399_env_prefix.rs"]
 mod test_issue399_env_prefix;
 
