@@ -2096,7 +2096,7 @@ pub(crate) fn readonly_client_may_run(cmd: &str) -> bool {
     matches!(cmd,
         // psmux client protocol
         "dump-state" | "dump" | "dump-layout" | "session-info" | "client-size"
-        | "host-colors" | "client-attach" | "client-detach" | "client-last-session"
+        | "host-colors" | "host-palette" | "client-attach" | "client-detach" | "client-last-session"
         | "client-flags" | "client-environ" | "focus-in" | "focus-out" | "prefix-begin" | "prefix-end"
         | "overlay-close" | "window-layout" | "window-dump" | "list-tree"
         // tmux CMD_READONLY commands
@@ -4119,6 +4119,12 @@ match cmd {
         // Issue #473: client reports its host terminal's colors (queried at
         // attach time) so the server can answer pane color queries.
         if let Some(spec) = args.get(0) { let _ = tx.send(CtrlReq::HostColors(spec.to_string())); }
+    }
+    "host-palette" => {
+        // The client's answer to a palette question (crate::palette_request).
+        if let Some((index, rgb)) = crate::palette_request::parse_reply_args(&args) {
+            let _ = tx.send(CtrlReq::HostPalette(client_id, index, rgb));
+        }
     }
     "focus-pane" => {
         if let Some(pid) = args.get(0).and_then(|s| s.parse::<usize>().ok()) { let _ = tx.send(CtrlReq::FocusPaneCmd(pid)); }

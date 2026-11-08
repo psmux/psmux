@@ -44,8 +44,10 @@ fn scan_detects_copilot_burst() {
 
 #[test]
 fn scan_ignores_out_of_range_index_and_non_queries() {
-    // Index 255 is outside the sixteen colours psmux answers.
-    assert!(scan_device_queries(b"\x1b]4;255;?\x1b\\").is_empty());
+    // Index 255 is a query too, which the host asks the outer terminal for;
+    // 256 is no index.
+    assert_eq!(scan_device_queries(b"\x1b]4;255;?\x1b\\"), vec![Q::PaletteColour { index: 255, own: None, bel: false }]);
+    assert!(scan_device_queries(b"\x1b]4;256;?\x1b\\").is_empty());
     // A color SET (no `?`) is not a query.
     assert!(scan_device_queries(b"\x1b]4;1;rgb:ff/00/00\x1b\\").is_empty());
     assert!(scan_device_queries(b"\x1b]11;rgb:ff/00/00\x1b\\").is_empty());

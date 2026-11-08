@@ -60,18 +60,10 @@ pub(crate) fn palette_pairs<'a>(
         .map_while(|pair| crate::palette::parse_palette_index(pair[0]).map(|i| (i, pair[1])))
 }
 
-/// Whether an `OSC 4` pair asks for a colour psmux answers: a `?` for one
-/// of the sixteen ANSI colours, whose outer terminal values the client
-/// reports, or for any index the pane has its own entry for (`own`), which
-/// tmux's `input_osc_4` answers from `colour_palette_get` (input.c:2947 at
-/// tag 3.8).
-pub(crate) fn is_palette_query(index: u8, spec: &[u8], own: Option<(u8, u8, u8)>) -> bool {
-    spec == b"?" && (index < 16 || own.is_some())
-}
-
-/// Whether an OSC may ask for a palette colour psmux answers. The detector
-/// has no palette, so any `?` counts: a query it flags that the live parser
-/// then leaves unanswered only releases held synchronized output early.
+/// Whether an OSC asks for a palette colour: a `?` for any index, as tmux's
+/// `input_osc_4` takes one (input.c:2945-2958 at tag 3.8). The host answers
+/// it from the pane's entry, the outer terminal's sixteen colours, or by
+/// asking the outer terminal, so every one is a query here.
 fn asks_palette(params: &[&[u8]]) -> bool {
     match params {
         [b"4", rest @ ..] => palette_pairs(rest).any(|(_, spec)| spec == b"?"),

@@ -202,10 +202,10 @@ fn every_query_pair_of_one_osc_4_is_taken_in_order() {
         parser.screen_mut().take_queries(),
         vec![palette(3, Some((0xff, 0, 0))), palette(5, None)]
     );
-    // Past the sixteen colours a pair the pane has no entry for is skipped
-    // and the rest still read; a bad index ends the OSC, as in tmux.
+    // Every pair is read, past the sixteen colours too; a bad index ends the
+    // OSC, as in tmux.
     parser.process(b"\x1b]4;16;?;2;?;x;?;6;?\x07");
-    assert_eq!(parser.screen_mut().take_queries(), vec![palette(2, None)]);
+    assert_eq!(parser.screen_mut().take_queries(), vec![palette(16, None), palette(2, None)]);
 }
 
 #[test]

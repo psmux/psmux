@@ -2042,6 +2042,10 @@ pub struct AppState {
     pub latest_size_client_id: Option<u64>,
     /// Client registry: all active PERSISTENT and CONTROL clients.
     pub client_registry: std::collections::HashMap<u64, ClientInfo>,
+    /// The palette questions each client was asked and has not answered,
+    /// oldest first: (pane id, index). tmux's `c->input_requests`
+    /// (crate::palette_request).
+    pub palette_requests: std::collections::HashMap<u64, std::collections::VecDeque<(usize, u8)>>,
     /// A `command-prompt` run from the command line, waiting for the client it
     /// targets to open it (#789 follow up). It rides in every state frame until
     /// that client reports the prompt closed with `prompt-done <id>`.
@@ -2866,6 +2870,8 @@ impl AppState {
     pub fn reap_client(&mut self, cid: u64) -> bool {
         self.client_sizes.remove(&cid);
         self.ignore_size_clients.remove(&cid);
+        // Its palette questions will not be answered now.
+        crate::palette_request::cancel_client(self, cid);
         // A prompt request for a client that is gone can never be answered:
         // drop it and let the command line waiting on it go.
         if self.prompt_request.as_ref().is_some_and(|r| r.client_id == cid) {
@@ -3541,6 +3547,7 @@ impl AppState {
             latest_client_id: None,
             latest_size_client_id: None,
             client_registry: std::collections::HashMap::new(),
+            palette_requests: std::collections::HashMap::new(),
             prompt_request: None,
             prompt_request_seq: 0,
             prompt_waiters: Vec::new(),
@@ -4112,6 +4119,10 @@ pub enum CtrlReq {
     /// in `HostColors::to_spec` form), gathered by querying the host terminal
     /// at attach time.
     HostColors(String),
+    /// A client's answer to a palette question it was asked
+    /// (crate::palette_request): the client, the index, and the outer
+    /// terminal's colour, or none.
+    HostPalette(u64, u8, Option<(u8, u8, u8)>),
     FocusPaneCmd(usize),
     FocusWindowCmd(usize),
     MouseDown(u64,u16,u16),

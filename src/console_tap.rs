@@ -91,6 +91,85 @@ const SHIFT_PRESSED: u32 = 0x0010;
 #[derive(Default, Debug)]
 pub(crate) struct ConsoleTap {
     high: Option<u16>,
+    /// When the head started to look like an OSC 4 reply that has not fully
+    /// arrived (see [`match_osc4_reply`]).
+    hold_since: Option<std::time::Instant>,
+}
+
+/// How long the head may look like the start of an OSC 4 reply before it is
+/// read as keys after all.
+const OSC4_HOLD: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The longest OSC 4 reply body taken, as tmux's tty_keys_palette reads at
+/// most 128 bytes of it (tty-keys.c:1830 at tag 3.8).
+const OSC4_MAX_BODY: usize = 128;
+
+/// What the records at the head of the buffer are, read as an OSC 4 reply
+/// from the terminal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Osc4Reply {
+    /// A whole reply: how many records it took, and its text after `ESC ]`
+    /// and before the BEL or `ESC \` that ended it (`4;N;colour`).
+    Whole { records: usize, body: String },
+    /// The start of one, the rest not here yet.
+    Partial,
+    /// Not one.
+    No,
+}
+
+/// Read the head records as an OSC 4 reply. A terminal's reply arrives as key
+/// down records with no virtual key (`vk = 0`, measured on Windows Terminal
+/// with VT input off: one record a character, ESC included), each followed or
+/// not by a key up record, which is skipped. A record with a virtual key is a
+/// key someone pressed, so it ends the match, and so does anything that is not
+/// a key record (`None`).
+pub(crate) fn match_osc4_reply(recs: &[Option<KeyRec>]) -> Osc4Reply {
+    let mut chars: Vec<u16> = Vec::new();
+    for (n, rec) in recs.iter().enumerate() {
+        let Some(rec) = rec else { return Osc4Reply::No };
+        if rec.vk != 0 {
+            return Osc4Reply::No;
+        }
+        if !rec.key_down {
+            continue;
+        }
+        let c = rec.u_char;
+        let prefix = [ESC, u16::from(b']'), u16::from(b'4'), u16::from(b';')];
+        match prefix.get(chars.len()) {
+            Some(&want) if c != want => return Osc4Reply::No,
+            Some(_) => {}
+            None => {
+                let end = if c == 0x07 {
+                    Some(chars.len())
+                } else if c == u16::from(b'\\') && chars.last() == Some(&ESC) {
+                    Some(chars.len() - 1)
+                } else {
+                    None
+                };
+                if let Some(end) = end {
+                    return Osc4Reply::Whole { records: n + 1, body: String::from_utf16_lossy(&chars[2..end]) };
+                }
+                if chars.len() - 2 >= OSC4_MAX_BODY {
+                    return Osc4Reply::No;
+                }
+            }
+        }
+        chars.push(c);
+    }
+    Osc4Reply::Partial
+}
+
+#[cfg(windows)]
+thread_local! {
+    /// The last [`take_head`] left the head in the buffer because it may be
+    /// the start of an OSC 4 reply, so crossterm must not read it yet.
+    static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the head is being held for the rest of an OSC 4 reply.
+#[cfg(windows)]
+pub(crate) fn holding() -> bool {
+    HOLDING.with(|h| h.get())
 }
 
 fn press(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -302,7 +381,21 @@ thread_local! {
 #[cfg(windows)]
 pub(crate) fn take_head() -> Option<Event> {
     use win::*;
+    HOLDING.with(|held| held.set(false));
     let h = crate::ssh_input::frame_wake::conin()?;
+    let key_of = |rec: &INPUT_RECORD| {
+        if rec.event_type == KEY_EVENT {
+            let k = unsafe { &*(rec.data.as_ptr() as *const KEY_EVENT_RECORD) };
+            Some(KeyRec {
+                key_down: k.key_down != 0,
+                vk: k.virtual_key_code,
+                u_char: k.u_char,
+                ctrl_state: k.control_key_state,
+            })
+        } else {
+            None
+        }
+    };
     TAP.with(|tap| {
         let mut tap = tap.borrow_mut();
         loop {
@@ -312,17 +405,46 @@ pub(crate) fn take_head() -> Option<Event> {
             if ok == 0 || n == 0 {
                 return None;
             }
-            let key = if rec.event_type == KEY_EVENT {
-                let k = unsafe { &*(rec.data.as_ptr() as *const KEY_EVENT_RECORD) };
-                Some(KeyRec {
-                    key_down: k.key_down != 0,
-                    vk: k.virtual_key_code,
-                    u_char: k.u_char,
-                    ctrl_state: k.control_key_state,
-                })
-            } else {
-                None
-            };
+            let key = key_of(&rec);
+            // An ESC with no virtual key may open an OSC 4 reply from the
+            // terminal, to a palette question the server passed on
+            // (crate::palette_request). Taken whole and never read as keys, as
+            // tmux's tty_keys_palette takes it.
+            if key.is_some_and(|k| k.key_down && k.vk == 0 && k.u_char == ESC) {
+                const PEEK: usize = 2 * OSC4_MAX_BODY + 16;
+                let mut batch: Vec<INPUT_RECORD> = (0..PEEK).map(|_| unsafe { std::mem::zeroed() }).collect();
+                let mut got: u32 = 0;
+                let ok = unsafe { PeekConsoleInputW(h, batch.as_mut_ptr() as *mut _, PEEK as u32, &mut got) };
+                let recs: Vec<Option<KeyRec>> =
+                    if ok == 0 { Vec::new() } else { batch[..got as usize].iter().map(key_of).collect() };
+                match match_osc4_reply(&recs) {
+                    Osc4Reply::Whole { records, body } => {
+                        tap.hold_since = None;
+                        let mut gone: u32 = 0;
+                        let ok = unsafe {
+                            ReadConsoleInputW(h, batch.as_mut_ptr() as *mut _, records as u32, &mut gone)
+                        };
+                        crate::debug_log::input_log("tap", &format!("osc4 reply {:?} ({} records)", body, records));
+                        if let Some((index, rgb)) = crate::palette_request::parse_reply(&body) {
+                            crate::palette_request::push_client_reply(index, rgb);
+                        }
+                        if ok == 0 || gone == 0 {
+                            return None;
+                        }
+                        continue;
+                    }
+                    Osc4Reply::Partial => {
+                        let now = std::time::Instant::now();
+                        let since = *tap.hold_since.get_or_insert(now);
+                        if now.duration_since(since) < OSC4_HOLD {
+                            HOLDING.with(|held| held.set(true));
+                            return None;
+                        }
+                        tap.hold_since = None;
+                    }
+                    Osc4Reply::No => tap.hold_since = None,
+                }
+            }
             match tap.classify(key) {
                 Verdict::NotOurs => return None,
                 Verdict::Consumed(ev) => {

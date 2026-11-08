@@ -722,6 +722,9 @@ pub(crate) fn dispatch(
                     hook_event = Some("client-resized");
                 }
                 // copied from server/mod.rs run_server (line 4299 at 86a78100)
+                CtrlReq::HostPalette(cid, index, rgb) => {
+                    crate::palette_request::answer(&mut app, cid, index, rgb);
+                }
                 CtrlReq::HostColors(spec) => {
                     // Issue #473: a client reported its host terminal's colors.
                     // Keep the most recent report: the newest attached client

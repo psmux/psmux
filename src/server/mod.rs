@@ -3362,6 +3362,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // ages out.
             crate::types::rearm_device_replies();
         }
+        // Palette questions for the outer terminal go to a client; one for a
+        // pane no client shows is answered with none (crate::palette_request).
+        if crate::palette_request::REQUEST_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let rest = crate::palette_request::route(&mut app, crate::palette_request::take_requests());
+            crate::palette_request::finish(rest);
+        }
+        crate::palette_request::FORWARD.store(
+            crate::palette_request::can_ask(&app),
+            std::sync::atomic::Ordering::Release,
+        );
         // When a popup PTY or a floating pane is active, always push frames so
         // interactive content (fzf, shell prompts) updates in real-time.
         if matches!(app.mode, Mode::PopupMode { .. })
@@ -4655,6 +4665,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     );
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     hook_event = Some("client-resized");
+                }
+                CtrlReq::HostPalette(cid, index, rgb) => {
+                    crate::palette_request::answer(&mut app, cid, index, rgb);
                 }
                 CtrlReq::HostColors(spec) => {
                     // Issue #473: a client reported its host terminal's colors.
