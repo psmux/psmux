@@ -710,18 +710,6 @@ pub struct WarmPane {
 /// ~405ms after spawn, which is exactly where the instant claims begin.
 pub const WARM_READY_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// How long a spare whose screen already shows text has to stay unchanged
-/// before it counts as ready (#661).
-///
-/// Visible text is the prompt itself, so the long [`WARM_READY_QUIET`] guess is
-/// not needed any more: pwsh draws its prompt in one batch and writes nothing
-/// after it (every claim of a settled spare in the #661 traces showed the same
-/// data version as the prompt, one to three seconds later). Holding a spare
-/// that already shows its prompt back for 250 ms only made claims that were
-/// instant for the user count as misses. 50 ms covers a prompt that arrives in
-/// two reads.
-pub const WARM_READY_TEXT_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
-
 /// Backstop: a spare this old counts as ready however little it has written.
 ///
 /// Readiness is inferred from output, so a `default-shell` that prints nothing
@@ -883,17 +871,17 @@ impl WarmPane {
                 );
             }
         }
-        let quiet = now.saturating_duration_since(self.last_change);
-        // #661: quiet counts only once the screen shows something. A pwsh that
-        // is still loading writes ConPTY's own setup sequences (nothing
-        // visible) and then nothing at all until its prompt, and on a busy
-        // machine that silence is far longer than WARM_READY_QUIET: spares
+        // #661: a spare is ready once its screen shows something, which for
+        // pwsh is the prompt itself, drawn in one batch with nothing after it.
+        // Readiness used to be WARM_READY_QUIET of silence, and a pwsh that is
+        // still loading writes ConPTY's own setup sequences (nothing visible)
+        // and then nothing at all until its prompt: on a busy machine spares
         // went "ready" 330 to 820 ms after spawn with a blank screen, the
         // pool's ready count was wrong, and a split that took one waited
-        // another 150 to 780 ms for the prompt. Once text is up, a short quiet
-        // is enough (WARM_READY_TEXT_QUIET). A shell that never draws anything
-        // visible is still covered by the WARM_READY_MAX_WAIT backstop below.
-        if dv > 0 && self.shows_text && quiet >= WARM_READY_TEXT_QUIET {
+        // another 150 to 780 ms for the prompt. A shell that never draws
+        // anything visible is still covered by the WARM_READY_MAX_WAIT
+        // backstop below.
+        if dv > 0 && self.shows_text {
             self.ready = true;
         } else if now.saturating_duration_since(self.spawned_at) >= WARM_READY_MAX_WAIT {
             self.ready = true;
@@ -977,19 +965,6 @@ pub const WARM_POOL_SIZE_MAX: usize = 8;
 pub const WARM_POOL_SURGE_MAX: usize = 8;
 pub const WARM_POOL_SURGE_FACTOR: usize = 4;
 
-/// How many spares may be booting at once (spawning, or spawned and not ready).
-///
-/// A surge used to start its whole batch at once: six pwsh beside the two or
-/// three refills already booting. Measured under PSMUX_WARM_TRACE (#661, 24
-/// splits 250 ms apart): a spare reached its prompt 550 to 870 ms after spawn
-/// with two to four shells booting beside it, and 1050 to 1400 ms when the
-/// batch of six landed. The refills that the next claims take (lowest id
-/// first) were booting under that batch, so three splits in a row got a blank
-/// pane and waited 200 to 780 ms each. Four booting at ~650 ms each still
-/// produces about six spares a second, more than a human run of creations
-/// takes, and each of them boots at the uncontended speed.
-pub const WARM_BOOT_CONCURRENCY: usize = 4;
-
 /// How long a surge allowance outlives the claim that triggered it. Long enough
 /// to cover a human run of window opening, short enough that the memory comes
 /// back while they are still looking at the result.
@@ -997,8 +972,8 @@ pub const WARM_SURGE_HOLD: std::time::Duration = std::time::Duration::from_secs(
 
 /// How close together two claims have to be to count as a run.
 ///
-/// A surge needs TWO signals, not one: a claim that found nothing ready, and
-/// another claim just before it. A lone miss is not a burst, and treating it as
+/// A surge needs a RUN: a claim with another claim just before it (see
+/// [`WarmPool::note_claim`]). A lone claim is not a burst, and treating it as
 /// one has a measured cost: a cold `new-session` misses by definition (its only
 /// spare is newborn), and surging there fired eight shell spawns alongside the
 /// session's own starting shell and made startup ~100ms slower.
@@ -1095,22 +1070,6 @@ impl WarmPool {
     pub fn ready_len(&self) -> usize {
         self.spares.iter().filter(|w| w.ready).count()
     }
-    /// Shells still starting: spawns in flight plus pooled spares that have not
-    /// yet been quiet for [`WARM_READY_QUIET`] after drawing their prompt (or
-    /// reached the backstop). A pwsh keeps loading for a while after its
-    /// prompt is up, and counting it as done from the prompt on let the
-    /// concurrency cap start the next spawns into that load (measured, #661).
-    pub fn booting(&self, now: std::time::Instant) -> usize {
-        self.inflight
-            + self
-                .spares
-                .iter()
-                .filter(|w| {
-                    !w.ready_via_backstop
-                        && !(w.shows_text && now.saturating_duration_since(w.last_change) >= WARM_READY_QUIET)
-                })
-                .count()
-    }
     /// Recompute readiness for every spare. Returns how many just flipped to
     /// ready, so the caller can trace the edge.
     pub fn refresh_all(&mut self, now: std::time::Instant) -> usize {
@@ -1130,13 +1089,18 @@ impl WarmPool {
     /// a run, and over-reacting to it costs startup time for no benefit (a cold
     /// `new-session` misses by definition).
     ///
-    /// Given a run, three things open or hold the surge open, and #661 is the
-    /// third of them:
+    /// Given a run, the second claim of it opens the surge, and every further
+    /// claim of it holds the window open (#661).
     ///
-    ///  - a MISS: the run has already outrun the idle depth.
-    ///  - a claim that took the LAST READY spare. The next claim in this run is
-    ///    then certain to miss, and a spare takes ~400ms to become useful, so
-    ///    waiting for that miss to react guarantees one slow creation per burst.
+    ///  - OPENING on the second claim, whatever the pool still holds. The
+    ///    surge used to wait for a miss or for the claim that took the last
+    ///    ready spare, which is the third claim of a run at the default depth
+    ///    of three. A spare under a surge takes 1.2 to 1.4 s to show its prompt
+    ///    on a quiet machine and longer under load, so starting the batch one
+    ///    creation later left the fourth to sixth splits of a run 250 ms apart
+    ///    on blank panes: 2 to 3 slow splits per run on a quiet machine, 3
+    ///    under load, where opening on the second claim gave 1 to 2 and 2.
+    ///    A lone creation still never surges.
     ///  - the run CONTINUING while a surge is serving it. The surge used to
     ///    decay from the last MISS, so a run the surge was serving well renewed
     ///    nothing: five seconds after the single miss that opened it,
@@ -1147,19 +1111,14 @@ impl WarmPool {
     ///    is what [`WARM_SURGE_HOLD`] always described, so the surplus still
     ///    comes back five seconds after the user stops creating panes and idle
     ///    memory is unchanged.
-    pub fn note_claim(&mut self, satisfied: bool) {
+    pub fn note_claim(&mut self, _satisfied: bool) {
         let now = std::time::Instant::now();
         let following_another = self
             .last_claim
             .map(|t| now.saturating_duration_since(t) <= WARM_BURST_WINDOW)
             .unwrap_or(false);
         self.last_claim = Some(now);
-        if !following_another {
-            return;
-        }
-        // `ready_len` here is the pool AFTER this claim took its spare: the
-        // claim sites call this straight after `claim`.
-        if !satisfied || self.ready_len() == 0 || self.is_surging() {
+        if following_another {
             self.surge_until = Some(now + WARM_SURGE_HOLD);
         }
     }

@@ -52,6 +52,26 @@ fn issue661_a_claim_that_takes_the_last_ready_spare_surges() {
 }
 
 #[test]
+fn issue661_the_second_claim_of_a_run_surges_with_ready_spares_left() {
+    // A spare under a surge needs 1.2 s or more to show its prompt, so the
+    // batch has to start on the claim that first shows a run, not on the one
+    // that takes the last ready spare (the third at the default depth): one
+    // creation later left the fourth to sixth splits of a run on blank panes.
+    let mut pool = WarmPool::new(3);
+    for id in 1..=3 {
+        pool.push(ready_spare661(id));
+    }
+    let _ = pool.claim();
+    pool.note_claim(true);
+    assert!(!pool.is_surging(), "one creation is not a run");
+    let _ = pool.claim();
+    pool.note_claim(true);
+    assert_eq!(pool.ready_len(), 1, "a ready spare is still left");
+    assert!(pool.is_surging(), "two creations in a row are a run: widen now");
+    assert_eq!(pool.effective_target(false), WARM_POOL_SURGE_MAX);
+}
+
+#[test]
 fn issue661_a_lone_claim_that_empties_the_pool_does_not_surge() {
     // The regression this must not cause: a cold `new-session` claims its only
     // spare, leaving the pool empty and unready. Surging there fires eight
