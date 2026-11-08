@@ -3877,7 +3877,16 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     app.status_message = Some((msg, Instant::now(), None));
                     return Ok(());
                 }
-                if let Some(port) = app.control_port {
+                if crate::server::shared::in_shared_server_process() {
+                    // The shared server (#798, PSMUX_SERVER_MODE=shared only)
+                    // refuses CtrlReq::RenameSession on its listener, so its
+                    // sessions are renamed here, in memory, exactly as before
+                    // the default mode's fix below.
+                    app.session_name = name.to_string();
+                    if let Some(port) = app.control_port {
+                        let _ = send_control_to_port(port, &format!("rename-session {}\n", crate::util::quote_arg(name)), &app.session_key);
+                    }
+                } else if let Some(port) = app.control_port {
                     // The server's rename moves the registry files from the
                     // CURRENT name and refuses a duplicate, so the name must
                     // still be the old one when it runs. Setting it here first

@@ -190,6 +190,11 @@ pub fn resolve_for_this_process() -> Result<ServerMode, String> {
 /// the switch says `shared`: a per session server cannot hand the request to
 /// the shared server in step 2, and the shared server does not yet run
 /// `new-session` from a hook, key binding or prompt.
+/// True only inside the shared server process (PSMUX_SERVER_MODE=shared).
+pub fn in_shared_server_process() -> bool {
+    server::in_shared_server()
+}
+
 pub fn not_available_message() -> String {
     if server::in_shared_server() {
         "shared server mode: new-session from a hook or the config is not supported yet \
