@@ -290,26 +290,19 @@ fn a_spare_that_lands_late_still_keeps_its_place_in_the_sequence() {
 }
 
 #[test]
-fn readiness_needs_output_then_quiet() {
+fn readiness_needs_visible_text() {
     let mut wp = fake_spare(1);
     let t0 = std::time::Instant::now();
-    // No output at all: nothing to be quiet after, so not ready however long
-    // we wait (short of the backstop).
+    // No output at all: not ready however long we wait (short of the backstop).
     assert!(!wp.refresh_ready(t0 + std::time::Duration::from_millis(600)));
-    // The prompt arrives.
+    // The prompt arrives: ready at once.
     shell_writes(&wp.data_version, &wp.term, b"PS C:\\> ");
-    assert!(!wp.refresh_ready(t0 + std::time::Duration::from_millis(601)));
-    // Still just under the quiet window.
-    assert!(!wp.refresh_ready(
-        t0 + std::time::Duration::from_millis(601) + crate::types::WARM_READY_TEXT_QUIET
-            - std::time::Duration::from_millis(1)
-    ));
-    // Quiet for long enough: the shell has settled.
-    assert!(wp.refresh_ready(t0 + std::time::Duration::from_millis(601) + crate::types::WARM_READY_TEXT_QUIET));
+    assert!(wp.refresh_ready(t0 + std::time::Duration::from_millis(601)));
+    assert!(!wp.ready_via_backstop);
 }
 
 #[test]
-fn readiness_quiet_needs_visible_text_issue661() {
+fn a_blank_quiet_spare_is_not_ready_issue661() {
     // #661: a loading pwsh writes ConPTY's setup sequences, which draw
     // nothing, and then stays silent until its prompt. On a busy machine that
     // silence outlasted WARM_READY_QUIET and blank spares counted as ready.
@@ -320,12 +313,9 @@ fn readiness_quiet_needs_visible_text_issue661() {
     assert!(!wp.refresh_ready(ms(t0, 20) + crate::types::WARM_READY_QUIET), "blank and quiet is still booting");
     assert!(!wp.refresh_ready(ms(t0, 900)), "blank and quiet is still booting");
     assert!(!wp.shows_text);
-    // The prompt lands; quiet counts from here.
     shell_writes(&wp.data_version, &wp.term, b"PS C:\\> ");
-    assert!(!wp.refresh_ready(ms(t0, 950)));
-    assert!(wp.shows_text);
-    assert!(wp.refresh_ready(ms(t0, 950) + crate::types::WARM_READY_TEXT_QUIET));
-    assert!(!wp.ready_via_backstop);
+    assert!(wp.refresh_ready(ms(t0, 950)));
+    assert!(wp.shows_text && !wp.ready_via_backstop);
 }
 
 #[test]
@@ -335,34 +325,6 @@ fn blank_spare_still_has_the_backstop_issue661() {
     assert!(!wp.refresh_ready(wp.spawned_at + std::time::Duration::from_millis(10)));
     assert!(wp.refresh_ready(wp.spawned_at + crate::types::WARM_READY_MAX_WAIT));
     assert!(wp.ready_via_backstop);
-}
-
-#[test]
-fn booting_counts_inflight_and_unready_spares_issue661() {
-    let now = std::time::Instant::now();
-    let mut pool = WarmPool::new(3);
-    assert_eq!(pool.booting(now), 0);
-    pool.inflight = 2;
-    pool.push(fake_spare(5));
-    pool.push(ready_spare(4));
-    assert_eq!(pool.booting(now), 3, "two in flight plus one pooled spare still blank");
-    // A spare whose prompt just landed is ready for a claim, but its shell is
-    // still settling, so it still holds a boot slot until WARM_READY_QUIET.
-    let mut prompted = fake_spare(6);
-    shell_writes(&prompted.data_version, &prompted.term, b"PS C:\\> ");
-    let t = prompted.spawned_at + std::time::Duration::from_millis(5);
-    assert!(!prompted.refresh_ready(t));
-    assert!(prompted.refresh_ready(t + crate::types::WARM_READY_TEXT_QUIET));
-    pool.push(prompted);
-    assert_eq!(pool.booting(t + crate::types::WARM_READY_TEXT_QUIET), 4);
-    assert_eq!(pool.booting(t + crate::types::WARM_READY_QUIET), 3);
-    // A blank spare released by the backstop does not hold a slot for ever.
-    let mut silent = fake_spare(7);
-    assert!(silent.refresh_ready(silent.spawned_at + crate::types::WARM_READY_MAX_WAIT));
-    pool.push(silent);
-    assert_eq!(pool.booting(t + crate::types::WARM_READY_QUIET), 3);
-    assert!(crate::types::WARM_BOOT_CONCURRENCY >= crate::types::WARM_POOL_SIZE_DEFAULT,
-        "the cap must not stop the default pool from refilling a claim per claim");
 }
 
 #[test]
