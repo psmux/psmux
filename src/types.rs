@@ -673,6 +673,9 @@ pub struct WarmPane {
     /// Whether [WarmPane::ready] was set by the [WARM_READY_MAX_WAIT]
     /// backstop rather than by the shell going quiet. Trace and diagnostics.
     pub ready_via_backstop: bool,
+    /// Whether this spare's screen has shown any visible character yet (a
+    /// prompt, a banner). Rechecked only when its output changes.
+    pub shows_text: bool,
     /// The directory this spare's shell was STARTED in: the `cwd` handed to
     /// `CreateProcessW`, read back off the command it was built with.
     ///
@@ -706,6 +709,18 @@ pub struct WarmPane {
 /// at 30ms and 40ms both cost ~380ms more. 250ms of quiet puts readiness at
 /// ~405ms after spawn, which is exactly where the instant claims begin.
 pub const WARM_READY_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a spare whose screen already shows text has to stay unchanged
+/// before it counts as ready (#661).
+///
+/// Visible text is the prompt itself, so the long [`WARM_READY_QUIET`] guess is
+/// not needed any more: pwsh draws its prompt in one batch and writes nothing
+/// after it (every claim of a settled spare in the #661 traces showed the same
+/// data version as the prompt, one to three seconds later). Holding a spare
+/// that already shows its prompt back for 250 ms only made claims that were
+/// instant for the user count as misses. 50 ms covers a prompt that arrives in
+/// two reads.
+pub const WARM_READY_TEXT_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Backstop: a spare this old counts as ready however little it has written.
 ///
@@ -856,9 +871,29 @@ impl WarmPane {
         if dv != self.last_dv {
             self.last_dv = dv;
             self.last_change = now;
+            // The reader thread parses a batch before it bumps the version, so
+            // the screen read here already holds whatever that batch drew.
+            if !self.shows_text && screen_has_text(&self.term) {
+                self.shows_text = true;
+                crate::warm_trace!(
+                    "pool: spare pane={} shows text {:.1}ms after spawn dv={}",
+                    self.pane_id,
+                    now.saturating_duration_since(self.spawned_at).as_secs_f64() * 1000.0,
+                    dv
+                );
+            }
         }
         let quiet = now.saturating_duration_since(self.last_change);
-        if dv > 0 && quiet >= WARM_READY_QUIET {
+        // #661: quiet counts only once the screen shows something. A pwsh that
+        // is still loading writes ConPTY's own setup sequences (nothing
+        // visible) and then nothing at all until its prompt, and on a busy
+        // machine that silence is far longer than WARM_READY_QUIET: spares
+        // went "ready" 330 to 820 ms after spawn with a blank screen, the
+        // pool's ready count was wrong, and a split that took one waited
+        // another 150 to 780 ms for the prompt. Once text is up, a short quiet
+        // is enough (WARM_READY_TEXT_QUIET). A shell that never draws anything
+        // visible is still covered by the WARM_READY_MAX_WAIT backstop below.
+        if dv > 0 && self.shows_text && quiet >= WARM_READY_TEXT_QUIET {
             self.ready = true;
         } else if now.saturating_duration_since(self.spawned_at) >= WARM_READY_MAX_WAIT {
             self.ready = true;
@@ -941,6 +976,19 @@ pub const WARM_POOL_SIZE_MAX: usize = 8;
 /// memory reasons from being handed eight shells.
 pub const WARM_POOL_SURGE_MAX: usize = 8;
 pub const WARM_POOL_SURGE_FACTOR: usize = 4;
+
+/// How many spares may be booting at once (spawning, or spawned and not ready).
+///
+/// A surge used to start its whole batch at once: six pwsh beside the two or
+/// three refills already booting. Measured under PSMUX_WARM_TRACE (#661, 24
+/// splits 250 ms apart): a spare reached its prompt 550 to 870 ms after spawn
+/// with two to four shells booting beside it, and 1050 to 1400 ms when the
+/// batch of six landed. The refills that the next claims take (lowest id
+/// first) were booting under that batch, so three splits in a row got a blank
+/// pane and waited 200 to 780 ms each. Four booting at ~650 ms each still
+/// produces about six spares a second, more than a human run of creations
+/// takes, and each of them boots at the uncontended speed.
+pub const WARM_BOOT_CONCURRENCY: usize = 4;
 
 /// How long a surge allowance outlives the claim that triggered it. Long enough
 /// to cover a human run of window opening, short enough that the memory comes
@@ -1046,6 +1094,22 @@ impl WarmPool {
     }
     pub fn ready_len(&self) -> usize {
         self.spares.iter().filter(|w| w.ready).count()
+    }
+    /// Shells still starting: spawns in flight plus pooled spares that have not
+    /// yet been quiet for [`WARM_READY_QUIET`] after drawing their prompt (or
+    /// reached the backstop). A pwsh keeps loading for a while after its
+    /// prompt is up, and counting it as done from the prompt on let the
+    /// concurrency cap start the next spawns into that load (measured, #661).
+    pub fn booting(&self, now: std::time::Instant) -> usize {
+        self.inflight
+            + self
+                .spares
+                .iter()
+                .filter(|w| {
+                    !w.ready_via_backstop
+                        && !(w.shows_text && now.saturating_duration_since(w.last_change) >= WARM_READY_QUIET)
+                })
+                .count()
     }
     /// Recompute readiness for every spare. Returns how many just flipped to
     /// ready, so the caller can trace the edge.

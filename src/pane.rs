@@ -1621,6 +1621,10 @@ pub fn schedule_warm_refill(app: &mut AppState) {
     let standby = app.is_warm_server();
     let target = app.warm_pane.effective_target(standby);
     let deficit = trickle_deficit(&mut app.pool_trickle, &app.warm_pane, app.warm_pane.deficit_for(target));
+    // #661: never more than WARM_BOOT_CONCURRENCY shells booting at once. The
+    // rest of the deficit is spawned by the loop tick as spares become ready.
+    let booting = app.warm_pane.booting(std::time::Instant::now());
+    let deficit = deficit.min(crate::types::WARM_BOOT_CONCURRENCY.saturating_sub(booting));
     for _ in 0..deficit {
         let Some(params) = warm_spawn_params(app) else { break };
         let spawn_pane_id = params.pane_id;
@@ -1950,7 +1954,7 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
         console_wait as f64 / 1000.0,
         os_create as f64 / 1000.0
     );
-    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring, spawned_at: now, ready: false, last_dv: 0, last_change: now, trace_settled: false, ready_via_backstop: false, spawn_cwd, host_colors: p.host_colors.clone() })
+    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring, spawned_at: now, ready: false, last_dv: 0, last_change: now, trace_settled: false, ready_via_backstop: false, shows_text: false, spawn_cwd, host_colors: p.host_colors.clone() })
 }
 
 pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
