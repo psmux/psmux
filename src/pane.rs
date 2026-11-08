@@ -2411,15 +2411,17 @@ fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
     // that is already dead back to the reaper. Under `on` the window used to
     // stay with a dead pane in it.
     let last_pane = matches!(win.root, Node::Leaf(_));
-    // Explicitly kill the target pane's process tree FIRST.
     // remove_node() doesn't call kill_node() when the root is a single Leaf,
-    // so we must do it here to ensure no orphaned processes.
-    if let Some(p) = active_pane_mut(&mut win.root, path) {
-        if last_pane {
+    // so the last pane's tree is killed here, and its node stays for the
+    // reaper. Any other pane is cut out below and kill_node() kills its tree
+    // on the pane kill worker. Killing it here as well cost the server loop a
+    // second tree kill: three process snapshot walks per kill-pane.
+    if last_pane {
+        if let Some(p) = active_pane_mut(&mut win.root, path) {
             p.pane_options.insert("remain-on-exit".to_string(), "off".to_string());
             p.dead = false;
+            crate::platform::process_kill::kill_process_tree(&mut p.child);
         }
-        crate::platform::process_kill::kill_process_tree(&mut p.child);
     }
     // In cells, so the neighbour gets exactly the dead pane's cells.
     crate::tree::normalize_window_sizes(win);
