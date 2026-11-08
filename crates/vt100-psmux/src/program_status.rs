@@ -326,6 +326,16 @@ pub enum TerminalQuery {
     Xtversion,
     /// Light or dark colour scheme (`CSI ? 996 n`).
     ColourScheme,
+    /// XTSMGRAPHICS (`CSI ? item ; action ; value S`). A missing parameter is
+    /// 0 and one holding a colon -1, as tmux's `input_get` reads them.
+    GraphicsAttribute {
+        /// 1 is the colour registers, 2 the sixel geometry, 3 the `ReGIS` geometry.
+        item: i32,
+        /// 1 reads, 2 resets, 3 sets, 4 reads the maximum.
+        action: i32,
+        /// The value for a set.
+        value: i32,
+    },
     /// Default foreground colour (`OSC 10 ; ?`).
     ForegroundColour {
         /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].

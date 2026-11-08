@@ -362,6 +362,17 @@ Three deliberate choices:
 
 One platform limit, measured on Windows 11 build 26200: conhost swallows a **bare** `ESC]104 ESC\` on the ConPTY output path, so a pane child running under ConPTY cannot reach the clear-everything form. `ESC]104;4 ESC\` arrives normally.
 
+### Sixel Limits Query (XTSMGRAPHICS)
+
+`CSI ? item ; action ; value S` asks a terminal for its sixel limits. psmux answers it itself and does not ask the outer terminal, as tmux's `input_csi_dispatch_sm_graphics` does not. Which answer a pane gets follows what its programs were told by DA1:
+
+| Pane's console host | DA1 reply | Colour registers (item 1, read, reset or maximum) | Anything else |
+|---|---|---|---|
+| OpenConsole (`PSMUX_CONPTY_DIR`) | psmux's, `CSI ? 1;2;4 c`, listing sixel | `CSI ? 1;0;1024 S`, as tmux | `CSI ? item;3;value S`, failure, as tmux |
+| Inbox conhost | its own, not listing sixel | `CSI ? 1;3;value S`, failure | `CSI ? item;3;value S`, failure |
+
+The inbox conhost differs from tmux on purpose: it drops a pane's sixel before psmux sees it, so reporting colour registers there would describe images nothing can draw. A query with more than three parameters gets no reply, as in tmux. psmux reads a parameter as at most 65535, where tmux reads up to `INT_MAX`.
+
 ## Behavioral Differences from tmux
 
 A few commands intentionally behave differently from upstream tmux. These are deliberate choices, not bugs.
