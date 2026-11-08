@@ -403,8 +403,16 @@ try {
     }
 
     $start = $Clock.ElapsedMilliseconds
-    $g1 = Request 'A' "set-option -t ghost1: @fwd_probe v3-$RunId" ($start + $RequestLimitMs)
-    if ($null -ne $g1) { Classify-Ghost 'G1' $g1.Ms 'ghost1' }
+    # The handler answers a forward it could not make with the error, as a
+    # failed command does (1df45e7b); anything else in the body is a failure.
+    $g1 = Send-Line $script:Ports['A'] $script:Keys['A'] "set-option -t ghost1: @fwd_probe v3-$RunId" ($start + $RequestLimitMs)
+    if ($g1.Result -ne 'Done') {
+        Fail 2 "A [set-option -t ghost1:] gave $($g1.Result) after $($g1.Ms) ms ($(Show $g1.Detail))"
+    } elseif ($g1.Body.Length -ne 0 -and -not $g1.Body.StartsWith("ERROR: can't connect to session: ghost1")) {
+        Fail 2 "A [set-option -t ghost1:] gave an unexpected body [$(Show $g1.Body)]"
+    } else {
+        Classify-Ghost 'G1' $g1.Ms 'ghost1'
+    }
 
     $value = "g2-$RunId"
     if ((Set-Fresh 'A' '@hook_mark' "reset-g2-$RunId") -and (Install-Hook "set -t ghost2: @hook_probe v4-$RunId" "set @hook_mark $value")) {
