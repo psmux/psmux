@@ -423,3 +423,7 @@ pub(crate) fn parse_reply_args(args: &[&str]) -> Option<(u8, Option<Rgb>)> {
     let byte = |i: usize| u8::from_str_radix(&colour[i..i + 2], 16).ok();
     Some((index, Some((byte(0)?, byte(2)?, byte(4)?))))
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_palette_request.rs"]
+mod tests_palette_request;
