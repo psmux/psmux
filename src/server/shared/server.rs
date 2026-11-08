@@ -536,6 +536,23 @@ fn run(ns: Option<String>) -> ! {
             );
             crate::types::rearm_device_replies();
         }
+        // Palette questions for the outer terminal go to a client of the
+        // session showing the pane (crate::palette_request).
+        if crate::palette_request::REQUEST_PENDING.swap(false, Ordering::AcqRel) {
+            let mut rest = crate::palette_request::take_requests();
+            ended.extend(
+                for_each_session_guarded(&mut sessions, |app, _lp| {
+                    rest = crate::palette_request::route(app, std::mem::take(&mut rest));
+                })
+                .into_iter()
+                .map(|sid| (sid, "panic")),
+            );
+            crate::palette_request::finish(rest);
+        }
+        crate::palette_request::FORWARD.store(
+            sessions.values().any(|s| crate::palette_request::can_ask(&s.app)),
+            Ordering::Release,
+        );
         let echo_active = sessions
             .values()
             .any(|s| s.lp.echo_pending_until.is_some_and(|t| t.elapsed().as_millis() < 50));

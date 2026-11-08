@@ -4222,6 +4222,7 @@ pub fn xtversion_reply() -> String {
 
 /// A device query psmux answers itself when the console host forwards it.
 pub(crate) use vt100::TerminalQuery as DeviceQuery;
+pub(crate) use crate::palette_request::ReplyItem;
 
 /// The pane screen state a DECRQM answer depends on.
 ///
@@ -4437,6 +4438,26 @@ pub(crate) fn pane_replies(
     colours: &crate::types::HostColors,
     console_host_da1_open: &mut bool,
 ) -> Vec<PaneReply> {
+    pane_items(queries, st, colours, console_host_da1_open, false)
+        .into_iter()
+        .filter_map(|item| match item {
+            ReplyItem::Reply(reply) => Some(reply),
+            ReplyItem::Ask { .. } => None,
+        })
+        .collect()
+}
+
+/// As [`pane_replies`], with `ask`: a palette index of 16 or more the pane
+/// has no entry for becomes a question for the outer terminal, in its place
+/// among the replies, as tmux's input_osc_4 asks it (input.c:2956 at tag
+/// 3.8). Without `ask`, nobody can be asked and it gets no reply.
+pub(crate) fn pane_items(
+    queries: &[DeviceQuery],
+    st: &DecrqmState,
+    colours: &crate::types::HostColors,
+    console_host_da1_open: &mut bool,
+    ask: bool,
+) -> Vec<ReplyItem> {
     use crate::server::helpers::{background_reply, foreground_reply, palette_reply, scheme_reply};
     use crate::types::{COLOR_QUERY_BG, COLOR_QUERY_FG, COLOR_QUERY_SCHEME};
     let colour = |text: Option<String>, bit: u32| {
@@ -4464,8 +4485,12 @@ pub(crate) fn pane_replies(
                     // The burst's own OSC 10 and 11 never arrived, so they
                     // end the way its palette query did.
                     burst = false;
-                    if !asked_fg { out.extend(fg(bel)); }
-                    if !asked_bg { out.extend(bg(bel)); }
+                    if !asked_fg { out.extend(fg(bel).map(ReplyItem::Reply)); }
+                    if !asked_bg { out.extend(bg(bel).map(ReplyItem::Reply)); }
+                }
+                if ask && own.is_none() && index >= crate::palette_request::FIRST_ASKED {
+                    out.push(ReplyItem::Ask { index, bel });
+                    continue;
                 }
                 let text = palette_reply(i, colours, own, bel);
                 if i < 16 {
@@ -4484,7 +4509,7 @@ pub(crate) fn pane_replies(
                     .map(|text| PaneReply { text, fallback: ReplyFallback::Pipe, console_host })
             }
         };
-        out.extend(reply);
+        out.extend(reply.map(ReplyItem::Reply));
     }
     out
 }
@@ -4774,6 +4799,19 @@ pub fn spawn_reader_thread(
         // The first DA1 of a pane is the console host's own, answered down
         // the PTY (`pane_replies`).
         let mut console_host_da1_open = true;
+        // Palette questions out to the outer terminal and the replies waiting
+        // behind them (crate::palette_request), with the flag the server loop
+        // raises when an answer is in the pane's inbox. The inbox opens with
+        // the first question and closes with the thread.
+        let mut requests = crate::palette_request::Requests::default();
+        let mut inbox_ready: Option<Arc<AtomicBool>> = None;
+        struct InboxGuard(usize);
+        impl Drop for InboxGuard {
+            fn drop(&mut self) {
+                crate::palette_request::close_inbox(self.0);
+            }
+        }
+        let _inbox_guard = InboxGuard(pane_id);
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -4806,13 +4844,27 @@ pub fn spawn_reader_thread(
                         }
                         return;
                     }
+                    // An answer to a palette question, or its timeout, lets the
+                    // replies waiting behind it go, as tmux's request timer
+                    // does (input.c:3521).
+                    if !requests.is_empty() {
+                        if inbox_ready.as_ref().is_some_and(|r| r.load(Ordering::Acquire)) {
+                            break;
+                        }
+                        if requests.deadline().is_some_and(|d| d <= Instant::now()) {
+                            break;
+                        }
+                    }
                     // A held synchronized update must be released on time even
                     // if the pane goes quiet; the gate below does the release.
-                    let wait = match sync_gate.time_left(Instant::now()) {
+                    let mut wait = match sync_gate.time_left(Instant::now()) {
                         Some(left) if left.is_zero() => break,
                         Some(left) => left.min(Duration::from_millis(100)),
                         None => Duration::from_millis(100),
                     };
+                    if let Some(deadline) = requests.deadline() {
+                        wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+                    }
                     let res = cv.wait_timeout(buf, wait);
                     buf = match res {
                         Ok((g, _)) => g,
@@ -4821,6 +4873,24 @@ pub fn spawn_reader_thread(
                 }
                 // First bytes are present — release the lock so the reader can
                 // keep pushing while we run the adaptive coalescing wait.
+            }
+
+            // Palette answers and timeouts: the replies they let go are
+            // delivered as a batch's are.
+            if !requests.is_empty() {
+                let mut ready_now = Vec::new();
+                if inbox_ready.as_ref().is_some_and(|r| r.load(Ordering::Acquire)) {
+                    for (index, rgb) in crate::palette_request::take_answers(pane_id) {
+                        ready_now.extend(requests.answer(index, rgb));
+                    }
+                }
+                ready_now.extend(requests.expire(Instant::now()));
+                if !ready_now.is_empty()
+                    && deliver_replies(pane_id, child_pid, &ready_now, &color_query_pending)
+                {
+                    crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                    crate::types::wake_server_loop();
+                }
             }
 
             // Adaptive coalescing: keep waiting in 1ms ticks while new bytes
@@ -4948,10 +5018,24 @@ pub fn spawn_reader_thread(
                 }
                 let st = decrqm_state.unwrap_or_default();
                 let colours = crate::types::shared_host_colors();
-                let replies = pane_replies(
-                    &device_queries, &st, &colours, &mut console_host_da1_open,
+                let ask = crate::palette_request::FORWARD.load(Ordering::Acquire);
+                let items = pane_items(
+                    &device_queries, &st, &colours, &mut console_host_da1_open, ask,
                 );
-                if deliver_replies(pane_id, child_pid, &replies, &color_query_pending) {
+                // A question for the outer terminal holds every reply after
+                // it; with none open this is the batch's replies as they are.
+                let (replies, asks) = requests.add(items, Instant::now());
+                if !asks.is_empty() {
+                    if inbox_ready.is_none() {
+                        inbox_ready = Some(crate::palette_request::open_inbox(pane_id, &staging));
+                    }
+                    for index in asks {
+                        crate::palette_request::push_request(pane_id, index);
+                    }
+                }
+                if !replies.is_empty()
+                    && deliver_replies(pane_id, child_pid, &replies, &color_query_pending)
+                {
                     crate::types::PTY_DATA_READY.store(true, Ordering::Release);
                     crate::types::wake_server_loop();
                 }

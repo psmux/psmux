@@ -76,7 +76,7 @@ pub const SUPPORTED: &[&str] = &[
     "list-keys", "lsk",
     // the attach handshake
     "client-attach", "client-detach", "client-size", "client-flags",
-    "client-environ", "client-last-session", "host-colors",
+    "client-environ", "client-last-session", "host-colors", "host-palette",
     "prefix-begin", "prefix-end",
     "focus-window", "focus-pane",
 ];

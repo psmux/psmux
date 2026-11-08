@@ -1356,6 +1356,12 @@ fn next_queued() -> io::Result<Option<Event>> {
     if let Some(ev) = crate::console_tap::take_head() {
         return Ok(Some(ev));
     }
+    // The head may be the start of an OSC 4 reply still arriving; crossterm
+    // must not read its ESC as a key.
+    #[cfg(windows)]
+    if crate::console_tap::holding() {
+        return Ok(None);
+    }
     if crossterm::event::poll(Duration::ZERO)? {
         Ok(Some(crossterm::event::read()?))
     } else {
@@ -2633,6 +2639,12 @@ impl VtParser {
                     }
                 }
             }
+        }
+        // An OSC 4 reply from the terminal, to a palette question the server
+        // passed on (crate::palette_request): handed to the main loop, never
+        // read as keys, as tmux's tty_keys_palette takes it (tty-keys.c:1830).
+        if let Some((index, rgb)) = crate::palette_request::parse_reply(&self.osc) {
+            crate::palette_request::push_client_reply(index, rgb);
         }
         // All other OSC sequences silently discarded
     }

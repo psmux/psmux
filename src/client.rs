@@ -4738,6 +4738,24 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // parent shell on exit (tmux -P parity, issue #275).
                         kill_parent_on_exit = true;
                         quit = true;
+                    } else if let Some(index) = crate::palette_request::parse_directive(&line) {
+                        // A pane asked for a palette colour it has no entry
+                        // for: ask this client's terminal, or say at once that
+                        // it will not answer (crate::palette_request). The
+                        // reply comes back through the input routes.
+                        if crate::palette_request::outer_answers() {
+                            let query = crate::palette_request::query_bytes(index);
+                            if crate::ssh_input::pipe_mode_active() {
+                                crate::ssh_input::pipe_stdout_write(query.as_bytes());
+                            } else {
+                                let mut out = std::io::stdout();
+                                let _ = std::io::Write::write_all(&mut out, query.as_bytes());
+                                let _ = std::io::Write::flush(&mut out);
+                            }
+                        } else {
+                            let _ = writer.write_all(crate::palette_request::reply_line(index, None).as_bytes());
+                            let _ = writer.flush();
+                        }
                     } else if let Some(open) = crate::choose_tree::parse_directive(line.trim()) {
                         // choose-tree ran on the server (the command prompt,
                         // a root table binding, a hook, a menu, the CLI).
@@ -4807,6 +4825,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if drained_oneshots.bell {
             let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
             let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        // Palette replies the input routes took off the key stream go to the
+        // server, which matches them to the questions it asked.
+        let palette_replies = crate::palette_request::take_client_replies();
+        if !palette_replies.is_empty() {
+            for (index, rgb) in palette_replies {
+                let _ = writer.write_all(crate::palette_request::reply_line(index, Some(rgb)).as_bytes());
+            }
+            let _ = writer.flush();
         }
         if quit && !got_frame {
             if reconnect_log_enabled() {
