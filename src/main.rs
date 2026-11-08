@@ -68,6 +68,7 @@ mod socket_path;
 mod environ;
 mod program_status;
 mod pane_colours;
+mod scroll_on_clear;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;

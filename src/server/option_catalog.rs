@@ -411,6 +411,8 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // tmux options-table.c:1699-1721, window and pane scope.
     OptionDef { name: "remain-on-exit", scope: Window, option_type: Choice(ChoiceKind::RemainOnExit), default: "off", description: "Whether a pane stays after its program exits: off, on, failed (only for a nonzero status), key (until a key is typed in it) or failed-key (a failed exit, until a key is typed in it)" },
     OptionDef { name: "remain-on-exit-format", scope: Window, option_type: OptionType::String, default: REMAIN_ON_EXIT_FORMAT_DEFAULT, description: "Text written on the bottom line of a pane remain-on-exit kept" },
+    // tmux options-table.c:1723, window and pane scope.
+    OptionDef { name: "scroll-on-clear", scope: Window, option_type: Boolean, default: "on", description: "Whether clearing the whole screen sends what it showed to history first" },
     OptionDef { name: "aggressive-resize", scope: Window, option_type: Boolean, default: "off", description: "Resize window to smallest attached client" },
     // tmux types both of these OPTIONS_TABLE_STRING (options-table.c:1474) and
     // documents a percentage form ("10%"), so they cannot be validated as a
@@ -647,6 +649,7 @@ pub static WINDOW_OPTION_NAMES: &[&str] = &[
     // A window option in tmux (options-table.c:1694): `set -w -t <window>`
     // keeps it on that window, and `show -w` lists it there.
     "remain-on-exit-format",
+    "scroll-on-clear",
     "window-status-format",
     "window-status-current-format",
     "window-status-separator",

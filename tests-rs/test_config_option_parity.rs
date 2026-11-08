@@ -114,6 +114,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "monitor-activity" => "on",
         "remain-on-exit" => "key",
         "remain-on-exit-format" => "bye #{pane_dead_status}",
+        "scroll-on-clear" => "off",
         "aggressive-resize" => "on",
         "main-pane-width" => "50",
         "main-pane-height" => "40",

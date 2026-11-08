@@ -507,6 +507,9 @@ pub(crate) fn set_window_option(
         return Err(format!("can't find window: {}", window_index));
     };
     window.window_options.insert(name.to_string(), value.to_string());
+    if name == crate::scroll_on_clear::OPTION {
+        app.scroll_on_clear.changed();
+    }
     Ok(())
 }
 
@@ -630,6 +633,9 @@ pub(crate) fn apply_set_window_option(
 pub(crate) fn unset_window_option(app: &mut AppState, window_index: usize, name: &str) {
     if let Some(window) = app.windows.get_mut(window_index) {
         window.window_options.remove(name);
+    }
+    if name == crate::scroll_on_clear::OPTION {
+        app.scroll_on_clear.changed();
     }
 }
 
@@ -1240,6 +1246,9 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
                 .cloned()
                 .unwrap_or_else(|| crate::server::option_catalog::REMAIN_ON_EXIT_FORMAT_DEFAULT.to_string());
         }
+        "scroll-on-clear" => {
+            return app.user_options.get(name).cloned().unwrap_or_else(|| "on".to_string());
+        }
         _ => {
             // Check user_options first (@-prefixed), then environment
             app.user_options.get(name).cloned()
@@ -1452,6 +1461,7 @@ pub(crate) fn is_boolean_option(name: &str) -> bool {
             | "visual-activity"
             | "synchronize-panes"
             | "remain-on-exit"
+            | "scroll-on-clear"
             | "destroy-unattached"
             | "exit-empty"
             | "set-titles"
@@ -1590,11 +1600,14 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
     if key == "input-buffer-size" {
         vt100::set_input_buffer_size(vt100::DEFAULT_INPUT_BUFFER_SIZE);
     }
+    if key == crate::scroll_on_clear::OPTION {
+        app.scroll_on_clear.changed();
+    }
     if matches!(
         key,
         "window-style" | "window-active-style" | "pane-border-indicators"
             | "extended-keys" | "extended-keys-format" | "remain-on-exit-format"
-            | "input-buffer-size"
+            | "input-buffer-size" | "scroll-on-clear"
     ) {
         return;
     }
@@ -1789,6 +1802,10 @@ pub(crate) fn apply_set_option(
         }
         "remain-on-exit-format" => {
             app.user_options.insert(option.to_string(), value.to_string());
+        }
+        "scroll-on-clear" => {
+            app.user_options.insert(option.to_string(), value.to_string());
+            app.scroll_on_clear.changed();
         }
         "destroy-unattached" => { app.destroy_unattached = matches!(value, "on" | "true" | "1" | "yes"); }
         "exit-empty" => {
@@ -1988,7 +2005,7 @@ pub(crate) fn apply_set_option(
 /// table's own entries (cmd-show-options.c:249-254, the `options_table_entry(o)
 /// == NULL` walk) and never invents an inherited one for it, so only the
 /// catalog name belongs here.
-pub(crate) const PANE_OPTION_NAMES: &[&str] = &["remain-on-exit", "remain-on-exit-format"];
+pub(crate) const PANE_OPTION_NAMES: &[&str] = &["remain-on-exit", "remain-on-exit-format", "scroll-on-clear"];
 
 /// Resolve a `set-option -p` / `show-options -p` target to the pane it names.
 ///
@@ -2093,6 +2110,23 @@ pub(crate) fn apply_set_pane_option(
             store.insert(option.to_string(), value.to_string());
             String::new()
         }
+        // tmux's window and pane flag (options-table.c:1723).
+        "scroll-on-clear" => {
+            if unset || value.is_empty() {
+                store.remove(option);
+                app.scroll_on_clear.changed();
+                return String::new();
+            }
+            if let Err(error) = crate::server::option_catalog::validate_option_value(option, value) {
+                return format!("ERROR: {}", error);
+            }
+            if only_if_unset && store.contains_key(option) {
+                return if quiet { String::new() } else { format!("ERROR: already set: {}", option) };
+            }
+            store.insert(option.to_string(), value.to_string());
+            app.scroll_on_clear.changed();
+            String::new()
+        }
         // tmux's window and pane option (options-table.c:1710): a pane's own
         // text wins over its window's. An empty value is a real value here,
         // which writes nothing on the dead pane, so only -u removes it.
@@ -2132,7 +2166,7 @@ pub(crate) fn apply_set_pane_option(
         // backend checked nothing but exit codes and a swallowed pane option
         // looked exactly like success (#580).
         other => format!(
-            "ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit, remain-on-exit-format, @mouse-force, any @user option)",
+            "ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit, remain-on-exit-format, scroll-on-clear, @mouse-force, any @user option)",
             other
         ),
     }

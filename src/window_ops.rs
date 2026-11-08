@@ -4292,8 +4292,10 @@ pub fn clear_active_pane_history(app: &mut AppState) {
             let key_mode = parser.screen().extended_keys_mode();
             // The pane's options are unchanged too (#980).
             let pane_colours = parser.screen().pane_colours().cloned();
+            let scroll_on_clear = parser.screen().scroll_on_clear();
             *parser = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
             parser.screen_mut().set_pane_colours(pane_colours);
+            parser.screen_mut().set_scroll_on_clear(scroll_on_clear);
             // The console host is unchanged, and it asked for win32 input mode
             // only once, at startup (issue #845).
             parser.screen_mut().set_win32_input_requested(host_win32_input);

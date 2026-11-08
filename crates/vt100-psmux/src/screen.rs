@@ -262,6 +262,12 @@ pub struct Screen {
     /// Copy-on-exit is the equivalent end-user behaviour.
     pub(crate) allow_alternate_screen: bool,
 
+    /// The `scroll-on-clear` option: a clear of the whole screen sends what
+    /// the screen showed to history first. On by default, as in tmux
+    /// (options-table.c:1723 at tag 3.8). It belongs to the pane, so a reset
+    /// keeps it.
+    scroll_on_clear: bool,
+
     /// True once the output stream asked its terminal for win32 input mode
     /// (`CSI ?9001h`).  On a psmux pane that request comes from the pane's
     /// console host itself, as the very first bytes it writes (`ESC[?9001h
@@ -420,6 +426,7 @@ impl Screen {
             squelch_clear_pending: false,
             audible_bell_count: 0,
             allow_alternate_screen: true,
+            scroll_on_clear: true,
             win32_input_requested: false,
             extended_keys_mode: initial_extended_keys_mode(),
         }
@@ -512,6 +519,7 @@ impl Screen {
         let pane_colours = self.pane_colours.take();
         let palette_generation = self.palette_generation;
         let allow_alternate_screen = self.allow_alternate_screen;
+        let scroll_on_clear = self.scroll_on_clear;
         let mut program_status = std::mem::take(&mut self.program_status);
         program_status.clear();
         let program_status_enabled = self.program_status_enabled;
@@ -524,6 +532,18 @@ impl Screen {
         self.pane_colours = pane_colours;
         self.palette_generation = palette_generation;
         self.allow_alternate_screen = allow_alternate_screen;
+        self.scroll_on_clear = scroll_on_clear;
+    }
+
+    /// The `scroll-on-clear` option. See the field.
+    #[must_use]
+    pub fn scroll_on_clear(&self) -> bool {
+        self.scroll_on_clear
+    }
+
+    /// Set the `scroll-on-clear` option. See the field.
+    pub fn set_scroll_on_clear(&mut self, on: bool) {
+        self.scroll_on_clear = on;
     }
 
     /// Updates the maximum scrollback buffer size for the main grid.  Rows
@@ -2417,7 +2437,28 @@ impl Screen {
         // to the pane's options, not to the program (input.c:1407 clears
         // `p->palette` and leaves `p->default_palette`).
         let pane_colours = self.pane_colours.take().map(|c| c.defaults);
+        // The history stays, and with `scroll-on-clear` the screen joins it,
+        // as tmux's RIS and `send-keys -R` go through screen_write_clearscreen
+        // (screen-write.c:435). In the alternate screen tmux stays there and
+        // keeps the normal screen. Both console hosts leave it and blank the
+        // normal screen, so this does too, which is the reason the normal
+        // screen's rows go to history rather than being lost. The hyperlink
+        // table stays because history cells point into it.
+        let scroll_on_clear = self.scroll_on_clear;
+        if scroll_on_clear {
+            self.grid
+                .erase_all_into_history(crate::attrs::Attrs::default());
+        }
+        let scrollback = self.grid.scrollback();
+        let frozen = self.grid.frozen();
+        let history = self.grid.take_scrollback();
+        let hyperlinks = std::mem::take(&mut self.hyperlinks);
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+        self.grid.put_scrollback(history);
+        self.grid.set_scrollback(scrollback);
+        self.grid.set_frozen(frozen);
+        self.hyperlinks = hyperlinks;
+        self.scroll_on_clear = scroll_on_clear;
         if let Some(defaults) = pane_colours {
             self.pane_colours = Some(Box::new(PaneColours::new(defaults, None)));
         }
@@ -2484,9 +2525,25 @@ impl Screen {
     }
 
     // CSI J
+    //
+    // `CSI 2 J`, and `CSI 0 J` from the top left corner, are the two forms
+    // that clear the whole screen, and tmux sends the screen to history for
+    // both when `scroll-on-clear` is on and the alternate screen is not in use
+    // (screen-write.c:1941 and 2093 at tag 3.8).
     pub(crate) fn ed(
         &mut self,
         mode: u16,
+        unhandled: impl FnMut(&mut Self),
+    ) {
+        let into_history =
+            self.scroll_on_clear && !self.mode(MODE_ALTERNATE_SCREEN);
+        self.erase_in_display(mode, into_history, unhandled);
+    }
+
+    fn erase_in_display(
+        &mut self,
+        mode: u16,
+        into_history: bool,
         mut unhandled: impl FnMut(&mut Self),
     ) {
         let attrs = self.attrs;
@@ -2496,9 +2553,15 @@ impl Screen {
         let top = line - u64::from(pos.row);
         match mode {
             0 => {
-                self.grid_mut().erase_all_forward(attrs);
+                // The images first: their lines are counted from where the
+                // rows are now, and a row keeps its line as it goes to history.
                 self.erase_image_cells(line, 1, pos.col, size.cols);
                 self.erase_image_cells(line + 1, u64::from(size.rows - 1 - pos.row), 0, size.cols);
+                if into_history && pos.row == 0 && pos.col == 0 {
+                    self.grid_mut().erase_all_into_history(attrs);
+                } else {
+                    self.grid_mut().erase_all_forward(attrs);
+                }
             }
             1 => {
                 self.grid_mut().erase_all_backward(attrs);
@@ -2506,7 +2569,11 @@ impl Screen {
                 self.erase_image_cells(line, 1, 0, pos.col + 1);
             }
             2 => {
-                self.grid_mut().erase_all(attrs);
+                if into_history {
+                    self.grid_mut().erase_all_into_history(attrs);
+                } else {
+                    self.grid_mut().erase_all(attrs);
+                }
                 self.drop_current_grid_images();
                 self.check_squelch_signal();
             }
@@ -2520,12 +2587,15 @@ impl Screen {
     }
 
     // CSI ? J
+    //
+    // Selective erase, not a clear of the screen, so nothing goes to history.
+    // tmux has no such sequence (input.c:314 lists `J` with no prefix only).
     pub(crate) fn decsed(
         &mut self,
         mode: u16,
         unhandled: impl FnMut(&mut Self),
     ) {
-        self.ed(mode, unhandled);
+        self.erase_in_display(mode, false, unhandled);
     }
 
     // CSI K

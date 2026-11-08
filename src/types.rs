@@ -2232,6 +2232,8 @@ pub struct AppState {
     /// pane-colours (#980): the global window array and every window's and
     /// pane's own table.
     pub pane_colours: crate::pane_colours::PaneColours,
+    /// What crate::scroll_on_clear has pushed into the panes.
+    pub scroll_on_clear: crate::scroll_on_clear::ScrollOnClear,
     /// window-size: "smallest", "largest", "manual", "latest" (default "latest")
     pub window_size: String,
     /// Requested manual geometry, keyed by window ID. The visible geometry may
@@ -3610,6 +3612,7 @@ impl AppState {
             status_right_length: 40,
             status_lines: 1,
             pane_colours: crate::pane_colours::PaneColours::default(),
+            scroll_on_clear: crate::scroll_on_clear::ScrollOnClear::default(),
             status_format: crate::option_array::OptionArray::with_default(
                 crate::option_array::spec("status-format").expect("status-format is in ARRAY_OPTIONS"),
             ),
