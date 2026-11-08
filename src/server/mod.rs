@@ -8908,6 +8908,25 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Err(e) => { let _ = resp.send(format!("error: {}", e)); }
                     }
                 }
+                CtrlReq::DecideOtherSession(line, resp) => {
+                    let words = crate::commands::parse_command_line(&line);
+                    let parts: Vec<&str> = words.iter().map(String::as_str).collect();
+                    let decision = if parts.is_empty() {
+                        crate::commands::OtherSessionDecision::Local
+                    } else {
+                        crate::commands::decide_other_session(&app, &parts, &line)
+                    };
+                    let reply = match decision {
+                        crate::commands::OtherSessionDecision::Local => Ok(None),
+                        crate::commands::OtherSessionDecision::Other { port, key, line, .. } => Ok(Some((port, key, line))),
+                        crate::commands::OtherSessionDecision::Refused(msg) => {
+                            app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                            state_dirty = true;
+                            Err(msg)
+                        }
+                    };
+                    let _ = resp.send(reply);
+                }
                 CtrlReq::ForwardToOtherSession(line, resp) => {
                     let words = crate::commands::parse_command_line(&line);
                     let parts: Vec<&str> = words.iter().map(String::as_str).collect();

@@ -2187,6 +2187,47 @@ pub(crate) fn forward_set_line(
     words.join(" ")
 }
 
+/// The session commands the TCP route runs on the session their -t names and
+/// whose reply it relays (relay_to_session).
+fn relayed_session_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "show-options" | "show" | "show-option" | "list-windows" | "lsw"
+            | "show-environment" | "showenv" | "set-environment" | "setenv"
+            | "lock-session" | "locks"
+    )
+}
+
+/// The loop's routing decision for a line, without running it.
+fn decide_other_session(
+    request_sender: &mpsc::Sender<CtrlReq>,
+    text: String,
+) -> Result<Option<(u16, String, String)>, String> {
+    let (reply_sender, reply_receiver) = mpsc::channel();
+    if request_sender.send(CtrlReq::DecideOtherSession(text, reply_sender)).is_err() {
+        return Ok(None);
+    }
+    // No answer (the shared server leaves this request alone): this session's.
+    reply_receiver.recv_timeout(Duration::from_secs(60)).unwrap_or(Ok(None))
+}
+
+/// Run `line` on the session server at `port` and copy its reply here, as
+/// the CLI would print it: everything after that server's AUTH answer.
+fn relay_to_session(write_stream: &mut ReplyStream, port: u16, key: &str, line: &str) -> io::Result<()> {
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
+    let _ = stream.set_nodelay(true);
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(format!("AUTH {}\n{}\n", key, line).as_bytes())?;
+    stream.flush()?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut reply = Vec::new();
+    let _ = io::Read::read_to_end(&mut stream, &mut reply);
+    let text = String::from_utf8_lossy(&reply);
+    let body = text.strip_prefix("OK\r\n").or_else(|| text.strip_prefix("OK\n")).unwrap_or(&text);
+    write_stream.write_all(body.as_bytes())
+}
+
 /// Ok(true): the line ran on the session its -t names; Ok(false): it is this
 /// session's; Err: tmux's error for a target that names no session.
 fn forwarded_set_to_other_session(
@@ -3566,6 +3607,37 @@ if set_option_command {
                 line.clear();
                 continue;
             }
+            Err(error) => {
+                let _ = writeln!(write_stream, "ERROR: {}", error);
+                let _ = write_stream.flush();
+                if !persistent { break; }
+                line.clear();
+                continue;
+            }
+        }
+    }
+}
+// A session command whose -t names another session runs there, as on the
+// CLI and hook routes (#938), and its reply is relayed; one naming no
+// session is tmux's error (`show -t` keeps a window name of this session).
+// Only a one-shot connection relays; elsewhere such a line keeps its old path.
+if relayed_session_command(cmd) {
+    if let Some(ref target) = raw_target {
+        let mut words: Vec<String> = vec![cmd.to_string(), "-t".to_string(), target.clone()];
+        words.extend(args.iter().map(|a| a.to_string()));
+        let text = words.iter().map(|w| crate::util::quote_arg_for_handler(w)).collect::<Vec<_>>().join(" ");
+        match decide_other_session(&tx, text) {
+            Ok(None) => {}
+            Ok(Some((port, key, forwarded))) if !persistent => {
+                if let Err(e) = relay_to_session(&mut write_stream, port, &key, &forwarded) {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                }
+                let _ = write_stream.flush();
+                if pending_chain.is_empty() { break; }
+                line.clear();
+                continue;
+            }
+            Ok(Some(_)) => {}
             Err(error) => {
                 let _ = writeln!(write_stream, "ERROR: {}", error);
                 let _ = write_stream.flush();

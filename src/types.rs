@@ -4887,6 +4887,9 @@ pub enum CtrlReq {
     /// Ok(true): sent to the session the line names; Ok(false): this
     /// session's; Err: tmux's error for the target (nothing ran).
     ForwardToOtherSession(String, mpsc::Sender<Result<bool, String>>),
+    /// The same decision without sending: Ok(None) this session's,
+    /// Ok(Some((port, key, line))) another live session's, Err tmux's error.
+    DecideOtherSession(String, mpsc::Sender<Result<Option<(u16, String, String)>, String>>),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.

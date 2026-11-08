@@ -2825,7 +2825,40 @@ fn missing_bare_session_error(app: &AppState, command: &str, name: &str) -> Opti
 }
 
 pub(crate) fn route_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> OtherSessionRoute {
-    use OtherSessionRoute::{Forwarded, Local, Refused};
+    let (name, port, key, line) = match decide_other_session(app, parts, cmd) {
+        OtherSessionDecision::Local => return OtherSessionRoute::Local,
+        OtherSessionDecision::Refused(msg) => return OtherSessionRoute::Refused(msg),
+        OtherSessionDecision::Other { name, port, key, line } => (name, port, key, line),
+    };
+    const FORWARD_CONNECT_LIMIT: std::time::Duration = std::time::Duration::from_millis(200);
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, FORWARD_CONNECT_LIMIT)
+    else {
+        return OtherSessionRoute::Refused(format!("can't connect to session: {}", name));
+    };
+    let _ = stream.set_nodelay(true);
+    let _ = writeln!(stream, "AUTH {}", key);
+    let _ = stream.write_all(format!("{}\n", line).as_bytes());
+    let _ = stream.flush();
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+    let _ = std::io::Read::read(&mut stream, &mut [0u8; 64]);
+    OtherSessionRoute::Forwarded
+}
+
+/// Where a line's `-t` sends it, decided without sending anything: the
+/// shared decision of [`route_to_other_session`], also asked by the TCP route
+/// for the commands whose reply it must relay (CtrlReq::DecideOtherSession).
+#[derive(Debug, PartialEq)]
+pub(crate) enum OtherSessionDecision {
+    Local,
+    Refused(String),
+    /// Another live session of this namespace: its port and key, and the
+    /// line with the target spelled out for that server.
+    Other { name: String, port: u16, key: String, line: String },
+}
+
+pub(crate) fn decide_other_session(app: &AppState, parts: &[&str], cmd: &str) -> OtherSessionDecision {
+    use OtherSessionDecision::{Local, Refused};
     let command = parts[0];
     if keeps_other_session_target_local(command) {
         return Local;
@@ -2900,19 +2933,7 @@ pub(crate) fn route_to_other_session(app: &mut AppState, parts: &[&str], cmd: &s
         _ => cmd.to_string(),
     };
     let key = crate::session::read_session_key(&base).unwrap_or_default();
-    const FORWARD_CONNECT_LIMIT: std::time::Duration = std::time::Duration::from_millis(200);
-    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, FORWARD_CONNECT_LIMIT)
-    else {
-        return Refused(format!("can't connect to session: {}", name));
-    };
-    let _ = stream.set_nodelay(true);
-    let _ = writeln!(stream, "AUTH {}", key);
-    let _ = stream.write_all(format!("{}\n", line).as_bytes());
-    let _ = stream.flush();
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
-    let _ = std::io::Read::read(&mut stream, &mut [0u8; 64]);
-    Forwarded
+    OtherSessionDecision::Other { name, port, key, line }
 }
 
 /// Kill every window but the one at `keep`, as tmux's `kill-window -a`
@@ -5257,6 +5278,10 @@ mod tests_hook_rename_session_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_missing_session_targets.rs"]
 mod tests_missing_session_targets;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_missing_session_targets_relay.rs"]
+mod tests_missing_session_targets_relay;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue938_arg_parsing.rs"]
