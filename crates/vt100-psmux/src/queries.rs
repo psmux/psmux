@@ -35,8 +35,24 @@ pub(crate) fn csi_query(
         // a version request.
         ('q', [b'>'], 0) => Some(TerminalQuery::Xtversion),
         ('n', [b'?'], 996) => Some(TerminalQuery::ColourScheme),
+        // XTSMGRAPHICS, which tmux answers whatever it holds, unless it has
+        // more than three parameters (input_csi_dispatch_sm_graphics,
+        // input.c:2103 in tmux 3.8).
+        // `Params::len` counts subparameters too, which tmux does not.
+        ('S', [b'?'], _) if params.iter().count() <= 3 => Some(graphics_attribute(params)),
         _ => None,
     }
+}
+
+/// An XTSMGRAPHICS's parameters as tmux's `input_get(ictx, n, 0, 0)` reads
+/// them: a missing one is 0 and one holding a colon is -1.
+fn graphics_attribute(params: &vte::Params) -> TerminalQuery {
+    let mut read = params.iter().map(|p| match p {
+        [n] => i32::from(*n),
+        _ => -1,
+    });
+    let mut next = || read.next().unwrap_or(0);
+    TerminalQuery::GraphicsAttribute { item: next(), action: next(), value: next() }
 }
 
 pub(crate) fn osc_query(params: &[&[u8]], program_status: bool, bel: bool) -> Option<TerminalQuery> {

@@ -4332,6 +4332,27 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     }
 }
 
+/// The colour registers an XTSMGRAPHICS reports, tmux's
+/// `SIXEL_COLOUR_REGISTERS` (tmux.h:4254 in tmux 3.8).
+const SIXEL_COLOUR_REGISTERS: u32 = 1024;
+
+/// The reply to an XTSMGRAPHICS. tmux answers it itself, without asking the
+/// outer terminal (`input_csi_dispatch_sm_graphics`, input.c:2103 in tmux
+/// 3.8): reading, resetting or reading the maximum of the colour registers
+/// succeeds, and anything else is a failure carrying the value asked.
+///
+/// `sixel` says whether the pane's programs were told sixel is there. A pane
+/// on a console host that answers DA1 itself, as the inbox one does, gets a
+/// list without sixel and its sixel is dropped before psmux sees it, so there
+/// every one is a failure rather than a limit nothing could use.
+fn graphics_reply(item: i32, action: i32, value: i32, sixel: bool) -> String {
+    if sixel && item == 1 && matches!(action, 1 | 2 | 4) {
+        format!("\x1b[?{item};0;{SIXEL_COLOUR_REGISTERS}S")
+    } else {
+        format!("\x1b[?{item};3;{value}S")
+    }
+}
+
 /// Issue #841: the XTWINOPS size reports, in the form tmux's
 /// `input_csi_dispatch_winops` (input.c:2163-2186 in tmux 3.8) writes them.
 ///
@@ -4424,6 +4445,8 @@ pub(crate) struct PaneReply {
 /// attach fails, and only put the answer off.  The child cannot ask anything
 /// before it is connected, so its own DA1 is never the first one, and the
 /// inbox console host answers a program's DA1 itself and never passes one on.
+/// So once it is no longer open, this pane's programs get psmux's DA1 reply,
+/// which lists sixel, and an XTSMGRAPHICS is answered to match.
 ///
 /// The one reply nobody asked for is the Copilot CLI colour burst's (issue
 /// #473): it asks `?996n`, OSC 10, OSC 11 and OSC 4 for 0 to 15 together and
@@ -4477,6 +4500,11 @@ pub(crate) fn pane_replies(
                     text.map(|text| PaneReply { text, fallback: ReplyFallback::Lost("OSC 4"), console_host: false })
                 }
             }
+            DeviceQuery::GraphicsAttribute { item, action, value } => Some(PaneReply {
+                text: graphics_reply(item, action, value, !*console_host_da1_open),
+                fallback: ReplyFallback::Pipe,
+                console_host: false,
+            }),
             _ => {
                 let console_host = q == DeviceQuery::Da1 && std::mem::take(console_host_da1_open);
                 Some(device_reply(q, st))
