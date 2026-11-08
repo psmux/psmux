@@ -42,7 +42,7 @@ function Write-Info {
 # Helpers
 # ---------------------------------------------------------------------------
 
-$script:PsmuxDir = Join-Path $env:USERPROFILE ".psmux"
+$script:PsmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { Join-Path $env:USERPROFILE ".psmux" }
 
 # Invoke psmux with the rbChurn namespace ALWAYS first. Returns a PSCustomObject
 # with ExitCode + Output so callers can assert on exact outcomes.
@@ -52,7 +52,7 @@ function Invoke-Psmux {
     # common -Debug switch, silently making `new-session -d` an ATTACHING
     # new-session that never returns under output capture. The automatic
     # $args of a simple function passes every token through verbatim.
-    $out = & psmux -L rbChurn @args 2>&1
+    $out = & $script:Exe -L rbChurn @args 2>&1
     $code = $LASTEXITCODE
     [PSCustomObject]@{
         ExitCode = $code
@@ -60,14 +60,30 @@ function Invoke-Psmux {
     }
 }
 
-# Count of live psmux processes (observation only; we NEVER kill these here).
-function Get-PsmuxProcCount {
+# Count of live psmux processes of the rbChurn namespace (observation only; we
+# NEVER kill these here). Every server of the namespace, the __warm__ standby
+# included, runs with `-L rbChurn` on its command line. Counting every
+# psmux.exe on the machine instead made the verdict depend on whatever else
+# was running: another program's psmux session that started mid run (a
+# server and its attached client) read as "process leak (final=2 >
+# baseline=0)" although kill-server had ended every rbChurn process.
+# PSMUX_TEST_BIN runs the suite against another (renamed) binary.
+$script:Exe = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { 'psmux' }
+$script:ExeImage = if ($env:PSMUX_TEST_BIN) { [IO.Path]::GetFileName($env:PSMUX_TEST_BIN) } else { 'psmux.exe' }
+function Get-PsmuxProcs {
     try {
-        $p = Get-Process psmux -ErrorAction SilentlyContinue
-        if ($null -eq $p) { return 0 }
-        return @($p).Count
+        $all = Get-CimInstance Win32_Process -Filter "Name='$($script:ExeImage)'" -ErrorAction SilentlyContinue
+        return @($all | Where-Object { $_.CommandLine -match '(^|\s)-L\s+"?rbChurn"?(\s|$)' })
     } catch {
-        return 0
+        return @()
+    }
+}
+function Get-PsmuxProcCount { return @(Get-PsmuxProcs).Count }
+# What a leak verdict names, so a failure says which process stayed.
+function Write-ProcList {
+    param([string]$Tag)
+    foreach ($p in (Get-PsmuxProcs)) {
+        Write-Info ("$Tag pid={0} parent={1} cmd={2}" -f $p.ProcessId, $p.ParentProcessId, $p.CommandLine)
     }
 }
 
@@ -467,6 +483,7 @@ try {
         Write-Pass "LEAK VERDICT: no process leak (final=$finalProcs <= baseline=$script:BaselineProcCount)"
     } else {
         Write-Fail "LEAK VERDICT: process leak detected (final=$finalProcs > baseline=$script:BaselineProcCount)"
+        Write-ProcList 'left after kill-server:'
     }
 
     # Port-file-leak verdict: after kill-server, rbChurn__*.port files must
@@ -483,7 +500,7 @@ try {
     # still lands here and tears the server down.
     # ---------------------------------------------------------------------
     Write-Host "--- Cleanup: kill rbChurn server ---" -ForegroundColor Yellow
-    & psmux -L rbChurn kill-server 2>&1 | Out-Null
+    & $script:Exe -L rbChurn kill-server 2>&1 | Out-Null
 }
 
 Write-Host ""
