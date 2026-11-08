@@ -129,6 +129,10 @@ path = "tests/line_drawing_charset.rs"
 name = "title_semicolon_stack"
 path = "tests/title_semicolon_stack.rs"
 
+[[test]]
+name = "scroll_on_clear"
+path = "tests/scroll_on_clear.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 
