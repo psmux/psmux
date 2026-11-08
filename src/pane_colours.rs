@@ -121,14 +121,18 @@ pub(crate) fn palette_of(array: &OptionArray) -> Option<vt100::ColourPalette> {
 /// handed to a new parser, so a parser that replaced it (respawn, a dead
 /// pane's restart) never compares equal by address.
 #[derive(Debug)]
-struct Applied {
+pub(crate) struct Applied {
     window: usize,
     parser: std::sync::Weak<std::sync::Mutex<vt100::Parser>>,
     generation: u64,
 }
 
 impl Applied {
-    fn is(&self, window: usize, parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, generation: u64) -> bool {
+    pub(crate) fn new(window: usize, parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, generation: u64) -> Self {
+        Self { window, parser: std::sync::Arc::downgrade(parser), generation }
+    }
+
+    pub(crate) fn is(&self, window: usize, parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, generation: u64) -> bool {
         self.window == window && self.generation == generation && std::ptr::eq(self.parser.as_ptr(), std::sync::Arc::as_ptr(parser))
     }
 }
@@ -180,7 +184,7 @@ fn walk<'a>(node: &'a Node, visit: &mut impl FnMut(&'a Pane)) {
     }
 }
 
-fn window_panes<'a>(window: &'a Window, mut visit: impl FnMut(&'a Pane)) {
+pub(crate) fn window_panes<'a>(window: &'a Window, mut visit: impl FnMut(&'a Pane)) {
     walk(&window.root, &mut visit);
     for float in &window.floating {
         visit(&float.pane);
@@ -414,7 +418,7 @@ pub(crate) fn reconcile(app: &mut AppState) -> bool {
             if tables.applied.get(&pane.id).is_some_and(|a| a.is(window.id, live, generation)) {
                 return;
             }
-            let now = Applied { window: window.id, parser: std::sync::Arc::downgrade(live), generation };
+            let now = Applied::new(window.id, live, generation);
             let palette = palette_of(effective(tables, window.id, pane.id).0);
             for term in pane.each_term() {
                 if let Ok(mut parser) = term.lock() {

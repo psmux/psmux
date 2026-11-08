@@ -511,6 +511,8 @@ fn run(ns: Option<String>) -> ! {
                 if crate::pane_colours::reconcile(app) {
                     lp.state_dirty = true;
                 }
+                // scroll-on-clear: the same, and nothing to redraw.
+                crate::scroll_on_clear::reconcile(app);
             })
             .into_iter()
             .map(|sid| (sid, "panic")),

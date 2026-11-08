@@ -646,6 +646,26 @@ impl Grid {
         }
     }
 
+    /// Clear the screen with what it showed going into history first, as
+    /// tmux's `grid_view_clear_history` does (grid-view.c at tag 3.8): rows
+    /// down to the last one holding text, blank ones between them included,
+    /// and nothing for a screen with no text. The scroll region plays no part.
+    /// The work is at most the height of the screen.
+    pub fn erase_all_into_history(&mut self, attrs: crate::attrs::Attrs) {
+        if let Some(last) = self.rows.iter().rposition(|row| !row.is_blank()) {
+            let moved: Vec<_> = self.rows.drain(..=last).collect();
+            for row in moved {
+                self.push_row_to_scrollback(row);
+            }
+            let cols = self.size.cols;
+            self.rows.extend(
+                std::iter::repeat_with(|| crate::row::Row::new(cols))
+                    .take(last + 1),
+            );
+        }
+        self.erase_all(attrs);
+    }
+
     pub fn erase_all_forward(&mut self, attrs: crate::attrs::Attrs) {
         let pos = self.pos;
         for row in self.drawing_rows_mut().skip(usize::from(pos.row) + 1) {

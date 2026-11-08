@@ -196,9 +196,9 @@ of them work against psmux, and the whole sequence is pinned by an end to end te
 | `set-option -p -t %N remain-on-exit failed` | Pane scoped options. `-p` is the tmux pane scope flag, not a target flag. `remain-on-exit` follows tmux semantics per pane (`on`, `off`, `failed`, `key`, `failed-key`): a teammate that crashes stays visible with its error, a teammate that exits cleanly closes its pane, and `remain-on-exit-format` sets the line written on the dead pane |
 | `show-options -p -t %N` | Lists the pane's options as `name value` lines. The `-v` flag and an option name filter are not yet applied at pane scope (still open under #580), so parse the `name value` shape |
 
-The pane scoped catalog options are `remain-on-exit` and `remain-on-exit-format`, beside psmux's own `@mouse-force` (see
+The pane scoped catalog options are `remain-on-exit`, `remain-on-exit-format` and `scroll-on-clear`, beside psmux's own `@mouse-force` (see
 below) and any `@user` option. Any other name is refused with
-`pane-scoped option 'x' is not supported (supported: remain-on-exit, remain-on-exit-format, @mouse-force, any @user option)` at exit 1
+`pane-scoped option 'x' is not supported (supported: remain-on-exit, remain-on-exit-format, scroll-on-clear, @mouse-force, any @user option)` at exit 1
 rather than stored as a silent no-op, and a `%id` that does not exist answers
 `can't find pane: %N`.
 

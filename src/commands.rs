@@ -4057,6 +4057,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         fresh.screen_mut().set_extended_keys_mode(parser.screen().extended_keys_mode());
                         // The pane's options are unchanged too (#980).
                         fresh.screen_mut().set_pane_colours(parser.screen().pane_colours().cloned());
+                        fresh.screen_mut().set_scroll_on_clear(parser.screen().scroll_on_clear());
                         *parser = fresh;
                     }
                 }
