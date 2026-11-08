@@ -18,7 +18,11 @@
 # `#{pane_title}` is read. Every expectation is what tmux 3.8 (`-f /dev/null`,
 # WSL) showed for the same bytes, with allow-set-title on as in tmux. A pane's title starts as the host name in
 # both (window.c:1479-1480), so restoring the title saved before any was set
-# gives the host name back.
+# gives the host name back. In psmux the console host may send a title of
+# its own before the program writes anything (an elevated host sends
+# `Administrator: <path to pwsh.exe>`), and that is then the pane's first
+# title. So first_title expects the title of a pane whose program writes
+# nothing (first_base): the host name, or the console host's own title.
 #
 # [1] the inbox conhost; [2] OpenConsole (PSMUX_CONPTY_DIR), when
 # PSMUX_TEST_CONPTY_DIR names a folder holding conpty.dll, skipped otherwise.
@@ -66,8 +70,8 @@ function Title($t) { "${E}]2;$t$BEL" }
 $push = "${E}[22;0t"
 $pop = "${E}[23;0t"
 $cap = (-join (0..10 | ForEach-Object { (Title "t$_") + $push })) + (Title 't11') + ($pop * 11)
-# name, the text written, the pane title tmux 3.8 showed ('HOST': the
-# pane's first title, the host name), and for a save or restore written in
+# name, the text written, the pane title tmux 3.8 showed ('FIRST': the
+# pane's first title, read from first_base; 'BASE': not checked), and for a save or restore written in
 # one go the title on the inbox conhost route, where the order changes (see
 # the top). $SEP splits the text into writes 700 ms apart.
 $SEP = [string][char]1
@@ -88,7 +92,10 @@ $cases = @(
     # Ten saved at most, the oldest dropped.
     @('cap_ten',         $cap, 't1', 't11'),
     # Saved before any title was set: back to the pane's first title.
-    @('first_title',     ($push + (Title 'app') + $pop), 'HOST', 'app'),
+    @('first_title',     ($push + (Title 'app') + $pop), 'FIRST', 'app'),
+    # Writes nothing: its title is the pane's first title that first_title
+    # is to get back. Not checked itself.
+    @('first_base',      '', 'BASE'),
     # Written apart, as programs do: the same on both routes.
     @('sep_push_pop',    ((Title 'outer') + $SEP + $push + $SEP + (Title 'inner') + $SEP + $pop), 'outer'),
     @('sep_two_deep',    ((Title 'a') + $SEP + $push + $SEP + (Title 'b') + $SEP + $push + $SEP + (Title 'c') + $SEP + $pop), 'b'),
@@ -135,10 +142,6 @@ function Run-Cases($route) {
     $script:NS = "tss_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
     P new-session -d -s s -x 60 -y 10 | Out-Null
     Start-Sleep -Milliseconds 2000
-    # A pane's first title is the host name (the first window's shell may
-    # set its own, so the name is read from #{host}).
-    $hostTitle = "$(P display -p '#{host}')"
-    Check "${route}: the host name is known" ($hostTitle -ne '') $true
     foreach ($c in $cases) {
         P new-window -d -t s -n $c[0] "& '$pwsh' -NoProfile -File $fwd/show.ps1 $fwd/p/$($c[0]).bin" | Out-Null
     }
@@ -152,9 +155,14 @@ function Run-Cases($route) {
     # propagate_osc_titles); tmux sets it as the OSC arrives. list-windows
     # copies them here, so the reads below see the program's titles.
     P list-windows | Out-Null
+    # The pane's first title: the host name, or the console host's own
+    # title when it sends one before the program writes (an elevated host).
+    $firstTitle = "$(P display -p -t 's:first_base' '#{pane_title}')"
+    Check "${route}: the first title is known ('$firstTitle')" ($firstTitle -ne '' -and $firstTitle -cne 'app') $true
     foreach ($c in $cases) {
         $want = if ($route -eq 'inbox conhost' -and $c.Count -gt 3) { $c[3] } else { $c[2] }
-        if ($want -ceq 'HOST') { $want = $hostTitle }
+        if ($want -ceq 'BASE') { continue }
+        if ($want -ceq 'FIRST') { $want = $firstTitle }
         Check "${route}: $($c[0]) pane_title" "$(P display -p -t "s:$($c[0])" '#{pane_title}')" $want
     }
     # send-keys -R is an RIS on the pane's parser, so the saved title stays:
