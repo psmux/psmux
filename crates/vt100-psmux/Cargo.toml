@@ -133,6 +133,10 @@ path = "tests/title_semicolon_stack.rs"
 name = "progress_forms"
 path = "tests/progress_forms.rs"
 
+[[test]]
+name = "scroll_on_clear"
+path = "tests/scroll_on_clear.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 
