@@ -114,6 +114,10 @@ name = "issue962_sgr_bold_dim_overline"
 path = "tests/issue962_sgr_bold_dim_overline.rs"
 
 [[test]]
+name = "passthrough_allowed"
+path = "tests/passthrough_allowed.rs"
+
+[[test]]
 name = "passthrough_discard"
 path = "tests/passthrough_discard.rs"
 

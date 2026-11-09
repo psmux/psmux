@@ -29,6 +29,29 @@ pub fn input_buffer_size() -> usize {
     INPUT_BUFFER_SIZE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether `allow-passthrough` is `on` or `all`. Off (the default, as in
+/// tmux) drops the body of a `DCS tmux;` passthrough unparsed, as tmux does
+/// (input.c:2672-2674). On, the parser reads the body as it always did here:
+/// vte ends the DCS at the first doubled ESC and acts on the inner sequence,
+/// so a wrapped OSC 52 still copies. tmux would instead write the body raw to
+/// the outer terminal; see docs/design/allow-passthrough-forwarding.md. One
+/// per process, like `input-buffer-size`, so a change applies to every pane
+/// at once.
+static ALLOW_PASSTHROUGH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record the `allow-passthrough` server option for every pane parser in this
+/// process: `true` for `on` and `all`, `false` for `off`.
+pub fn set_allow_passthrough(on: bool) {
+    ALLOW_PASSTHROUGH.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The value last given to [`set_allow_passthrough`].
+#[must_use]
+pub fn allow_passthrough() -> bool {
+    ALLOW_PASSTHROUGH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     pub screen: crate::screen::Screen,
     pub callbacks: CB,
@@ -633,8 +656,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     ) {
         // `ESC P tmux;`: the final byte is the `t`, `mux;` comes to `put`.
         // tmux looks only at the data, whatever came before it
-        // (input_dcs_dispatch, input.c:2675).
-        self.tmux_prefix = u8::from(action == 't');
+        // (input_dcs_dispatch, input.c:2675). With allow-passthrough on the
+        // body is parsed as before, so nothing is matched.
+        self.tmux_prefix = u8::from(action == 't' && !allow_passthrough());
         // Sixel is DCS with final byte 'q' and NO intermediates.  DECRQSS also
         // ends in 'q' but carries the '$' (0x24) intermediate, so gating on an
         // empty intermediates slice keeps DECRQSS (and all other DCS) untouched.

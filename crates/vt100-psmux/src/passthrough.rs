@@ -1,5 +1,6 @@
 //! The body of a tmux passthrough, `ESC P tmux; ... ESC \`, which the pane
-//! parser must not act on.
+//! parser must not act on while `allow-passthrough` is off (with it on or
+//! all the body is parsed as it always was here, see `allow_passthrough`).
 //!
 //! tmux keeps the whole DCS in its input buffer and, at the ST, either drops
 //! it (`allow-passthrough off`) or writes the part after `tmux;` to the outer

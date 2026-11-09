@@ -389,6 +389,16 @@ The state is one digit, 0 hidden, 1 normal, 2 error, 3 indeterminate, 4 paused. 
 
 A few commands intentionally behave differently from upstream tmux. These are deliberate choices, not bugs.
 
+### `allow-passthrough`
+
+A program that sees `TMUX` set may wrap a sequence meant for the outer terminal in a tmux passthrough, `ESC P tmux; ... ESC \`, with every inner ESC doubled. Claude Code does this for its OSC 52 copy, after writing the same copy unwrapped.
+
+- **`off` (the default) matches tmux.** The whole passthrough is dropped and nothing inside it is acted on, as in tmux (`input_dcs_dispatch`, input.c:2672). A wrapped OSC 52 does not copy, a wrapped title or clear screen does not apply. An unwrapped OSC 52 still copies under the `set-clipboard` rules.
+- **`on` and `all` differ from tmux.** tmux writes the wrapped sequence raw to the outer terminal of every client showing the pane (`on`: visible panes only, `all`: any pane). psmux does not forward it yet: it reads the wrapped sequence as if the pane had written it, so a wrapped OSC 52 copies through `set-clipboard` and any other wrapped sequence is read the same way. This keeps tools that only write the wrapped form working when you opt in. Raw forwarding is a later step, described in [design/allow-passthrough-forwarding.md](design/allow-passthrough-forwarding.md).
+- psmux keeps the option per server, not per window or pane as tmux does, and a change with `set -g allow-passthrough` applies to panes that already exist.
+- The inbox Windows console host drops the closing `ESC \` of every passthrough (#1026). psmux ends such a passthrough at the program's next escape sequence, or at text that follows the wrapped sequence's BEL, so the output after it is never swallowed. A passthrough still open after 5 seconds is ended at the next output, as tmux's parser returns to ground after 5 seconds.
+- Control mode clients (`-CC`) get the wrapped sequence unwrapped in `%output` whatever the option says (#1026), since a control client is the outer terminal.
+
 ### `kill-server` with Multiple Sockets
 
 In upstream tmux, each `-L <name>` socket is a fully separate server, and `kill-server` only ever affects the socket it was invoked on. psmux matches that: **a bare `kill-server` ends the default namespace and leaves every `-L` namespace running**, and `-L <name> kill-server` ends that one namespace only.

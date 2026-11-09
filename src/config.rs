@@ -2486,7 +2486,12 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
             if let Ok(n) = value.parse::<usize>() { app.status_right_length = n; }
         }
         "window-size" => { app.window_size = value.to_string(); }
-        "allow-passthrough" => { app.allow_passthrough = value.to_string(); }
+        "allow-passthrough" => {
+            app.allow_passthrough = value.to_string();
+            // Every pane parser reads it from the next DCS on, so a change
+            // applies to panes that already exist.
+            vt100::set_allow_passthrough(matches!(value, "on" | "all"));
+        }
         "copy-command" => { app.copy_command = value.to_string(); }
         "set-clipboard" => { app.set_clipboard = value.to_string(); }
         "env-shim" => {
