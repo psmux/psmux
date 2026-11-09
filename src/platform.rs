@@ -2893,10 +2893,19 @@ pub mod mouse_inject {
             }
         }
 
-        if crate::platform::process_info::foreground_is_vt_bridge(child_pid) {
-            log(&format!("vt-bridge foreground under pid={}: deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
-            strip_processed_input(child_pid, &log);
-            return false;
+        // Issue #1024 follow up: ancestry alone does not decide.  A bridge on a
+        // PRIVATE console (an `ssh -N` tunnel a TUI or tool started with its
+        // own console) is out of the broadcast's reach, and stripping
+        // PROCESSED_INPUT for it left a cooked pane with no interrupt at all
+        // (measured: `for /l` in cmd, 0 of 6 interrupted).  When the bridge
+        // is in the tree, the attached stage below reads the console's real
+        // membership in the same attach the strip would have cost, and skips
+        // the broadcast for both lethal shapes (bridge on the console, or a
+        // Cygwin/MSYS shell on it).
+        let bridge_in_tree = crate::platform::process_info::foreground_is_vt_bridge(child_pid)
+            || crate::platform::process_info::has_vt_bridge_descendant(child_pid);
+        if bridge_in_tree {
+            log(&format!("vt-bridge in the tree under pid={}: console membership decides", child_pid));
         }
 
         // Issue #579, third guard: a bridge ANYWHERE in the pane's process
@@ -2908,12 +2917,8 @@ pub mod mouse_inject {
         // keep their PPID links intact, so the descendant BFS is reliable
         // exactly where the leaf heuristic is not.  A bridge in the tree
         // forwards the raw 0x03 into its guest itself; the broadcast is
-        // redundant for it and fatal to it.
-        if crate::platform::process_info::has_vt_bridge_descendant(child_pid) {
-            log(&format!("vt-bridge descendant under pid={}: deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
-            strip_processed_input(child_pid, &log);
-            return false;
-        }
+        // redundant for it and fatal to it when it can reach it.  That BFS is
+        // part of `bridge_in_tree` above; the attached stage decides.
 
         // Issue #579, boot-window guard (the reproduced kill): while the WSL
         // VM boots (~1-2s cold), the live wsl.exe processes are parented by
