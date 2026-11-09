@@ -3,6 +3,7 @@
 pub struct Parser<CB: crate::callbacks::Callbacks = ()> {
     parser: vte::Parser,
     screen: crate::perform::WrappedScreen<CB>,
+    passthrough: crate::passthrough::Passthrough,
 }
 
 impl Parser {
@@ -17,6 +18,7 @@ impl Parser {
                 cols,
                 scrollback_len,
             ),
+            passthrough: crate::passthrough::Passthrough::default(),
         }
     }
 }
@@ -40,6 +42,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
                 scrollback_len,
                 callbacks,
             ),
+            passthrough: crate::passthrough::Passthrough::default(),
         }
     }
 
@@ -61,6 +64,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         Self {
             parser: vte::Parser::new(),
             screen: crate::perform::WrappedScreen::from_screen(screen, CB::default()),
+            passthrough: crate::passthrough::Passthrough::default(),
         }
     }
 
@@ -83,7 +87,33 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     /// Processes the contents of the given byte string, and updates the
     /// in-memory terminal state.
     pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.screen, bytes);
+        let mut rest = bytes;
+        if self.passthrough.expired() {
+            self.passthrough.end();
+            self.parser.advance(&mut self.screen, b"\x1b\\");
+        }
+        loop {
+            if self.passthrough.active() {
+                match self.passthrough.skip(rest) {
+                    crate::passthrough::Skip::More => return,
+                    crate::passthrough::Skip::End { resume, close } => {
+                        self.parser.advance(&mut self.screen, close);
+                        rest = &rest[resume..];
+                    }
+                }
+            }
+            if rest.is_empty() {
+                return;
+            }
+            // Stops right after an `ESC P tmux;`, so its body is skipped
+            // above instead of parsed (see `passthrough`).
+            let n = self.parser.advance_until_terminated(&mut self.screen, rest);
+            rest = &rest[n..];
+            if !self.screen.take_tmux_passthrough() {
+                return;
+            }
+            self.passthrough.begin();
+        }
     }
 
     /// Returns a reference to a [`Screen`](crate::Screen) object containing

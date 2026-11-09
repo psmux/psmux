@@ -60,6 +60,7 @@ mod grid;
 pub mod image;
 mod palette;
 mod parser;
+mod passthrough;
 mod perform;
 mod program_status;
 mod queries;

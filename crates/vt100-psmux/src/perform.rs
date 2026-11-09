@@ -46,6 +46,10 @@ pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     /// and the dispatchers' ends, :1383, :1459, :1895, :2549, :2694 at tag
     /// 3.8).
     last_printed: Option<char>,
+    /// How much of `tmux;` a DCS has matched: 1 after the final `t`, 5 once
+    /// `mux;` followed, which stops vte (`terminated`) so the parser can skip
+    /// the passthrough body (see `passthrough`). 0 otherwise.
+    tmux_prefix: u8,
 }
 
 impl WrappedScreen<()> {
@@ -70,6 +74,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             dcs_active: false,
             dcs_buf: Vec::new(),
             last_printed: None,
+            tmux_prefix: 0,
         }
     }
 
@@ -82,7 +87,19 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             dcs_active: false,
             dcs_buf: Vec::new(),
             last_printed: None,
+            tmux_prefix: 0,
         }
+    }
+}
+
+impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
+    /// True once, right after a DCS turned out to be `ESC P tmux;`.
+    pub(crate) fn take_tmux_passthrough(&mut self) -> bool {
+        let matched = self.tmux_prefix == 5;
+        if matched {
+            self.tmux_prefix = 0;
+        }
+        matched
     }
 }
 
@@ -609,6 +626,10 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         _ignore: bool,
         action: char,
     ) {
+        // `ESC P tmux;`: the final byte is the `t`, `mux;` comes to `put`.
+        // tmux looks only at the data, whatever came before it
+        // (input_dcs_dispatch, input.c:2675).
+        self.tmux_prefix = u8::from(action == 't');
         // Sixel is DCS with final byte 'q' and NO intermediates.  DECRQSS also
         // ends in 'q' but carries the '$' (0x24) intermediate, so gating on an
         // empty intermediates slice keeps DECRQSS (and all other DCS) untouched.
@@ -638,7 +659,18 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         // Any other DCS: no-op (do NOT set active, do NOT route anywhere).
     }
 
+    fn terminated(&self) -> bool {
+        self.tmux_prefix == 5
+    }
+
     fn put(&mut self, byte: u8) {
+        if (1..5).contains(&self.tmux_prefix) {
+            self.tmux_prefix = if b"mux;"[usize::from(self.tmux_prefix - 1)] == byte {
+                self.tmux_prefix + 1
+            } else {
+                0
+            };
+        }
         if self.dcs_active {
             if self.dcs_buf.len() >= input_buffer_size() {
                 self.dcs_active = false;
@@ -651,6 +683,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
     fn unhook(&mut self) {
         self.last_printed = None;
+        self.tmux_prefix = 0;
         if !self.dcs_active {
             return;
         }
