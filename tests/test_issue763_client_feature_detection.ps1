@@ -2,8 +2,8 @@
 param(
     [string]$Exe = $env:PSMUX_EXE,
     [string]$ServerExe,
-    [string]$ExpectedConEmuFeatures = '256,RGB,title',
-    [string]$ExpectedClassicFeatures = '256,RGB,title'
+    [string]$ExpectedConEmuFeatures = '256,RGB,title,progressbar',
+    [string]$ExpectedClassicFeatures = '256,RGB,title,progressbar'
 )
 $ErrorActionPreference = 'Stop'
 if ($env:PSMUX_DISPOSABLE_GUEST -ne '1' -and $env:PSMUX_TEST_SANDBOX -ne '1' -and $env:GITHUB_ACTIONS -ne 'true') {
@@ -107,7 +107,7 @@ try {
                 $expected = switch ($profile) {
                     'conemu' { $ExpectedConEmuFeatures }
                     'classic' { $ExpectedClassicFeatures }
-                    default { '256,RGB,hyperlinks,title' }
+                    default { '256,RGB,hyperlinks,title,progressbar' }
                 }
                 $row = (Px display-message -t work -c "/dev/pts/$($client.Id)" -p '#{client_pid}|#{client_termfeatures}') -join ''
                 Equal "$mode $profile client report" "$($client.Id)|$expected" $row
@@ -115,7 +115,7 @@ try {
             # Later attaches must not overwrite the first client's report.
             Wait-ClientCount 6
             $first = (Px display-message -t work -c "/dev/pts/$($clients[0].Id)" -p '#{client_pid}|#{client_termfeatures}') -join ''
-            Equal "$mode first client's report survives later attaches" "$($clients[0].Id)|256,RGB,hyperlinks,title" $first
+            Equal "$mode first client's report survives later attaches" "$($clients[0].Id)|256,RGB,hyperlinks,title,progressbar" $first
             foreach ($client in $clients) {
                 if ($mode -eq 'per-session') {
                     Px detach-client -t "/dev/pts/$($client.Id)" | Out-Null

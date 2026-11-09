@@ -55,7 +55,8 @@ function Fresh([string[]]$config = @()) {
     Start-Sleep -Milliseconds 500
 }
 
-$DEFAULT = @('xterm*:clipboard:ccolour:cstyle:focus:title', 'screen*:title', 'rxvt*:ignorefkeys')
+# tmux 3.8's three elements, and psmux's own for the progress indicator.
+$DEFAULT = @('xterm*:clipboard:ccolour:cstyle:focus:title', 'screen*:title', 'rxvt*:ignorefkeys', '*:progressbar')
 function Lines([string[]]$values, [int]$from = 0) {
     $i = $from
     ($values | ForEach-Object { "terminal-features[$i] $_"; $i++ }) -join "`n"
@@ -66,7 +67,7 @@ Write-Host "  Binary: $PSMUX"
 Write-Host "  $((& $PSMUX -V) -join ' ')"
 
 try {
-    Write-Host "`n[1] tmux 3.8's default, one line per element" -ForegroundColor Yellow
+    Write-Host "`n[1] tmux 3.8's default and *:progressbar, one line per element" -ForegroundColor Yellow
     Fresh
     Check "show -s" (P show -s terminal-features) (Lines $DEFAULT)
     Check "show -sv" (P show -sv terminal-features) ($DEFAULT -join "`n")
@@ -78,12 +79,12 @@ try {
 
     Write-Host "`n[2] -a, an element, -u of one element" -ForegroundColor Yellow
     P set -as terminal-features ',xterm*:overline' | Out-Null
-    Check "-as ',xterm*:overline' adds [3]" (P show -s terminal-features) (Lines ($DEFAULT + 'xterm*:overline'))
+    Check "-as ',xterm*:overline' adds [4]" (P show -s terminal-features) (Lines ($DEFAULT + 'xterm*:overline'))
     P set -s 'terminal-features[7]' 'foo:bar' | Out-Null
     Check "show [7]" (P show -s 'terminal-features[7]') "terminal-features[7] foo:bar"
     Check "show [6], which is not set" (P show -s 'terminal-features[6]') "terminal-features[6] ''"
     P set -su 'terminal-features[0]' | Out-Null
-    Check "-su [0] removes only [0]" (P show -s terminal-features) "$(Lines ($DEFAULT[1..2] + 'xterm*:overline') 1)`nterminal-features[7] foo:bar"
+    Check "-su [0] removes only [0]" (P show -s terminal-features) "$(Lines ($DEFAULT[1..3] + 'xterm*:overline') 1)`nterminal-features[7] foo:bar"
 
     Write-Host "`n[3] A whole value, -u of the array" -ForegroundColor Yellow
     P set -s terminal-features 'a,b c,,d' | Out-Null
@@ -109,7 +110,7 @@ try {
 
     Write-Host "`n[5] The config file gives the same array" -ForegroundColor Yellow
     Fresh @("set -as terminal-features ',xterm*:overline'", "set -s 'terminal-features[9]' 'foo:bar'", "set -su 'terminal-features[1]'")
-    Check "config: -as, [9] and -su [1]" (P show -s terminal-features) "terminal-features[0] $($DEFAULT[0])`nterminal-features[2] $($DEFAULT[2])`nterminal-features[3] xterm*:overline`nterminal-features[9] foo:bar"
+    Check "config: -as, [9] and -su [1]" (P show -s terminal-features) "terminal-features[0] $($DEFAULT[0])`nterminal-features[2] $($DEFAULT[2])`nterminal-features[3] $($DEFAULT[3])`nterminal-features[4] xterm*:overline`nterminal-features[9] foo:bar"
 }
 catch {
     Write-Fail "exception: $_"
