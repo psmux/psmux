@@ -81,3 +81,4 @@ try {
     Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
 }
 if ($failed) { throw "$failed mouse transport cases failed" }
+exit 0
