@@ -624,6 +624,7 @@ pub(crate) fn expand_status_formats(
                     .collect();
                 (!keys.is_empty()).then_some(keys)
             },
+            status_keys_vi: (app.user_options.get("status-keys").map(String::as_str) == Some("vi")).then_some(true),
         },
         status_format_json: status_format_json(app),
         // set-titles-string was expanded outside the guard on BOTH paths, so it

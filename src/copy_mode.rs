@@ -2250,6 +2250,15 @@ pub fn prompt_edit(
         }
         "up" | "c-p" => PromptEdit::HistoryUp,
         "down" | "c-n" => PromptEdit::HistoryDown,
+        // The vi command mode word motions (status-keys vi): w and W to the
+        // start of the next word, e and E to the end of this one, B to the
+        // start of the word before. The capital ones split on spaces only
+        // (prompt.c:1392 to :1407 at tag 3.8).
+        "vi-w" => { b = len - prompt_forward_word_vi(&chars, idx, separators); PromptEdit::Edited }
+        "vi-bigw" => { b = len - prompt_forward_word_vi(&chars, idx, ""); PromptEdit::Edited }
+        "vi-e" => { b = len - prompt_end_word(&chars, idx, separators); PromptEdit::Edited }
+        "vi-bige" => { b = len - prompt_end_word(&chars, idx, ""); PromptEdit::Edited }
+        "vi-bigb" => { b = len - prompt_backward_word(&chars, idx, ""); PromptEdit::Edited }
         _ => PromptEdit::Other,
     };
     *input = chars.into_iter().collect();
@@ -2289,6 +2298,60 @@ fn prompt_forward_word(chars: &[char], idx: usize, separators: &str) -> usize {
             return idx;
         }
     }
+}
+
+/// Where vi's w goes from character index `idx`: to the end of the word as
+/// M-f does, then on over the spaces to the start of the next word
+/// (prompt_forward_word with vi set, prompt.c:1066 to :1104 at tag 3.8).
+fn prompt_forward_word_vi(chars: &[char], idx: usize, separators: &str) -> usize {
+    let size = chars.len();
+    let mut idx = idx.min(size);
+    if idx == size {
+        return idx;
+    }
+    let word_is_separators = prompt_in_list(separators, chars[idx]) && !prompt_space(chars[idx]);
+    loop {
+        idx += 1;
+        if idx == size {
+            return idx;
+        }
+        if prompt_space(chars[idx]) {
+            while idx != size && prompt_space(chars[idx]) {
+                idx += 1;
+            }
+            return idx;
+        }
+        if word_is_separators != prompt_in_list(separators, chars[idx]) {
+            return idx;
+        }
+    }
+}
+
+/// Where vi's e goes from character index `idx`: the last character of the
+/// next word end after the cursor (prompt_end_word, prompt.c:1108 to :1140).
+fn prompt_end_word(chars: &[char], idx: usize, separators: &str) -> usize {
+    let size = chars.len();
+    let mut idx = idx.min(size);
+    if idx == size {
+        return idx;
+    }
+    loop {
+        idx += 1;
+        if idx == size {
+            return idx;
+        }
+        if !prompt_space(chars[idx]) {
+            break;
+        }
+    }
+    let word_is_separators = prompt_in_list(separators, chars[idx]);
+    loop {
+        idx += 1;
+        if idx == size || prompt_space(chars[idx]) || word_is_separators != prompt_in_list(separators, chars[idx]) {
+            break;
+        }
+    }
+    idx - 1
 }
 
 /// Where M-b, and the start of what C-w cuts, is from character index `idx`:

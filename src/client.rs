@@ -3445,6 +3445,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // frame; before the first one no prompt can be open.
     let mut word_separators = String::new();
     let mut command_input = false;
+    // `status-keys vi`: whether the command prompt is in vi command mode,
+    // tmux's PROMPT_COMMANDMODE (prompt.c:819 at tag 3.8). Every prompt
+    // opens in insert mode. The option arrives with every frame.
+    let mut prompt_vi_command = false;
+    let mut status_keys_vi = false;
     let mut command_buf = String::new();
     // Characters from the END of `command_buf`, the way the shared prompt
     // editor and the rename overlay count (`copy_mode::prompt_edit`).
@@ -3490,6 +3495,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             let key: bool = !single && !numeric && $key;
             let search: bool = $search;
             command_input = true;
+            prompt_vi_command = false;
             command_buf = initial;
             command_back = 0;
             prompt_saved = None;
@@ -5317,6 +5323,33 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                         }
+                        // `status-keys vi` at the command prompt: Escape enters
+                        // command mode instead of closing the prompt, and there
+                        // a key is a vi command, as tmux's prompt_translate_key
+                        // turns it into an editing key (prompt.c:784 to :930
+                        // at tag 3.8). What it becomes goes on through the
+                        // prompt's arms below like any key typed there.
+                        if command_input && status_keys_vi && !command_key_answer && !command_single && !command_numeric {
+                            let was = prompt_vi_command;
+                            match vi_prompt_key(&mut prompt_vi_command, key.code, key.modifiers) {
+                                ViPromptKey::Key(code, mods) => {
+                                    key.code = code;
+                                    key.modifiers = mods;
+                                }
+                                ViPromptKey::Edit(name) => {
+                                    let _ = crate::copy_mode::prompt_edit(&mut command_buf, &mut command_back, &mut prompt_saved, &word_separators, name, || None);
+                                    key.code = KeyCode::Null;
+                                    key.modifiers = KeyModifiers::NONE;
+                                }
+                                ViPromptKey::Done => {
+                                    key.code = KeyCode::Null;
+                                    key.modifiers = KeyModifiers::NONE;
+                                }
+                            }
+                            if was != prompt_vi_command {
+                                selection_changed = true;
+                            }
+                        }
                         // Dynamic prefix key check (default: Ctrl+B, configurable via .psmux.conf)
                         let is_prefix = prefix_key == Some((key.code, key.modifiers))
                             || prefix_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c))
@@ -5980,7 +6013,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // because the `.` fallback below sets one and
                                 // this table is read before the first state dump
                                 // has a chance to rebuild either prompt.
-                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_back = 0; prompt_saved = None; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; command_key_answer = false; command_single = false; }
+                                KeyCode::Char(':') => { command_input = true; prompt_vi_command = false; command_buf.clear(); command_back = 0; prompt_saved = None; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; command_key_answer = false; command_single = false; }
                                 // Same command as the PREFIX_DEFAULTS entry for
                                 // `'`, for the moment before the first state
                                 // sync arrives.
@@ -5993,6 +6026,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // before the first state sync arrives.
                                 KeyCode::Char('.') => {
                                     command_input = true;
+                                    prompt_vi_command = false;
                                     command_buf.clear();
                                     command_back = 0;
                                     prompt_saved = None;
@@ -9078,6 +9112,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if let Some(seps) = state.client_render_options.word_separators.as_ref() {
             word_separators.clone_from(seps);
         }
+        status_keys_vi = state.client_render_options.status_keys_vi.unwrap_or(false);
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
             // Pass full string — visual truncation is handled by ratatui
@@ -10309,11 +10344,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
             if command_input {
                 let title = command_prompt_label.as_deref().unwrap_or("command");
-                let command_style = crate::style::parse_tmux_style(
-                    state.message_command_style
-                        .as_deref()
-                        .unwrap_or("bg=black,fg=yellow"),
-                );
+                // tmux draws its prompt with message-style, and with
+                // message-command-style only in vi command mode
+                // (prompt_effective_style, prompt.c:438 to :450 at tag 3.8;
+                // status_prompt_redraw at 3.5a, status.c:742 to :745).
+                let command_style = crate::style::parse_tmux_style(prompt_style(
+                    prompt_vi_command,
+                    state.message_style.as_deref(),
+                    state.message_command_style.as_deref(),
+                ));
                 let overlay = Block::default()
                     .borders(Borders::ALL)
                     .title(title)
@@ -11600,6 +11639,94 @@ pub(crate) enum PromptKeyAction {
 /// prompts and the rename overlay already share, reached by the tmux name of
 /// the key. C-c and C-g cancel tmux's prompt the way Escape does
 /// (`status.c:1671` to `:1674`) and C-[ IS Escape.
+/// The style the command prompt is drawn with: `message-command-style` in vi
+/// command mode, `message-style` otherwise, each falling back to tmux's
+/// default when the server sent none (options-table.c, bg=yellow,fg=black and
+/// bg=black,fg=yellow before tmux 3.8's theme colours).
+pub(crate) fn prompt_style<'a>(vi_command: bool, message_style: Option<&'a str>, message_command_style: Option<&'a str>) -> &'a str {
+    let (set, default) = if vi_command {
+        (message_command_style, "bg=black,fg=yellow")
+    } else {
+        (message_style, "bg=yellow,fg=black")
+    };
+    match set {
+        Some(s) if !s.is_empty() => s,
+        _ => default,
+    }
+}
+
+/// What a key does at the command prompt with `status-keys vi`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ViPromptKey {
+    /// Handle this key the way the prompt handles a typed key.
+    Key(KeyCode, KeyModifiers),
+    /// Run this prompt editor action (`copy_mode::prompt_edit`) and nothing more.
+    Edit(&'static str),
+    /// Nothing more: a change of mode, or a key command mode has no use for.
+    Done,
+}
+
+/// tmux's prompt_translate_key (prompt.c:784 to :930 at tag 3.8). In insert
+/// mode Escape (or C-[) enters command mode and steps the cursor back one, and
+/// every other key is typed as usual. In command mode a key is a vi command:
+/// `i`, `a`, `A`, `I`, `C`, `s` and `S` go back to insert mode, the motions
+/// and edits become the editing keys they stand for, Enter, C-c and C-h still
+/// work, and anything else does nothing.
+pub(crate) fn vi_prompt_key(command_mode: &mut bool, code: KeyCode, mods: KeyModifiers) -> ViPromptKey {
+    use ViPromptKey::{Done, Edit, Key};
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let escape = matches!(code, KeyCode::Esc) || (ctrl && code == KeyCode::Char('['));
+    if !*command_mode {
+        if escape {
+            *command_mode = true;
+            return Edit("left");
+        }
+        return Key(code, mods);
+    }
+    let ch = match code {
+        KeyCode::Char(c) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => Some(c),
+        _ => None,
+    };
+    let none = KeyModifiers::NONE;
+    match (code, ch) {
+        (KeyCode::Backspace, _) => return Key(KeyCode::Left, none),
+        (_, Some('A' | 'I' | 'C' | 's' | 'a')) => *command_mode = false,
+        (_, Some('S')) => {
+            *command_mode = false;
+            return Key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        }
+        (_, Some('i')) => {
+            *command_mode = false;
+            return Done;
+        }
+        _ if escape => return Done,
+        _ => {}
+    }
+    match (code, ch) {
+        (_, Some('A' | '$')) => Key(KeyCode::End, none),
+        (_, Some('I' | '0' | '^')) => Key(KeyCode::Home, none),
+        (_, Some('C' | 'D')) => Key(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        (_, Some('X')) => Key(KeyCode::Backspace, none),
+        (_, Some('b')) => Key(KeyCode::Char('b'), KeyModifiers::ALT),
+        (_, Some('B')) => Edit("vi-bigb"),
+        (_, Some('d')) => Key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        (_, Some('e')) => Edit("vi-e"),
+        (_, Some('E')) => Edit("vi-bige"),
+        (_, Some('w')) => Edit("vi-w"),
+        (_, Some('W')) => Edit("vi-bigw"),
+        (_, Some('p')) => Key(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        (_, Some('q')) => Key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        (KeyCode::Delete, _) | (_, Some('s' | 'x')) => Key(KeyCode::Delete, none),
+        (KeyCode::Down, _) | (_, Some('j')) => Key(KeyCode::Down, none),
+        (KeyCode::Left, _) | (_, Some('h')) => Key(KeyCode::Left, none),
+        (KeyCode::Right, _) | (_, Some('a' | 'l')) => Key(KeyCode::Right, none),
+        (KeyCode::Up, _) | (_, Some('k')) => Key(KeyCode::Up, none),
+        (KeyCode::Enter, _) => Key(code, mods),
+        (KeyCode::Char('h' | 'c'), _) if ctrl => Key(code, mods),
+        _ => Done,
+    }
+}
+
 pub(crate) fn command_prompt_key(
     buf: &mut String,
     back: &mut usize,
@@ -12012,3 +12139,7 @@ mod test_issue783_prompt_edit_unify;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue839_rename_session_identity.rs"]
 mod test_issue839_rename_session_identity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr1017_prompt_vi_style.rs"]
+mod test_pr1017_prompt_vi_style;

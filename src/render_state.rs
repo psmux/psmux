@@ -54,4 +54,11 @@ pub(crate) struct ClientRenderOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "ukeys")]
     pub user_keys: Option<Vec<(u32, String)>>,
+    /// `status-keys vi`: the client's command prompt has tmux's vi command
+    /// mode, entered with Escape (prompt.c:1265 and :819 at tag 3.8), and is
+    /// drawn with `message-command-style` while in it. Skipped on the wire
+    /// for emacs, the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "skvi")]
+    pub status_keys_vi: Option<bool>,
 }
