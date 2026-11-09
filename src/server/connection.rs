@@ -3425,6 +3425,14 @@ loop {
     } else {
         effective_line = line.trim().to_string();
     }
+    // A persistent connection is an attached client's: its lines are what was
+    // typed at the command prompt or bound to a key, which tmux reads with its
+    // parser, so a user-keys value reads `\e` as ESC there as it does in a
+    // config file (#1014). The CLI's one-shot lines keep their arguments.
+    let effective_line = match persistent.then(|| crate::config::user_keys_line_tmux_read(&effective_line)).flatten() {
+        Some(read) => read,
+        None => effective_line,
+    };
     let mut parsed = crate::cli::normalize_command_words(parse_command_line(&effective_line), true);
     // `command-alias` (tmux cmd_parse_expand_alias): the alias's first command
     // runs here and the rest go ahead of whatever is already queued. The old

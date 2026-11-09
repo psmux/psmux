@@ -2782,7 +2782,22 @@ pub(crate) const KILL_PANE_F_WITHOUT_A: &str = "-f only valid with -a";
 /// cmd-find.c:1093-1110). Ids (`$`, `@`, `%`) and `window.pane` forms stay
 /// with the arms below. Returns true when the line was handled here.
 pub(crate) fn forward_to_other_session(app: &mut AppState, parts: &[&str], cmd: &str) -> bool {
-    match route_to_other_session(app, parts, cmd) {
+    // This route runs hooks, menus and bindings, whose lines tmux parses, and
+    // the `set` arm below reads a user-keys value with tmux's escapes. The
+    // session the line goes to reads it with psmux's lexer, so the value is
+    // read here first, as it would have been had the line stayed (#1014).
+    if let Some(read) = crate::config::user_keys_line_tmux_read(cmd) {
+        let words = parse_command_line(&read);
+        let parts: Vec<&str> = words.iter().map(String::as_str).collect();
+        let route = route_to_other_session(app, &parts, &read);
+        return forward_routed(app, route);
+    }
+    let route = route_to_other_session(app, parts, cmd);
+    forward_routed(app, route)
+}
+
+fn forward_routed(app: &mut AppState, route: OtherSessionRoute) -> bool {
+    match route {
         OtherSessionRoute::Local => false,
         OtherSessionRoute::Forwarded => true,
         OtherSessionRoute::Refused(msg) => {
