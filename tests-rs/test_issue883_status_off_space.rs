@@ -53,6 +53,7 @@ fn app_with_client(content_rows: u16) -> AppState {
             tty_name: crate::types::client_tty_name(1, Some(4242)),
             is_control: false,
             termfeatures: crate::terminal_features::TerminalFeatures::from_bits(0xf),
+            term: String::new(),
             last_session: None,
             pid: 4242,
             readonly: false,

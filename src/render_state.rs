@@ -42,6 +42,12 @@ pub(crate) struct ClientRenderOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "tov")]
     pub terminal_overrides: Option<Vec<String>>,
+    /// `terminal-features` entries, which the client matches against its own
+    /// TERM for the `progressbar` feature. Skipped on the wire while the option
+    /// holds its default, so a frame without it means the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "tfe")]
+    pub terminal_features: Option<Vec<String>>,
     /// `word-separators`, which the client's prompts split words with for
     /// C-w, M-f and M-b, as tmux's prompt reads the option (status.c:1559,
     /// :1600, :1622).

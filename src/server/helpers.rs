@@ -610,6 +610,11 @@ pub(crate) fn expand_status_formats(
             } else {
                 Some(app.terminal_overrides.iter().map(|(_, entry)| entry.to_string()).collect())
             },
+            // Only travels when the user changed the option, so the default
+            // configuration adds nothing to every render frame.
+            terminal_features: crate::option_array::spec("terminal-features")
+                .filter(|spec| !app.terminal_features.holds_default(spec))
+                .map(|_| app.terminal_features.values()),
             word_separators: Some(app.word_separators.clone()),
             // Only the numbered elements: tmux reads user-keys by number from
             // 0 to KEYC_NUSER (tty-keys.c:533-540), so a named element is
@@ -1013,14 +1018,16 @@ pub(crate) fn propagate_osc_titles(app: &mut AppState) -> bool {
 /// Returns `Some((state, value))` when a progress sequence has been received,
 /// where state ∈ 0..=4 (0=hide, 1=default, 2=error, 3=indeterminate, 4=warning)
 /// and value ∈ 0..=100. Used by the dump-state builder so the client can
-/// re-emit OSC 9;4 to the host terminal (issue #269).
+/// re-emit OSC 9;4 to the host terminal (issue #269). `None` reaches the client
+/// as no field, which it reads as hidden.
+///
+/// From the live parser, as tmux reads `wp->base` (server-client.c:2666 at tag
+/// 3.8), so copy mode does not freeze it, and a dead pane keeps its value until
+/// a respawn, also measured from tmux 3.8.
 pub(crate) fn active_pane_progress(app: &AppState) -> Option<(u8, u8)> {
     let win = app.windows.get(app.active_idx)?;
     let pane = crate::tree::active_pane(&win.root, &win.active_path)?;
-    if pane.dead {
-        return None;
-    }
-    let parser = pane.term.lock().ok()?;
+    let parser = pane.live_parser().lock().ok()?;
     parser.screen().progress()
 }
 

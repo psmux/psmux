@@ -78,15 +78,19 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
         default: "",
         trim: false,
     },
-    // options-table.c:553-563 at tag 3.8, a server option split on `,`.
-    // psmux keeps it as tmux does and reads nothing from it: the client's
-    // features come from the attaching client's own report (#763).
+    // options-table.c:553-563 at tag 3.8, a server option split on `,`. Of its
+    // features psmux reads only `progressbar`
+    // (crate::terminal_features::progressbar_enabled); the others come from
+    // the attaching client's own report (#763). The last element is psmux's:
+    // tmux turns the feature on for the terminals it identifies, and psmux
+    // does not ask the terminal, so it starts on for all of them.
     ArraySpec {
         name: "terminal-features",
         separator: ",",
         default: "xterm*:clipboard:ccolour:cstyle:focus:title,\
                   screen*:title,\
-                  rxvt*:ignorefkeys",
+                  rxvt*:ignorefkeys,\
+                  *:progressbar",
         trim: false,
     },
     // options-table.c:518-525
@@ -122,6 +126,11 @@ pub static ARRAY_OPTIONS: &[ArraySpec] = &[
         trim: false,
     },
 ];
+
+/// The elements of the array option `name` as it starts out.
+pub fn default_values(name: &str) -> Vec<&'static str> {
+    spec(name).map_or_else(Vec::new, |spec| spec.default.split(spec.separator).collect())
+}
 
 /// The array option `name` is, judged by its base name.
 pub fn spec(name: &str) -> Option<&'static ArraySpec> {
@@ -267,6 +276,12 @@ impl OptionArray {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Whether the elements are the ones `spec` starts with, in order. This
+    /// allocates nothing, for a check made on every frame.
+    pub fn holds_default(&self, spec: &ArraySpec) -> bool {
+        self.items.values().map(String::as_str).eq(spec.default.split(spec.separator))
     }
 
     /// options.c:409-419, `options_array_clear`.

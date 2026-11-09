@@ -402,6 +402,8 @@ not part of it. Capture again after any split you want to keep.
 | `#{pane_current_command}` | Foreground process name |
 | `#{pane_current_path}` | Current working directory of the pane. Under `wsl` or `ssh` this needs shell integration, see [the FAQ](faq.md) |
 | `#{pane_path}` | Path the pane announced over `OSC 7` or `OSC 9;9`, untranslated, empty if none |
+| `#{pane_pb_state}` | Progress indicator state the pane set with `OSC 9;4`: `hidden`, `normal`, `error`, `indeterminate` or `paused`. `hidden` if it set none |
+| `#{pane_pb_progress}` | Progress indicator percentage the pane set with `OSC 9;4`, `0` if it set none |
 | `#{pane_start_command}` | Command the pane was started with, **empty** when it was started with the default shell. A `--` argv is reported as its token list, a single command string is quoted when it contains spaces (tmux `args_escape`). A respawn replaces it only when the respawn carried a command of its own |
 | `#{pane_pid}` | PID of the pane's shell |
 | `#{pane_tty}` | Pseudo terminal name, for example `/dev/pty1` |
@@ -474,9 +476,9 @@ client attached, the identity variables (`client_name`, `client_pid`, `client_re
 | `#{client_activity}` / `#{client_created}` | Timestamps for the client |
 | `#{client_activity_string}` / `#{client_created_string}` | The same, already formatted |
 | `#{client_termname}` / `#{client_termtype}` | Terminal type reported by the client |
-| `#{client_termfeatures}` | Comma-separated terminal features reported at attach for the selected client; empty with no client |
+| `#{client_termfeatures}` | Comma-separated terminal features reported at attach for the selected client, and `progressbar` when `terminal-features` gives it that; empty with no client |
 
-Feature reporting covers these terminal profiles:
+Feature reporting covers these terminal profiles. `progressbar` is not part of a report: the server reads it from `terminal-features` against the `TERM` the client attached with, so with the default option each list below ends in `,progressbar`:
 
 | Terminal | Features |
 |---|---|
@@ -511,12 +513,13 @@ All other environments retain `256,RGB,hyperlinks,title` as a compatibility assu
 capability support. Clients that send no valid report receive the independently owned four-bit server
 fallback. Detection uses the attaching client's environment and passive local console observations at each
 attachment, including reconnection. It does not probe the terminal. The `terminal-features` option is kept
-as an array, as tmux keeps it, but nothing reads it, and feature-based output gating is not implemented;
-OSC 8 forwarding is unchanged.
+as an array, as tmux keeps it. Only its `progressbar` feature is read, which decides whether the client
+writes the progress indicator (see [Progress Indicator](compatibility.md#progress-indicator-osc-94));
+feature-based output gating is not implemented for the others, and OSC 8 forwarding is unchanged.
 
 The optional attach argument is `features=0x<hex digits>`, an unsigned 64-bit mask. Leading zeroes
 are optional. Bits 0, 1, 2, and 3 represent `256`, `RGB`, `hyperlinks`, and `title`, respectively.
-Unknown bits are retained, but only known feature names appear in `client_termfeatures`.
+Unknown bits are retained, but only known feature names appear in `client_termfeatures`. Bit 4 is `progressbar`, which a report does not set; the server decides it.
 Malformed or overflowing reports are ignored without rejecting the attachment; a zero mask is valid
 and produces an empty feature list.
 

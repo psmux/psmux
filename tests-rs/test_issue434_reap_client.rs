@@ -31,6 +31,7 @@ fn client_info(id: u64, control: bool) -> ClientInfo {
         tty_name: format!("/dev/pts/{}", id),
         is_control: control,
         termfeatures: crate::terminal_features::TerminalFeatures::from_bits(0xf),
+        term: String::new(),
         last_session: None,
         pid: 0,
         readonly: false,

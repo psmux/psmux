@@ -130,6 +130,9 @@ pub struct ClientInfo {
     pub is_control: bool,
     /// Terminal capabilities reported at attach, including unknown bits.
     pub termfeatures: TerminalFeatures,
+    /// TERM in the client's environment at attach, empty when it has none,
+    /// which `terminal-features` patterns match against (tty-term.c:627).
+    pub term: String,
     /// The session THIS client was in before it switched here, if any.
     ///
     /// psmux runs one server per session, so a switch tears the client off one
@@ -586,6 +589,16 @@ impl Pane {
     /// grid -- must go through here.  Outside copy mode it is `term`.
     pub fn live_parser(&self) -> &Arc<Mutex<vt100::Parser>> {
         self.live_term.as_ref().unwrap_or(&self.term)
+    }
+
+    /// The pane's OSC 9;4 state and value, hidden and 0 until it sets one, as
+    /// tmux's `screen_reinit` starts them (screen.c:139 at tag 3.8).
+    pub fn progress(&self) -> (u8, u8) {
+        self.live_parser()
+            .lock()
+            .ok()
+            .and_then(|parser| parser.screen().progress())
+            .unwrap_or((0, 0))
     }
 
     /// The view parser plus, while a copy-mode snapshot is installed, the live
@@ -2814,6 +2827,7 @@ impl AppState {
                 TerminalFeatures::COLOR_256.bits() | TerminalFeatures::RGB.bits()
                     | TerminalFeatures::HYPERLINKS.bits() | TerminalFeatures::TITLE.bits(),
             ),
+            term: String::new(),
             last_session: None,
             pid: pid.unwrap_or(0),
             readonly: false,
