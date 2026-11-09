@@ -521,6 +521,9 @@ function Show-TrendRow {
             } else {
                 $flag = ("ok {0:+0;-0;0}%" -f $pct); $colour = "Gray"
             }
+        } elseif ($null -ne $baseline -and $Unit -eq "margin") {
+            $flag = ("{0} by {1:N0}, {2:+0;-0;0} vs prev5med" -f $(if ($newest.Value -le 0) { "leads" } else { "BEHIND" }), [math]::Abs($newest.Value), ($newest.Value - $baseline))
+            $colour = if ($newest.Value -le 0) { "Green" } else { "Red" }
         }
     }
     Write-Host ("  {0,-34} {1,-6} {2,5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
@@ -565,6 +568,19 @@ function Show-T {
     Show-TrendRow "launch Windows Terminal" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "wt_pwsh" "launch_median" })
     Show-TrendRow "launch WezTerm" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "wezterm_pwsh" "launch_median" })
     Show-TrendRow "launch bare pwsh" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "bare_pwsh" "launch_median" })
+    # The lead itself: psmux with a server running minus each terminal, so a
+    # negative number is psmux ahead. A percentage of a negative baseline means
+    # nothing, so Show-TrendRow flags these "margin" rows by the absolute change
+    # against the median of the previous five, and red only when psmux is behind.
+    $lead = {
+        param($j, $other)
+        $p = & $vtCell $j "psmux_attached_warm" "launch_median"
+        $o = & $vtCell $j $other "launch_median"
+        if ($null -eq $p -or $null -eq $o) { return $null }
+        return ([double]$p - [double]$o)
+    }
+    Show-TrendRow "lead: warm psmux minus WT" "margin" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $lead $j "wt_pwsh" })
+    Show-TrendRow "lead: warm psmux minus WezTerm" "margin" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $lead $j "wezterm_pwsh" })
     # To the prompt VISIBLE in the console the user launched from
     # (test_launch_visible_prompt_gate): the warm row is the path a user takes
     # with a psmux server already running, which no marker based cell measures.
@@ -582,6 +598,11 @@ function Show-T {
     # (Get-PerfShellSplit). The p99 is where a timer inside psmux shows up.
     Show-TrendRow "keystroke pwsh psmux hops p50" "ms" 2 (Get-TrendSeries "keystroke-latency-pwsh-*.json" @() { param($j) Prop (Prop (Prop $j "pwsh") "split") "psmuxMedian" })
     Show-TrendRow "keystroke pwsh psmux hops p99" "ms" 2 (Get-TrendSeries "keystroke-latency-pwsh-*.json" @() { param($j) Prop (Prop (Prop $j "pwsh") "split") "psmuxP99" })
+    # Real typing into an attached client (test_typing_benchmark): every char of
+    # ten sentences, and the first key after a Ctrl+C.
+    Show-TrendRow "typing per char p50" "ms" 1 (Get-TrendSeries "typing-benchmark-*.json" @() { param($j) Prop (Prop $j "psmux_per_char") "p50" })
+    Show-TrendRow "typing per char p99" "ms" 1 (Get-TrendSeries "typing-benchmark-*.json" @() { param($j) Prop (Prop $j "psmux_per_char") "p99" })
+    Show-TrendRow "typing first key after Ctrl+C p50" "ms" 1 (Get-TrendSeries "typing-benchmark-*.json" @() { param($j) Prop (Prop $j "ctrlc_first_key") "p50" })
 
     # C: creation and teardown, every cell the gate records
     $cell = {
@@ -599,6 +620,10 @@ function Show-T {
         @("split -b", "creation split -b p50"),
         @("split -bh", "creation split -bh p50"),
         @("split -bv", "creation split -bv p50"),
+        @("split -l 10", "creation split -l 10 p50"),
+        @("split -l 30%", "creation split -l 30% p50"),
+        @("split -p 25", "creation split -p 25 p50"),
+        @("split zoomed", "creation split zoomed p50"),
         @("split with cmd", "creation split w/ command p50"),
         @("new-session (warm)", "new-session warm p50"),
         @("new-session (no warm)", "new-session no-warm p50"),
@@ -662,6 +687,16 @@ function Show-T {
         if (-not $c) { return $null }
         return ((Prop $c "server" 0) + (Prop $c "client" 0))
     })
+    Show-TrendRow "typing cpu per 100 chars, srv+cli" "ms" 0 (Get-TrendSeries "typing-benchmark-*.json" @() {
+        param($j)
+        $c = Prop (Prop (Prop $j "resources") "typing") "cpu_ms_per_100_units"
+        if (-not $c) { return $null }
+        return ((Prop $c "server" 0) + (Prop $c "client" 0))
+    })
+    # Handle counts arrived with schema 3 files written after 2026-11-10; older
+    # files carry none and simply do not contribute a point.
+    Show-TrendRow "server handles at prompt" "n" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "at_prompt") "server") "handles" })
+    Show-TrendRow "server handles, session full" "n" 0 (Get-TrendSeries "creation_latency_gate-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "after_panes") "server") "handles" })
     Show-TrendRow "idle socket lines per second" "l/s" 2 (Get-TrendSeries "idle-socket-traffic-*.json" @() {
         param($j)
         $cells = Prop $j "cells"
