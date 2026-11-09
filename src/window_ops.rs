@@ -528,6 +528,10 @@ pub fn pane_mouse_is_inert_motion(app: &AppState, pane_id: usize, button: u8) ->
 /// anywhere in its process tree. A native TUI can spawn an SSH tunnel on a
 /// private console: injecting VT KEY_EVENTs into the TUI's console then types
 /// the mouse report into its prompt. Keep the probe cached for 2s per pane.
+///
+/// The process tree walk runs first: a pane with no bridge anywhere under it
+/// (the common case) never attaches the server to its console for this.  Only
+/// when a bridge descendant exists does the console membership query decide.
 fn detect_vt_bridge(pane: &mut Pane) -> bool {
     // Check cache first (2 second TTL)
     if let Some((ts, cached)) = pane.vt_bridge_cache {
@@ -540,7 +544,8 @@ fn detect_vt_bridge(pane: &mut Pane) -> bool {
         pane.child_pid = mouse_inject::get_child_pid(&*pane.child);
     }
     let result = if let Some(pid) = pane.child_pid {
-        mouse_inject::query_console_process_ids(pid)
+        crate::platform::process_info::has_vt_bridge_descendant(pid)
+            && mouse_inject::query_console_process_ids(pid)
             .is_some_and(|pids| crate::platform::process_info::any_vt_bridge(&pids))
     } else {
         false
