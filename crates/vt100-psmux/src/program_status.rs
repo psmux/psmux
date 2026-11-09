@@ -346,8 +346,7 @@ pub enum TerminalQuery {
         /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
         bel: bool,
     },
-    /// A palette colour (an `index ; ?` pair of an `OSC 4`): one of the
-    /// sixteen ANSI colours, or any index the pane has its own entry for.
+    /// A palette colour (an `index ; ?` pair of an `OSC 4`), any index.
     PaletteColour {
         /// The palette index asked for, 0 to 255.
         index: u8,

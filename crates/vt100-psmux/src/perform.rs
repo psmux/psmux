@@ -384,22 +384,19 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // `bad = 1; break;`).  A `?` is a QUERY, taken in the order
             // written with the pane's own entry as it stands at that pair, so
             // a set before it in the same OSC is what it reports, as in tmux.
-            // psmux answers one of the sixteen ANSI colours from the outer
-            // terminal when the pane has no entry, and any other index only
-            // from the pane's entry; tmux asks the outer terminal for those
-            // (input_add_request, input.c:2956), psmux does not yet.  The
-            // answers go in stream order with the other queries (#473).
+            // With no entry, the host answers one of the sixteen ANSI colours
+            // from the outer terminal's values and any other index from the
+            // xterm 256 colour table, where tmux asks the outer terminal
+            // (input_add_request, input.c:2956).  The answers go in stream
+            // order with the other queries (#473).
             [b"4", rest @ ..] if !rest.is_empty() => {
                 for (idx, spec) in crate::queries::palette_pairs(rest) {
                     if spec == b"?" {
-                        let own = self.screen.palette_entry(idx);
-                        if crate::queries::is_palette_query(idx, spec, own) {
-                            self.screen.query(crate::TerminalQuery::PaletteColour {
-                                index: idx,
-                                own,
-                                bel: bel_terminated,
-                            });
-                        }
+                        self.screen.query(crate::TerminalQuery::PaletteColour {
+                            index: idx,
+                            own: self.screen.palette_entry(idx),
+                            bel: bel_terminated,
+                        });
                         continue;
                     }
                     if let Some(rgb) = crate::palette::parse_x11_colour(spec) {
