@@ -388,6 +388,9 @@ function Get-PerfProcSample {
         private_mb = [math]::Round($p.PrivateMemorySize64 / 1MB, 2)
         cpu_ms     = [math]::Round($cpu, 1)
         threads    = $p.Threads.Count
+        # Kernel handles held. A leak of pipes, events or process handles per
+        # pane shows here long before it shows in memory.
+        handles    = $p.HandleCount
     }
 }
 
@@ -438,6 +441,48 @@ function Measure-PerfIdleCpu {
     }
 }
 
+# One scenario's resource cost in one shape: snapshot the roles, run the
+# scriptblock, snapshot again. Returns memory, handles and CPU before and after
+# (Get-PerfMemorySummary shape), the CPU each role spent during the scenario in
+# ms, the wall time, and, when $Units is given (keys typed, panes made), the CPU
+# per 100 units. A role whose process changed in between is left out of the
+# deltas, never reported as a delta it is not. The scriptblock's own output is
+# returned under `result` so a caller can time and measure in one call.
+function Measure-PerfScenario {
+    param(
+        [string]$Name,
+        [System.Collections.IDictionary]$Roles,
+        [scriptblock]$Body,
+        [double]$Units = 0
+    )
+    $a = Get-PerfResourceSnapshot $Roles
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $res = & $Body
+    $sw.Stop()
+    $b = Get-PerfResourceSnapshot $Roles
+    $handleDelta = [ordered]@{}
+    foreach ($r in @($a.Keys)) {
+        if ($b.Contains($r) -and $a[$r].pid -eq $b[$r].pid -and $null -ne $a[$r].handles -and $null -ne $b[$r].handles) {
+            $handleDelta[$r] = [int]$b[$r].handles - [int]$a[$r].handles
+        }
+    }
+    $o = [ordered]@{
+        scenario      = $Name
+        wall_ms       = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+        before        = (Get-PerfMemorySummary $a)
+        after         = (Get-PerfMemorySummary $b)
+        cpu_ms        = (Get-PerfCpuDelta $a $b 1.0 1.0)
+        cpu_pct_of_one_core = (Get-PerfCpuDelta $a $b ([double][Math]::Max(1.0, $sw.Elapsed.TotalMilliseconds)) 100.0)
+        handles_delta = $handleDelta
+        result        = $res
+    }
+    if ($Units -gt 0) {
+        $o["units"] = $Units
+        $o["cpu_ms_per_100_units"] = (Get-PerfCpuDelta $a $b $Units 100.0)
+    }
+    return $o
+}
+
 # The whole process tree under one root (the server): pane shells, the spare
 # shells of the warm pool, their console hosts, the standby server. The server's
 # own working set is ~16 MB while each spare pwsh and its console host is ~45 to
@@ -446,9 +491,9 @@ function Measure-PerfIdleCpu {
 # recycled pid cannot pull a stranger's process into the sum.
 function Get-PerfTreeMemory {
     param([int]$RootPid)
-    $o = [ordered]@{ processes = 0; ws_mb = 0.0; private_mb = 0.0; by_name = [ordered]@{}; pids = @() }
+    $o = [ordered]@{ processes = 0; ws_mb = 0.0; private_mb = 0.0; handles = 0; by_name = [ordered]@{}; pids = @() }
     if ($RootPid -le 0) { return $o }
-    try { $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, WorkingSetSize, PrivatePageCount, CreationDate -ErrorAction Stop) }
+    try { $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, WorkingSetSize, PrivatePageCount, HandleCount, CreationDate -ErrorAction Stop) }
     catch { return $o }
     $byParent = @{}
     foreach ($p in $all) {
@@ -469,6 +514,7 @@ function Get-PerfTreeMemory {
         $o.pids += [int]$p.ProcessId
         $o.ws_mb += [double]$p.WorkingSetSize / 1MB
         $o.private_mb += [double]$p.PrivatePageCount / 1MB
+        if ($null -ne $p.HandleCount) { $o.handles += [int]$p.HandleCount }
         $n = [IO.Path]::GetFileNameWithoutExtension([string]$p.Name).ToLower()
         if (-not $o.by_name.Contains($n)) { $o.by_name[$n] = 0 }
         $o.by_name[$n]++
@@ -489,7 +535,7 @@ function Get-PerfTreeMemory {
 function Get-PerfMemorySummary {
     param($Snapshot)
     $o = [ordered]@{}
-    $wsTotal = 0.0; $privTotal = 0.0
+    $wsTotal = 0.0; $privTotal = 0.0; $cpuTotal = 0.0; $hTotal = 0
     foreach ($r in @($Snapshot.Keys)) {
         $o[$r] = [ordered]@{
             pid        = $Snapshot[$r].pid
@@ -497,14 +543,19 @@ function Get-PerfMemorySummary {
             private_mb = $Snapshot[$r].private_mb
             cpu_ms     = $Snapshot[$r].cpu_ms
             threads    = $Snapshot[$r].threads
+            handles    = $Snapshot[$r].handles
         }
         if ($r -in @("server", "client")) {
             $wsTotal += [double]$Snapshot[$r].ws_mb
             $privTotal += [double]$Snapshot[$r].private_mb
+            $cpuTotal += [double]$Snapshot[$r].cpu_ms
+            if ($null -ne $Snapshot[$r].handles) { $hTotal += [int]$Snapshot[$r].handles }
         }
     }
     $o["psmux_total_ws_mb"] = [math]::Round($wsTotal, 2)
     $o["psmux_total_private_mb"] = [math]::Round($privTotal, 2)
+    $o["psmux_total_cpu_ms"] = [math]::Round($cpuTotal, 1)
+    $o["psmux_total_handles"] = $hTotal
     return $o
 }
 
@@ -512,7 +563,7 @@ function Format-PerfResourceLine {
     param($Snapshot, [string]$Label)
     $parts = @()
     foreach ($r in @($Snapshot.Keys)) {
-        $parts += ("{0} ws {1}MB priv {2}MB cpu {3}ms" -f $r, $Snapshot[$r].ws_mb, $Snapshot[$r].private_mb, $Snapshot[$r].cpu_ms)
+        $parts += ("{0} ws {1}MB priv {2}MB cpu {3}ms handles {4}" -f $r, $Snapshot[$r].ws_mb, $Snapshot[$r].private_mb, $Snapshot[$r].cpu_ms, $Snapshot[$r].handles)
     }
     if ($parts.Count -eq 0) { return "$Label : no process found" }
     return ("{0} : {1}" -f $Label, ($parts -join "  |  "))
