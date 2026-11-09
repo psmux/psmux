@@ -4,7 +4,8 @@
 # tmux's input_osc_4 (input.c:2925-2970 at tag 3.8) answers `OSC 4 ; N ; ?`
 # for every index from 0 to 255 from the pane's own palette, the OSC 4 entries
 # over the pane-colours defaults (colour_palette_get), and asks the outer
-# terminal only when the pane has none. Every colour reply ends as its query
+# terminal only when the pane has none. psmux answers an index of 16 or more
+# with no entry from the xterm 256 colour table instead (#1018). Every colour reply ends as its query
 # did, BEL or ST (input_osc_colour_reply with ictx->input_end). psmux answered
 # only the sixteen ANSI colours, and ended every reply in ST.
 #
@@ -67,12 +68,12 @@ $C1 = 'rgb:c5c5/0f0f/1f1f'; $C2 = 'rgb:1313/a1a1/0e0e'
 $cases = @(
     @{ n = 'index 1 asked with BEL';  q = "$E]4;1;?$A";   a = "$E]4;1;$C1$A" }
     @{ n = 'index 1 asked with ST';   q = "$E]4;1;?$ST";  a = "$E]4;1;$C1$ST" }
-    @{ n = 'index 20, no entry';      q = "$E]4;20;?$A";  a = '' }
-    @{ n = 'index 255, no entry';     q = "$E]4;255;?$ST"; a = '' }
+    @{ n = 'index 20, no entry';      q = "$E]4;20;?$A";  a = "$E]4;20;rgb:0000/0000/d7d7$A" }
+    @{ n = 'index 255, no entry';     q = "$E]4;255;?$ST"; a = "$E]4;255;rgb:eeee/eeee/eeee$ST" }
     @{ n = 'index 20 set by OSC 4';   q = "$E]4;20;rgb:11/22/33$ST$E]4;20;?$A"; a = "$E]4;20;rgb:1111/2222/3333$A" }
     @{ n = 'index 255 set by OSC 4';  q = "$E]4;255;#abcdef$A$E]4;255;?$ST"; a = "$E]4;255;rgb:abab/cdcd/efef$ST" }
-    @{ n = 'low and high in one OSC 4'; q = "$E]4;20;#112233;1;?;20;?;21;?;2;?$ST"; a = "$E]4;1;$C1$ST$E]4;20;rgb:1111/2222/3333$ST$E]4;2;$C2$ST" }
-    @{ n = 'index 20 reset by OSC 104'; q = "$E]4;20;#112233$A$E]104;20$A$E]4;20;?$A"; a = '' }
+    @{ n = 'low and high in one OSC 4'; q = "$E]4;20;#112233;1;?;20;?;21;?;2;?$ST"; a = "$E]4;1;$C1$ST$E]4;20;rgb:1111/2222/3333$ST$E]4;21;rgb:0000/0000/ffff$ST$E]4;2;$C2$ST" }
+    @{ n = 'index 20 reset by OSC 104'; q = "$E]4;20;#112233$A$E]104;20$A$E]4;20;?$A"; a = "$E]4;20;rgb:0000/0000/d7d7$A" }
     @{ n = 'foreground asked with BEL'; q = "$E]10;?$A";  a = "$E]10;rgb:cccc/cccc/cccc$A"; inbox = '' }
     @{ n = 'background asked with ST';  q = "$E]11;?$ST"; a = "$E]11;rgb:0c0c/0c0c/0c0c$ST"; inbox = '' }
     @{ n = 'index 20 from set -p pane-colours'; q = "$E]4;20;?$A"; a = "$E]4;20;rgb:4444/5555/6666$A"; set = @('-p', 'pane-colours[20]', '#445566') }

@@ -1595,8 +1595,12 @@ pub(crate) fn background_reply(colors: &crate::types::HostColors, bel: bool) -> 
 
 /// The `OSC 4` reply for palette index `i`, ended as [`foreground_reply`] is.
 /// The pane's own entry (`own`) wins, the outer terminal's is the fallback
-/// (issue #685); the client reports only the sixteen ANSI colours of the
-/// outer terminal, so a higher index has a reply only from `own`.
+/// (issue #685). The client reports only the sixteen ANSI colours of the
+/// outer terminal, so an index of 16 or more with no entry is answered from
+/// the xterm 256 colour table (#1018). tmux asks the outer terminal for it
+/// (input_add_request, input.c:2955) and gives no reply when no client can be
+/// asked or none answers in 500 ms; nearly every terminal answers with this
+/// same table, and answering from it never holds the pane's later replies.
 pub(crate) fn palette_reply(
     i: usize,
     colors: &crate::types::HostColors,
@@ -1604,6 +1608,7 @@ pub(crate) fn palette_reply(
     bel: bool,
 ) -> Option<String> {
     own.or_else(|| colors.palette.get(i).copied().flatten())
+        .or_else(|| u8::try_from(i).ok().filter(|&n| n >= 16).map(vt100::xterm_rgb))
         .map(|rgb| format!("\x1b]4;{};{}{}", i, x11_rgb(rgb), osc_end(bel)))
 }
 

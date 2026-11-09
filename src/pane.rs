@@ -4491,8 +4491,9 @@ pub(crate) fn pane_replies(
                     colour(text, 1 << i)
                 } else {
                     // The colour path's bits hold only the sixteen ANSI
-                    // colours, and it would ask the outer terminal's value,
-                    // which psmux does not have for this index.
+                    // colours; this index always has a reply (the pane's
+                    // entry or the xterm table), so only a failed injection
+                    // loses it.
                     text.map(|text| PaneReply { text, fallback: ReplyFallback::Lost("OSC 4"), console_host: false })
                 }
             }

@@ -202,22 +202,47 @@ fn delivery_says_when_the_server_loop_has_replies_to_write() {
 // A palette index past the sixteen ANSI colours is answered from the pane's
 // own entry, as tmux's input_osc_4 answers it from colour_palette_get
 // (input.c:2947 at tag 3.8). The client reports only the sixteen of the outer
-// terminal, so with no entry there is no reply.
+// terminal, so with no entry the xterm 256 colour table answers (#1018),
+// where tmux asks the outer terminal.
 #[test]
 fn an_index_past_sixteen_is_answered_from_the_panes_entry() {
     assert_eq!(
         texts(b"\x1b]4;20;rgb:11/22/33\x07\x1b]4;20;?\x07\x1b]4;255;#abcdef\x1b\\\x1b]4;255;?\x1b\\"),
         vec!["\x1b]4;20;rgb:1111/2222/3333\x07".to_string(), "\x1b]4;255;rgb:abab/cdcd/efef\x1b\\".to_string()]
     );
-    assert!(texts(b"\x1b]4;20;?\x07\x1b]4;16;?\x1b\\").is_empty());
+    assert_eq!(
+        texts(b"\x1b]4;20;?\x07\x1b]4;16;?\x1b\\"),
+        vec!["\x1b]4;20;rgb:0000/0000/d7d7\x07".to_string(), "\x1b]4;16;rgb:0000/0000/0000\x1b\\".to_string()]
+    );
     assert_eq!(
         texts(b"\x1b]4;20;#112233;1;?;20;?;21;?;2;?\x1b\\"),
         vec![
             "\x1b]4;1;rgb:c5c5/0f0f/1f1f\x1b\\".to_string(),
             "\x1b]4;20;rgb:1111/2222/3333\x1b\\".to_string(),
+            "\x1b]4;21;rgb:0000/0000/ffff\x1b\\".to_string(),
             "\x1b]4;2;rgb:1313/a1a1/0e0e\x1b\\".to_string(),
         ]
     );
+}
+
+#[test]
+fn an_index_past_sixteen_with_no_entry_is_the_xterm_colour_in_order() {
+    // #1018: the cube (16 to 231) and the greys (232 to 255) of the xterm
+    // table, each ended as its query was, in order with the other replies
+    // and never held behind anything.
+    assert_eq!(
+        texts(b"\x1b]4;196;?\x1b\\\x1b]4;232;?;255;?\x07\x1b[>q\x1b]4;1;?\x07"),
+        vec![
+            "\x1b]4;196;rgb:ffff/0000/0000\x1b\\".to_string(),
+            "\x1b]4;232;rgb:0808/0808/0808\x07".to_string(),
+            "\x1b]4;255;rgb:eeee/eeee/eeee\x07".to_string(),
+            xt(),
+            "\x1b]4;1;rgb:c5c5/0f0f/1f1f\x07".to_string(),
+        ]
+    );
+    // Detached, with no outer terminal values at all, it is still answered.
+    let out = pane_replies(&scan_device_queries(b"\x1b]4;20;?\x07"), &DecrqmState::default(), &HostColors::empty(), &mut false);
+    assert_eq!(out.into_iter().map(|r| r.text).collect::<Vec<_>>(), vec!["\x1b]4;20;rgb:0000/0000/d7d7\x07".to_string()]);
 }
 
 #[test]
