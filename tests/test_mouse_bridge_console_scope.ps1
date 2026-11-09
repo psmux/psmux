@@ -65,7 +65,7 @@ try {
         if ($case -eq 'bridge') {
             $ok = $content -match 'BYTES .*1B-5B-3C' -and $content -match 'BYTES .*51'
         } else {
-            $ok = $content -notmatch 'KEY 001B' -and $content -match 'KEY 0051'
+            $ok = $content -notmatch 'KEY 001B' -and $content -match 'KEY 0051' -and $content -match '(?m)^MOUSE$'
         }
         if ($ok) { Write-Host "PASS $case : correct mouse transport and keyboard delivery" }
         else { $failed++; Write-Host "FAIL $case"; Write-Host $content }
