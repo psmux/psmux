@@ -544,9 +544,9 @@ fn detect_vt_bridge(pane: &mut Pane) -> bool {
         pane.child_pid = mouse_inject::get_child_pid(&*pane.child);
     }
     let result = if let Some(pid) = pane.child_pid {
-        crate::platform::process_info::has_vt_bridge_descendant(pid)
-            && mouse_inject::query_console_process_ids(pid)
-            .is_some_and(|pids| crate::platform::process_info::any_vt_bridge(&pids))
+        crate::platform::process_info::vt_bridge_on_pane_console(pid, || {
+            mouse_inject::query_console_process_ids(pid)
+        })
     } else {
         false
     };

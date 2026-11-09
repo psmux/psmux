@@ -5665,6 +5665,25 @@ pub mod process_info {
         console_contains_vt_bridge(&entries, pids)
     }
 
+    /// Mouse transport choice (issue #1024): a VT bridge counts only when it
+    /// is both under the pane and on the pane's console.  One live walk
+    /// answers both halves, and `console_pids` (which attaches to the pane
+    /// console) runs only when the tree holds a bridge at all, so a pane with
+    /// no ssh or wsl under it never pays for the attach.
+    pub fn vt_bridge_on_pane_console(
+        root_pid: u32,
+        console_pids: impl FnOnce() -> Option<Vec<u32>>,
+    ) -> bool {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return false,
+        };
+        if !tree_has_vt_bridge(&entries, root_pid, &mut |p| entries.creation_of(p)) {
+            return false;
+        }
+        console_pids().is_some_and(|pids| console_contains_vt_bridge(&entries, &pids))
+    }
+
     fn console_contains_vt_bridge(entries: &[ProcRowT], pids: &[u32]) -> bool {
         entries.iter().any(|(pid, _, name)| pids.contains(pid) && is_vt_bridge_exe(name))
     }
@@ -5845,6 +5864,10 @@ pub mod process_info {
     pub fn get_deepest_foreground_process_name_fresh(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
+    pub fn vt_bridge_on_pane_console(
+        _root_pid: u32,
+        _console_pids: impl FnOnce() -> Option<Vec<u32>>,
+    ) -> bool { false }
     pub fn tree_has_vt_bridge_cached(_root_pid: u32) -> bool { false }
     pub fn foreground_is_shell(_root_pid: u32) -> Option<bool> { None }
     pub fn foreground_is_vt_bridge(_root_pid: u32) -> bool { false }

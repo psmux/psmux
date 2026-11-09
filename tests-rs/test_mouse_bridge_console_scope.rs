@@ -33,3 +33,13 @@ fn wsl_bridge_still_uses_vt_transport() {
     assert!(console_contains_vt_bridge(&entries, &[10, 50]));
     assert!(!console_contains_vt_bridge(&entries, &[10]));
 }
+
+#[test]
+fn pane_without_bridge_descendant_never_queries_its_console() {
+    // The console query attaches the server to the pane console; a tree with
+    // no bridge in it must answer without that.
+    let mut queried = false;
+    let hit = vt_bridge_on_pane_console(std::process::id(), || { queried = true; Some(vec![]) });
+    assert!(!hit);
+    assert!(!queried, "console membership was queried for a tree with no bridge");
+}
