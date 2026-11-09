@@ -4,7 +4,7 @@
 //! tmux keeps the whole DCS in its input buffer and, at the ST, either drops
 //! it (`allow-passthrough off`) or writes the part after `tmux;` to the outer
 //! terminal; it never parses what is inside as pane output
-//! (input_dcs_dispatch, input.c:2617-2683). vte ends every DCS at the first
+//! (`input_dcs_dispatch`, input.c:2617-2683). vte ends every DCS at the first
 //! ESC, so the doubled ESC in `ESC P tmux; ESC ESC ]52;...` ended the DCS and
 //! vte then parsed the inner OSC 52 as if the pane had written it bare. The
 //! pane parser stops at `tmux;` (`Perform::terminated`) and this skips the
@@ -21,7 +21,7 @@
 //! - A byte other than ESC or BEL right after a BEL, for the same reason:
 //!   conhost hands `... BEL` and then the program's text.
 //! - 5 seconds after it began, at the next read: tmux's ground timer
-//!   (input_start_ground_timer, input.c:826-832, started for every DCS at
+//!   (`input_start_ground_timer`, input.c:826-832, started for every DCS at
 //!   input.c:2547) resets the parser to ground then.
 
 use std::time::{Duration, Instant};
@@ -41,7 +41,7 @@ enum State {
 
 /// How a call to [`Passthrough::skip`] ended.
 #[derive(PartialEq, Eq, Debug)]
-pub(crate) enum Skip {
+pub enum Skip {
     /// Every byte was part of the wrapper, which goes on.
     More,
     /// The wrapper ended. `close` goes to vte to end its DCS, then normal
@@ -50,7 +50,7 @@ pub(crate) enum Skip {
 }
 
 #[derive(Default, Debug)]
-pub(crate) struct Passthrough {
+pub struct Passthrough {
     state: Option<(State, Instant)>,
 }
 
