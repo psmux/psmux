@@ -426,6 +426,22 @@ Write-Host ("  {0,-45} {1,10}" -f "WT mouse handling", "No throttle")
 Write-Host ("  {0,-45} {1,10}" -f "WT architecture", "In-process (no TCP)")
 Write-Host ""
 
+# The numbers above as JSON with the shared envelope, in the metrics folder
+# perf_summary.ps1 reads.
+. "$PSScriptRoot\perf_metrics_common.ps1"
+$jsonPath = Write-PerfMetrics -Suite "test_startup_perf" -Binary $PSMUX -FileStem "startup_perf" -Data ([ordered]@{
+    server_startup_bare_ms    = (Get-PerfStats $startupTimes 1)
+    server_startup_plugins_ms = (Get-PerfStats $pluginTimes 1)
+    bare_pwsh_ms              = (Get-PerfStats $barePwshTimes 1)
+    pane_command_echo_ms      = $(if ($marker_sent) { $marker_sent.ElapsedMilliseconds } else { $null })
+    tcp_show_options_ms       = (Get-PerfStats $tcpTimes 1)
+    tcp_dump_state_ms         = (Get-PerfStats $dumpTimes 1)
+    set_option_per_sec        = $opsPerSec
+    passed                    = $script:TestsPassed
+    failed                    = $script:TestsFailed
+})
+if ($jsonPath) { Write-Info "metrics: $jsonPath" }
+
 # ===========================================================================
 # CLEANUP
 # ===========================================================================

@@ -603,5 +603,17 @@ Write-Host ""
 $outFile = Join-Path $PSScriptRoot "..\test_extreme_perf_results.txt"
 $results | ConvertTo-Json | Out-File $outFile -Encoding utf8
 Info "Results written to $outFile"
+# The same numbers with the shared envelope (build, machine, load) in the
+# metrics folder perf_summary.ps1 reads, so the scale run has a history too.
+. "$PSScriptRoot\perf_metrics_common.ps1"
+$sorted = [ordered]@{}
+foreach ($k in ($results.Keys | Sort-Object)) { $sorted[$k] = $results[$k] }
+$jsonPath = Write-PerfMetrics -Suite "test_extreme_perf" -Binary $PSMUX -FileStem "extreme_perf" -Data ([ordered]@{
+    params  = [ordered]@{ sequential_windows = $SequentialWindows; burst_windows = $BurstWindows; mixed_windows = $MixedWindows; mixed_splits = $MixedSplits }
+    results = $sorted
+    passed  = $PASS
+    failed  = $FAIL
+})
+if ($jsonPath) { Info "metrics: $jsonPath" }
 
 if ($FAIL -gt 0) { exit 1 } else { exit 0 }
