@@ -6,6 +6,7 @@
 
 param(
     [switch]$SkipPerf,       # Skip long-running perf/stress tests
+    [switch]$PerfOnly,       # Run only the perf group ($perfTests), then print the trend
     [switch]$IncludeWSL,     # Include WSL-dependent tests
     [switch]$IncludeInteractive, # Include tests that need interactive TUI
     [int]$DefaultTimeoutSec = 240,  # Per-suite timeout (normal suites)
@@ -987,7 +988,11 @@ $perfTests = @(
     # Launches real terminal emulators (Windows Terminal, WezTerm, Alacritty) and
     # times psmux against them: launch to prompt, keystroke to screen, creation
     # latency. Long by nature, and it opens GUI windows, so -SkipPerf skips it.
-    "test_launch_to_prompt_gate", "test_keystroke_latency_gate", "test_creation_latency_gate", "test_idle_socket_traffic", "test_perf_vs_terminals"
+    "test_launch_to_prompt_gate", "test_keystroke_latency_gate", "test_creation_latency_gate", "test_idle_socket_traffic", "test_perf_vs_terminals",
+    # To the prompt VISIBLE in the console the user launched from (warm, cold,
+    # bare pwsh), and real typing into an attached client, per character and
+    # after Ctrl+C. Both write JSON to the metrics folder perf_summary reads.
+    "test_launch_visible_prompt_gate", "test_typing_benchmark"
 )
 
 # Results tracking
@@ -1551,6 +1556,11 @@ if ($Only) {
     $allTests = @($allTests | Where-Object { $_.BaseName -match $Only })
     Write-Log "Filter -Only '$Only' matched $($allTests.Count) suites"
 }
+if ($PerfOnly) {
+    if ($SkipPerf) { Write-Host "  -PerfOnly and -SkipPerf together run nothing; -SkipPerf ignored" -ForegroundColor Yellow; $SkipPerf = $false }
+    $allTests = @($allTests | Where-Object { $perfTests -contains $_.BaseName })
+    Write-Log "Filter -PerfOnly matched $($allTests.Count) suites"
+}
 $totalSuites = $allTests.Count
 Write-Host ""
 Write-Host ("  {0} test suites discovered" -f $totalSuites) -ForegroundColor Cyan
@@ -1885,7 +1895,7 @@ $summaryLines = [System.Collections.ArrayList]::new()
 [void]$summaryLines.Add("Finished: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 [void]$summaryLines.Add("Duration: $([math]::Round($totalDuration,1))s ($([math]::Round($totalDuration/60,1)) min)")
 [void]$summaryLines.Add("Binary:   $PSMUX")
-[void]$summaryLines.Add("Params:   SkipPerf=$SkipPerf IncludeWSL=$IncludeWSL IncludeInteractive=$IncludeInteractive")
+[void]$summaryLines.Add("Params:   SkipPerf=$SkipPerf PerfOnly=$PerfOnly IncludeWSL=$IncludeWSL IncludeInteractive=$IncludeInteractive")
 [void]$summaryLines.Add("")
 [void]$summaryLines.Add("Suites PASSED:  $($passed.Count)")
 [void]$summaryLines.Add("Suites FAILED:  $($failed.Count)")
@@ -1922,6 +1932,20 @@ if ($script:RunAborted) {
 Write-Log "Summary written to: $script:SummaryLog"
 Write-Log "Suite logs in:      $script:SuiteDir"
 Write-Log "=== Run finished ==="
+
+# Every perf suite writes its numbers as JSON under
+# %USERPROFILE%\.psmux-test-data\metrics (or PSMUX_METRICS_DIR). When this run
+# included any of them, read the history back and print the trend: each
+# headline number's newest value against the median of the five runs before
+# it. A reading, not a verdict: it never changes the exit code.
+$perfRan = @($results | Where-Object { $perfTests -contains $_.Name -and $_.Status -ne "SKIP" })
+if ($perfRan.Count -gt 0 -and (Test-Path "$PSScriptRoot\perf_summary.ps1")) {
+    $trendFile = Join-Path $script:RunDir "perf_trend.txt"
+    try {
+        & pwsh -NoProfile -File "$PSScriptRoot\perf_summary.ps1" -Metric T 2>&1 | Tee-Object -FilePath $trendFile | Out-Host
+        Write-Log "Perf trend written to: $trendFile"
+    } catch { Write-Log "perf_summary.ps1 failed: $_" }
+}
 
 Write-Host ""
 Write-Host "  Logs saved to: $script:RunDir" -ForegroundColor Cyan
