@@ -35,7 +35,7 @@
 # WHAT ELSE IS TIMED HERE
 #
 #   variants     the split flags the deep cells do not cover: -f, -b, -bh, -bv,
-#                -l in cells and in percent (each checked to have produced the
+#                -l in cells and in percent, -p (each checked to have produced the
 #                size it asked for), a split issued in a ZOOMED window (checked
 #                to really be zoomed first) and a split that carries its own
 #                command. Five samples each
@@ -566,6 +566,10 @@ function Test-Variants {
         # through the same claim as a plain split and are budgeted like one.
         "split -l 10"    = @{ cmd = "split-window -v -l 10";  limit = $VariantP50LimitMs }
         "split -l 30%"   = @{ cmd = "split-window -h -l 30%"; limit = $VariantP50LimitMs }
+        # -p is the older percentage flag, still parsed by tmux next to -l
+        # (cmd-split-window.c args "...l:m:p:..."), and scripts written for
+        # tmux 2.x use it, so it is timed and size checked like -l N%.
+        "split -p 25"    = @{ cmd = "split-window -v -p 25";  limit = $VariantP50LimitMs }
         # A split issued while the window is ZOOMED. tmux unzooms first
         # (cmd-split-window.c, window_unzoom) and then splits, so this is the
         # unzoom plus resize of every pane plus the claim. It needs a window
@@ -604,8 +608,8 @@ function Test-Variants {
             # split under the wrong name, so the first sample of a sized cell
             # checks the new pane really got the size it asked for (within two
             # cells, for the border and percentage rounding).
-            if ($ms -ge 0 -and $i -eq 0 -and $cells[$label].cmd -match '-l (\d+)(%?)') {
-                $want = [int]$Matches[1]; $pct = ($Matches[2] -eq '%')
+            if ($ms -ge 0 -and $i -eq 0 -and $cells[$label].cmd -match '-([lp]) (\d+)(%?)') {
+                $want = [int]$Matches[2]; $pct = ($Matches[3] -eq '%' -or $Matches[1] -eq 'p')
                 $dim = if ($cells[$label].cmd -match '-h') { 'width' } else { 'height' }
                 $got = (Get-Text (Invoke-Psmux $inf.Port $inf.Key "display-message -p '#{pane_$dim} #{window_$dim}'")).Trim().Trim("'") -split '\s+'
                 if ($got.Count -ge 2) {
