@@ -287,7 +287,8 @@ param(
     [switch]$Quick,         # smaller n, for a smoke run
     [switch]$SkipLaunch,
     [switch]$SkipKeys,
-    [switch]$SkipCreate
+    [switch]$SkipCreate,
+    [switch]$SkipTabs       # section 3b: new tab and split against WT and WezTerm
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
@@ -1076,7 +1077,7 @@ function Save-Metrics {
         wt_was_running = $WtWasRunning
         params         = [ordered]@{
             n = $N; keys = $Keys; creates = $Creates; idle_seconds = $IdleSeconds
-            skip_launch = [bool]$SkipLaunch; skip_keys = [bool]$SkipKeys; skip_create = [bool]$SkipCreate
+            skip_launch = [bool]$SkipLaunch; skip_keys = [bool]$SkipKeys; skip_create = [bool]$SkipCreate; skip_tabs = [bool]$SkipTabs
             quick = [bool]$Quick
         }
         launch_to_prompt    = $script:Launch
@@ -1085,6 +1086,7 @@ function Save-Metrics {
         keystroke_split     = $script:KeySplit
         resources           = $script:Resource
         creation_latency    = $script:Create
+        tab_split           = $script:TabSplit
         summary_table  = $Rows
         psmux_overhead = $Deltas
         thresholds     = $script:Thresholds
@@ -2282,6 +2284,211 @@ if (-not $SkipCreate) {
 }
 
 # ══════════════════════════════════════════════════════════════════
+#  SECTION 3b  NEW TAB AND SPLIT, SAME SHELL IN EVERY TERMINAL
+# ══════════════════════════════════════════════════════════════════
+# Section 3 times psmux's own default path (a warm spare claimed to a visible
+# prompt). It cannot be set beside a terminal, because a terminal's default
+# profile shell writes no marker. This section is the like for like one:
+#
+#   - every host opens EXACTLY the same command line, `cmd /c <wrapper>` whose
+#     only line is `pwsh -NoLogo -NoProfile -File tabmarker.ps1 <marker> <quit>`,
+#     so no host gets a cheaper shell or a cheaper start;
+#   - every host is driven by its own CLI, which is how a user or a script
+#     opens a tab: `psmux new-window` / `split-window -h|-v`, `wt -w <ours> nt`
+#     / `sp -V|-H`, `wezterm cli spawn` / `split-pane --right|--bottom`;
+#   - t0 is the QPC stamp just before that CLI starts, t1 is the QPC stamp the
+#     new shell writes as its script runs (the same beacon section 1 uses), so
+#     both ends are on one clock and the CLI's own start is charged to its host.
+#
+# Because the pane runs a command, psmux's warm spares are NOT in play here:
+# this is the cold "start a shell for me" path of every host, and section 3 is
+# psmux's warm one. psmux new-window -h and -v map to wt sp -V and -H and to
+# wezterm --right and --bottom (a side by side split and a stacked split).
+#
+# The shell exits by itself (exit 0) once this suite drops its quit file, so a
+# WT tab or a WezTerm pane closes cleanly instead of showing a killed process.
+# Every host window is this suite's own: a named WT window ($WtWindow), a
+# WezTerm GUI started here and addressed through its own gui socket (never a
+# WezTerm the user has open), and a psmux client in a namespace of its own.
+# Each is closed by PID at the end of its block.
+$script:TabSplit = [ordered]@{}
+$TabMarker = Join-Path $RunDir "tabmarker.ps1"
+@'
+param([string]$Out, [string]$Quit)
+[IO.File]::WriteAllText($Out, "$([Diagnostics.Stopwatch]::GetTimestamp()) $PID")
+$sw = [Diagnostics.Stopwatch]::StartNew()
+while (-not (Test-Path -LiteralPath $Quit) -and $sw.Elapsed.TotalSeconds -lt 120) { Start-Sleep -Milliseconds 50 }
+exit 0
+'@ | Set-Content -Path $TabMarker -Encoding UTF8
+
+function New-TabWrapper {
+    param([string]$Tag)
+    $mf = Join-Path $RunDir "tm_$Tag.txt"
+    $qf = Join-Path $RunDir "tq_$Tag.txt"
+    Remove-Item $mf, $qf -Force -ErrorAction SilentlyContinue
+    $w = New-Wrapper "tab_$Tag" ("pwsh -NoLogo -NoProfile -File `"$TabMarker`" `"$mf`" `"$qf`"")
+    return @{ Wrapper = $w; Marker = $mf; Quit = $qf }
+}
+
+# Ask the shell to leave, give it a moment, and only then kill it by PID.
+function Close-TabShell {
+    param($Spec, [int]$ShellPid)
+    try { [IO.File]::WriteAllText($Spec.Quit, "q") } catch {}
+    if ($ShellPid -le 0) { return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt 3000 -and (Get-Process -Id $ShellPid -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 25 }
+    if (Get-Process -Id $ShellPid -ErrorAction SilentlyContinue) { Kill-Pid $ShellPid }
+}
+
+# One creation: start the host's CLI with the wrapper, wait for the marker.
+# Returns @{ ms; shell } or $null.
+function Invoke-TabCreate {
+    param([string]$Exe, [string[]]$Argv, $Spec, [hashtable]$Env = @{}, [bool]$Hidden = $true)
+    $saved = @{}
+    foreach ($k in $Env.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $Env[$k]) }
+    $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
+    $p = $null
+    # The console CLIs (psmux, wezterm cli) start hidden, so none of them pays
+    # for a visible console window; wt.exe is a GUI launcher and starts as the
+    # launch cells start it.
+    try {
+        if ($Hidden) { $p = Start-Process -FilePath $Exe -ArgumentList $Argv -PassThru -WindowStyle Hidden -ErrorAction Stop }
+        else { $p = Start-Process -FilePath $Exe -ArgumentList $Argv -PassThru -ErrorAction Stop }
+    } catch { }
+    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    if (-not $p) { return $null }
+    Register-Started $p.Id
+    $m = Wait-Marker $Spec.Marker 30000
+    if (-not $m) { return $null }
+    Register-Started $m.ShellPid
+    return @{ ms = (($m.Ticks - $t0) * 1000.0 / $Freq); shell = $m.ShellPid; cli = $p.Id }
+}
+
+# The three creation kinds for one host, $Reps times each, interleaved
+# (tab, split side by side, split stacked, tab, ...). After every sample the new
+# shell is asked to exit, so its tab or pane closes and the next split always
+# splits the base pane of a window that has one pane.
+function Measure-TabHost {
+    param([string]$HostName, [System.Collections.IDictionary]$Kinds, [hashtable]$Env = @{}, [int]$Reps)
+    $samples = [ordered]@{}
+    foreach ($k in $Kinds.Keys) { $samples[$k] = @() }
+    for ($r = 0; $r -lt $Reps; $r++) {
+        foreach ($k in @($Kinds.Keys)) {
+            $spec = New-TabWrapper ("{0}_{1}_{2}" -f $HostName, ($k -replace '\W', ''), $r)
+            $call = & $Kinds[$k] $spec.Wrapper
+            $res = Invoke-TabCreate -Exe $call.Exe -Argv $call.Argv -Spec $spec -Env $Env -Hidden (-not $call.Visible)
+            if ($res) {
+                $samples[$k] += $res.ms
+                Write-Host ("    {0,-10} {1,-14} rep {2}: {3,8:F1} ms" -f $HostName, $k, $r, $res.ms) -ForegroundColor DarkGray
+                Close-TabShell $spec $res.shell
+            } else {
+                Warn ("    {0} {1} rep {2}: no marker within 30 s" -f $HostName, $k, $r)
+                Close-TabShell $spec 0
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    $o = [ordered]@{}
+    foreach ($k in $samples.Keys) {
+        $st = Stat $samples[$k]
+        if ($st) { $o[$k] = $st }
+    }
+    return $o
+}
+
+if (-not $SkipCreate -and -not $SkipTabs) {
+    Head "3b. NEW TAB AND SPLIT, SAME SHELL AND SAME COMMAND IN EVERY HOST  (pwsh -NoProfile via cmd /c; warm spares not in play)"
+    $reps = $Creates
+
+    # ── psmux: an attached client in a namespace of its own ──
+    $tabNs = "tab$PID"
+    $base = New-TabWrapper "psmux_base"
+    $snap = Snapshot-Hosts; $since = Get-Date
+    $cli = Start-Process -FilePath $Psmux -ArgumentList @("-L", $tabNs, "new-session", "-s", "tabs", "cmd", "/c", $base.Wrapper) -PassThru
+    Register-Started $cli.Id
+    $bm = Wait-Marker $base.Marker 30000
+    if ($bm) {
+        Register-Started $bm.ShellPid
+        Start-Sleep -Milliseconds 1500
+        $script:TabSplit["psmux"] = Measure-TabHost -HostName "psmux" -Reps $reps -Kinds ([ordered]@{
+            "new tab"        = { param($w) @{ Exe = $Psmux; Argv = @("-L", $tabNs, "new-window", "-t", "tabs", "cmd", "/c", $w) } }
+            "split side"     = { param($w) @{ Exe = $Psmux; Argv = @("-L", $tabNs, "split-window", "-h", "-t", "tabs", "cmd", "/c", $w) } }
+            "split stacked"  = { param($w) @{ Exe = $Psmux; Argv = @("-L", $tabNs, "split-window", "-v", "-t", "tabs", "cmd", "/c", $w) } }
+        })
+    } else { Warn "  psmux: the base pane's marker never arrived; psmux tab and split cells skipped" }
+    Close-TabShell $base $(if ($bm) { $bm.ShellPid } else { 0 })
+    $hosts = Find-CellHosts -Snap $snap -Since $since -Gui "" -Ours @($cli.Id)
+    Close-Cell -Hosts $hosts -LauncherPid $cli.Id -ShellPid 0 -Ns $tabNs
+
+    # ── Windows Terminal: this suite's own named window ──
+    if ($WT -and -not $script:HostDown.Contains("WindowsTerminal")) {
+        $tabWin = "${WtWindow}tabs"
+        $base = New-TabWrapper "wt_base"
+        $snap = Snapshot-Hosts; $since = Get-Date
+        $l = $null
+        try { $l = Start-Process -FilePath $WT -ArgumentList @("-w", $tabWin, "nt", "cmd", "/c", $base.Wrapper) -PassThru -ErrorAction Stop; Register-Started $l.Id } catch { Set-HostDown "WindowsTerminal" ($_.Exception.Message -replace '\s+', ' ') }
+        $bm = if ($l) { Wait-Marker $base.Marker 30000 } else { $null }
+        if ($bm) {
+            Register-Started $bm.ShellPid
+            Start-Sleep -Milliseconds 1500
+            $script:TabSplit["windows_terminal"] = Measure-TabHost -HostName "wt" -Reps $reps -Kinds ([ordered]@{
+                "new tab"       = { param($w) @{ Visible = $true; Exe = $WT; Argv = @("-w", $tabWin, "nt", "cmd", "/c", $w) } }
+                "split side"    = { param($w) @{ Visible = $true; Exe = $WT; Argv = @("-w", $tabWin, "sp", "-V", "cmd", "/c", $w) } }
+                "split stacked" = { param($w) @{ Visible = $true; Exe = $WT; Argv = @("-w", $tabWin, "sp", "-H", "cmd", "/c", $w) } }
+            })
+        } elseif ($l) { Warn "  Windows Terminal: the base tab's marker never arrived; WT tab and split cells skipped" }
+        Close-TabShell $base $(if ($bm) { $bm.ShellPid } else { 0 })
+        Start-Sleep -Milliseconds 700
+        $hosts = Find-CellHosts -Snap $snap -Since $since -Gui "WindowsTerminal" -Ours @($(if ($l) { $l.Id } else { 0 }))
+        Close-Cell -Hosts $hosts -LauncherPid $(if ($l) { $l.Id } else { 0 }) -ShellPid 0 -Ns ""
+    }
+
+    # ── WezTerm: a GUI of its own, addressed through its own gui socket ──
+    if ($WEZ -and -not $script:HostDown.Contains("wezterm-gui")) {
+        $base = New-TabWrapper "wez_base"
+        $snap = Snapshot-Hosts; $since = Get-Date
+        $l = $null
+        try { $l = Start-Process -FilePath $WEZ -ArgumentList @("start", "--", "cmd", "/c", $base.Wrapper) -PassThru -ErrorAction Stop; Register-Started $l.Id } catch { Set-HostDown "wezterm-gui" ($_.Exception.Message -replace '\s+', ' ') }
+        $bm = if ($l) { Wait-Marker $base.Marker 30000 } else { $null }
+        $gui = 0
+        if ($bm) {
+            Register-Started $bm.ShellPid
+            $gh = Get-GuiHost $bm.ShellPid
+            if ($gh.gui_name -eq "wezterm-gui" -and -not $gh.gui_shared) { $gui = [int]$gh.gui }
+        }
+        $sock = if ($gui) { Join-Path $env:USERPROFILE ".local\share\wezterm\gui-sock-$gui" } else { "" }
+        if ($bm -and $gui -and (Test-Path $sock)) {
+            $wenv = @{ WEZTERM_UNIX_SOCKET = $sock }
+            # The base pane is the split target, so a split never lands in a
+            # pane that is about to exit.
+            $basePane = ""
+            $saved = $env:WEZTERM_UNIX_SOCKET; $env:WEZTERM_UNIX_SOCKET = $sock
+            try { $basePane = ((& $WEZ cli list --format json 2>$null | Out-String | ConvertFrom-Json) | Select-Object -First 1).pane_id } catch {}
+            $env:WEZTERM_UNIX_SOCKET = $saved
+            Start-Sleep -Milliseconds 1500
+            $paneArg = if ("$basePane" -ne "") { @("--pane-id", "$basePane") } else { @() }
+            $script:TabSplit["wezterm"] = Measure-TabHost -HostName "wezterm" -Reps $reps -Env $wenv -Kinds ([ordered]@{
+                "new tab"       = { param($w) @{ Exe = $WEZ; Argv = (@("cli", "spawn") + $paneArg + @("--", "cmd", "/c", $w)) } }.GetNewClosure()
+                "split side"    = { param($w) @{ Exe = $WEZ; Argv = (@("cli", "split-pane") + $paneArg + @("--right", "--", "cmd", "/c", $w)) } }.GetNewClosure()
+                "split stacked" = { param($w) @{ Exe = $WEZ; Argv = (@("cli", "split-pane") + $paneArg + @("--bottom", "--", "cmd", "/c", $w)) } }.GetNewClosure()
+            })
+        } elseif ($l) { Warn "  WezTerm: the GUI or its gui socket could not be identified as this suite's own; WezTerm tab and split cells skipped" }
+        Close-TabShell $base $(if ($bm) { $bm.ShellPid } else { 0 })
+        Start-Sleep -Milliseconds 700
+        $hosts = Find-CellHosts -Snap $snap -Since $since -Gui "wezterm-gui" -Ours @($(if ($l) { $l.Id } else { 0 }))
+        Close-Cell -Hosts $hosts -LauncherPid $(if ($l) { $l.Id } else { 0 }) -ShellPid 0 -Ns ""
+    }
+
+    foreach ($h in $script:TabSplit.Keys) {
+        foreach ($k in $script:TabSplit[$h].Keys) {
+            $st = $script:TabSplit[$h][$k]
+            Write-Host ("  {0,-18} {1,-14} n={2}  min={3,7:F1}  median={4,7:F1}  p90={5,7:F1}  max={6,7:F1} ms" -f $h, $k, $st.n, $st.min, $st.median, $st.p90, $st.max) -ForegroundColor Green
+        }
+    }
+    $null = Save-Metrics
+}
+
+# ══════════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════════
 $bareMed = if ($script:Launch["bare_pwsh"]) { $script:Launch["bare_pwsh"].median } else { 0 }
@@ -2449,6 +2656,23 @@ foreach ($t in @("wt_pwsh", "wezterm_pwsh", "alacritty_pwsh")) {
             psmux_leads = ([double]$p.idle_cpu_pct_psmux -le [double]$o.idle_cpu_pct_host)
             note = $(if ($o.host_shared) { "host process is shared with other windows" } else { "" })
         })
+    }
+}
+# New tab and split, same shell and same command in every host (section 3b).
+if ($script:TabSplit -and $script:TabSplit.Contains("psmux")) {
+    foreach ($other in @("windows_terminal", "wezterm")) {
+        if (-not $script:TabSplit.Contains($other)) { continue }
+        foreach ($k in @("new tab", "split side", "split stacked")) {
+            $p = $script:TabSplit["psmux"][$k]; $o = $script:TabSplit[$other][$k]
+            if (-not $p -or -not $o) { continue }
+            [void]$leaderboard.Add([pscustomobject]@{
+                metric = "$k, same cmd"; psmux_cell = "psmux"; other_cell = $other
+                psmux = $p.median; other = $o.median; unit = "ms"
+                margin = [math]::Round([double]$p.median - [double]$o.median, 2)
+                psmux_leads = ([double]$p.median -le [double]$o.median)
+                note = "cold path in every host: the pane runs a command, so psmux's warm spares are not used"
+            })
+        }
     }
 }
 if ($leaderboard.Count -gt 0) {
