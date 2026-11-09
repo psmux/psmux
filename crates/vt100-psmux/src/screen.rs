@@ -1293,11 +1293,17 @@ impl Screen {
         self.osc94_progress
     }
 
-    /// Store an OSC 9;4 progress indicator. State is clamped to 0..=4 and
-    /// value to 0..=100 to match the Windows Terminal contract.
-    pub fn set_progress(&mut self, state: u8, value: u8) {
+    /// Store an OSC 9;4 progress indicator, as tmux's
+    /// `screen_set_progress_bar` (screen.c:344 at tag 3.8) does: the state
+    /// always changes, and the value only when one is given and the state is
+    /// not indeterminate (3). State is clamped to 0..=4 and value to 0..=100.
+    pub fn set_progress(&mut self, state: u8, value: Option<u8>) {
         let s = state.min(4);
-        let v = value.min(100);
+        let last = self.osc94_progress.map_or(0, |(_, v)| v);
+        let v = match value {
+            Some(v) if s != 3 => v.min(100),
+            _ => last,
+        };
         self.osc94_progress = Some((s, v));
     }
 
@@ -2413,6 +2419,9 @@ impl Screen {
         let osc_title = std::mem::take(&mut self.osc_title);
         let title_stack = std::mem::take(&mut self.title_stack);
         let title_reset = self.title_reset;
+        // So does the progress indicator: only `screen_reinit` resets it
+        // (screen.c:139 at tag 3.8).
+        let progress = self.osc94_progress;
         // RIS drops the OSC 4 entries only; the pane-colours defaults belong
         // to the pane's options, not to the program (input.c:1407 clears
         // `p->palette` and leaves `p->default_palette`).
@@ -2429,6 +2438,7 @@ impl Screen {
         self.osc_title = osc_title;
         self.title_stack = title_stack;
         self.title_reset = title_reset;
+        self.osc94_progress = progress;
     }
 
     // csi codes

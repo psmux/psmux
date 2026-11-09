@@ -428,20 +428,19 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"7", uri] => {
                 self.screen.set_path(uri);
             }
-            [b"9", b"4", state, progress] => {
-                // OSC 9;4 — Windows Terminal progress indicator.
+            [b"9", b"4", rest @ ..] => {
+                // OSC 9;4, the Windows Terminal progress indicator.
                 //   state: 0=hide, 1=default, 2=error, 3=indeterminate, 4=warning
-                //   progress: 0..=100
-                let s = std::str::from_utf8(state)
-                    .ok()
-                    .and_then(|s| s.parse::<u8>().ok())
-                    .unwrap_or(0);
-                let v = std::str::from_utf8(progress)
-                    .ok()
-                    .and_then(|s| s.parse::<u8>().ok())
-                    .unwrap_or(0);
-                self.screen.set_progress(s, v);
-                self.callbacks.set_progress(&mut self.screen, s, v);
+                //   progress: 0..=100, or nothing to keep the last one
+                match progress_fields(rest) {
+                    Some((state, value)) => {
+                        self.screen.set_progress(state, value);
+                        if let Some((s, v)) = self.screen.progress() {
+                            self.callbacks.set_progress(&mut self.screen, s, v);
+                        }
+                    }
+                    None => self.callbacks.unhandled_osc(&mut self.screen, params),
+                }
             }
             [b"9", b"9", cwd_rest @ ..] if !cwd_rest.is_empty() => {
                 // OSC 9;9;<cwd> — ConEmu's "set working directory", the form
@@ -706,6 +705,36 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         // Let go of the image's bytes rather than keep the capacity.
         self.dcs_buf = Vec::new();
     }
+}
+
+/// The fields of an OSC 9;4 after the `4`, read as tmux's `input_osc_9` reads
+/// them (input.c:3030 at tag 3.8): one digit from 0 to 4 for the state, then a
+/// value of at most 100, or nothing with or without its `;`. tmux ignores
+/// anything else and so does this, leaving the indicator as it was.
+fn progress_fields(rest: &[&[u8]]) -> Option<(u8, Option<u8>)> {
+    let (state, value) = match rest {
+        [state] | [state, b""] => (*state, None),
+        [state, value] => (*state, Some(*value)),
+        _ => return None,
+    };
+    let state = match state {
+        [digit @ b'0'..=b'4'] => digit - b'0',
+        _ => return None,
+    };
+    let Some(digits) = value else {
+        return Some((state, None));
+    };
+    let mut number: u16 = 0;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        number = number * 10 + u16::from(byte - b'0');
+        if number > 100 {
+            return None;
+        }
+    }
+    Some((state, u8::try_from(number).ok()))
 }
 
 /// Where a sixel lands and where it leaves the text cursor, in the units the

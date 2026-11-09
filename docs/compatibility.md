@@ -373,6 +373,18 @@ One platform limit, measured on Windows 11 build 26200: conhost swallows a **bar
 
 The inbox conhost differs from tmux on purpose: it drops a pane's sixel before psmux sees it, so reporting colour registers there would describe images nothing can draw. A query with more than three parameters gets no reply, as in tmux. psmux reads a parameter as at most 65535, where tmux reads up to `INT_MAX`.
 
+### Progress Indicator (OSC 9;4)
+
+A pane sets the progress indicator with `ESC]9;4;state;value ESC\`, and the client writes the active pane's to the host terminal. The fields are read as tmux's `input_osc_9` reads them:
+
+```
+ESC]9;4;1;50 ESC\              state and value
+ESC]9;4;3 ESC\                 state only (a trailing ; is the same), the value stays
+ESC]9;4;3;70 ESC\              indeterminate never takes a value, the value stays
+```
+
+The state is one digit, 0 hidden, 1 normal, 2 error, 3 indeterminate, 4 paused. The value is at most 100. Anything else leaves the indicator as it was. The client always writes both fields, so `ESC]9;4;3 ESC\` after a value of 50 reaches the host terminal as `ESC]9;4;3;50 ESC\`, as it does from tmux. RIS leaves the indicator alone, and a respawn clears it.
+
 ## Behavioral Differences from tmux
 
 A few commands intentionally behave differently from upstream tmux. These are deliberate choices, not bugs.
