@@ -24,15 +24,32 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+. "$PSScriptRoot\perf_metrics_common.ps1"
+# The build in this tree first, then PSMUX_TEST_BIN, then the psmux on PATH.
 $PSMUX = Join-Path $PSScriptRoot "..\target\release\psmux.exe"
 if (-not (Test-Path $PSMUX)) {
     $PSMUX = Join-Path $PSScriptRoot "..\target\release\tmux.exe"
 }
+if (-not (Test-Path $PSMUX) -and $env:PSMUX_TEST_BIN) { $PSMUX = $env:PSMUX_TEST_BIN }
+if (-not (Test-Path $PSMUX)) { $c = Get-Command psmux -ErrorAction SilentlyContinue; if ($c) { $PSMUX = $c.Source } }
 if (-not (Test-Path $PSMUX)) {
-    Write-Host "ERROR: psmux.exe not found in target\release\" -ForegroundColor Red
+    Write-Host "ERROR: no psmux binary (target\release, PSMUX_TEST_BIN or PATH)" -ForegroundColor Red
     exit 1
 }
 $PSMUX = (Resolve-Path $PSMUX).Path
+
+# ISOLATION. Everything this suite starts lives in its own -L namespace AND its
+# own data directory, so it can run on a machine with live sessions. It used to
+# run a bare kill-server (the default namespace), Stop-Process every psmux on
+# the machine by image name, and delete every *.port and *.key in ~/.psmux.
+# Cleanup now ends only this namespace, and then only processes running THIS
+# binary with this namespace on their command line, by PID.
+$NS = "xperf$PID"
+$DataDir = Join-Path $env:TEMP "psmux_xperf_$PID"
+New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+$prevDataDir = $env:PSMUX_DATA_DIR
+$env:PSMUX_DATA_DIR = $DataDir
+$env:PSMUX_SESSION_NAME = $null
 
 $PASS = 0; $FAIL = 0; $TOTAL = 0
 function Pass($msg) { $script:PASS++; $script:TOTAL++; Write-Host "  [PASS] $msg" -ForegroundColor Green }
@@ -43,13 +60,17 @@ function Metric($label, $ms) {
     Write-Host ("  {0,-55} {1,8:N0} ms" -f $label, $ms) -ForegroundColor $c
 }
 function Cleanup {
-    & $PSMUX kill-server 2>&1 | Out-Null
+    & $PSMUX -L $NS -L $NS kill-server 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    Get-Process psmux -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Stragglers of THIS namespace only (exact binary path and -L $NS on the
+    # command line), by PID. Never by image name.
+    foreach ($p in (Get-PerfNamespacePids -Binary $PSMUX -Ns $NS)) {
+        try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch {}
+    }
     Start-Sleep -Milliseconds 500
-    $psmuxDir = "$env:USERPROFILE\.psmux"
-    Get-ChildItem "$psmuxDir\*.port" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    Get-ChildItem "$psmuxDir\*.key"  -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    # Only this suite's own data directory is cleared.
+    Get-ChildItem "$DataDir\*.port" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem "$DataDir\*.key"  -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 function Wait-Prompt {
@@ -57,7 +78,7 @@ function Wait-Prompt {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $Timeout) {
         try {
-            $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
+            $cap = & $PSMUX -L $NS capture-pane -t $Target -p 2>&1 | Out-String
             # Detect PS prompt: standard "PS C:\", oh-my-posh "❯", or starship "$"
             #
             # TEST 4 (split-pane scaling) drives panes down to 3 rows tall
@@ -86,7 +107,7 @@ function Wait-Prompt {
 
 function Wait-ServerReady {
     param([string]$Session, [int]$TimeoutMs = 15000)
-    $pf = "$env:USERPROFILE\.psmux\${Session}.port"
+    $pf = Join-Path $DataDir "${NS}__${Session}.port"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         if (Test-Path $pf) {
@@ -105,9 +126,18 @@ function Percentile($arr, $pct) {
     return $sorted[$idx]
 }
 
+# Working set of this namespace's session server, found by its pid anchor. One
+# session runs at a time here, and the warm standby has no anchor of that kind.
 function Get-PsmuxMemory {
-    $proc = Get-Process psmux -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($proc) { return [Math]::Round($proc.WorkingSet64 / 1MB, 1) }
+    foreach ($f in @(Get-ChildItem (Join-Path $DataDir "${NS}__*.pid") -ErrorAction SilentlyContinue)) {
+        $sess = $f.BaseName.Substring($NS.Length + 2)
+        if ($sess -like "__warm__*") { continue }
+        $sp = Get-PerfServerPid -Ns $NS -Session $sess -DataDir $DataDir
+        if ($sp -gt 0) {
+            $proc = Get-Process -Id $sp -ErrorAction SilentlyContinue
+            if ($proc) { return [Math]::Round($proc.WorkingSet64 / 1MB, 1) }
+        }
+    }
     return 0
 }
 
@@ -162,7 +192,7 @@ Write-Host ("─" * 78) -ForegroundColor DarkGray
 
 Cleanup
 $coldSw = [System.Diagnostics.Stopwatch]::StartNew()
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s xperf -d" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -s xperf -d" -WindowStyle Hidden
 $srv = Wait-ServerReady "xperf"
 if ($srv) {
     Metric "Server ready (port file)" $srv.ElapsedMs
@@ -191,7 +221,7 @@ Write-Host "  TEST 2: SEQUENTIAL $SequentialWindows WINDOWS (command + prompt ch
 Write-Host ("─" * 78) -ForegroundColor DarkGray
 
 Cleanup
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s seq -d" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -s seq -d" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 $seqPrompt = Wait-Prompt "seq:0"
 if (-not $seqPrompt.Found) { Fail "Initial prompt for seq session"; }
@@ -203,7 +233,7 @@ $failedWindows = @()
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 for ($i = 1; $i -le $SequentialWindows; $i++) {
     $cmdSw = [System.Diagnostics.Stopwatch]::StartNew()
-    & $PSMUX new-window -t seq 2>&1 | Out-Null
+    & $PSMUX -L $NS new-window -t seq 2>&1 | Out-Null
     $cmdSw.Stop()
     $cmdTimes += $cmdSw.ElapsedMilliseconds
 
@@ -273,7 +303,7 @@ Write-Host "  TEST 3: BURST $BurstWindows WINDOWS (fire all, then verify)" -Fore
 Write-Host ("─" * 78) -ForegroundColor DarkGray
 
 Cleanup
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s burst -d" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -s burst -d" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 Wait-Prompt "burst:0" | Out-Null
 
@@ -281,7 +311,7 @@ $burstSw = [System.Diagnostics.Stopwatch]::StartNew()
 $burstCmdTimes = @()
 for ($i = 1; $i -le $BurstWindows; $i++) {
     $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
-    & $PSMUX new-window -t burst 2>&1 | Out-Null
+    & $PSMUX -L $NS new-window -t burst 2>&1 | Out-Null
     $sw2.Stop()
     $burstCmdTimes += $sw2.ElapsedMilliseconds
     if ($BurstDelayMs -gt 0) { Start-Sleep -Milliseconds $BurstDelayMs }
@@ -323,7 +353,7 @@ Write-Host "  TEST 4: SPLIT PANE SCALING (alternating V/H in one window)" -Foreg
 Write-Host ("─" * 78) -ForegroundColor DarkGray
 
 Cleanup
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s splitx -d" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -s splitx -d" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 Wait-Prompt "splitx:0" | Out-Null
 
@@ -332,7 +362,7 @@ $maxSplits = 30  # Try up to 30 splits (31 panes total)
 for ($i = 1; $i -le $maxSplits; $i++) {
     $flag = if ($i % 2 -eq 0) { "-h" } else { "-v" }
     $sw3 = [System.Diagnostics.Stopwatch]::StartNew()
-    $out = & $PSMUX split-window $flag -t splitx 2>&1 | Out-String
+    $out = & $PSMUX -L $NS split-window $flag -t splitx 2>&1 | Out-String
     $sw3.Stop()
     if ($LASTEXITCODE -ne 0 -or $out -match "too small") {
         Info "Split $i rejected (pane too small): $($out.Trim())"
@@ -370,7 +400,7 @@ Write-Host "  TEST 5: MIXED $MixedWindows windows x $MixedSplits splits = $total
 Write-Host ("─" * 78) -ForegroundColor DarkGray
 
 Cleanup
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s mixed -d" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -s mixed -d" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 Wait-Prompt "mixed:0" | Out-Null
 
@@ -378,14 +408,14 @@ $mixedSw = [System.Diagnostics.Stopwatch]::StartNew()
 $windowCmds = @(); $splitCmds = @(); $mixedErrors = 0
 for ($w = 1; $w -le $MixedWindows; $w++) {
     $sw4 = [System.Diagnostics.Stopwatch]::StartNew()
-    & $PSMUX new-window -t mixed 2>&1 | Out-Null
+    & $PSMUX -L $NS new-window -t mixed 2>&1 | Out-Null
     $sw4.Stop()
     $windowCmds += $sw4.ElapsedMilliseconds
 
     for ($s = 0; $s -lt $MixedSplits; $s++) {
         $flag = if ($s % 2 -eq 0) { "-v" } else { "-h" }
         $sw5 = [System.Diagnostics.Stopwatch]::StartNew()
-        $out = & $PSMUX split-window $flag -t mixed 2>&1 | Out-String
+        $out = & $PSMUX -L $NS split-window $flag -t mixed 2>&1 | Out-String
         $sw5.Stop()
         if ($LASTEXITCODE -ne 0 -or $out -match "too small") {
             $mixedErrors++
@@ -450,8 +480,8 @@ Write-Host ("─" * 78) -ForegroundColor DarkGray
 # Use the mixed session that still has many panes
 $port = $null; $key = $null
 try {
-    $port = [int](Get-Content "$env:USERPROFILE\.psmux\mixed.port" -Raw).Trim()
-    $key = (Get-Content "$env:USERPROFILE\.psmux\mixed.key" -Raw).Trim()
+    $port = [int](Get-Content (Join-Path $DataDir "${NS}__mixed.port") -Raw).Trim()
+    $key = (Get-Content (Join-Path $DataDir "${NS}__mixed.key") -Raw).Trim()
 } catch { Info "Could not read server port/key" }
 
 if ($port -and $key) {
@@ -533,14 +563,14 @@ Write-Host "  TEST 7: THROUGHPUT — new-window commands per second" -Foreground
 Write-Host ("─" * 78) -ForegroundColor DarkGray
 
 Cleanup
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s tput -d" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "-L $NS new-session -s tput -d" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 Wait-Prompt "tput:0" | Out-Null
 
 $tputCount = 200
 $tputSw = [System.Diagnostics.Stopwatch]::StartNew()
 for ($i = 1; $i -le $tputCount; $i++) {
-    & $PSMUX new-window -t tput 2>&1 | Out-Null
+    & $PSMUX -L $NS new-window -t tput 2>&1 | Out-Null
 }
 $tputSw.Stop()
 $tputRate = [Math]::Round($tputCount / ($tputSw.ElapsedMilliseconds / 1000.0), 1)
@@ -549,7 +579,7 @@ Info "Throughput: $tputRate windows/sec"
 $results["throughput_wps"] = $tputRate
 
 # Verify server alive
-$alive = & $PSMUX list-sessions 2>&1 | Out-String
+$alive = & $PSMUX -L $NS list-sessions 2>&1 | Out-String
 if ($alive -match "tput") { Pass "Server alive after $tputCount rapid windows" }
 else { Fail "Server died after rapid window creation" }
 $memFinal = Get-PsmuxMemory
@@ -567,7 +597,7 @@ Write-Host ("─" * 78) -ForegroundColor DarkGray
 $killSw = [System.Diagnostics.Stopwatch]::StartNew()
 # Kill windows in reverse to avoid index shifting issues  
 for ($i = $tputCount; $i -ge 1; $i--) {
-    & $PSMUX kill-window -t "tput:$i" 2>&1 | Out-Null
+    & $PSMUX -L $NS kill-window -t "tput:$i" 2>&1 | Out-Null
 }
 $killSw.Stop()
 Metric "Kill $tputCount windows" $killSw.ElapsedMilliseconds
@@ -605,7 +635,6 @@ $results | ConvertTo-Json | Out-File $outFile -Encoding utf8
 Info "Results written to $outFile"
 # The same numbers with the shared envelope (build, machine, load) in the
 # metrics folder perf_summary.ps1 reads, so the scale run has a history too.
-. "$PSScriptRoot\perf_metrics_common.ps1"
 $sorted = [ordered]@{}
 foreach ($k in ($results.Keys | Sort-Object)) { $sorted[$k] = $results[$k] }
 $jsonPath = Write-PerfMetrics -Suite "test_extreme_perf" -Binary $PSMUX -FileStem "extreme_perf" -Data ([ordered]@{
@@ -615,5 +644,8 @@ $jsonPath = Write-PerfMetrics -Suite "test_extreme_perf" -Binary $PSMUX -FileSte
     failed  = $FAIL
 })
 if ($jsonPath) { Info "metrics: $jsonPath" }
+
+if ($null -eq $prevDataDir) { Remove-Item Env:\PSMUX_DATA_DIR -ErrorAction SilentlyContinue } else { $env:PSMUX_DATA_DIR = $prevDataDir }
+Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
 
 if ($FAIL -gt 0) { exit 1 } else { exit 0 }
