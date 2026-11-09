@@ -68,7 +68,8 @@ pub trait Callbacks {
     /// This callback is called when the terminal receives an OSC 9;4
     /// (Windows Terminal progress indicator) sequence.  State values:
     /// 0 = hide, 1 = default, 2 = error, 3 = indeterminate, 4 = warning.
-    /// Progress is in 0..=100.
+    /// Progress is in 0..=100, and is the value now held, so the last one
+    /// when the sequence gave none or the state is indeterminate.
     fn set_progress(
         &mut self,
         _: &mut crate::Screen,
