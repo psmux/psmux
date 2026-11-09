@@ -130,8 +130,14 @@ Set-Content -Path "$TempHome\emit.ps1" -Value @(
     '    Start-Sleep -Milliseconds 50'
     '}'
 )
-# A prompt for Ctrl+L, with no predictions drawn under what is typed.
-Set-Content -Path "$TempHome\prompt.ps1" -Value 'Set-PSReadLineOption -PredictionSource None'
+# A prompt for Ctrl+L, with no predictions drawn under what is typed. The
+# prompt is short and fixed: the default one shows the working directory, which
+# wraps onto a second row in a 40 column pane when the suite runs from a long
+# path, and the cursor then sits on row 1 after Ctrl+L.
+Set-Content -Path "$TempHome\prompt.ps1" -Value @(
+    'Set-PSReadLineOption -PredictionSource None'
+    'function global:prompt { "PS> " }'
+)
 $pwsh = (Get-Command pwsh).Source.Replace('\', '/')
 $fwd = $TempHome.Replace('\', '/')
 $script:NS = ""
