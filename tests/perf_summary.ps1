@@ -581,6 +581,22 @@ function Show-T {
     }
     Show-TrendRow "lead: warm psmux minus WT" "margin" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $lead $j "wt_pwsh" })
     Show-TrendRow "lead: warm psmux minus WezTerm" "margin" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $lead $j "wezterm_pwsh" })
+    # New tab and split with the same command in every host (section 3b of
+    # test_perf_vs_terminals): psmux minus each terminal, per kind.
+    $tabLead = {
+        param($j, $other, $kind)
+        $t = Prop $j "tab_split"
+        $p = Prop (Prop (Prop $t "psmux") $kind) "median"
+        $o = Prop (Prop (Prop $t $other) $kind) "median"
+        if ($null -eq $p -or $null -eq $o) { return $null }
+        return ([double]$p - [double]$o)
+    }
+    foreach ($kind in @("new tab", "split side", "split stacked")) {
+        foreach ($oth in @(@("windows_terminal", "WT"), @("wezterm", "WezTerm"))) {
+            $o = $oth[0]; $k = $kind
+            Show-TrendRow ("lead: {0} psmux minus {1}" -f $kind, $oth[1]) "margin" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $tabLead $j $o $k }.GetNewClosure())
+        }
+    }
     # To the prompt VISIBLE in the console the user launched from
     # (test_launch_visible_prompt_gate): the warm row is the path a user takes
     # with a psmux server already running, which no marker based cell measures.
