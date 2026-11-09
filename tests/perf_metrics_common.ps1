@@ -441,25 +441,33 @@ function Measure-PerfIdleCpu {
     }
 }
 
-# One scenario's resource cost in one shape: snapshot the roles, run the
-# scriptblock, snapshot again. Returns memory, handles and CPU before and after
-# (Get-PerfMemorySummary shape), the CPU each role spent during the scenario in
-# ms, the wall time, and, when $Units is given (keys typed, panes made), the CPU
-# per 100 units. A role whose process changed in between is left out of the
-# deltas, never reported as a delta it is not. The scriptblock's own output is
-# returned under `result` so a caller can time and measure in one call.
-function Measure-PerfScenario {
-    param(
-        [string]$Name,
-        [System.Collections.IDictionary]$Roles,
-        [scriptblock]$Body,
-        [double]$Units = 0
-    )
-    $a = Get-PerfResourceSnapshot $Roles
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    $res = & $Body
-    $sw.Stop()
-    $b = Get-PerfResourceSnapshot $Roles
+# One scenario's resource cost in one shape. Start-PerfScenario snapshots the
+# roles and starts a clock; Complete-PerfScenario snapshots again and returns
+# memory, handles and CPU before and after (Get-PerfMemorySummary shape), the
+# CPU each role spent in ms and in percent of one core, the change in handle
+# count, the wall time, and, when $Units is given (keys typed, panes made), the
+# CPU per 100 units. A role whose process changed in between is left out of the
+# deltas, never reported as a delta it is not.
+#
+# A start and complete pair rather than a scriptblock, because a scriptblock
+# invoked from a function runs in a child scope: `$count++` or `$rows += $x`
+# inside it would silently update a copy, and the caller's counters with it.
+function Start-PerfScenario {
+    param([string]$Name, [System.Collections.IDictionary]$Roles)
+    return [pscustomobject]@{
+        Name   = $Name
+        Roles  = $Roles
+        Before = (Get-PerfResourceSnapshot $Roles)
+        Clock  = [Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+function Complete-PerfScenario {
+    param($Scenario, [double]$Units = 0)
+    $Scenario.Clock.Stop()
+    $wall = $Scenario.Clock.Elapsed.TotalMilliseconds
+    $a = $Scenario.Before
+    $b = Get-PerfResourceSnapshot $Scenario.Roles
     $handleDelta = [ordered]@{}
     foreach ($r in @($a.Keys)) {
         if ($b.Contains($r) -and $a[$r].pid -eq $b[$r].pid -and $null -ne $a[$r].handles -and $null -ne $b[$r].handles) {
@@ -467,14 +475,13 @@ function Measure-PerfScenario {
         }
     }
     $o = [ordered]@{
-        scenario      = $Name
-        wall_ms       = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
-        before        = (Get-PerfMemorySummary $a)
-        after         = (Get-PerfMemorySummary $b)
-        cpu_ms        = (Get-PerfCpuDelta $a $b 1.0 1.0)
-        cpu_pct_of_one_core = (Get-PerfCpuDelta $a $b ([double][Math]::Max(1.0, $sw.Elapsed.TotalMilliseconds)) 100.0)
-        handles_delta = $handleDelta
-        result        = $res
+        scenario            = $Scenario.Name
+        wall_ms             = [math]::Round($wall, 1)
+        before              = (Get-PerfMemorySummary $a)
+        after               = (Get-PerfMemorySummary $b)
+        cpu_ms              = (Get-PerfCpuDelta $a $b 1.0 1.0)
+        cpu_pct_of_one_core = (Get-PerfCpuDelta $a $b ([double][Math]::Max(1.0, $wall)) 100.0)
+        handles_delta       = $handleDelta
     }
     if ($Units -gt 0) {
         $o["units"] = $Units

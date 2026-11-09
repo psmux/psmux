@@ -127,6 +127,7 @@ $prevDataDir = $env:PSMUX_DATA_DIR
 $env:PSMUX_DATA_DIR = $DATA
 
 $psmuxRows = @(); $ctrlcFirst = @(); $directRows = @()
+$script:TypingResources = $null
 $psmuxAll = [System.Collections.Generic.List[double]]::new()
 $directAll = [System.Collections.Generic.List[double]]::new()
 $held = 0; $lost = 0
@@ -150,7 +151,18 @@ try {
     if (-not $ready) { Write-Fail "the psmux pane never showed a prompt"; throw "no prompt" }
     Start-Sleep -Seconds 1
 
+    # Memory, handles and CPU of the server and the attached client across the
+    # whole typing phase, so the JSON says what the keystrokes cost as well as
+    # how fast they were. The server is found by its pid anchor, never by name.
+    $srvPid = Get-PerfServerPid -Ns $NS -Session $S -DataDir $DATA
+    $roles = [ordered]@{}
+    if ($srvPid -gt 0) { $roles["server"] = $srvPid }
+    if ($client -and -not $client.HasExited) { $roles["client"] = $client.Id }
+    $resAtPrompt = Get-PerfResourceSnapshot $roles
+    Write-Info (Format-PerfResourceLine $resAtPrompt "at prompt")
+
     $n = 0
+    $typingScn = Start-PerfScenario -Name "typing" -Roles $roles
     foreach ($sentence in $sentences) {
         $n++
         & $Binary -L $NS send-keys -t $S C-c 2>&1 | Out-Null
@@ -170,6 +182,10 @@ try {
         $psmuxRows += $row
         Write-Host ("  sentence {0,2}: seen {1}/{2} p50={3}ms p99={4}ms max={5}ms{6}" -f $n, $r.Lat.Count, $sentence.Length, $st.p50, $st.p99, $st.max, $note) -ForegroundColor $(if ($note -match "MISSING") { "Red" } else { "Gray" })
     }
+    $typing = Complete-PerfScenario $typingScn -Units $psmuxAll.Count
+    Write-Info (Format-PerfResourceLine (Get-PerfResourceSnapshot $roles) "after typing")
+    Write-Info ("cpu per 100 typed chars seen (includes the send-keys clears between sentences): " + (@($typing.cpu_ms_per_100_units.Keys | ForEach-Object { "{0} {1}ms" -f $_, $typing.cpu_ms_per_100_units[$_] }) -join "  "))
+    $script:TypingResources = [ordered]@{ at_prompt = (Get-PerfMemorySummary $resAtPrompt); typing = $typing }
     Add-PerfLoadSample "after_typing" | Out-Null
 
     # ── phase 2: Ctrl+C then type at once ───────────────────────────────
@@ -261,6 +277,7 @@ $jsonPath = Write-PerfMetrics -Suite "test_typing_benchmark" -Binary $Binary -Fi
     ctrlc_first_key_ms    = $ctrlcFirst
     direct_per_char       = $dStats
     direct_sentences      = $directRows
+    resources             = $script:TypingResources
     failed                = $script:TestsFailed
 })
 if ($jsonPath) { Write-Info "metrics: $jsonPath" }
