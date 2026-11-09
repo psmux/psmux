@@ -49,6 +49,7 @@ mod debug_log;
 mod control;
 mod scrollback;
 mod control_ring;
+mod tmux_passthrough_unwrap;
 mod resize_window;
 mod proxy_pane;
 mod cross_session;
