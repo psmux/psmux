@@ -138,8 +138,8 @@ foreach ($chk in $screenChecks) {
 }
 
 $performSrc = Get-Content "$PSScriptRoot\..\crates\vt100-psmux\src\perform.rs" -Raw
-if ($performSrc -match '\[b"9",\s*b"4",\s*state,\s*progress\]') {
-    Pass "perform.rs: osc_dispatch arm [b\"9\", b\"4\", state, progress]"
+if ($performSrc -match '\[b"9",\s*b"4",\s*rest @ \.\.\]') {
+    Pass "perform.rs: osc_dispatch arm [b\"9\", b\"4\", rest @ ..]"
 } else {
     FailX "perform.rs: OSC 9;4 dispatch arm NOT FOUND"
 }

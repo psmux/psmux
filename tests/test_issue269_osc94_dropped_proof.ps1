@@ -99,7 +99,8 @@ $cases = @(
     @{S=1; P=10; Marker='TUI_OSC94_1_10'}
     @{S=1; P=50; Marker='TUI_OSC94_1_50'}
     @{S=2; P=80; Marker='TUI_OSC94_2_80'}
-    @{S=3; P=0;  Marker='TUI_OSC94_3_0'}
+    # Indeterminate keeps the last value, as tmux's screen_set_progress_bar does.
+    @{S=3; P=0;  Shown=80; Marker='TUI_OSC94_3_0'}
     @{S=4; P=99; Marker='TUI_OSC94_4_99'}
     @{S=0; P=0;  Marker='TUI_OSC94_0_0'}
 )
@@ -124,9 +125,10 @@ foreach ($c in $cases) {
     }
 
     $dump = Send-Tcp "dump-state"
-    $expected = '"host_progress"\s*:\s*"' + [regex]::Escape("$($c.S);$($c.P)") + '"'
+    $shown = if ($null -ne $c.Shown) { $c.Shown } else { $c.P }
+    $expected = '"host_progress"\s*:\s*"' + [regex]::Escape("$($c.S);$shown") + '"'
     if ($dump -match $expected) {
-        Pass "state=$($c.S) progress=$($c.P): forwarded as host_progress=`"$($c.S);$($c.P)`""
+        Pass "state=$($c.S) progress=$($c.P): forwarded as host_progress=`"$($c.S);$shown`""
     } else {
         FailX "state=$($c.S) progress=$($c.P): host_progress mismatch"
         if ($dump -match '"host_progress"\s*:\s*"([^"]*)"') {
