@@ -258,3 +258,23 @@ fn the_console_route_leaves_keys_and_other_sequences_alone() {
     let long = format!("\x1b]4;20;{}\x07", "a".repeat(200));
     assert_eq!(match_osc4_reply(&records(&long)), Osc4Reply::No);
 }
+
+#[test]
+fn a_client_in_a_psmux_pane_on_the_console_route_is_not_asked() {
+    // The parent psmux withholds the answer from a console not reading VT
+    // input (#623), so asking would only hold the pane's replies 500 ms.
+    assert!(!outer_answers_with(false, true));
+    // On the VT or pipe route the parent delivers it, so the client asks.
+    assert!(outer_answers_with(true, true));
+}
+
+#[test]
+fn a_client_whose_terminal_stopped_answering_keeps_a_bounded_list() {
+    let mut app = crate::types::AppState::new("s".to_string());
+    for n in 0..(MAX_OPEN + 50) {
+        remember(&mut app, 7, n, 20);
+    }
+    let q = app.palette_requests.get(&7).expect("list");
+    assert_eq!(q.len(), MAX_OPEN);
+    assert_eq!(q.front(), Some(&(50, 20)), "the oldest went first");
+}

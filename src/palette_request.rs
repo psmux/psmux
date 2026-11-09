@@ -308,11 +308,25 @@ pub(crate) fn route(app: &mut crate::types::AppState, requests: Vec<(usize, u8)>
             crate::types::send_directive_to_client(cid, &format!("{}{}", DIRECTIVE, index))
         });
         match asked {
-            Some(cid) => app.palette_requests.entry(cid).or_default().push_back((pane_id, index)),
+            Some(cid) => remember(app, cid, pane_id, index),
             None => deliver(pane_id, index, None),
         }
     }
     other
+}
+
+/// Keep a question the client was asked. A client whose terminal stopped
+/// answering never drains its list, and only the pane's own timeout lets
+/// those go, so the list is bounded: the oldest question is long timed out
+/// by the time it is dropped.
+pub(crate) fn remember(app: &mut crate::types::AppState, client_id: u64, pane_id: usize, index: u8) {
+    let q = app.palette_requests.entry(client_id).or_default();
+    while q.len() >= MAX_OPEN {
+        if let Some((p, i)) = q.pop_front() {
+            deliver(p, i, None);
+        }
+    }
+    q.push_back((pane_id, index));
 }
 
 /// Answer, with none, questions nobody can be asked.
@@ -371,6 +385,31 @@ pub(crate) fn query_bytes(index: u8) -> String {
 /// pane wait the full timeout. A client that never asked (the pipe route, or
 /// a psmux nested in a psmux pane) asks, as tmux does.
 pub(crate) fn outer_answers() -> bool {
+    outer_answers_with(
+        crate::ssh_input::pipe_mode_active() || crate::ssh_input::needs_vt_input(),
+        terminal_is_psmux_pane(),
+    )
+}
+
+/// Whether this client runs in a psmux pane or popup. A nested client is
+/// started with PSMUX_SESSION cleared (the nesting guard says to), so the
+/// pane's TMUX_PANE and the colours the parent planted count too.
+fn terminal_is_psmux_pane() -> bool {
+    crate::util::psmux_drawn_terminal()
+        || std::env::var_os("TMUX_PANE").is_some_and(|v| v.to_string_lossy().starts_with('%'))
+        || std::env::var_os("PSMUX_HOST_COLORS").is_some()
+}
+
+/// [`outer_answers`] with its environment given. `vt_input` is this client
+/// reading its terminal as VT (the pipe or VT input route). A psmux pane as
+/// the terminal withholds every reply from a console that is not reading VT
+/// input (#623, `send_vt_reply`), which is this client's console on the
+/// console route, so the answer would never come and the pane would wait
+/// the full timeout for nothing.
+pub(crate) fn outer_answers_with(vt_input: bool, in_psmux_pane: bool) -> bool {
+    if in_psmux_pane && !vt_input {
+        return false;
+    }
     match crate::types::HOST_COLORS_SPEC.get() {
         None => true,
         Some(None) => crate::util::psmux_drawn_terminal(),
