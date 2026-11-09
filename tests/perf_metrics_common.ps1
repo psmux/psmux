@@ -312,7 +312,9 @@ function Write-PerfMetrics {
         if (-not $FileStem) { $FileStem = $Suite }
         if (-not $Stamp) { $Stamp = Get-Date -Format "yyyyMMdd-HHmmss" }
         $payload = Get-PerfEnvelope $Suite $Binary
-        foreach ($k in $Data.Keys) { $payload[$k] = $Data[$k] }
+        # get_Keys(), not .Keys: on a dictionary that HAS a "keys" entry,
+        # .Keys returns that entry and the copy loop walks the wrong thing.
+        foreach ($k in @($Data.get_Keys())) { $payload[$k] = $Data[$k] }
         $path = Join-Path $dir "$FileStem-$Stamp.json"
         ($payload | ConvertTo-Json -Depth $Depth) | Set-Content -LiteralPath $path -Encoding UTF8
         return $path
