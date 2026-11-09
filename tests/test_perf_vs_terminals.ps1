@@ -2392,6 +2392,75 @@ if ($deltas.Count -gt 0) {
     foreach ($k in $deltas.Keys) { Write-Host ("  {0,-46} {1,8:F1}" -f $k, $deltas[$k]) }
 }
 
+# Does psmux lead? One row per head to head the owner asks about, psmux's best
+# cell against each terminal, with the margin (negative is psmux ahead) and a
+# verdict. Reported and written to the JSON under `leaderboard`, NOT judged:
+# the hard lines are T1 to T8 above, and a "lead" gate needs thresholds set
+# from quiet runs, not from this table.
+#
+# Keystroke is deliberately NOT a row. The terminal cells are probed at the
+# pane conhost's screen buffer, upstream of the pseudoconsole pipe and of the
+# terminal's own renderer, while the psmux cells are probed downstream of it,
+# so the psmux number carries the ~16 ms ConPTY floor and the terminal number
+# carries none of the terminal's render. Setting them side by side would say
+# psmux is 15 ms behind when that 15 ms is conhost's (see the deltas above and
+# T3a, which isolates psmux's own hops). A like for like keystroke to PIXELS
+# comparison needs a screen capture probe, which this suite does not have.
+#
+# Memory: the terminal's host_ws for a Windows Terminal tab is a SHARED
+# process (it also holds the user's own windows), so that row is marked.
+$leaderboard = [System.Collections.ArrayList]::new()
+$rowOf = @{}; foreach ($r in $rows) { $rowOf[$r.host] = $r }
+function Add-LeadRow {
+    param([string]$Metric, [string]$PsmuxCell, [string]$OtherCell, [string]$Field, [string]$Unit, [string]$Note = "", [string]$OtherField = "")
+    if (-not $OtherField) { $OtherField = $Field }
+    $p = $rowOf[$PsmuxCell]; $o = $rowOf[$OtherCell]
+    if (-not $p -or -not $o) { return }
+    $pv = $p.$Field; $ov = $o.$OtherField
+    if ($null -eq $pv -or $null -eq $ov) { return }
+    [void]$leaderboard.Add([pscustomobject]@{
+        metric      = $Metric
+        psmux_cell  = $PsmuxCell
+        other_cell  = $OtherCell
+        psmux       = [math]::Round([double]$pv, 2)
+        other       = [math]::Round([double]$ov, 2)
+        unit        = $Unit
+        margin      = [math]::Round([double]$pv - [double]$ov, 2)
+        psmux_leads = ([double]$pv -le [double]$ov)
+        note        = $Note
+    })
+}
+foreach ($t in @("wt_pwsh", "wezterm_pwsh", "alacritty_pwsh", "bare_pwsh")) {
+    Add-LeadRow "launch to prompt, server running" "psmux_attached_warm" $t "launch_median" "ms"
+    Add-LeadRow "launch to prompt, cold server" "psmux_attached" $t "launch_median" "ms"
+}
+# psmux inside WT against WT on its own is the like for like launch row.
+Add-LeadRow "launch in WT, server running" "psmux_in_wt_warm" "wt_pwsh" "launch_median" "ms"
+# Memory and idle CPU compare psmux's tree against each terminal's own host.
+foreach ($t in @("wt_pwsh", "wezterm_pwsh", "alacritty_pwsh")) {
+    $shared = if ($rowOf[$t] -and $rowOf[$t].host_shared) { "host process is shared with other windows, read with care" } else { "" }
+    Add-LeadRow "working set, psmux tree vs host" "psmux_attached" $t "psmux_ws_mb" "MB" $shared "host_ws_mb"
+    $p = $rowOf["psmux_attached"]; $o = $rowOf[$t]
+    if ($p -and $o -and $null -ne $p.idle_cpu_pct_psmux -and $null -ne $o.idle_cpu_pct_host) {
+        [void]$leaderboard.Add([pscustomobject]@{
+            metric = "idle cpu, % of one core"; psmux_cell = "psmux_attached"; other_cell = $t
+            psmux = $p.idle_cpu_pct_psmux; other = $o.idle_cpu_pct_host; unit = "%core"
+            margin = [math]::Round([double]$p.idle_cpu_pct_psmux - [double]$o.idle_cpu_pct_host, 2)
+            psmux_leads = ([double]$p.idle_cpu_pct_psmux -le [double]$o.idle_cpu_pct_host)
+            note = $(if ($o.host_shared) { "host process is shared with other windows" } else { "" })
+        })
+    }
+}
+if ($leaderboard.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  does psmux lead? (reported, not judged; margin < 0 means psmux is ahead)" -ForegroundColor White
+    Write-Host ("  {0,-34} {1,-20} {2,-16} {3,9} {4,9} {5,9}  {6}" -f "metric", "psmux cell", "against", "psmux", "other", "margin", "verdict") -ForegroundColor DarkCyan
+    foreach ($l in $leaderboard) {
+        Write-Host ("  {0,-34} {1,-20} {2,-16} {3,9} {4,9} {5,9}  {6}" -f $l.metric, $l.psmux_cell, $l.other_cell, $l.psmux, $l.other, $l.margin, $(if ($l.psmux_leads) { "LEADS" } else { "behind" })) `
+            -ForegroundColor $(if ($l.psmux_leads) { "Green" } else { "Yellow" })
+    }
+}
+
 if ($script:Create.Count -gt 0) {
     Write-Host ""
     Write-Host ("  {0,-22} {1,10} {2,10} {3,10} {4,10}" -f "creation","min","median","p90","max") -ForegroundColor White
@@ -2581,6 +2650,7 @@ $payload = Save-Metrics -Rows $rows -Deltas $deltas
 try {
     $payload["leftovers"] = $leftovers
     $payload["console_hosts_reaped_late"] = @($script:Reaped)
+    $payload["leaderboard"] = @($leaderboard)
     $payload | ConvertTo-Json -Depth 9 | Set-Content -Path $MetricsFile -Encoding UTF8
 } catch {}
 Info "metrics: $MetricsFile"
