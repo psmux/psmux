@@ -4,6 +4,10 @@ pub struct Parser<CB: crate::callbacks::Callbacks = ()> {
     parser: vte::Parser,
     screen: crate::perform::WrappedScreen<CB>,
     passthrough: crate::passthrough::Passthrough,
+    /// The last call's bytes ended inside a DCS introducer that has not
+    /// reached its final byte (`ESC`, `ESC P`, `ESC P 1;2`), which may still
+    /// turn out to be `ESC P tmux;`.
+    dcs_may_continue: bool,
 }
 
 impl Parser {
@@ -19,6 +23,7 @@ impl Parser {
                 scrollback_len,
             ),
             passthrough: crate::passthrough::Passthrough::default(),
+            dcs_may_continue: false,
         }
     }
 }
@@ -43,6 +48,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
                 callbacks,
             ),
             passthrough: crate::passthrough::Passthrough::default(),
+            dcs_may_continue: false,
         }
     }
 
@@ -65,6 +71,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
             parser: vte::Parser::new(),
             screen: crate::perform::WrappedScreen::from_screen(screen, CB::default()),
             passthrough: crate::passthrough::Passthrough::default(),
+            dcs_may_continue: false,
         }
     }
 
@@ -88,6 +95,8 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     /// in-memory terminal state.
     pub fn process(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
+        let mut dcs_may_continue =
+            std::mem::replace(&mut self.dcs_may_continue, dcs_introducer_open(bytes));
         if self.passthrough.expired() {
             self.passthrough.end();
             self.parser.advance(&mut self.screen, b"\x1b\\");
@@ -101,6 +110,19 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
                         rest = &rest[resume..];
                     }
                 }
+            }
+            // Nothing before the first `ESC P` can begin a passthrough, so it
+            // goes through vte's plain `advance`: the per byte `terminated`
+            // check below cost about 4% on SGR heavy output.
+            let start = if dcs_may_continue || self.screen.tmux_prefix_pending() {
+                0
+            } else {
+                dcs_start(rest).unwrap_or(rest.len())
+            };
+            dcs_may_continue = false;
+            if start > 0 {
+                self.parser.advance(&mut self.screen, &rest[..start]);
+                rest = &rest[start..];
             }
             if rest.is_empty() {
                 return;
@@ -159,5 +181,24 @@ impl std::io::Write for Parser {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Where the first `ESC P` in `bytes` starts.
+fn dcs_start(bytes: &[u8]) -> Option<usize> {
+    memchr::memmem::find(bytes, b"\x1bP")
+}
+
+/// Whether `bytes` ends inside an escape that may still become the start of
+/// a DCS (a lone ESC) or a DCS introducer without its final byte yet (`ESC P`
+/// and parameter or intermediate bytes).
+fn dcs_introducer_open(bytes: &[u8]) -> bool {
+    let Some(e) = memchr::memrchr(0x1b, bytes) else {
+        return false;
+    };
+    match &bytes[e + 1..] {
+        [] => true,
+        [b'P', tail @ ..] => tail.iter().all(|b| (0x20..=0x3f).contains(b)),
+        _ => false,
     }
 }

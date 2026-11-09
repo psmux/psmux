@@ -2142,6 +2142,7 @@ name = "vt100-psmux"
 version = "0.16.13"
 dependencies = [
  "itoa",
+ "memchr",
  "nix 0.31.3",
  "quickcheck",
  "rand 0.10.3",

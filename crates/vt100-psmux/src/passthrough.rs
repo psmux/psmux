@@ -84,7 +84,7 @@ impl Passthrough {
             match state {
                 State::Inside => {
                     // Payload bytes: jump to the next one that matters.
-                    match bytes[i..].iter().position(|&c| c == ESC || c == BEL) {
+                    match memchr::memchr2(ESC, BEL, &bytes[i..]) {
                         Some(off) => {
                             i += off;
                             state = if bytes[i] == ESC { State::Esc } else { State::AfterBel };

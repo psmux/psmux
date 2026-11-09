@@ -93,6 +93,11 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
 }
 
 impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
+    /// A DCS ended in `t` and may still be matching `mux;`.
+    pub(crate) fn tmux_prefix_pending(&self) -> bool {
+        (1..5).contains(&self.tmux_prefix)
+    }
+
     /// True once, right after a DCS turned out to be `ESC P tmux;`.
     pub(crate) fn take_tmux_passthrough(&mut self) -> bool {
         let matched = self.tmux_prefix == 5;
