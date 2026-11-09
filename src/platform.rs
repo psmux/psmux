@@ -2220,6 +2220,31 @@ pub mod mouse_inject {
         }
     }
 
+    /// Members of the console that actually receives input for this pane.
+    /// A descendant may own a private pseudoconsole (a TUI tool subprocess),
+    /// so process ancestry alone cannot select the mouse injection transport.
+    pub fn query_console_process_ids(child_pid: u32) -> Option<Vec<u32>> {
+        let _console_guard = portable_pty::console_state_lock();
+        unsafe {
+            let had_console = GetConsoleWindow() != 0;
+            if !free_and_attach(child_pid, "query_console_process_ids") {
+                if had_console { reattach_parent_console(); }
+                return None;
+            }
+            let mut pids = vec![0u32; 64];
+            let mut n = GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32);
+            if n as usize > pids.len() {
+                pids.resize(n as usize, 0);
+                n = GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32);
+            }
+            detach_console();
+            if had_console { reattach_parent_console(); }
+            if n == 0 || n as usize > pids.len() { return None; }
+            pids.truncate(n as usize);
+            Some(pids)
+        }
+    }
+
     /// Inject a VT escape sequence into a child process's console input buffer
     /// as a series of KEY_EVENT records.
     ///
@@ -3570,6 +3595,7 @@ pub mod mouse_inject {
     pub fn send_ctrl_break_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn query_console_input_mode(_pid: u32) -> Option<u32> { None }
+    pub fn query_console_process_ids(_pid: u32) -> Option<Vec<u32>> { None }
     pub fn send_vt_response(_pid: u32, _text: &str) -> bool { false }
     pub fn inject_paste(_pid: u32, _text: &str, _abort: &std::sync::atomic::AtomicBool) -> crate::pane::PasteInjectResult {
         crate::pane::PasteInjectResult { consumed: 0, complete: false }
@@ -5636,6 +5662,10 @@ pub mod process_info {
             Some(t) => t,
             None => return false,
         };
+        console_contains_vt_bridge(&entries, pids)
+    }
+
+    fn console_contains_vt_bridge(entries: &[ProcRowT], pids: &[u32]) -> bool {
         entries.iter().any(|(pid, _, name)| pids.contains(pid) && is_vt_bridge_exe(name))
     }
 
@@ -5779,6 +5809,10 @@ pub mod process_info {
     #[cfg(test)]
     #[path = "../../../tests-rs/test_proc_table_cache.rs"]
     mod tests_proc_table_cache;
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_mouse_bridge_console_scope.rs"]
+    mod tests_mouse_bridge_console_scope;
 
     #[cfg(test)]
     #[path = "../../../tests-rs/test_issue579_any_vt_bridge.rs"]
