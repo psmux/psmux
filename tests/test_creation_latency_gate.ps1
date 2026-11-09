@@ -518,11 +518,16 @@ function Test-ColdLaunchRun {
     $median = $s[[int][Math]::Floor(($s.Count - 1) / 2)]
     $list = (($c4 | ForEach-Object { [int]$_ }) -join ', ')
     Write-Perf ("{0,-18} med={1,6:N0} max={2,6:N0} ms  [{3}]" -f "cold c4 (human)", $median, $s[-1], $list)
-    if ($median -le $ColdLaunchC4P50LimitMs) {
-        Write-Pass ("cold launch creation 4 p50 {0:N0}ms is within {1}ms" -f $median, $ColdLaunchC4P50LimitMs)
-    } else {
-        Write-Fail ("cold launch creation 4 p50 {0:N0}ms exceeds {1}ms - the pool is too shallow for a few windows opened after launch  [{2}]" -f $median, $ColdLaunchC4P50LimitMs, $list)
-    }
+    # Judged like the other tails (Assert-Tail): hard on a quiet machine, a
+    # warning on a loaded one. Creation 4 is served by a spare the pool is
+    # still FILLING, so it waits out a cold pwsh start that a busy machine
+    # stretches no matter how deep the pool is: on 2026-11-10 at 92 percent
+    # total CPU the installed build read [868, 500, 691] ms here, while the
+    # same build reads 15 to 16 ms on a quiet box. A quiet run still fails the
+    # depth two defect (p50 791 ms) by five times the budget.
+    Assert-Tail ($median -le $ColdLaunchC4P50LimitMs) `
+        ("cold launch creation 4 p50 {0:N0}ms is within {1}ms" -f $median, $ColdLaunchC4P50LimitMs) `
+        ("cold launch creation 4 p50 {0:N0}ms exceeds {1}ms - the pool is too shallow for a few windows opened after launch  [{2}]" -f $median, $ColdLaunchC4P50LimitMs, $list)
     $all = @($runs | ForEach-Object { $_ } | Where-Object { $_ -ge 0 })
     $mx = ($all | Measure-Object -Maximum).Maximum
     Assert-Tail ($mx -le $MaxLimitMs) `
