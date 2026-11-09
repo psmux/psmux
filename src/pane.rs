@@ -4678,6 +4678,7 @@ pub fn spawn_reader_thread(
         }
         let mut local = vec![0u8; 65536];
         let mut zero_reads: u32 = 0;
+        let mut passthrough_unwrapper = crate::tmux_passthrough_unwrap::TmuxPassthroughUnwrapper::new();
         loop {
             match reader.read(&mut local) {
                 Ok(n) if n > 0 => {
@@ -4702,7 +4703,12 @@ pub fn spawn_reader_thread(
                     // While control clients consume it, a full ring holds
                     // this reader until the server loop takes the bytes
                     // instead of dropping the oldest (#875).
-                    crate::control_ring::push(&output_ring_r, &local[..n]);
+                    // tmux passthrough wrappers are unwrapped first: ConPTY
+                    // drops their closing ESC \, which left iTerm2's tmux
+                    // integration inside an unterminated DCS
+                    // (see tmux_passthrough_unwrap).
+                    let for_control = passthrough_unwrapper.feed(&local[..n]);
+                    crate::control_ring::push(&output_ring_r, &for_control);
                     // Issue #440: tee raw pane output to any registered pipe-pane
                     // writer for this pane. The atomic gate keeps this a single
                     // relaxed load (no mutex) whenever nothing is being piped,
