@@ -133,7 +133,8 @@ Write-Host "`n[Test 3] OSC 9;4 round-trip: each state surfaces correctly" -Foreg
 $cases = @(
     @{State=1; Progress=50; Label='default 50%'; Marker='OSC94_DEFAULT_50'}
     @{State=2; Progress=75; Label='error 75%';   Marker='OSC94_ERROR_75'}
-    @{State=3; Progress=0;  Label='indeterminate'; Marker='OSC94_INDET'}
+    # Indeterminate keeps the last value, as tmux's screen_set_progress_bar does.
+    @{State=3; Progress=0;  Shown=75; Label='indeterminate'; Marker='OSC94_INDET'}
     @{State=4; Progress=90; Label='warning 90%';  Marker='OSC94_WARN_90'}
     @{State=0; Progress=0;  Label='hide';          Marker='OSC94_HIDE'}
 )
@@ -153,11 +154,12 @@ foreach ($c in $cases) {
     }
 
     $dump = Send-Tcp "dump-state"
-    $expected = '"host_progress"\s*:\s*"' + [regex]::Escape("$($c.State);$($c.Progress)") + '"'
+    $shown = if ($null -ne $c.Shown) { $c.Shown } else { $c.Progress }
+    $expected = '"host_progress"\s*:\s*"' + [regex]::Escape("$($c.State);$shown") + '"'
     if ($dump -match $expected) {
-        Pass "$($c.Label): host_progress=`"$($c.State);$($c.Progress)`" in dump-state"
+        Pass "$($c.Label): host_progress=`"$($c.State);$shown`" in dump-state"
     } else {
-        FailX "$($c.Label): expected host_progress=`"$($c.State);$($c.Progress)`" not found in dump-state"
+        FailX "$($c.Label): expected host_progress=`"$($c.State);$shown`" not found in dump-state"
         if ($dump -match '"host_progress"\s*:\s*"([^"]*)"') {
             Info "actual host_progress = '$($matches[1])'"
         } else {

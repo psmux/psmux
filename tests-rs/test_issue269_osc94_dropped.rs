@@ -7,8 +7,8 @@
 // fell through to the empty default `unhandled_osc` callback. After the
 // fix:
 //   1. `Screen` carries an `osc94_progress: Option<(u8, u8)>` field.
-//   2. `osc_dispatch` pattern-matches `[b"9", b"4", state, progress]`,
-//      parses the two ASCII numerics, clamps them, and stores the pair.
+//   2. `osc_dispatch` pattern-matches `[b"9", b"4", rest @ ..]`, reads the
+//      fields as tmux's `input_osc_9` does, and stores the pair.
 //   3. The `Callbacks::set_progress` hook is invoked so a custom callback
 //      can react if needed.
 //   4. `Screen::progress()` returns `Some((state, value))` once any OSC 9;4
@@ -166,20 +166,21 @@ fn fix_osc94_overwrites_previous_state() {
 }
 
 #[test]
-fn fix_osc94_clamps_out_of_range_state() {
+fn fix_osc94_ignores_out_of_range_state() {
+    // tmux's input_osc_9 ignores a state past 4 (input.c:3030 at tag 3.8).
     let mut p = fresh_parser();
-    // state=99 — out of spec; the implementation clamps to 4.
+    p.process(&osc94(1, 25));
     p.process(&osc94(99, 50));
-    let (s, _) = p.screen().progress().expect("captured even when out of range");
-    assert!(s <= 4, "state must be clamped into 0..=4, got {}", s);
+    assert_eq!(p.screen().progress(), Some((1, 25)));
 }
 
 #[test]
-fn fix_osc94_clamps_out_of_range_progress() {
+fn fix_osc94_ignores_out_of_range_progress() {
+    // And a value past 100.
     let mut p = fresh_parser();
+    p.process(&osc94(1, 25));
     p.process(&osc94(1, 200));
-    let (_, v) = p.screen().progress().expect("captured");
-    assert!(v <= 100, "value must be clamped into 0..=100, got {}", v);
+    assert_eq!(p.screen().progress(), Some((1, 25)));
 }
 
 #[test]
