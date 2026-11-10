@@ -13,6 +13,10 @@
 #   pane.rs:2142/2185 byte range starts at 1 but ends at 0
 
 $ErrorActionPreference = 'Continue'
+# psmux writes UTF-8, and PowerShell decodes a native command's output with
+# [Console]::OutputEncoding, the console code page (OEM 437 in the runner's
+# window), so the non-ASCII text this suite compares must be read as UTF-8.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $script:TestsPassed = 0
 $script:TestsFailed = 0

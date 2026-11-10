@@ -11,9 +11,13 @@
 # assert has-session exits 0 AND capture-pane shows the content was received.
 ###############################################################################
 $ErrorActionPreference = "Continue"
+# psmux writes UTF-8, and PowerShell decodes a native command's output with
+# [Console]::OutputEncoding, the console code page (OEM 437 in the runner's
+# window), so the non-ASCII text this suite compares must be read as UTF-8.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $PSMUX = (Get-Command psmux -EA Stop).Source
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $script:Passed = 0
 $script:Failed = 0
 
