@@ -774,7 +774,7 @@ function Invoke-LeftoverAudit {
 function Get-SuiteTimeout {
     param([string]$Name)
     # Perf/stress/latency suites legitimately run long; everything else gets the default.
-    if ($Name -match 'perf|stress|latency|benchmark|extreme|battle|install_speed|e2e|sustained|exhaustive|nsis|installer|realistic_typing|robust_|win32_tui_flag_parity|issue615_wsl_pane_path|issue684_paste_route|issue647_git_commit_in_version|issue693_targets|stalled_server_target_routing|issue835_status_tab_click_drift|issue943_failing_kinds_tcp') { return $LongTimeoutSec }
+    if ($Name -match 'perf|stress|latency|benchmark|extreme|battle|install_speed|e2e|sustained|exhaustive|nsis|installer|realistic_typing|robust_|win32_tui_flag_parity|issue615_wsl_pane_path|issue684_paste_route|issue647_git_commit_in_version|issue693_targets|stalled_server_target_routing|issue835_status_tab_click_drift|issue943_failing_kinds_tcp|ctrlc_private_bridge') { return $LongTimeoutSec }
     return $DefaultTimeoutSec
 }
 
