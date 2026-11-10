@@ -14,6 +14,12 @@
 #         Neovim end-to-end routing, Win32 TUI verification.
 
 $ErrorActionPreference = "Continue"
+# psmux writes UTF-8. PowerShell decodes a native command's output with
+# [Console]::OutputEncoding, which is the console's code page: 65001 in an
+# agent's shell, but OEM 437 in the runner's console window, where the bytes of
+# the Neovim divider U+2502 (E2 94 82) came back as three other characters and
+# Get-DividerRel never found it, so the Neovim checks never ran.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA Stop).Source }
 # Honour PSMUX_DATA_DIR: the control-connection section reads $SESSION.port and
 # $SESSION.key out of the data root, and hardcoding the profile made that section
