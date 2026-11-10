@@ -2387,11 +2387,15 @@ impl VtParser {
         if is_alt   { modifiers |= KeyModifiers::ALT; }
         if is_ctrl  { modifiers |= KeyModifiers::CONTROL; }
 
+        // Wheel buttons 64..67 are up, down, left, right. A trackpad sends
+        // left/right for the sideways drift of a vertical swipe, so reading
+        // them as down makes an upward scroll jitter.
         let kind = if is_scroll {
-            if btn_id == 0 {
-                MouseEventKind::ScrollUp
-            } else {
-                MouseEventKind::ScrollDown
+            match btn_id {
+                0 => MouseEventKind::ScrollUp,
+                1 => MouseEventKind::ScrollDown,
+                2 => MouseEventKind::ScrollLeft,
+                _ => MouseEventKind::ScrollRight,
             }
         } else if is_release {
             let button = match btn_id {
@@ -2456,7 +2460,12 @@ impl VtParser {
         if raw_btn & 0x10 != 0 { modifiers |= KeyModifiers::CONTROL; }
 
         let kind = if is_scroll {
-            if btn_id == 0 { MouseEventKind::ScrollUp } else { MouseEventKind::ScrollDown }
+            match btn_id {
+                0 => MouseEventKind::ScrollUp,
+                1 => MouseEventKind::ScrollDown,
+                2 => MouseEventKind::ScrollLeft,
+                _ => MouseEventKind::ScrollRight,
+            }
         } else if is_motion {
             match btn_id {
                 0 => MouseEventKind::Drag(MouseButton::Left),
