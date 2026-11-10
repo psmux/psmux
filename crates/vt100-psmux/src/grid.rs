@@ -882,12 +882,6 @@ impl Grid {
         self.pos.col = self.pos.col.saturating_sub(count);
     }
 
-    pub fn col_tab(&mut self) {
-        self.pos.col -= self.pos.col % 8;
-        self.pos.col += 8;
-        self.col_clamp();
-    }
-
     pub fn col_set(&mut self, i: u16) {
         self.pos.col = i;
         self.col_clamp();

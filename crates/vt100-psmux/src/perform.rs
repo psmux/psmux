@@ -200,6 +200,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 b'>' => self.screen.deckpnm(),
                 b'D' => self.screen.ind(),
                 b'E' => self.screen.nel(),
+                b'H' => self.screen.hts(),
                 b'M' => self.screen.ri(),
                 b'c' => self.screen.ris(),
                 b'g' => self.callbacks.visual_bell(&mut self.screen),
@@ -245,7 +246,8 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'D' => self.screen.cub(canonicalize_params_1(params, 1)),
                 'E' => self.screen.cnl(canonicalize_params_1(params, 1)),
                 'F' => self.screen.cpl(canonicalize_params_1(params, 1)),
-                'G' => self.screen.cha(canonicalize_params_1(params, 1)),
+                // HPA is CHA under another name (input.c:312, :324 at tag 3.8).
+                'G' | '`' => self.screen.cha(canonicalize_params_1(params, 1)),
                 'H' | 'f' => self.screen.cup(canonicalize_params_2(params, 1, 1)),
                 'J' => self
                     .screen
@@ -259,6 +261,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'S' => self.screen.su(canonicalize_params_1(params, 1)),
                 'T' => self.screen.sd(canonicalize_params_1(params, 1)),
                 'X' => self.screen.ech(canonicalize_params_1(params, 1)),
+                'Z' => self.screen.cbt(canonicalize_params_1(params, 1)),
+                // TBC reads 0 as itself, the stop at the cursor.
+                'g' => self.screen.tbc(canonicalize_params_1(params, 0)),
                 // REP: the last character printed, n more times
                 // (input.c:1799-1818 at tag 3.8). Each goes through `print`,
                 // as tmux adds each through screen_write_collect_add.

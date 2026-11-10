@@ -373,6 +373,22 @@ One platform limit, measured on Windows 11 build 26200: conhost swallows a **bar
 
 The inbox conhost differs from tmux on purpose: it drops a pane's sixel before psmux sees it, so reporting colour registers there would describe images nothing can draw. A query with more than three parameters gets no reply, as in tmux. psmux reads a parameter as at most 65535, where tmux reads up to `INT_MAX`.
 
+### Tab Stops (HTS, TBC, CBT, HPA)
+
+Each pane keeps a table of tab stops, every 8 columns to begin with, which `#{pane_tabs}` lists, as tmux keeps `s->tabs`:
+
+| Sequence | Effect |
+|---|---|
+| `HT` (tab) | To the next stop, or the last column when there is none. Nothing from the last column |
+| `ESC H` (HTS) | A stop at the cursor, unless it waits past the last column |
+| `ESC [ g` or `ESC [ 0 g` (TBC) | Clears the stop at the cursor. `ESC [ 3 g` clears them all, and any other value nothing |
+| `ESC [ n Z` (CBT) | Back `n` stops (0 counts as 1), or to column 0 |
+| ``ESC [ n ` `` (HPA) | To column `n`, the same as `ESC [ n G` |
+
+The normal and the alternate screen share the table. A change of width, RIS, `send-keys -R` and a respawn put the default back, and a change of height alone keeps it.
+
+The inbox conhost keeps a table of its own and hands psmux plain cursor moves instead of these sequences, so the cursor lands where it should there too, but `#{pane_tabs}` stays at the default. Through OpenConsole (`PSMUX_CONPTY_DIR`) psmux reads them, and the table follows the program.
+
 ### Progress Indicator (OSC 9;4)
 
 A pane sets the progress indicator with `ESC]9;4;state;value ESC\`, and the client writes the active pane's to the host terminal. The fields are read as tmux's `input_osc_9` reads them:

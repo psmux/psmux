@@ -219,10 +219,10 @@ fn real_active_idx(app: &AppState) -> usize {
     app.temp_focus_saved_active.unwrap_or(app.active_idx)
 }
 
-/// #{pane_tabs} for a pane `cols` wide: the default tab stops, one every 8
-/// columns from column 8 (tmux screen_reset_tabs), comma separated.
-pub fn pane_tab_stops(cols: u16) -> String {
-    (8..cols).step_by(8).map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+/// #{pane_tabs}: the screen's tab stops, comma separated, as
+/// format_cb_pane_tabs lists them (format.c:1051 at tag 3.8).
+pub fn pane_tab_stops(screen: &vt100::Screen) -> String {
+    screen.tab_stops().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
 }
 
 /// #{window_raw_flags} of window `win_idx` (tmux window_printable_flags).
@@ -2184,11 +2184,10 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             .unwrap_or_default(),
         "pane_start_path" => String::new(),
         // tmux format_cb_pane_tabs lists the set tab stops of the pane's
-        // screen.  The pane emulator keeps the default stops only (every 8
-        // columns from column 8, as tmux screen_reset_tabs sets them), so
-        // they follow from the pane width (#827).
+        // screen (#827), which ESC H and CSI g change. From the live parser,
+        // as tmux reads `wp->base`.
         "pane_tabs" => target_pane()
-            .map(|p| pane_tab_stops(p.last_cols))
+            .and_then(|p| p.live_parser().lock().ok().map(|parser| pane_tab_stops(parser.screen())))
             .unwrap_or_default(),
         "pane_fg" => {
             if let Some(p) = target_pane() {

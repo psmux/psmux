@@ -402,6 +402,7 @@ not part of it. Capture again after any split you want to keep.
 | `#{pane_current_command}` | Foreground process name |
 | `#{pane_current_path}` | Current working directory of the pane. Under `wsl` or `ssh` this needs shell integration, see [the FAQ](faq.md) |
 | `#{pane_path}` | Path the pane announced over `OSC 7` or `OSC 9;9`, untranslated, empty if none |
+| `#{pane_tabs}` | The pane's tab stops, comma separated, every 8 columns unless the program set its own (see [Tab Stops](compatibility.md#tab-stops-hts-tbc-cbt-hpa)) |
 | `#{pane_start_command}` | Command the pane was started with, **empty** when it was started with the default shell. A `--` argv is reported as its token list, a single command string is quoted when it contains spaces (tmux `args_escape`). A respawn replaces it only when the respawn carried a command of its own |
 | `#{pane_pid}` | PID of the pane's shell |
 | `#{pane_tty}` | Pseudo terminal name, for example `/dev/pty1` |
@@ -577,7 +578,7 @@ rather than live state. They exist for tmux format compatibility. Do not build l
 | `#{window_cell_width}` / `#{window_cell_height}` | `8` / `16` |
 | `#{window_linked_sessions_list}` | empty |
 | `#{pane_dead_signal}` / `#{pane_dead_status}` / `#{pane_dead_time}` | `0` |
-| `#{pane_start_path}` / `#{pane_tabs}` | empty |
+| `#{pane_start_path}` | empty |
 | `#{cursor_flag}` | `0` |
 | `#{scroll_region_upper}` | `0` |
 | `#{client_utf8}` | `1` |
