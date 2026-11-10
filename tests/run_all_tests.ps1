@@ -944,15 +944,20 @@ if ($script:DefaultConfigs) {
     Write-Log "ABORT: default path config present: $($script:DefaultConfigs -join ', ')"
     exit 2
 }
-# The console's output code page as the run starts (OEM 437 in the launcher's
-# window, as users have it). Suites run with -NoNewWindow and share this
-# console, and a suite that sets [Console]::OutputEncoding (several read psmux's
-# UTF-8 that way) calls SetConsoleOutputCP on it, so every suite after it ran at
-# 65001 and the result of a suite depended on what ran before it. The code page
-# is put back after each suite.
-$script:SuiteConsoleEncoding = [Console]::OutputEncoding
-function Restore-SuiteConsoleEncoding {
-    try { [Console]::OutputEncoding = $script:SuiteConsoleEncoding } catch { }
+# Suites run with -NoNewWindow and share the runner's console, and a suite that
+# sets [Console]::OutputEncoding or InputEncoding (several read psmux's UTF-8
+# that way) calls SetConsoleOutputCP / SetConsoleCP on that console. Every
+# suite after it then ran at 65001 instead of the console's own page (OEM 437
+# in the launcher's window, as users have it), and a suite's result depended on
+# what ran before it (#570 failed under -Only only). Run-TestFile saves both
+# code pages before a suite and puts them back after it, whatever way it ends.
+function Save-SuiteConsoleEncoding {
+    try { return @{ Out = [Console]::OutputEncoding; In = [Console]::InputEncoding } } catch { return $null }
+}
+function Restore-SuiteConsoleEncoding($Saved) {
+    if (-not $Saved) { return }
+    try { [Console]::OutputEncoding = $Saved.Out } catch { }
+    try { [Console]::InputEncoding = $Saved.In } catch { }
 }
 $script:RunStartedAt = Get-Date
 
@@ -1326,6 +1331,7 @@ function Run-TestFile {
     Write-Host "  RUNNING: $baseName" -ForegroundColor White
     Write-Host "$('=' * 60)" -ForegroundColor DarkGray
 
+    $consoleEncoding = Save-SuiteConsoleEncoding
     try {
         # Run the test as a real child process inside a Windows Job Object.
         #  - stdout/stderr go straight to files: nothing ever blocks on a pipe,
@@ -1418,7 +1424,6 @@ function Run-TestFile {
             }
             try { $proc.WaitForExit(5000) | Out-Null } catch {}
             $sw.Stop()
-            Restore-SuiteConsoleEncoding
             Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
             # An interrupted suite is the MOST likely one to strand a window, so
             # the audit runs here too.
@@ -1458,7 +1463,6 @@ function Run-TestFile {
             }
         }
         $sw.Stop()
-        Restore-SuiteConsoleEncoding
 
         # Desktop audit. Runs after the job teardown AND after the suite's own
         # cleanup, so a suite that opens terminals and closes them itself (see
@@ -1546,7 +1550,6 @@ function Run-TestFile {
         }
     } catch {
         $sw.Stop()
-        Restore-SuiteConsoleEncoding
         Write-Host "  ERROR: $_" -ForegroundColor Red
         [System.IO.File]::WriteAllText($suiteLog, "Suite: $baseName`r`nERROR: $_`r`n", [System.Text.Encoding]::UTF8)
         Write-Log "ERROR $baseName  $_"
@@ -1559,6 +1562,8 @@ function Run-TestFile {
             Duration = [math]::Round($sw.Elapsed.TotalSeconds, 1)
             Output = $_.ToString()
         }
+    } finally {
+        Restore-SuiteConsoleEncoding $consoleEncoding
     }
 }
 
