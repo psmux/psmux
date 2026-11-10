@@ -443,7 +443,8 @@ bind-key -n C-h if-shell -F "#{pane_at_left}" "send-keys C-h" "select-pane -L"
 | `#{search_present}` | `1` if a copy mode search is active |
 | `#{search_match}` | The current search match |
 | `#{scroll_position}` | Lines scrolled back from the live bottom |
-| `#{scroll_region_lower}` | Lower bound of the scroll region |
+| `#{scroll_region_upper}` / `#{scroll_region_lower}` | Top and bottom rows of the pane's scroll region, counted from 0. The whole pane until a program sets one with `ESC [ top ; bottom r` (see [Scroll Region](compatibility.md#scroll-region-origin-mode-and-decaln)) |
+| `#{origin_flag}` | `1` while the pane is in origin mode (`ESC [ ? 6 h`) |
 
 ### Buffer variables
 
@@ -580,12 +581,11 @@ rather than live state. They exist for tmux format compatibility. Do not build l
 | `#{pane_dead_signal}` / `#{pane_dead_status}` / `#{pane_dead_time}` | `0` |
 | `#{pane_start_path}` | empty |
 | `#{cursor_flag}` | `0` |
-| `#{scroll_region_upper}` | `0` |
 | `#{client_utf8}` | `1` |
 | `#{client_cell_width}` / `#{client_cell_height}` | a fixed value |
 | `#{client_written}` / `#{client_discarded}` | `0` |
 | `#{alternate_saved_x}` / `#{alternate_saved_y}` | `0` |
-| `#{origin_flag}` / `#{insert_flag}` / `#{keypad_cursor_flag}` / `#{keypad_flag}` | `0` |
+| `#{insert_flag}` / `#{keypad_cursor_flag}` / `#{keypad_flag}` | `0` |
 | `#{wrap_flag}` | `1` |
 | `#{line}`, `#{command}`, `#{command_list_name}`, `#{command_list_alias}`, `#{command_list_usage}`, `#{config_files}` | empty |
 

@@ -362,6 +362,21 @@ Three deliberate choices:
 
 One platform limit, measured on Windows 11 build 26200: conhost swallows a **bare** `ESC]104 ESC\` on the ConPTY output path, so a pane child running under ConPTY cannot reach the clear-everything form. `ESC]104;4 ESC\` arrives normally.
 
+### Scroll Region, Origin Mode and DECALN
+
+A pane's scroll region and origin mode are what `#{scroll_region_upper}`, `#{scroll_region_lower}` and `#{origin_flag}` show:
+
+| Sequence | Effect |
+|---|---|
+| `ESC [ top ; bottom r` (DECSTBM) | Sets the region and moves the cursor home: the top left of the screen, or of the region in origin mode. A missing or 0 bottom is the last row and a missing or 0 top the first, so `ESC [ r` and `ESC [ 0 ; 0 r` give the whole screen. A region of one line or less, or with its bottom past the screen, is ignored and the cursor stays |
+| `ESC [ ? 6 h` / `l` (DECOM) | Origin mode on or off, the cursor home either way |
+| `ESC [ row d` (VPA) | To `row`, counted from the top of the region in origin mode and stopping at its bottom, keeping the column |
+| `ESC # 8` (DECALN) | Fills the screen with `E` in the default colours, puts the region back to the whole screen, turns origin mode off and moves the cursor to the top left. The colours for text written after it are unchanged |
+
+Four of these follow the console hosts, which agree with each other, rather than tmux, so that psmux's screen stays where the host's is: tmux homes DECSTBM to the top left of the screen in origin mode, cuts a bottom past the screen to the last row, ignores `ESC [ 0 ; 0 r` as a one line region, and keeps origin mode across DECALN.
+
+The inbox conhost keeps the region and origin mode to itself and hands psmux the result, so the cursor and the screen are right there, and the three formats show the whole screen and `0`. Through OpenConsole (`PSMUX_CONPTY_DIR`) psmux reads the sequences, and the formats follow the program.
+
 ### Sixel Limits Query (XTSMGRAPHICS)
 
 `CSI ? item ; action ; value S` asks a terminal for its sixel limits. psmux answers it itself and does not ask the outer terminal, as tmux's `input_csi_dispatch_sm_graphics` does not. Which answer a pane gets follows what its programs were told by DA1:
