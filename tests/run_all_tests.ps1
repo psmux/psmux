@@ -944,6 +944,16 @@ if ($script:DefaultConfigs) {
     Write-Log "ABORT: default path config present: $($script:DefaultConfigs -join ', ')"
     exit 2
 }
+# The console's output code page as the run starts (OEM 437 in the launcher's
+# window, as users have it). Suites run with -NoNewWindow and share this
+# console, and a suite that sets [Console]::OutputEncoding (several read psmux's
+# UTF-8 that way) calls SetConsoleOutputCP on it, so every suite after it ran at
+# 65001 and the result of a suite depended on what ran before it. The code page
+# is put back after each suite.
+$script:SuiteConsoleEncoding = [Console]::OutputEncoding
+function Restore-SuiteConsoleEncoding {
+    try { [Console]::OutputEncoding = $script:SuiteConsoleEncoding } catch { }
+}
 $script:RunStartedAt = Get-Date
 
 $script:CurrentSuiteFile = Join-Path $script:RunDir "current_suite.txt"
@@ -1408,6 +1418,7 @@ function Run-TestFile {
             }
             try { $proc.WaitForExit(5000) | Out-Null } catch {}
             $sw.Stop()
+            Restore-SuiteConsoleEncoding
             Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
             # An interrupted suite is the MOST likely one to strand a window, so
             # the audit runs here too.
@@ -1447,6 +1458,7 @@ function Run-TestFile {
             }
         }
         $sw.Stop()
+        Restore-SuiteConsoleEncoding
 
         # Desktop audit. Runs after the job teardown AND after the suite's own
         # cleanup, so a suite that opens terminals and closes them itself (see
@@ -1534,6 +1546,7 @@ function Run-TestFile {
         }
     } catch {
         $sw.Stop()
+        Restore-SuiteConsoleEncoding
         Write-Host "  ERROR: $_" -ForegroundColor Red
         [System.IO.File]::WriteAllText($suiteLog, "Suite: $baseName`r`nERROR: $_`r`n", [System.Text.Encoding]::UTF8)
         Write-Log "ERROR $baseName  $_"
