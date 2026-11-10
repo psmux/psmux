@@ -2951,7 +2951,10 @@ pub mod mouse_inject {
         // long as the cold boot: once the bridge is a real child on a real
         // console the descendant BFS and the console-membership check see it,
         // so bounding by age loses no protection.
-        if crate::platform::process_info::foreground_fell_back_to_root(child_pid) {
+        // A bridge already seen in the tree is not the blind boot state this
+        // guard is for, and the attached stage below decides for it; skipping
+        // the system wide recency scan keeps this press as cheap as before.
+        if !bridge_in_tree && crate::platform::process_info::foreground_fell_back_to_root(child_pid) {
             if let Some((bridge_pid, age)) =
                 crate::platform::process_info::recently_started_vt_bridge(
                     crate::platform::process_info::BRIDGE_BOOT_WINDOW,
