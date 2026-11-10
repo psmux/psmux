@@ -307,6 +307,13 @@ pub fn queue_loop_start(
     true
 }
 
+pub fn run_in_other_session(app: &crate::types::AppState, parts: &[&str], cmd: &str) -> bool {
+    if !server::in_shared_server() || !server::on_loop_thread() {
+        return false;
+    }
+    server::queue_other_session_line(app, parts, cmd)
+}
+
 /// Called at the very top of the internal `psmux server` process, the one
 /// place every server process starts, however it was spawned (a CLI, another
 /// server's `new-session`, the warm standby refill). A process whose switch
