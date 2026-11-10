@@ -71,6 +71,45 @@ fn malformed_sgr_mouse_is_dropped_and_parser_recovers() {
     assert_eq!(mouse_kind(&recovered[0]), Some(MouseEventKind::ScrollDown));
 }
 
+#[test]
+fn sgr_horizontal_wheel_is_not_read_as_scroll_down() {
+    // A trackpad's vertical swipe drifts sideways and the terminal reports
+    // that drift as wheel left/right (66/67) between the wheel up reports.
+    let mut parser = VtParser::new();
+    let events = feed(
+        &mut parser,
+        "\x1b[<64;3;2M\x1b[<66;3;2M\x1b[<64;3;2M\x1b[<67;3;2M\x1b[<64;3;2M",
+    );
+    let kinds: Vec<_> = events.iter().filter_map(mouse_kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollRight,
+            MouseEventKind::ScrollUp,
+        ]
+    );
+}
+
+#[test]
+fn x10_wheel_buttons_parse_all_four_directions() {
+    // X10 adds 32 to the button and to each 1-based coordinate.
+    let mut parser = VtParser::new();
+    let events = feed(&mut parser, "\x1b[M`*%\x1b[Ma*%\x1b[Mb*%\x1b[Mc*%");
+    let kinds: Vec<_> = events.iter().filter_map(mouse_kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ]
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn pipe_mode_override_still_controls_detection() {
