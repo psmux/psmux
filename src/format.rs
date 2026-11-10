@@ -2352,13 +2352,20 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                     .unwrap_or_default()
             } else { String::new() }
         }
-        "scroll_region_upper" => "0".into(),
-        "scroll_region_lower" => {
-            if let Some(p) = active_pane(&win.root, &win.active_path) {
-                return p.last_rows.saturating_sub(1).to_string();
-            }
-            "0".into()
-        }
+        // The pane's scroll region and origin mode, from the live parser
+        // (format.c:2834, :2843 at tag 3.8).
+        "scroll_region_upper" | "scroll_region_lower" | "origin_flag" => target_pane()
+            .and_then(|p| {
+                let parser = p.live_parser().lock().ok()?;
+                let screen = parser.screen();
+                let (upper, lower) = screen.scroll_region();
+                Some(match var {
+                    "scroll_region_upper" => upper.to_string(),
+                    "scroll_region_lower" => lower.to_string(),
+                    _ => if screen.origin_mode() { "1" } else { "0" }.to_string(),
+                })
+            })
+            .unwrap_or_else(|| "0".into()),
 
         // ── Buffer ──
         "buffer_size" => {
@@ -2533,7 +2540,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
 
         // ── Misc ──
-        "origin_flag" | "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
+        "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
         "wrap_flag" => "1".into(),
         "line" | "command" | "command_list_name" | "command_list_alias" | "command_list_usage" | "config_files" => String::new(),
         "current_file" => crate::config::current_config_file(),

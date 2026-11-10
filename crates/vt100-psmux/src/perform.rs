@@ -185,6 +185,11 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             self.screen.designate_charset(*g == b')', b == b'0');
             return;
         }
+        // DECALN (input.c:1439 at tag 3.8).
+        if let ([b'#'], b'8') = (intermediates, b) {
+            self.screen.decaln();
+            return;
+        }
         if let Some(i) = intermediates.first() {
             self.callbacks.unhandled_escape(
                 &mut self.screen,

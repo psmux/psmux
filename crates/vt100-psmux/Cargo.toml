@@ -145,6 +145,10 @@ path = "tests/progress_forms.rs"
 name = "scroll_on_clear"
 path = "tests/scroll_on_clear.rs"
 
+[[test]]
+name = "scroll_region"
+path = "tests/scroll_region.rs"
+
 [dependencies.itoa]
 version = "1.0.18"
 

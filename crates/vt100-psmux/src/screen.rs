@@ -2678,9 +2678,30 @@ impl Screen {
         self.erase_image_cells(line, 1, pos.col, pos.col.saturating_add(count));
     }
 
-    // CSI d
+    // CSI d, counted from the top of the scroll region in origin mode
+    // (input.c:1870 at tag 3.8).
     pub(crate) fn vpa(&mut self, row: u16) {
-        self.grid_mut().row_set(row - 1);
+        self.grid_mut().row_set_in_origin(row - 1);
+    }
+
+    // ESC # 8
+    pub(crate) fn decaln(&mut self) {
+        self.grid_mut().alignment_pattern();
+        // tmux drops the images with them (screen-write.c:1327).
+        self.drop_current_grid_images();
+    }
+
+    /// The scroll region of the screen in use, its top and bottom rows
+    /// counted from 0 (format.c:2834 and :2843 at tag 3.8).
+    #[must_use]
+    pub fn scroll_region(&self) -> (u16, u16) {
+        self.grid().scroll_region()
+    }
+
+    /// Whether origin mode (DECOM) is on, as `#{origin_flag}` shows it.
+    #[must_use]
+    pub fn origin_mode(&self) -> bool {
+        self.grid().origin_mode()
     }
 
     // CSI ? h
