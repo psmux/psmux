@@ -1740,10 +1740,6 @@ fn refuse(stream: std::net::TcpStream, outcome: &Outcome, opening_lines: usize) 
     }
 }
 
-/// The control listener protocol, spoken only by the shared CLI:
-/// `AUTH <key>`, then `new-session` followed by `field=value` lines (values
-/// escaped by `router::encode_field`) and `end`, or `ping`. The reply is
-/// written by `reply::reply_text`.
 fn replay_globals(globals: &Globals, name: &str) {
     let peer = globals
         .peers
@@ -1758,6 +1754,10 @@ fn replay_globals(globals: &Globals, name: &str) {
     }
 }
 
+/// The control listener protocol, spoken only by the shared CLI:
+/// `AUTH <key>`, then `new-session` followed by `field=value` lines (values
+/// escaped by `router::encode_field`) and `end`, or `ping`. The reply is
+/// written by `reply::reply_text`.
 fn serve_control(stream: std::net::TcpStream, key: &str, tx: mpsc::Sender<Msg>, globals: &Globals) {
     use std::io::BufRead;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
