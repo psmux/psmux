@@ -3,6 +3,8 @@
 # Tests that box-drawing characters carry correct SGR color attributes
 # at EVERY level: vt100 parser state, capture-pane -e, dump-state JSON, TUI
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue263"

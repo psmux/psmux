@@ -3,6 +3,8 @@
 # Strategy: skip clever regex. Reuse same nested-psmux setup, then dump raw
 # bytes of each rendered line and match them against expected byte patterns.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $VERSION = (& $PSMUX -V).Trim()

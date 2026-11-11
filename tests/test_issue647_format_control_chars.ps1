@@ -28,6 +28,9 @@
 # to terminal from commands."), so a literal tab the caller put in their own
 # `-F` string still reaches stdout byte for byte. capture-pane, show-buffer and
 # save-buffer are likewise untouched.
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 $ErrorActionPreference = "Continue"
 if ($env:PSMUX_TEST_EXE) { $PSMUX = $env:PSMUX_TEST_EXE }
 else { $PSMUX = (Get-Command psmux -EA Stop).Source }

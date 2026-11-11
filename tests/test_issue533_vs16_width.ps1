@@ -36,6 +36,9 @@
 #   U+2733 -> 1,  U+2733 U+FE0F -> 2,  U+2733 U+FE0E -> 1,  U+1F4DB -> 2
 #   tmux ships variation-selector-always-wide ON by default.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue533"

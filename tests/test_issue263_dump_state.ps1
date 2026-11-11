@@ -11,6 +11,8 @@
 #   4. If U+2502: examine its fg attribute - does it match the SGR sent?
 #   5. If 3 CP437 chars: parser is reading bytes as CP437 (different bug)
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $VERSION = (& $PSMUX -V).Trim()

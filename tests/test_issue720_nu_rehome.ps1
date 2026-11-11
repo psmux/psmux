@@ -37,6 +37,9 @@
 # config dir all point into a throwaway fixture root, every command runs under
 # its own -L namespace, and cleanup is `kill-server` on that namespace only.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 

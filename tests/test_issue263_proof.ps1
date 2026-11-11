@@ -9,6 +9,8 @@
 # Verification fix: use [regex] match instead of String.IndexOf(char) to
 # avoid PowerShell's char/string overload quirk.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $VERSION = (& $PSMUX -V).Trim()

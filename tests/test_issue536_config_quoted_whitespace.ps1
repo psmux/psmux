@@ -18,6 +18,9 @@
 # Every assertion here compares an exact character count, because the whole
 # failure mode is invisible to the eye: the bar still looks plausible.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue536"

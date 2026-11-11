@@ -49,8 +49,10 @@ try {
 
     # ---- Test 4: show-hooks via external CLI ----
     $hooks = psmux show-hooks -t $SESSION 2>&1 | Out-String
-    # Hooks may be empty or contain hook names, either is valid
-    $pass = $hooks.Trim().Length -gt 0
+    $hooksRc = $LASTEXITCODE
+    # Like tmux, a session with no hooks of its own prints nothing (no "(no hooks)" line).
+    # The command must still succeed and print no error.
+    $pass = ($hooksRc -eq 0) -and ($hooks -notmatch 'unknown|error|no server')
     Add-Result "show-hooks (external CLI)" $pass "Output: $($hooks.Trim())"
 
     # ---- Test 5: list-commands via external CLI ----

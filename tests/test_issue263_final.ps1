@@ -10,6 +10,8 @@
 # capture-pane -e re-emits the screen buffer state with full SGR per attribute
 # group, exercising the same color-mapping code that the live renderer uses.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $VERSION = (& $PSMUX -V).Trim()

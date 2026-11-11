@@ -81,7 +81,7 @@ Test "2.1 -ga on missing hook creates it" ($hooks -match 'after-new-window')
 Test "2.2 Contains correct command" ($hooks -match 'created-by-ga')
 # Single handler should NOT use indexed format
 # tmux indexes every array element, a single one too: name[0] command.
-Test '2.3 Single handler is listed as element 0' ($hooks -match 'after-new-window\[0\] created-by-ga' -and $hooks -notmatch 'after-new-window\[1\]')
+Test '2.3 Single handler is listed as element 0' ($hooks -match '(?m)^after-new-window\[0\] display-message.*created-by-ga' -and $hooks -notmatch 'after-new-window\[1\]')
 
 # ════════════════════════════════════════════════════════════════════
 # Test Group 3: -g (replace) clears all appended handlers
@@ -96,7 +96,8 @@ $hooks = & $exe show-hooks -g 2>&1 | Out-String
 $lines = ($hooks -split "`n" | Where-Object { $_ -match 'client-attached' })
 Test "3.1 -g replaces all appended handlers (count=$($lines.Count))" ($lines.Count -eq 1)
 Test "3.2 Only the replacement command remains" ($hooks -match 'replaced-all')
-Test '3.3 No indexed format after replace' ($hooks -notmatch 'client-attached\[')
+# tmux indexes a single element too, so the replacement is element 0 and nothing else.
+Test '3.3 Replacement is the only element, [0]' ($hooks -match '(?m)^client-attached\[0\] ' -and $hooks -notmatch 'client-attached\[1\]')
 
 # ════════════════════════════════════════════════════════════════════
 # Test Group 4: -gu removes all appended handlers
@@ -241,7 +242,7 @@ Test "8.1 Empty hooks: bare names, no commands" ($hooks -match '(?m)^client-atta
 Start-Sleep -Milliseconds 200
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
 Test '8.2 Single handler: tmux format "name[0] cmd"' ($hooks -match '(?m)^client-attached\[0\] display-message')
-Test '8.3 Single handler: no brackets' ($hooks -notmatch 'client-attached\[')
+Test '8.3 Single handler: no second element' ($hooks -notmatch 'client-attached\[1\]')
 
 # Multi handler: indexed format
 & $exe set-hook -ga client-attached 'display-message "duo"'

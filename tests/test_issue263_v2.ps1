@@ -1,6 +1,8 @@
 # Issue #263 v2: Need to check whether box-drawing chars are reaching the pane,
 # and if so, what color attributes their cells carry.
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "issue263v2"

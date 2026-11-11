@@ -17,6 +17,8 @@
 #   - If text-control is 7/7 BUT box-char is 0/7: bug PRESENT
 #   - Otherwise: encoding artifact, inconclusive
 
+# The runner console is OEM 437: read psmux output as UTF-8 so non-ASCII cells compare by their real bytes.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $VERSION = (& $PSMUX -V).Trim()
