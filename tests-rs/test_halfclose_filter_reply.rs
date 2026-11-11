@@ -95,8 +95,15 @@ fn exchange_ends_an_unterminated_request_with_a_newline() {
         let (mut a, mut b) = (String::new(), String::new());
         std::io::BufRead::read_line(&mut r, &mut a).unwrap();
         std::io::BufRead::read_line(&mut r, &mut b).unwrap();
+        // End the reply the way the server does: half-close, drain, close.
+        // A bare close can reach the client as a reset that throws the
+        // unread reply away.
         let mut w = s;
         let _ = w.write_all(b"OK\ndone\n");
+        let _ = w.shutdown(std::net::Shutdown::Write);
+        let _ = w.set_read_timeout(Some(Duration::from_millis(100)));
+        let mut sink = [0u8; 64];
+        while matches!(w.read(&mut sink), Ok(n) if n > 0) {}
         b
     });
     let got = exchange_on_port(port, "k", None, "list-panes", Some(Duration::from_secs(3))).unwrap();
