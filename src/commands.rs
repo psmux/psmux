@@ -2018,7 +2018,10 @@ pub(crate) fn in_server_target_kind(cmd: &str) -> Option<InServerTarget> {
         "kill-pane" | "killp" | "respawn-pane" | "respawnp" | "resize-pane" | "resizep"
         | "capture-pane" | "capturep" | "clear-history" | "clearhist" | "pipe-pane" | "pipep"
         | "send-keys" | "send" | "display-message" | "display" | "select-layout" | "selectl"
-        | "paste-buffer" | "pasteb" | "split-window" | "splitw" => Some(InServerTarget::Pane),
+        | "paste-buffer" | "pasteb" | "split-window" | "splitw"
+        // cmd-select-pane.c: CMD_FIND_PANE. A bare `select-pane -t 1` or
+        // `-t !` died in the CLI as a session name (issue #1040).
+        | "select-pane" | "selectp" => Some(InServerTarget::Pane),
         _ => None,
     }
 }
@@ -2031,7 +2034,9 @@ pub(crate) fn in_server_target_kind(cmd: &str) -> Option<InServerTarget> {
 /// to the active pane (issue #1040).
 pub(crate) fn target_resolved_in_server(kind: InServerTarget, t: &str) -> bool {
     crate::cli::bare_target_token(t)
-        || (kind == InServerTarget::Pane && crate::cli::split_special_pane_target(t).is_some())
+        || (kind == InServerTarget::Pane
+            && (crate::cli::split_special_pane_target(t).is_some()
+                || crate::cli::has_special_window_part(t)))
 }
 
 /// Resolve a window or pane `-t` on the in server route to the `@id` or
@@ -5321,3 +5326,7 @@ mod tests_issue1005_attached_target;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue964_kill_pane_all.rs"]
 mod tests_issue964_kill_pane_all;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1040_special_pane_targets.rs"]
+mod tests_issue1040_special_pane_targets;

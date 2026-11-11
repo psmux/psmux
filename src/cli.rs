@@ -1937,6 +1937,25 @@ pub fn special_pane_token(p: &str) -> bool {
     }
 }
 
+/// A window token from tmux's window table or an offset (`!`, `^`, `$`,
+/// `+N`, `-N`, `{start}`, `{last}`, `{end}`, `{next}`, `{previous}`), as the
+/// window half of a `sess:W` or `:W.P` target.
+pub fn special_window_token(w: &str) -> bool {
+    matches!(w, "!" | "^" | "$" | "{start}" | "{last}" | "{end}" | "{next}" | "{previous}")
+        || w.strip_prefix(['+', '-']).is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Does a `sess:W` / `:W.P` target carry a [`special_window_token`] as its
+/// window half? The generic parser files it as a window NAME, and a pane
+/// command then asked for a window called "+" (#1040).
+pub fn has_special_window_part(target: &str) -> bool {
+    let t = strip_exact_match_prefix(target.trim());
+    let Some(colon) = t.find(':') else { return false };
+    let rest = &t[colon + 1..];
+    let win = rest.find('.').map_or(rest, |d| &rest[..d]);
+    special_window_token(strip_exact_match_prefix(win))
+}
+
 /// Split a `window.pane` target whose pane half is a [`special_pane_token`]
 /// into the part before the dot (session and window, possibly empty) and that
 /// token. tmux splits on the first `.` after the `:` (or the first `.` at all

@@ -4140,6 +4140,12 @@ pub fn resolve_pane_spec(app: &AppState, spec: &str) -> Result<(usize, Vec<usize
         }
     } else if let Some(d) = pt.window {
         win_pos = Some(app.win_pos(d).ok_or_else(|| format!("can't find window: {}", d))?);
+    } else if let Some(ref n) = pt.window_name.as_ref().filter(|n| crate::cli::special_window_token(n)) {
+        // `sess:+`, `:!`, `:{end}`: the window table and offsets
+        // (cmd-find.c:51 and :390), not a window called "+" (#1040).
+        win_pos = Some(app.resolve_window_spec(n, false)
+            .map_err(|_| format!("can't find window: {}", n))?
+            .pos().ok_or_else(|| format!("can't find window: {}", n))?);
     } else if let Some(ref n) = pt.window_name {
         win_pos = Some(app.windows.iter().position(|w| w.name == *n)
             .ok_or_else(|| format!("can't find window: {}", n))?);

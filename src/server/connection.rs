@@ -3586,6 +3586,14 @@ if set_option_command {
                     target_pane = pt.pane;
                     pane_is_id = pt.pane_is_id;
                 }
+                // A bare `%N` names its window too: a window half left over
+                // from the TARGET line (`s:+` rewritten to `%4` above) must
+                // not be checked as a window called "+" (#1040).
+                if pt.pane_is_id && pt.window.is_none() {
+                    target_win = None;
+                    target_win_is_id = false;
+                    target_win_name = None;
+                }
             }
             i += 2; continue;
         }
