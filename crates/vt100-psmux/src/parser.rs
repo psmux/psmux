@@ -138,6 +138,19 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         }
     }
 
+    /// Read C0 controls the way the inbox Windows console host writes them:
+    /// as cells of one column each (issue #972). New parsers take
+    /// [`set_conhost_c0_cells_default`](crate::set_conhost_c0_cells_default).
+    pub fn set_conhost_c0_cells(&mut self, on: bool) {
+        self.screen.conhost_c0_cells = on;
+    }
+
+    /// Whether this parser reads C0 controls as conhost cells.
+    #[must_use]
+    pub fn conhost_c0_cells(&self) -> bool {
+        self.screen.conhost_c0_cells
+    }
+
     /// Returns a reference to a [`Screen`](crate::Screen) object containing
     /// the terminal state.
     #[must_use]

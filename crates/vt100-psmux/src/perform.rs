@@ -52,9 +52,63 @@ pub fn allow_passthrough() -> bool {
     ALLOW_PASSTHROUGH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether parsers made from now on read the stream the way the inbox Windows
+/// console host writes it, where a C0 control outside an escape sequence is a
+/// buffer cell holding that control and takes one column (see
+/// [`conhost_c0_glyph`]). psmux turns it on in a server whose panes run under
+/// the inbox conhost. A supplied OpenConsole forwards the application's own
+/// bytes, where a tab is a tab, so it stays off there; off is also the
+/// default, which is plain VT.
+static CONHOST_C0_CELLS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Set the [`CONHOST_C0_CELLS`] default for parsers created after this call.
+pub fn set_conhost_c0_cells_default(on: bool) {
+    CONHOST_C0_CELLS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The value last given to [`set_conhost_c0_cells_default`].
+#[must_use]
+pub fn conhost_c0_cells_default() -> bool {
+    CONHOST_C0_CELLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The glyph for a C0 control the inbox conhost sent as a cell, or `None` for
+/// the controls it sends as controls.
+///
+/// A console cell can hold a C0 control (WriteConsoleOutputCharacterW puts one
+/// there, and so does a write while ENABLE_PROCESSED_OUTPUT is off). The inbox
+/// conhost (Windows 10 19045 and Windows 11 26100, with or without the
+/// passthrough flag) writes such a cell to the pipe as the bare byte and counts
+/// it as one column, so its next relative move, a BS to step back onto the
+/// cell, lands one column short in a terminal that runs the byte as a control
+/// (#972, the stale first letter in Claude Code's prompt). With processed
+/// output on it sends the code page 437 picture instead (SI as ☼), and so does
+/// a NuGet OpenConsole for the same cell; this is that picture.
+///
+/// BEL, BS, LF, CR and ESC stay controls: conhost uses them itself (BEL for a
+/// real bell, after which it does not move its cursor). NUL and DEL never
+/// reach `execute`.
+pub(crate) fn conhost_c0_glyph(b: u8) -> Option<char> {
+    const CP437: [char; 32] = [
+        '\0', '\u{263a}', '\u{263b}', '\u{2665}', '\u{2666}', '\u{2663}', '\u{2660}', '\u{2022}',
+        '\u{25d8}', '\u{25cb}', '\u{25d9}', '\u{2642}', '\u{2640}', '\u{266a}', '\u{266b}',
+        '\u{263c}', '\u{25ba}', '\u{25c4}', '\u{2195}', '\u{203c}', '\u{00b6}', '\u{00a7}',
+        '\u{25ac}', '\u{21a8}', '\u{2191}', '\u{2193}', '\u{2192}', '\u{2190}', '\u{221f}',
+        '\u{2194}', '\u{25b2}', '\u{25bc}',
+    ];
+    match b {
+        0x00 | 0x07 | 0x08 | 0x0a | 0x0d | 0x1b => None,
+        0x01..=0x1f => Some(CP437[b as usize]),
+        _ => None,
+    }
+}
+
 pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     pub screen: crate::screen::Screen,
     pub callbacks: CB,
+    /// Read C0 controls as conhost cells; see [`CONHOST_C0_CELLS`].
+    pub(crate) conhost_c0_cells: bool,
     /// Set by `hook` when a sixel DCS (final `q`, no intermediates) begins, so
     /// `put`/`unhook` know to accumulate and materialise the image.  Any other
     /// DCS leaves this `false`, preserving the pre-existing no-op behaviour.
@@ -94,6 +148,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
                 scrollback_len,
             ),
             callbacks,
+            conhost_c0_cells: conhost_c0_cells_default(),
             dcs_active: false,
             dcs_buf: Vec::new(),
             last_printed: None,
@@ -107,6 +162,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
         Self {
             screen,
             callbacks,
+            conhost_c0_cells: conhost_c0_cells_default(),
             dcs_active: false,
             dcs_buf: Vec::new(),
             last_printed: None,
@@ -156,6 +212,12 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn execute(&mut self, b: u8) {
+        if self.conhost_c0_cells {
+            if let Some(glyph) = conhost_c0_glyph(b) {
+                self.print(glyph);
+                return;
+            }
+        }
         self.last_printed = None;
         match b {
             7 => {
@@ -1304,3 +1366,7 @@ fn canonicalize_params_decstbm(
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue431_sixel_parse.rs"]
 mod test_issue431_sixel_parse;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue972_conhost_c0_cells.rs"]
+mod test_issue972_conhost_c0_cells;

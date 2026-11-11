@@ -76,8 +76,8 @@ pub use image::SixelImage;
 pub use palette::{parse_palette_index, parse_x11_colour, xterm_rgb, ColourPalette};
 pub use parser::Parser;
 pub use perform::{
-    allow_passthrough, input_buffer_size, set_allow_passthrough, set_input_buffer_size,
-    DEFAULT_INPUT_BUFFER_SIZE,
+    allow_passthrough, conhost_c0_cells_default, input_buffer_size, set_allow_passthrough,
+    set_conhost_c0_cells_default, set_input_buffer_size, DEFAULT_INPUT_BUFFER_SIZE,
 };
 pub use queries::{QueryDetector, MAX_PENDING_QUERIES};
 pub use program_status::{ProgramKind, ProgramRecord, ProgramState, ProgramStatus, ProgramStatuses, TerminalQuery, PROGRAM_STATUS_REPLY};
