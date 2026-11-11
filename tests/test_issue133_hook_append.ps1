@@ -119,7 +119,8 @@ Test "4.1 Pre-check: 3 handlers before -gu" ($pre -eq 3)
 Start-Sleep -Milliseconds 200
 
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
-Test "4.2 -gu removes ALL handlers" ($hooks -notmatch 'client-attached')
+# An unset hook stays listed under -g as a bare name, as in tmux.
+Test "4.2 -gu removes ALL handlers" ($hooks -notmatch 'client-attached\[')
 
 # ════════════════════════════════════════════════════════════════════
 # Test Group 5: Multi-plugin simulation (the real-world use case)
@@ -217,7 +218,7 @@ Start-Sleep -Milliseconds 200
 
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
 Test "7.5 Removing after-new-window doesn't affect client-attached" ($hooks -match 'client-attached')
-Test "7.6 after-new-window is gone" ($hooks -notmatch 'after-new-window')
+Test "7.6 after-new-window is gone" ($hooks -notmatch 'after-new-window\[')
 Test "7.7 client-detached still present" ($hooks -match 'client-detached')
 
 # ════════════════════════════════════════════════════════════════════
@@ -232,7 +233,8 @@ Start-Sleep -Milliseconds 200
 
 # Empty state
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
-Test "8.1 Empty hooks shows (no hooks)" ($hooks -match '\(no hooks\)')
+# tmux lists every session hook under -g, empty ones as bare names.
+Test "8.1 Empty hooks: bare names, no commands" ($hooks -match '(?m)^client-attached\s*$' -and $hooks -notmatch '\[\d+\]' -and $hooks -notmatch 'no hooks')
 
 # Single handler: plain format
 & $exe set-hook -g client-attached 'display-message "solo"'
@@ -292,7 +294,7 @@ Test "10.1 Pre-check: hook exists" ($hooks -match 'client-attached')
 Start-Sleep -Milliseconds 200
 
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
-Test "10.2 -u (without g) removes hook" ($hooks -notmatch 'client-attached')
+Test "10.2 -u (without g) removes hook" ($hooks -notmatch 'client-attached\[')
 
 # Cleanup
 & $exe kill-session -t $session 2>$null
