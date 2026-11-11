@@ -9008,15 +9008,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // frame, and are read only when the value changes.
         // A frame with no change compares one short string and allocates
         // nothing.
-        let host_progress_now = state.host_progress.as_deref().unwrap_or("0;0");
-        let host_progress_change = if host_progress_now != last_emitted_host_progress {
+        let host_progress_this_frame = state.host_progress.as_deref().unwrap_or("0;0");
+        let host_progress_change = if host_progress_this_frame != last_emitted_host_progress {
             let sequence = crate::terminal_overrides::progress_sequence(
                 state.client_render_options.terminal_features.as_deref(),
                 state.client_render_options.terminal_overrides.as_deref().unwrap_or(&[]),
                 &crate::terminal_overrides::client_term(),
-                host_progress_now,
+                host_progress_this_frame,
             );
-            Some((host_progress_now.to_string(), sequence))
+            Some((host_progress_this_frame.to_string(), sequence))
         } else {
             None
         };
@@ -10897,7 +10897,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // an override changed it, and nothing without one (tty.c:3219 at tag
         // 3.8). The value counts as seen either way, as tmux keeps it in
         // `c->progress_bar` before it looks for the capability.
-        if let Some((value, sequence)) = host_progress_change {
+        if let Some((host_progress_this_frame, sequence)) = host_progress_change {
             if let Some(sequence) = sequence {
                 use std::io::Write;
                 let mut out = std::io::stdout().lock();
@@ -10905,9 +10905,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 let _ = out.flush();
             }
             if let Ok(mut last) = LAST_HOST_PROGRESS.lock() {
-                *last = Some(value.clone());
+                *last = Some(host_progress_this_frame.clone());
             }
-            last_emitted_host_progress = value;
+            last_emitted_host_progress = host_progress_this_frame;
         }
 
         // ── Periodic mouse-enable refresh (ALL input modes) ──────────
