@@ -185,6 +185,17 @@ impl Grid {
         self.col_clamp();
     }
 
+    /// Put the cursor at `pos` as it is, counted from the top left of the
+    /// screen whatever the origin mode, as when the cursor carries over from
+    /// the other screen. A column one past the last, where the cursor waits
+    /// to wrap, stays.
+    pub fn set_pos_absolute(&mut self, pos: Pos) {
+        self.pos = Pos {
+            row: pos.row.min(self.size.rows.saturating_sub(1)),
+            col: pos.col.min(self.size.cols),
+        };
+    }
+
     pub fn save_cursor(&mut self) {
         self.saved_pos = self.pos;
         self.saved_origin_mode = self.origin_mode;

@@ -1874,13 +1874,23 @@ impl Screen {
     }
 
     fn enter_alternate_grid(&mut self) {
-        if !self.mode(MODE_ALTERNATE_SCREEN) {
+        let entering = !self.mode(MODE_ALTERNATE_SCREEN);
+        if entering {
             let pos = self.grid.pos();
             self.alternate_saved_cursor = Some((pos.col, pos.row));
         }
         self.grid_mut().set_scrollback(0);
         self.set_mode(MODE_ALTERNATE_SCREEN);
         self.alternate_grid.allocate_rows();
+        if entering {
+            // tmux has one cursor for both screens, so it stays where it was
+            // (screen_alternate_on, screen.c at tag 3.8), and both console
+            // hosts keep it too. The alternate grid keeps a cursor of its
+            // own, which would otherwise start at 0,0 or where the last
+            // alternate session left it (#1032 follow up).
+            let pos = self.grid.pos();
+            self.alternate_grid.set_pos_absolute(pos);
+        }
         // Start the alternate screen's DECSC slot clean so a value left by a
         // previous alternate-screen session cannot surface in this one.
         self.alternate_saved_attrs = crate::attrs::Attrs::default();
@@ -2812,7 +2822,14 @@ impl Screen {
                 [7] => self.clear_mode(MODE_NO_AUTOWRAP),
                 [9] => self.set_mouse_mode(MouseProtocolMode::Press),
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
-                [47] => self.enter_alternate_grid(),
+                // tmux clears the alternate screen for 47 as for 1049
+                // (screen_alternate_on), and keeps the cursor for both.
+                [47] => {
+                    if !self.mode(MODE_ALTERNATE_SCREEN) {
+                        self.alternate_grid.clear();
+                    }
+                    self.enter_alternate_grid();
+                }
                 [1000] => {
                     self.set_mouse_mode(MouseProtocolMode::PressRelease);
                 }
@@ -2852,8 +2869,18 @@ impl Screen {
                 [7] => self.set_mode(MODE_NO_AUTOWRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
+                // 47 saves no cursor, so the cursor stays where the
+                // alternate screen left it (screen_alternate_off with cursor
+                // 0 at tag 3.8), as in both console hosts. 1049 below puts
+                // back the one it saved.
                 [47] => {
+                    let carried = self
+                        .mode(MODE_ALTERNATE_SCREEN)
+                        .then(|| self.alternate_grid.pos());
                     self.exit_alternate_grid();
+                    if let Some(pos) = carried {
+                        self.grid.set_pos_absolute(pos);
+                    }
                 }
                 [1000] => {
                     self.clear_mouse_mode(MouseProtocolMode::PressRelease);

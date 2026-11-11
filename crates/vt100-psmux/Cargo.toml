@@ -150,6 +150,10 @@ name = "tab_stops"
 path = "tests/tab_stops.rs"
 
 [[test]]
+name = "alt_screen_cursor"
+path = "tests/alt_screen_cursor.rs"
+
+[[test]]
 name = "scroll_region"
 path = "tests/scroll_region.rs"
 
