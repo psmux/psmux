@@ -914,8 +914,25 @@ fn write_mouse_to_pty(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press:
 /// wheel gate) run BEFORE this and are untouched: this decides how a report
 /// travels, never whether one is owed.
 pub(crate) fn record_bypass_applies(event_flags: u32) -> bool {
-    event_flags & mouse_inject::MOUSE_WHEELED != 0
+    event_flags & WHEEL_FLAGS != 0
         || crate::ssh_input::conpty_needs_mouse_record_bypass()
+}
+
+/// The record flags that mean "a wheel notch": vertical (MOUSE_WHEELED) and
+/// horizontal (MOUSE_HWHEELED, #1036). Both take the #598 wheel gate and the
+/// #277 record channel; nothing else ever sets MOUSE_HWHEELED.
+const WHEEL_FLAGS: u32 = mouse_inject::MOUSE_WHEELED | mouse_inject::MOUSE_HWHEELED;
+
+/// The Win32 record for a horizontal wheel report: SGR buttons 66 (left) and
+/// 67 (right), tmux's MOUSE_BUTTON_6/7, plus any modifier bits. A native
+/// console app reads them as MOUSE_HWHEELED, positive delta for right.
+/// None for every other button, vertical wheel included.
+pub(crate) fn hwheel_record(btn: u8) -> Option<(u32, u32)> {
+    if btn & (64 | 2) != (64 | 2) || btn & (128 | 32) != 0 {
+        return None;
+    }
+    let delta: i16 = if btn & 1 != 0 { 120 } else { -120 };
+    Some((((delta as i32) << 16) as u32, mouse_inject::MOUSE_HWHEELED))
 }
 
 /// Inject a mouse event into a pane using the best available method.
@@ -1069,7 +1086,7 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // the `wheel_auth` latch is the real backstop).  There a `true`
         // WITHHOLDS the VTI flip, and the same inherited bit would then silence
         // the #277 apps for good.
-        if _event_flags & mouse_inject::MOUSE_WHEELED != 0 && !wheel_forced(pane) {
+        if _event_flags & WHEEL_FLAGS != 0 && !wheel_forced(pane) {
             if matches!(pane.mouse_proto_owner, Some((_, true))) || detect_mouse_input(pane) {
                 // A live signal answered yes: refresh the latch so the
                 // authorization outlives the next child that raw-modes the
@@ -1124,7 +1141,7 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // all.  The MOUSE_EVENT bypass is a Windows only extension that
         // exists because conhost sits between psmux and the pane child.
         if record_bypass_applies(_event_flags) {
-            let reason = if _event_flags & mouse_inject::MOUSE_WHEELED != 0 {
+            let reason = if _event_flags & WHEEL_FLAGS != 0 {
                 "wheel, fixes #277"
             } else {
                 "build below CONPTY_MOUSE_MIN_BUILD, #597"
@@ -2291,6 +2308,39 @@ pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Optio
     }
 }
 
+/// A horizontal wheel notch over a pane (#1036): SGR buttons 66/67 over SSH,
+/// MOUSE_HWHEELED on a local console. tmux has no wheel key for them: they
+/// are buttons 6 and 7 (server_client_check_mouse), so the key is
+/// MouseDown6Pane / MouseDown7Pane. No default binding exists; unbound in
+/// root they go to the program only if it asked for the mouse (the same #598
+/// gate as the vertical wheel), and a pane in copy mode drops them. They
+/// never scroll.
+pub fn handle_pane_hwheel(app: &mut AppState, pane_id: usize, right: bool, at: Option<(i16, i16)>, mods: u8) {
+    if !app.mouse_enabled || matches!(app.mode, Mode::PopupMode { .. }) {
+        return;
+    }
+    let mods = crate::mouse_keys::mods_from_mask(mods);
+    let button = if right { 7 } else { 6 };
+    let key = crate::mouse_keys::key(crate::mouse_keys::EV_MOUSE_DOWN, button, crate::mouse_keys::LOC_PANE, mods);
+    let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
+    mouse_log(&format!("handle_pane_hwheel: pane={} right={} mods={:?} -> {:?}", pane_id, right, mods, dispatch));
+    let btn = (if right { 67 } else { 66 }) + crate::mouse_keys::sgr_mod_bits(mods);
+    match dispatch {
+        crate::mouse_keys::Dispatch::User(cmd) => {
+            focus_pane_by_id(app, pane_id);
+            app.last_mouse_event = Some((pane_id, btn, true, at, std::time::Instant::now()));
+            let (c, r) = at.unwrap_or((0, 0));
+            note_mouse_pane(app, pane_id, c, r);
+            run_mouse_binding(app, pane_id, &cmd);
+        }
+        crate::mouse_keys::Dispatch::Forward => {
+            focus_pane_by_id(app, pane_id);
+            forward_wheel_button_to_active_pane(app, btn, at);
+        }
+        crate::mouse_keys::Dispatch::Builtin | crate::mouse_keys::Dispatch::Drop => {}
+    }
+}
+
 /// A wheel notch over the status line: tmux's `WheelUpStatus` /
 /// `WheelDownStatus`, whose defaults are previous-window / next-window
 /// (key-bindings.c).  Unbound, nothing happens: there is no pane under the
@@ -2451,6 +2501,10 @@ pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press:
         return;
     }
     let (col, row) = at.unwrap_or((5, 5));
+    if let Some((state, flags)) = hwheel_record(btn) {
+        inject_mouse_combined(pane, col, row, btn, press, state, flags, &win_name);
+        return;
+    }
     let flags = if btn & 64 != 0 { mouse_inject::MOUSE_WHEELED } else if btn & 32 != 0 { mouse_inject::MOUSE_MOVED } else { 0 };
     inject_mouse_combined(pane, col, row, btn, press, 0, flags, &win_name);
 }
@@ -2603,6 +2657,10 @@ pub fn send_mouse_event(app: &mut AppState) {
         return;
     }
     let (col, row) = at.unwrap_or((5, 5));
+    if let Some((state, flags)) = hwheel_record(btn) {
+        inject_mouse_combined(pane, col, row, btn, press, state, flags, &win_name);
+        return;
+    }
     let flags = if btn & 64 != 0 { mouse_inject::MOUSE_WHEELED } else { 0 };
     inject_mouse_combined(pane, col, row, btn, press, 0, flags, &win_name);
 }
@@ -2635,6 +2693,21 @@ fn forward_wheel_to_active_pane(app: &mut AppState, up: bool, at: Option<(i16, i
     let (col, row) = at.unwrap_or((5, 5));
     inject_mouse_combined(pane, col, row, sgr_btn, true,
         button_state, mouse_inject::MOUSE_WHEELED, &win_name);
+}
+
+/// The horizontal sibling of `forward_wheel_to_active_pane`: SGR 66/67 (with
+/// modifier bits) and a MOUSE_HWHEELED record, behind the same #598 gate.
+fn forward_wheel_button_to_active_pane(app: &mut AppState, btn: u8, at: Option<(i16, i16)>) {
+    let Some((button_state, flags)) = hwheel_record(btn) else { return };
+    let win = &mut app.windows[app.active_idx];
+    let win_name = win.name.clone();
+    let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return };
+    if !pane_wheel_forward(pane) {
+        mouse_log("  -> unbound horizontal wheel, pane has no mouse reporting: nothing (tmux parity)");
+        return;
+    }
+    let (col, row) = at.unwrap_or((5, 5));
+    inject_mouse_combined(pane, col, row, btn, true, button_state, flags, &win_name);
 }
 
 /// Set split sizes at a given tree path during border drag.
@@ -4692,6 +4765,10 @@ mod test_issue623_record_reader_gate;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue629_ssh_vt_wheel.rs"]
 mod test_issue629_ssh_vt_wheel;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1036_hwheel_mouse_keys.rs"]
+mod test_issue1036_hwheel_mouse_keys;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_respawn_pane_refusal_survives.rs"]

@@ -4,7 +4,9 @@ using System.Runtime.InteropServices;
 using System.Threading;
 
 // Injects mouse wheel events into a console process via WriteConsoleInput.
-// Usage: mouse_injector.exe <pid> <up|down> [count] [x] [y]
+// Usage: mouse_injector.exe <pid> <up|down|left|right> [count] [x] [y]
+// left/right send MOUSE_HWHEELED records (a tilt wheel or trackpad sideways
+// swipe): a positive high word is right, a negative one left.
 class MouseInjector
 {
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -22,6 +24,7 @@ class MouseInjector
 
     const ushort MOUSE_EVENT = 0x0002;
     const uint MOUSE_WHEELED = 0x0004;
+    const uint MOUSE_HWHEELED = 0x0008;
     const uint GENERIC_WRITE = 0x40000000;
     const uint GENERIC_READ = 0x80000000;
     const uint FILE_SHARE_READ = 0x00000001;
@@ -57,7 +60,7 @@ class MouseInjector
 
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: mouse_injector.exe <pid> <up|down> [count] [x] [y]");
+            Console.Error.WriteLine("Usage: mouse_injector.exe <pid> <up|down|left|right> [count] [x] [y]");
             return 1;
         }
 
@@ -69,7 +72,9 @@ class MouseInjector
 
         // Scroll delta: positive = up, negative = down
         // The high word of dwButtonState holds the delta (120 = one notch)
-        int delta = direction == "up" ? 120 : -120;
+        // For left/right: positive = right, negative = left.
+        bool horizontal = direction == "left" || direction == "right";
+        int delta = (direction == "up" || direction == "right") ? 120 : -120;
 
         var log = new System.Text.StringBuilder();
         log.AppendLine(string.Format("MouseInjector: pid={0} dir={1} count={2} x={3} y={4} delta={5}", pid, direction, count, x, y, delta));
@@ -108,7 +113,7 @@ class MouseInjector
             // High word = scroll delta, encoded as unsigned
             rec.MouseEvent.dwButtonState = (uint)(delta << 16);
             rec.MouseEvent.dwControlKeyState = 0;
-            rec.MouseEvent.dwEventFlags = MOUSE_WHEELED;
+            rec.MouseEvent.dwEventFlags = horizontal ? MOUSE_HWHEELED : MOUSE_WHEELED;
 
             uint written;
             bool ok = WriteConsoleInput(hInput, new INPUT_RECORD[] { rec }, 1, out written);

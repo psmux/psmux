@@ -8431,6 +8431,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     }
                                 }
                             }
+                            // Horizontal wheel (#1036): tmux's MouseDown6Pane /
+                            // MouseDown7Pane, resolved by the server. Never a
+                            // scroll; outside a pane there is nothing to do.
+                            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                    r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                }) {
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
+                                    let dir = if me.kind == MouseEventKind::ScrollRight { "right" } else { "left" };
+                                    cmd_batch.push(format!("pane-hwheel {} {} {} {} {}\n", pane_id, dir, rel_col, rel_row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers)));
+                                }
+                            }
                             _ => {}
                         }
                     }

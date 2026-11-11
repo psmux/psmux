@@ -1414,6 +1414,9 @@ pub mod mouse_inject {
     // dwEventFlags
     pub const MOUSE_MOVED: u32       = 0x0001;
     pub const MOUSE_WHEELED: u32     = 0x0004;
+    /// Horizontal wheel (tilt wheel, trackpad sideways swipe): a positive
+    /// high word is right, a negative one left.
+    pub const MOUSE_HWHEELED: u32    = 0x0008;
 
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -3594,6 +3597,7 @@ pub mod mouse_inject {
     pub const FROM_LEFT_2ND_BUTTON_PRESSED: u32 = 0x0004;
     pub const MOUSE_MOVED: u32 = 0x0001;
     pub const MOUSE_WHEELED: u32 = 0x0004;
+    pub const MOUSE_HWHEELED: u32 = 0x0008;
     pub fn get_child_pid(_child: &dyn portable_pty::Child) -> Option<u32> { None }
     pub fn send_mouse_event(_pid: u32, _col: i16, _row: i16, _btn: u32, _flags: u32, _reattach: bool) -> bool { false }
     pub fn send_vt_sequence(_pid: u32, _sequence: &[u8]) -> bool { false }

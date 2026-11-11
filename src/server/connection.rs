@@ -4272,6 +4272,19 @@ match cmd {
             }
         }
     }
+    "pane-hwheel" => {
+        // pane-hwheel PANE_ID left|right COL ROW MODS (#1036): a horizontal
+        // wheel notch, tmux's MouseDown6Pane / MouseDown7Pane.
+        if args.len() >= 5 {
+            let right = match args[1] { "right" => Some(true), "left" => Some(false), _ => None };
+            if let (Ok(pane_id), Some(right), Ok(col), Ok(row)) = (
+                args[0].parse::<usize>(), right, args[2].parse::<i16>(), args[3].parse::<i16>()
+            ) {
+                let mods = args[4].parse::<u8>().unwrap_or(0);
+                let _ = tx.send(CtrlReq::PaneHWheel(client_id, pane_id, right, Some((col, row)), mods));
+            }
+        }
+    }
     "split-sizes" => {
         // split-sizes PATH SIZE1,SIZE2,...  (PATH is "_" for root, or dot-separated indices)
         if args.len() >= 2 {

@@ -2797,6 +2797,7 @@ pub(crate) fn dispatch(
                 CtrlReq::PaneMouse(cid, pane_id, button, col, row, press, replay) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); crate::window_ops::handle_client_pane_mouse(&mut app, pane_id, button, col, row, press, replay); if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 // copied from server/mod.rs run_server (line 4371 at 86a78100)
                 CtrlReq::PaneScroll(cid, pane_id, up, at, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_pane_wheel(&mut app, pane_id, up, at, mods); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::PaneHWheel(cid, pane_id, right, at, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_pane_hwheel(&mut app, pane_id, right, at, mods); state_dirty = true; meta_dirty = true; } }
                 // copied from server/mod.rs run_server (line 4247 at 86a78100)
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); hook_event = Some("pane-mode-changed"); }
                 // copied from server/mod.rs run_server (line 4248 at 86a78100)

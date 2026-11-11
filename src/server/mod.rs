@@ -4733,6 +4733,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::MouseForward(cid, pane_id, btn, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::forward_mouse_to_pane(&mut app, pane_id, btn, press, Some((col, row))); state_dirty = true; } }
                 CtrlReq::SendMouse(cid) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::send_mouse_event(&mut app); state_dirty = true; meta_dirty = true; } }
                 CtrlReq::PaneScroll(cid, pane_id, up, at, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_pane_wheel(&mut app, pane_id, up, at, mods); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::PaneHWheel(cid, pane_id, right, at, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_pane_hwheel(&mut app, pane_id, right, at, mods); state_dirty = true; meta_dirty = true; } }
                 CtrlReq::SplitSetSizes(cid, path, sizes) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_set_sizes(&mut app, &path, &sizes); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::SplitResizeDone(cid) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_resize_done(&mut app); state_dirty = true; meta_dirty = true; } }
                 CtrlReq::NextWindow => {
