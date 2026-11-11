@@ -1615,6 +1615,12 @@ pub(crate) fn background_reply(colors: &crate::types::HostColors, bel: bool) -> 
     colors.bg.map(|rgb| format!("\x1b]11;{}{}", x11_rgb(rgb), osc_end(bel)))
 }
 
+/// The reply to `OSC n ; ?` (10 or 11) with a colour of the pane's own,
+/// ended as [`foreground_reply`] is.
+pub(crate) fn pane_colour_reply(n: u8, rgb: (u8, u8, u8), bel: bool) -> String {
+    format!("\x1b]{n};{}{}", x11_rgb(rgb), osc_end(bel))
+}
+
 /// The `OSC 4` reply for palette index `i`, ended as [`foreground_reply`] is.
 /// The pane's own entry (`own`) wins, the outer terminal's is the fallback
 /// (issue #685). The client reports only the sixteen ANSI colours of the

@@ -24,8 +24,8 @@ fn scan_detects_each_palette_index() {
 
 #[test]
 fn scan_detects_fg_bg_and_scheme() {
-    assert_eq!(scan_device_queries(b"\x1b]10;?\x1b\\"), vec![Q::ForegroundColour { bel: false }]);
-    assert_eq!(scan_device_queries(b"\x1b]11;?\x1b\\"), vec![Q::BackgroundColour { bel: false }]);
+    assert_eq!(scan_device_queries(b"\x1b]10;?\x1b\\"), vec![Q::ForegroundColour { colour: None, bel: false }]);
+    assert_eq!(scan_device_queries(b"\x1b]11;?\x1b\\"), vec![Q::BackgroundColour { colour: None, bel: false }]);
     assert_eq!(scan_device_queries(b"\x1b[?996n"), vec![Q::ColourScheme]);
 }
 
@@ -37,7 +37,7 @@ fn scan_detects_copilot_burst() {
     for i in 0..16 {
         burst.push_str(&format!("\x1b]4;{};?\x1b\\", i));
     }
-    let mut expected = vec![Q::ColourScheme, Q::ForegroundColour { bel: false }, Q::BackgroundColour { bel: false }];
+    let mut expected = vec![Q::ColourScheme, Q::ForegroundColour { colour: None, bel: false }, Q::BackgroundColour { colour: None, bel: false }];
     expected.extend((0..16u8).map(|index| Q::PaletteColour { index, own: None, bel: false }));
     assert_eq!(scan_device_queries(burst.as_bytes()), expected);
 }

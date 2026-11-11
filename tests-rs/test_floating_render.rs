@@ -196,7 +196,7 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
         alternate_screen: false,
         wants_mouse: false,
         hide_cursor: true,
-        cursor_shape: 0, cursor_colour: None,
+        cursor_shape: 0, cursor_colour: None, default_colours: None,
         active: true,
         copy_mode: false,
         scroll_offset: 0,

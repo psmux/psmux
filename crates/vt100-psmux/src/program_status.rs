@@ -338,11 +338,18 @@ pub enum TerminalQuery {
     },
     /// Default foreground colour (`OSC 10 ; ?`).
     ForegroundColour {
+        /// The pane's own colour when the query was met, its styles' and the
+        /// program's (`Screen::default_foreground`). `None` leaves the reply
+        /// to the outer terminal's colour, as tmux's `window_pane_get_fg`
+        /// does (window.c:2758 at tag 3.8).
+        colour: Option<(u8, u8, u8)>,
         /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
         bel: bool,
     },
     /// Default background colour (`OSC 11 ; ?`).
     BackgroundColour {
+        /// As [`TerminalQuery::ForegroundColour`]'s.
+        colour: Option<(u8, u8, u8)>,
         /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
         bel: bool,
     },

@@ -668,6 +668,9 @@ fn run(ns: Option<String>) -> ! {
                 if crate::cursor_colour::reconcile(app) {
                     lp.state_dirty = true;
                 }
+                // window-style and window-active-style, for the OSC 10 and
+                // OSC 11 replies.
+                crate::style_colours::reconcile(app);
             })
             .into_iter()
             .map(|sid| (sid, "panic")),

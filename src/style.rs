@@ -237,6 +237,16 @@ fn named_colour_index(colour: Color) -> Option<u8> {
     })
 }
 
+/// A colour as RGB, as tmux's `colour_force_rgb` gives it: a palette colour
+/// is its xterm value, and the default colour (or `terminal`) is `None`.
+pub fn colour_force_rgb(colour: Color) -> Option<(u8, u8, u8)> {
+    match colour {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Indexed(idx) => Some(colour_256_to_rgb(idx)),
+        other => named_colour_index(other).map(colour_256_to_rgb),
+    }
+}
+
 /// Scale a colour toward black by `dim` percent, matching tmux `colour.c`
 /// `colour_dim`: the terminal default colour is left alone, 100 percent is
 /// black, and anything else is forced to RGB and scaled per channel.
@@ -247,15 +257,8 @@ pub fn dim_colour_percent(colour: Color, dim: u8) -> Color {
     if dim >= 100 {
         return Color::Rgb(0, 0, 0);
     }
-    let (r, g, b) = match colour {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(idx) => colour_256_to_rgb(idx),
-        other => match named_colour_index(other) {
-            Some(idx) => colour_256_to_rgb(idx),
-            // colour_force_rgb returns -1 and colour_dim leaves the cell alone.
-            None => return colour,
-        },
-    };
+    // colour_force_rgb returns -1 and colour_dim leaves the cell alone.
+    let Some((r, g, b)) = colour_force_rgb(colour) else { return colour };
     let keep = 100u16 - dim as u16;
     Color::Rgb(
         (r as u16 * keep / 100) as u8,
