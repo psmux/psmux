@@ -1,0 +1,74 @@
+[2J[m[H]0;C:\Program Files\PowerShell\7\pwsh.exe[?25h]0;claude[?25l[?2004h[?2031h[?1004h[?9001l[<u[>5u[>4;2m[38;2;255;215;0m
+────────────────────────────────────────────────────────────────────────────────────────────────────[m
+ [1m[38;2;255;215;0mAccessing[m [1m[38;2;255;215;0mworkspace:[m[K
+[K
+ [1m[97mC:\Users\tester\AppData\Local\Temp\r13i972wd[m[K
+[K
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a[K
+ well-known open source project, or work from your team). If not, take a moment to review what's in 
+ this folder first.[K
+[K
+ Claude Code'll be able to read, edit, and execute files here.[K
+[K
+ [38;2;148;148;148mSecurity[m [38;2;148;148;148mguide[m[K
+[K
+ [38;2;175;215;255m❯[m [38;2;175;215;255mNo,[m [38;2;175;215;255mexit[m[K
+   Yes, I trust this folder[K
+[K
+ [38;2;148;148;148mEnter[m [38;2;148;148;148mto[m [38;2;148;148;148mconfirm[m [38;2;148;148;148m·[m [38;2;148;148;148mEsc[m [38;2;148;148;148mto[m [38;2;148;148;148mcancel[m[K[67C[>0q[?u]7501;?[15;2H  No, exit[16X[38;2;175;215;255m[16;2H❯[m [38;2;175;215;255mYes, I trust this folder[m[>4m[<u[?1004l[?2031l[?2004l[H[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[100C[?2004h[?2031h[?1004h[?9001l[<u[>5u[>4;2m]0;✳ Claude Code[H[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[H[?25h[25l[<u[>5u[>4;2m[K[38;2;215;135;135m
+ ▐[48;2;0;0;0m▛███▛█[m   [1m[97mClaude Code[m [38;2;148;148;148mv2.1.322[m[K[38;2;215;135;135m
+▝▜[48;2;0;0;0m█████[49m█▀[m  [38;2;148;148;148mOpus 5.5 · Claude Ultra[m[K[38;2;215;135;135m
+ ▝▝   ▝▝ [m  [38;2;148;148;148m~\AppData\Local\Temp\r13i972wd[m[K
+[K[38;2;215;135;135m
+▎[m [1m[97mAuto mode is now Claude Code's default permission mode.[m[K[38;2;215;135;135m
+▎[m [38;2;148;148;148mAuto mode lets Claude handle permission prompts automatically. Claude checks each tool call for [m  [38;2;215;135;135m
+▎[m [38;2;148;148;148mrisky actions and prompt injection before executing, runs the ones it assesses as lower-risk, and [38;2;215;135;135m
+▎[m [38;2;148;148;148mblocks the rest.[m[K[38;2;215;135;135m
+▎[m [38;2;148;148;148mhttps://code.claude.com/docs/en/permission-modes[m[K
+  [38;2;148;148;148m2 more notices hidden[m[K
+[K
+[K
+[K
+[80X[38;2;148;148;148m[80C◐ medium · /effort[m  [38;2;128;128;128m
+────────────────────────────────────────────────────────────────────────────────────────────────────[m
+❯ Try "create a util logging.py that..."[K[38;2;128;128;128m
+────────────────────────────────────────────────────────────────────────────────────────────────────[m
+[K
+  [38;2;255;215;0m⏵⏵ auto mode on[38;2;148;148;148m (shift+tab to cycle) · ← for agents[m[K[17;3H[?25h[>0q[?2004h[<u[>5u[>4;2m[25la[K[38;2;128;128;128m[18;3H──────────────────────────────────────────────────────────────────────────────────────────────────[38;2;148;148;148m[19;3HOpus 5.5 | 0% context | $0.00[m[K[38;2;255;215;0m[20;3H⏵⏵ auto mode on[38;2;148;148;148m (shift+tab to cycle)[m[K[17;4H[?25h[25lTry "create a util logging.py that..."[13X[38;2;128;128;128m[18;3H───────────────────────────────────────────────────[38;2;148;148;148m[19;3HOpus 5.5 | 0% context | $0.00[m[22X[38;2;255;215;0m[20;3H⏵⏵ auto mode on[38;2;148;148;148m (shift+tab to cycle) · ← for agents[17;3H[?25h[m[25lb[K[38;2;128;128;128m[18;3H──────────────────────────────────────────────────────────────────────────────────────────────────[38;2;148;148;148m[19;3HOpus 5.5 | 0% context | $0.00[m[K[38;2;255;215;0m[20;3H⏵⏵ auto mode on[38;2;148;148;148m (shift+tab to cycle)[m[K[17;4H[?25h

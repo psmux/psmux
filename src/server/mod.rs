@@ -2431,6 +2431,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     #[cfg(windows)]
     crate::platform::mouse_inject::SERVER_PROCESS
         .store(true, std::sync::atomic::Ordering::Relaxed);
+    // The inbox conhost sends a buffer cell that holds a C0 control as that
+    // bare byte and counts it as one column; every pane parser of this server
+    // reads it that way, or the next relative move lands a column short
+    // (issue #972). A supplied OpenConsole (PSMUX_CONPTY_DIR) forwards the
+    // application's own bytes, where a tab is a tab, so it keeps plain VT.
+    #[cfg(windows)]
+    vt100::set_conhost_c0_cells_default(!crate::input::pane_host_is_supplied());
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
     let panic_session_name = session_name.clone();
