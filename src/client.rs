@@ -58,32 +58,43 @@ fn layout_default_status_line(
     justify: &str,
     base: Style,
 ) -> crate::style::LayoutResult {
-    use crate::style::{layout_status_list, spans_visual_width, truncate_spans_to_width,
-        LayoutResult, StatusRangeType};
+    use crate::style::{layout_status_list, overlay_status_spans, spans_visual_width,
+        truncate_spans_to_width, LayoutResult, StatusRangeType};
 
-    // Side sections keep their configured limits, then the left section takes
-    // precedence if the terminal is too narrow even for both sides.
+    // tmux's default status-format (format-draw.c): the window list is
+    // trimmed first, then status-right, then status-left. With
+    // absolute-centre the list is trimmed only against the full width and
+    // drawn over status-left and status-right.
     truncate_spans_to_width(&mut left, width);
     let left_w = spans_visual_width(&left);
     truncate_spans_to_width(&mut right, width - left_w);
     let right_w = spans_visual_width(&right);
-    let available = width - left_w - right_w;
+    let right_start = width - right_w;
+    let absolute = matches!(justify, "absolute-centre" | "absolute-center");
+    let available = if absolute { width } else { right_start - left_w };
+    // Without an active window tmux keeps the list start in view, or its
+    // middle for centred lists.
     let focus = tab_ranges.iter().find(|(idx, _, _)| Some(*idx) == active)
-        .map(|(_, start, end)| *start..*end).unwrap_or(0..0);
+        .map(|(_, start, end)| *start..*end)
+        .unwrap_or_else(|| match justify {
+            "centre" | "center" | "absolute-centre" | "absolute-center" => {
+                let middle = spans_visual_width(&tabs) / 2;
+                middle..middle
+            }
+            _ => 0..0,
+        });
     let list = layout_status_list(
         &tabs, available, focus, &[Span::styled("<", base)], &[Span::styled(">", base)],
     );
     let tabs_w = spans_visual_width(&list.spans);
-    let right_start = width - right_w;
-    // Use the actual drawing origin for hit regions as well, including when
-    // status-left overlaps the ideal absolute-centre position.
     let tabs_start = match justify {
-        "centre" | "center" => left_w + (available - tabs_w) / 2,
-        "absolute-centre" | "absolute-center" =>
-            ((width - tabs_w) / 2).clamp(left_w, right_start - tabs_w),
+        "centre" | "center" => left_w + (right_start - left_w) / 2 - tabs_w / 2,
+        "absolute-centre" | "absolute-center" => (width - tabs_w) / 2,
         "right" => right_start - tabs_w,
         _ => left_w,
     };
+    // Ranges keep tmux's order (left, windows, right): a click on a list
+    // cell drawn over status-left still resolves to the first match.
     let mut ranges = Vec::new();
     if left_w > 0 { ranges.push((StatusRangeType::Left, 0, left_w as u16)); }
     for &(idx, start, end) in tab_ranges {
@@ -95,15 +106,26 @@ fn layout_default_status_line(
     if right_w > 0 {
         ranges.push((StatusRangeType::Right, right_start as u16, width as u16));
     }
-    let mut spans = left;
-    if tabs_start > left_w {
-        spans.push(Span::styled(" ".repeat(tabs_start - left_w), base));
-    }
-    spans.extend(list.spans);
-    if right_start > tabs_start + tabs_w {
-        spans.push(Span::styled(" ".repeat(right_start - tabs_start - tabs_w), base));
-    }
-    spans.extend(right);
+    let spans = if tabs_start >= left_w && tabs_start + tabs_w <= right_start {
+        let mut spans = left;
+        if tabs_start > left_w {
+            spans.push(Span::styled(" ".repeat(tabs_start - left_w), base));
+        }
+        spans.extend(list.spans);
+        if right_start > tabs_start + tabs_w {
+            spans.push(Span::styled(" ".repeat(right_start - tabs_start - tabs_w), base));
+        }
+        spans.extend(right);
+        spans
+    } else {
+        // Only absolute-centre gets here: the list covers part of a side.
+        let mut line = left;
+        if right_start > left_w {
+            line.push(Span::styled(" ".repeat(right_start - left_w), base));
+        }
+        line.extend(right);
+        overlay_status_spans(&line, tabs_start, list.spans, width)
+    };
     LayoutResult { spans, ranges }
 }
 

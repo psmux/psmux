@@ -928,9 +928,12 @@ fn clip_status_list(
 }
 
 /// Lay out only the list allocation; callers own whole-line positioning.
-/// A point focus keeps the custom renderer's centering policy. An interval
-/// stays wholly visible when it fits; an oversized interval favors its start.
-/// Markers are kept whole and omitted when necessary to reserve content space.
+///
+/// Same viewport as tmux (format-draw.c format_draw_put_list): when the list
+/// does not fit, the middle of the focus range is centred in the viewport,
+/// clamped to the list ends. A marker is drawn over the first (or last)
+/// columns of the viewport when the list is cut off on that side and the
+/// marker is narrower than the space left for it.
 pub fn layout_status_list(
     spans: &[Span<'static>],
     width: usize,
@@ -950,55 +953,53 @@ pub fn layout_status_list(
         };
     }
 
-    let lm = spans_visual_width(left_marker);
-    let rm = spans_visual_width(right_marker);
-    // Keep at least one content column. In the middle, prefer the left marker
-    // if both markers cannot fit. Never split a marker's glyphs or styling.
-    let left_w = if lm < width { lm } else { 0 };
-    let right_w = if rm < width { rm } else { 0 };
-    let both_right_w = if rm < width - left_w { rm } else { 0 };
-    let head_width = width - right_w;
-    let tail_width = width - left_w;
-    let middle_width = width - left_w - both_right_w;
-    let focus_start = focus.start.min(total.saturating_sub(1));
-    let focus_end = focus.end.max(focus.start).min(total);
-    let point = focus.is_empty();
-    let focus_len = focus_end.saturating_sub(focus_start);
+    let focus_start = focus.start.min(total);
+    let focus_end = focus.end.clamp(focus_start, total);
+    let focus_centre = focus_start + (focus_end - focus_start) / 2;
+    let mut start = focus_centre.saturating_sub(width / 2).min(total - width);
+    let mut content_width = width;
+    let mut offset = 0;
 
-    let head = if point {
-        focus_start <= head_width / 2
-    } else {
-        focus_start == 0 || focus_end <= head_width
-    };
-    let tail = if point {
-        focus_start >= total.saturating_sub(tail_width / 2)
-    } else {
-        focus_start >= total - tail_width && focus_len <= tail_width
-    };
-    let (start, content_width, lm_w, rm_w) = if head {
-        (0, head_width, 0, right_w)
-    } else if tail {
-        (total - tail_width, tail_width, left_w, 0)
-    } else {
-        let mut start = focus_start.saturating_sub(middle_width / 2);
-        if !point {
-            start = if focus_len <= middle_width {
-                start.max(focus_end.saturating_sub(middle_width)).min(focus_start)
-            } else {
-                focus_start
-            };
-        }
-        (start.min(total - middle_width), middle_width, left_w, both_right_w)
-    };
+    let lm = spans_visual_width(left_marker);
+    let show_left = start != 0 && content_width > lm;
+    if show_left {
+        offset = lm;
+        start += lm;
+        content_width -= lm;
+    }
+    let rm = spans_visual_width(right_marker);
+    let show_right = start + content_width < total && content_width > rm;
+    if show_right {
+        content_width -= rm;
+    }
 
     let (content, visible) = clip_status_list(spans, start, start + content_width);
-    let mut rendered = Vec::new();
-    if lm_w > 0 { rendered.extend_from_slice(left_marker); }
+    let mut rendered = Vec::with_capacity(content.len() + left_marker.len() + right_marker.len());
+    if show_left { rendered.extend_from_slice(left_marker); }
     rendered.extend(content);
-    if rm_w > 0 { rendered.extend_from_slice(right_marker); }
+    if show_right { rendered.extend_from_slice(right_marker); }
     StatusListLayout {
-        spans: rendered, viewport_start: start, content_offset: lm_w, visible,
+        spans: rendered, viewport_start: start, content_offset: offset, visible,
     }
+}
+
+/// Draw `over` on top of `line` starting at column `at`, the way tmux draws
+/// an absolute-centre list over the sides. Glyphs of `line` cut by the
+/// overlay become blanks; the result is clipped to `width`.
+pub fn overlay_status_spans(
+    line: &[Span<'static>],
+    at: usize,
+    over: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let end = at + spans_visual_width(&over);
+    let mut out = clip_status_list(line, 0, at.min(width)).0;
+    out.extend(over);
+    if end < width {
+        out.extend(clip_status_list(line, end, width).0);
+    }
+    truncate_spans_to_width(&mut out, width);
+    out
 }
 
 /// Lay out a status format line with full range tracking.
@@ -1036,10 +1037,16 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
     let mut list_left_marker: Vec<Span<'static>> = Vec::new();
     let mut list_right_marker: Vec<Span<'static>> = Vec::new();
     let mut list_spans: Vec<Span<'static>> = Vec::new();
-    let mut list_focus_col: Option<usize> = None;
+    // tmux focus: starts at the first list=focus inside the list and ends at
+    // the next list=on or nolist; entering a marker drops an unfinished one.
+    let mut list_focus_start: Option<usize> = None;
+    let mut list_focus_end: Option<usize> = None;
     let mut list_total_w: usize = 0;
     let mut list_align = StatusAlignment::Left;
     let mut has_list = false;
+    // Spans and width of the list's own section before the list starts; the
+    // rest of that section is tmux's "after" part, drawn after the list.
+    let mut list_pre: (usize, usize) = (0, 0);
 
     // Range tracking: (type, section, in_list, start_col_in_context, end_col_in_context)
     struct RangeRecord {
@@ -1066,6 +1073,16 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
         }
     }
 
+    fn section_mark(left: &Section, centre: &Section, right: &Section,
+                    align: StatusAlignment) -> (usize, usize) {
+        let s = match align {
+            StatusAlignment::Left => left,
+            StatusAlignment::Centre => centre,
+            StatusAlignment::Right => right,
+        };
+        (s.spans.len(), s.width)
+    }
+
     for token in &tokens {
         match token {
             FormatToken::Text(span) => {
@@ -1090,18 +1107,40 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
             FormatToken::Fill(s) => { fill_style = Some(*s); }
             FormatToken::ListLeftMarker => {
                 list_state = ListSt::LeftMarker;
-                list_align = current_align;
-                has_list = true;
+                if !has_list {
+                    list_align = current_align;
+                    has_list = true;
+                    list_pre = section_mark(&left, &centre, &right, current_align);
+                }
+                if list_focus_end.is_none() { list_focus_start = None; }
             }
-            FormatToken::ListRightMarker => { list_state = ListSt::RightMarker; }
+            FormatToken::ListRightMarker => {
+                list_state = ListSt::RightMarker;
+                if list_focus_end.is_none() { list_focus_start = None; }
+            }
             FormatToken::ListOn => {
                 list_state = ListSt::InList;
-                if !has_list { list_align = current_align; has_list = true; }
+                if !has_list {
+                    list_align = current_align;
+                    has_list = true;
+                    list_pre = section_mark(&left, &centre, &right, current_align);
+                }
+                if list_focus_start.is_some() && list_focus_end.is_none() {
+                    list_focus_end = Some(list_total_w);
+                }
             }
             FormatToken::ListFocus => {
-                if list_state == ListSt::InList { list_focus_col = Some(list_total_w); }
+                if list_state == ListSt::InList && list_focus_start.is_none() {
+                    list_focus_start = Some(list_total_w);
+                }
             }
-            FormatToken::NoList => { list_state = ListSt::Normal; }
+            FormatToken::NoList => {
+                if list_state == ListSt::InList
+                    && list_focus_start.is_some() && list_focus_end.is_none() {
+                    list_focus_end = Some(list_total_w);
+                }
+                list_state = ListSt::Normal;
+            }
             FormatToken::Range(rt) => {
                 // A new range ends the one before it, as a style change of
                 // the range does in tmux (format-draw.c format_draw_none).
@@ -1140,13 +1179,14 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
         StatusAlignment::Centre => left.width + right.width,
         StatusAlignment::Right => left.width + centre.width,
     };
-    let list_sec_pre_w = match list_align {
+    let list_sec_w = match list_align {
         StatusAlignment::Left => left.width,
         StatusAlignment::Centre => centre.width,
         StatusAlignment::Right => right.width,
     };
-    let avail = width.saturating_sub(other_w).saturating_sub(list_sec_pre_w);
-    let list_insert_offset = list_sec_pre_w; // column within section where list starts
+    let avail = width.saturating_sub(other_w).saturating_sub(list_sec_w);
+    let (list_insert_index, list_insert_offset) = list_pre; // where the list starts in its section
+    let mut list_drawn_w = 0;
 
     let mut list_layout: Option<StatusListLayout> = None;
 
@@ -1157,11 +1197,20 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
     };
 
     if has_list {
-        let focus = list_focus_col.unwrap_or(0);
+        // Without a finished focus tmux keeps the list's own end in view:
+        // the start for left and right lists, the middle for centred ones.
+        let focus = match (list_focus_start, list_focus_end) {
+            (Some(start), Some(end)) => start..end,
+            _ if list_align == StatusAlignment::Centre => list_total_w / 2..list_total_w / 2,
+            _ => 0..0,
+        };
         let layout = layout_status_list(
-            &list_spans, avail, focus..focus, &list_left_marker, &list_right_marker,
+            &list_spans, avail, focus, &list_left_marker, &list_right_marker,
         );
-        for span in &layout.spans { list_section.push(span.clone()); }
+        list_drawn_w = spans_visual_width(&layout.spans);
+        let index = list_insert_index.min(list_section.spans.len());
+        list_section.spans.splice(index..index, layout.spans.iter().cloned());
+        list_section.width += list_drawn_w;
         list_layout = Some(layout);
     }
 
@@ -1225,9 +1274,14 @@ pub fn layout_format_line(text: &str, width: usize, base_style: Style) -> Layout
                 }
             }
         } else {
+            // Text after the list in the list's own section moves right by
+            // the drawn list width.
+            let shift = |col: usize, past: bool| {
+                if has_list && rr.section == list_align && past { col + list_drawn_w } else { col }
+            };
             let base = section_start(rr.section);
-            let start = base + rr.start_col;
-            let end = base + rr.end_col;
+            let start = base + shift(rr.start_col, rr.start_col >= list_insert_offset);
+            let end = base + shift(rr.end_col, rr.end_col > list_insert_offset);
             if start < end {
                 ranges.push((rr.range_type.clone(), start as u16, end as u16));
             }

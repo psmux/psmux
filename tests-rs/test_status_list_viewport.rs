@@ -23,16 +23,53 @@ fn source_columns_follow_the_renderers_grapheme_boundaries() {
     }
 }
 
+// Expected strings marked "tmux" were drawn by a real tmux client with the
+// same status-format and width.
+
 #[test]
-fn custom_left_partial_glyph_keeps_following_columns() {
+fn custom_focus_runs_to_nolist_and_is_centred() {
+    // tmux: |<CD>| (focus 2..8 ends at nolist, middle 5)
     let result = layout_format_line(
         "#[list=left-marker]<#[list=right-marker]>#[list=on]#[range=window|0]界#[norange]#[list=focus]#[range=window|1]ABCDEF#[norange]#[nolist]",
         4,
         Style::default(),
     );
     assert_eq!(vt100::str_width("界"), 2);
+    assert_eq!(text(&result.spans), "<CD>");
+    assert_eq!(result.ranges, vec![(StatusRangeType::Window(1), 1, 3)]);
+}
+
+#[test]
+fn custom_left_partial_glyph_keeps_following_columns() {
+    // The left marker covers column 1, the right half of 界 at 1..3 is blanked.
+    let result = layout_format_line(
+        "#[list=left-marker]<#[list=right-marker]>#[list=on]#[range=window|0]x界#[norange]#[list=focus]#[range=window|1]A#[norange list=on]BCDEF#[nolist]",
+        4,
+        Style::default(),
+    );
     assert_eq!(text(&result.spans), "< A>");
     assert_eq!(result.ranges, vec![(StatusRangeType::Window(1), 2, 3)]);
+}
+
+#[test]
+fn custom_focus_ended_by_list_on_matches_tmux() {
+    for (format, width, expected) in [
+        // tmux: |<EFG>|
+        ("#[list=left-marker]<#[list=right-marker]>#[list=on]ABCDE#[list=focus]F#[list=on]GHIJ#[nolist]", 5, "<EFG>"),
+        // tmux: |<GHIJ|
+        ("#[list=left-marker]<#[list=right-marker]>#[list=on]ABCDEFGHI#[list=focus]J#[list=on]#[nolist]", 5, "<GHIJ"),
+        // tmux: |ABCD>|
+        ("#[list=left-marker]<#[list=right-marker]>#[list=on]AB#[list=focus]C#[list=on]DEFGHIJ#[nolist]", 5, "ABCD>"),
+        // tmux: |abc>|
+        ("#[list=right-marker]>#[list=on]ab#[list=focus]c#[list=on]defghij#[nolist]", 4, "abc>"),
+        // tmux: |<JKLMNOPQ>| (centred list without focus keeps its middle)
+        ("#[align=centre]#[list=left-marker]<#[list=right-marker]>#[list=on]ABCDEFGHIJKLMNOPQRSTUVWXYZ#[nolist]", 10, "<JKLMNOPQ>"),
+        // tmux: |ABCDEFGHI>|
+        ("#[align=right]#[list=left-marker]<#[list=right-marker]>#[list=on]ABCDEFGHIJKLMNOPQRSTUVWXYZ#[nolist]", 10, "ABCDEFGHI>"),
+    ] {
+        let result = layout_format_line(format, width, Style::default());
+        assert_eq!(text(&result.spans), expected, "{format}");
+    }
 }
 
 #[test]
@@ -59,12 +96,13 @@ fn custom_range_stops_before_right_marker() {
 
 #[test]
 fn custom_clipped_base_does_not_leave_a_combining_mark() {
+    // Focus middle 3 starts the viewport at column 1, past "a" and its mark.
     let result = layout_format_line(
-        "#[list=left-marker]<#[list=right-marker]>#[list=on]a\u{301}b#[list=focus]cdefghij#[nolist]",
+        "#[list=right-marker]>#[list=on]a\u{301}bc#[list=focus]d#[list=on]efghij#[nolist]",
         4,
         Style::default(),
     );
-    assert_eq!(text(&result.spans), "<bc>");
+    assert_eq!(text(&result.spans), "bcd>");
 }
 
 fn markers() -> (Vec<Span<'static>>, Vec<Span<'static>>) {
@@ -102,12 +140,13 @@ fn fitting_and_empty_lists_are_unchanged() {
 }
 
 #[test]
-fn point_focus_keeps_head_middle_and_tail_policy() {
+fn point_focus_is_centred_like_tmux() {
     let spans = [Span::raw("ABCDEFGHIJ")];
     let (left, right) = markers();
     for (focus, expected, source, output) in [
         (0, "ABCD>", 0..4, (0, 4)),
         (2, "ABCD>", 0..4, (0, 4)),
+        (3, "<CDE>", 2..5, (1, 4)),
         (5, "<EFG>", 4..7, (1, 4)),
         (9, "<GHIJ", 6..10, (1, 5)),
         (10, "<GHIJ", 6..10, (1, 5)),
@@ -146,14 +185,15 @@ fn selected_interval_is_contained_when_it_fits_between_markers() {
 }
 
 #[test]
-fn oversized_selected_interval_keeps_its_start() {
+fn oversized_selected_interval_shows_its_middle() {
+    // tmux centres the middle of the focus even when it is wider than the list.
     let spans = [Span::raw("ABCDEFGHIJKLMNOPQRSTUVWXYZ")];
     let (left, right) = markers();
-    for (focus, expected) in [(0..12, "ABCD>"), (5..20, "<FGH>"), (20..26, "<UVW>")] {
+    for (focus, expected) in [(0..12, "<FGH>"), (5..20, "<LMN>"), (20..26, "<WXYZ")] {
         assert!(focus.len() > 5);
         let layout = layout_status_list(&spans, 5, focus.clone(), &left, &right);
         assert_eq!(text(&layout.spans), expected);
-        assert!(layout.project_range(focus.start, focus.start + 1).is_some());
+        assert!(layout.project_range(focus.start, focus.end).is_some());
     }
 }
 
@@ -186,7 +226,7 @@ fn arbitrary_marker_widths_are_measured_and_omitted_whole() {
     assert_eq!(spans_visual_width(&left), 2);
     assert_eq!(spans_visual_width(&right), 3);
     let middle = layout_status_list(&spans, 8, 6..6, &left, &right);
-    assert_eq!(text(&middle.spans), "左FGH右>");
+    assert_eq!(text(&middle.spans), "左EFG右>");
     assert_eq!(middle.spans.first(), left.first());
     assert_eq!(middle.spans.last(), right.first());
     assert_eq!(middle.project_range(0, usize::MAX), Some((2, 5)));
@@ -240,11 +280,11 @@ fn clipped_content_and_separators_keep_all_style_fields() {
 #[test]
 fn unicode_boundary_blanks_are_not_clickable() {
     let (left, right) = markers();
-    let spans = [Span::raw("界ABCDEF")];
-    let layout = layout_status_list(&spans, 4, 2..2, &left, &right);
+    let spans = [Span::raw("x界ABCDEF")];
+    let layout = layout_status_list(&spans, 4, 3..3, &left, &right);
     assert_eq!(text(&layout.spans), "< A>");
-    assert_eq!(layout.project_range(0, 2), None);
-    assert_eq!(layout.project_range(2, 8), Some((2, 3)));
+    assert_eq!(layout.project_range(1, 3), None);
+    assert_eq!(layout.project_range(3, 9), Some((2, 3)));
     assert_eq!(layout.project_range(0, usize::MAX), Some((2, 3)));
 
     let spans = [Span::raw("ABC界"), Span::raw("XYZ")];
@@ -276,8 +316,8 @@ fn combining_and_zwj_graphemes_survive_only_with_their_base() {
         assert!(spans_visual_width(&layout.spans) <= glyph_width + 3);
     }
     let source = [Span::raw("a"), Span::raw("\u{301}bcdefgh")];
-    let layout = layout_status_list(&source, 4, 2..2, &left, &right);
-    assert_eq!(text(&layout.spans), "<bc>");
+    let layout = layout_status_list(&source, 4, 3..3, &[], &right);
+    assert_eq!(text(&layout.spans), "bcd>");
 }
 
 #[test]
@@ -304,7 +344,8 @@ fn drawn_unicode_markers_are_outside_window_hit_ranges() {
         let mut buffer = Buffer::empty(area);
         Paragraph::new(Line::from(custom.spans)).render(area, &mut buffer);
         assert_eq!(buffer[(5, 0)].symbol(), ">", "custom {active:?}");
-        assert_eq!(custom.ranges, vec![(StatusRangeType::Window(1), 2, 5)]);
+        // The focus runs to nolist, so the viewport is past "AA".
+        assert_eq!(custom.ranges, vec![(StatusRangeType::Window(1), 0, 5)]);
     }
 }
 
@@ -319,24 +360,48 @@ fn source_coordinates_beyond_u16_do_not_wrap() {
     ];
     let (left, right) = markers();
     let layout = layout_status_list(&source, 10, 70_000..70_006, &left, &right);
-    assert_eq!(text(&layout.spans), "<xxACTIVE>");
-    assert_eq!(layout.project_range(70_000, 70_006), Some((3, 9)));
-    assert_eq!(layout.project_range(0, 69_998), None);
-    assert_eq!(layout.project_range(70_006, usize::MAX), None);
+    assert_eq!(text(&layout.spans), "<xACTIVE >");
+    assert_eq!(layout.project_range(70_000, 70_006), Some((2, 8)));
+    assert_eq!(layout.project_range(0, 69_999), None);
+    assert_eq!(layout.project_range(70_006, usize::MAX), Some((8, 9)));
 }
 
 #[test]
 fn custom_list_ranges_follow_section_offsets_without_claiming_markers() {
-    for (align, expected) in [("left", (2, 6)), ("centre", (2, 6)), ("right", (5, 9))] {
+    // tmux: |LLABCD>RRR| for left and right, |LLCDEF>RRR| for centre.
+    for (align, expected, drawn) in [
+        ("left", (2, 6), "LLABCD>RRR"),
+        ("centre", (2, 6), "LLCDEF>RRR"),
+        ("right", (2, 6), "LLABCD>RRR"),
+    ] {
         let format = format!("#[align=left]LL#[align={align}]#[list=right-marker]>#[list=on]#[range=window|0]ABCDEFGH#[norange]#[nolist]#[align=right]RRR");
         let result = layout_format_line(&format, 10, Style::default());
         assert_eq!(spans_visual_width(&result.spans), 10);
+        assert_eq!(text(&result.spans), drawn, "align {align}");
         assert_eq!(
             result.ranges,
             vec![(StatusRangeType::Window(0), expected.0, expected.1)],
             "align {align}"
         );
     }
+}
+
+#[test]
+fn custom_text_after_the_list_in_its_section_is_drawn_after_it() {
+    // tmux's default status-format with status-justify right puts
+    // status-right after the list in the same alignment (the "after" part).
+    let format = "#[align=left range=left]LL#[norange]#[align=right list=on]#[list=left-marker]<#[list=right-marker]>#[list=on]#[range=window|0]ABC#[norange] #[list=focus range=window|1]DEF#[norange list=on] #[range=window|2]GHI#[norange]#[nolist align=right range=right]RR#[norange]";
+    let result = layout_format_line(format, 20, Style::default());
+    // tmux: |LL     ABC DEF GHIRR| and |LL<C DEF >RR|
+    assert_eq!(text(&result.spans), "LL     ABC DEF GHIRR");
+    let result = layout_format_line(format, 12, Style::default());
+    assert_eq!(text(&result.spans), "LL<C DEF >RR");
+    assert_eq!(result.ranges, vec![
+        (StatusRangeType::Left, 0, 2),
+        (StatusRangeType::Window(0), 3, 4),
+        (StatusRangeType::Window(1), 5, 8),
+        (StatusRangeType::Right, 10, 12),
+    ]);
 }
 
 #[test]
@@ -356,6 +421,7 @@ fn custom_long_source_ranges_are_projected_before_u16_conversion() {
     let prefix = "x".repeat(70_000);
     let format = format!("#[list=left-marker]<#[list=right-marker]>#[list=on]{prefix}#[list=focus]#[range=window|7]ACTIVE#[norange] tail tail#[nolist]");
     let result = layout_format_line(&format, 10, Style::default());
-    assert_eq!(text(&result.spans), "<xxxxACTI>");
-    assert_eq!(result.ranges, vec![(StatusRangeType::Window(7), 5, 9)]);
+    // tmux: |<VE tail >| (the focus runs to nolist, so " tail tail" is in it)
+    assert_eq!(text(&result.spans), "<VE tail >");
+    assert_eq!(result.ranges, vec![(StatusRangeType::Window(7), 1, 3)]);
 }
