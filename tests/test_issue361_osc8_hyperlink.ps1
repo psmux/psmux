@@ -8,9 +8,17 @@
 # psmux falls back to non-passthrough and OSC 8 is stripped before psmux sees
 # it. On those builds this test reports the ConPTY limitation instead of failing
 # (the psmux side is proven by the unit tests).
+#
+# Isolation: runs in its own -L namespace with its own PSMUX_DATA_DIR, so it
+# never touches the default namespace or ~\.psmux, and cleans up with
+# kill-server on that namespace only. Set $env:PSMUX_EXE to test a build.
 $ErrorActionPreference="Continue"
-$PSMUX=(Get-Command psmux -EA Stop).Source
-$psmuxDir="$env:USERPROFILE\.psmux"
+$PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA Stop).Source }
+$NS = "t361" + (Get-Random -Maximum 999999)
+$work = Join-Path ([IO.Path]::GetTempPath()) ("psmux_361_" + [guid]::NewGuid().ToString("N"))
+$env:PSMUX_DATA_DIR = Join-Path $work "data"
+New-Item -ItemType Directory -Force $env:PSMUX_DATA_DIR | Out-Null
+$psmuxDir = $env:PSMUX_DATA_DIR
 $S="t361"
 $URI="https://example.com/issue361"
 $LINKTEXT="PSMUXLINK361"
@@ -21,8 +29,9 @@ function Write-Skip($m){ Write-Host "  [SKIP] $m" -ForegroundColor Yellow }
 
 function Get-Dump {
     param([string]$Session)
-    $port=(Get-Content "$psmuxDir\$Session.port" -Raw).Trim()
-    $key=(Get-Content "$psmuxDir\$Session.key" -Raw).Trim()
+    # A -L namespace stores its files as <namespace>__<session>.
+    $port=(Get-Content "$psmuxDir\${NS}__$Session.port" -Raw).Trim()
+    $key=(Get-Content "$psmuxDir\${NS}__$Session.key" -Raw).Trim()
     $tcp=[System.Net.Sockets.TcpClient]::new("127.0.0.1",[int]$port); $tcp.NoDelay=$true; $tcp.ReceiveTimeout=4000
     $st=$tcp.GetStream(); $w=[System.IO.StreamWriter]::new($st); $r=[System.IO.StreamReader]::new($st)
     $w.Write("AUTH $key`n"); $w.Flush(); $null=$r.ReadLine(); $w.Write("dump-state`n"); $w.Flush()
@@ -31,25 +40,29 @@ function Get-Dump {
 }
 
 Write-Host "=== Issue #361: OSC 8 hyperlink end-to-end ===" -ForegroundColor Cyan
-& $PSMUX kill-session -t $S 2>&1 | Out-Null; Start-Sleep -Milliseconds 500
-& $PSMUX new-session -d -s $S 2>&1 | Out-Null
+function Cleanup {
+    & $PSMUX -L $NS kill-server 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    Remove-Item $work -Recurse -Force -EA SilentlyContinue
+}
+& $PSMUX -L $NS new-session -d -s $S 2>&1 | Out-Null
 Start-Sleep -Seconds 3
-& $PSMUX has-session -t $S 2>$null
-if ($LASTEXITCODE -ne 0) { Write-Fail "session create failed"; exit 1 }
+& $PSMUX -L $NS has-session -t $S 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Fail "session create failed"; Cleanup; exit 1 }
 
 # Emit a raw OSC 8 hyperlink from inside the pane (mimics `delta`/`ls --hyperlink`):
 #   ESC ]8;;URI ESC \  LINKTEXT  ESC ]8;; ESC \
-$emit="$env:TEMP\psmux_emit361.ps1"
+$emit=Join-Path $work "psmux_emit361.ps1"
 @"
 `$seq = [char]27 + "]8;;$URI" + [char]27 + "\$LINKTEXT" + [char]27 + "]8;;" + [char]27 + "\" + "``n"
 `$bytes = [System.Text.Encoding]::UTF8.GetBytes(`$seq)
 `$o = [System.Console]::OpenStandardOutput(); `$o.Write(`$bytes,0,`$bytes.Length); `$o.Flush()
 "@ | Set-Content -Path $emit -Encoding UTF8
-& $PSMUX send-keys -t $S "& '$emit'" Enter 2>&1 | Out-Null
+& $PSMUX -L $NS send-keys -t $S "& '$emit'" Enter 2>&1 | Out-Null
 Start-Sleep -Seconds 2
 
 $dump = Get-Dump $S
-if (-not $dump) { Write-Fail "no dump-state received"; & $PSMUX kill-session -t $S 2>&1 | Out-Null; exit 1 }
+if (-not $dump) { Write-Fail "no dump-state received"; Cleanup; exit 1 }
 
 $linkPresent = $dump -match [regex]::Escape("`"link`":`"$URI`"")
 $textPresent = $dump -match [regex]::Escape($LINKTEXT)
@@ -63,7 +76,6 @@ if ($linkPresent) {
     Write-Fail "neither link nor text reached psmux (emission failed)"
 }
 
-& $PSMUX kill-session -t $S 2>&1 | Out-Null
-Remove-Item $emit -Force -EA SilentlyContinue
+Cleanup
 Write-Host "`n=== Results: Passed=$($script:Pass) Failed=$($script:Fail) ===" -ForegroundColor Cyan
 exit $script:Fail
