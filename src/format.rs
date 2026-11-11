@@ -2786,6 +2786,10 @@ mod tests_issue985_bracket_paste_flag;
 mod tests_issue1032_1034_vt_formats;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_alt_screen_cursor_formats.rs"]
+mod tests_alt_screen_cursor_formats;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue272_format_shell_cache.rs"]
 mod tests_issue272_format_shell_cache;
 
