@@ -70,6 +70,9 @@ try {
     & $Exe -L $ns split-window -t a
     & $Exe -L $ns new-window -t a
     & $Exe -L $ns split-window -t a
+    # No buffers yet: tmux prints nothing, not an empty line.
+    Check ((RawCli @('list-buffers')) -eq '') "cli: list-buffers with no buffers prints nothing"
+    Check ((RawTcp 'list-buffers') -eq '') "tcp: list-buffers with no buffers replies nothing"
     & $Exe -L $ns set-buffer hello
     & $Exe -L $ns set-hook -g after-new-window 'display-message hi'
     Start-Sleep -Milliseconds 800

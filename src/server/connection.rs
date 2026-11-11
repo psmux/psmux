@@ -4769,7 +4769,8 @@ match cmd {
         if let Ok(text) = rrx.recv() {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("list-buffers".to_string(), text));
-            } else {
+            } else if !text.is_empty() {
+                // No buffers prints nothing, as in tmux, not an empty line.
                 write_listing(&mut write_stream, &text);
             }
         }
