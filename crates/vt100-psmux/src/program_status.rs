@@ -346,6 +346,15 @@ pub enum TerminalQuery {
         /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
         bel: bool,
     },
+    /// Cursor colour (`OSC 12 ; ?`).
+    CursorColour {
+        /// The colour when the query was met: the program's, then the
+        /// `cursor-colour` default. `None` gets no reply, as in tmux
+        /// (`input_osc_12`, input.c:3164 at tag 3.8).
+        colour: Option<(u8, u8, u8)>,
+        /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
+        bel: bool,
+    },
     /// A palette colour (an `index ; ?` pair of an `OSC 4`), any index.
     PaletteColour {
         /// The palette index asked for, 0 to 255.

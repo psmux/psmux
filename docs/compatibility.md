@@ -323,6 +323,15 @@ Two things follow tmux by not changing. `list-panes`, `list-windows` and `list-s
 
 One deliberate deviation: a backslash is never doubled. tmux stores `C:\src` as `C:\\src`, which on Windows would corrupt every path shaped window name.
 
+### Cursor Colour (OSC 12)
+
+A pane's cursor colour is the one its program set with `ESC ] 12 ; colour`, until `ESC ] 112` takes it back, and otherwise the `cursor-colour` option, as tmux keeps `s->ccolour` over `s->default_ccolour`. RIS and the alternate screen keep it, as in tmux. `ESC ] 12 ; ?` is answered with that colour as `ESC ] 12 ; rgb:rrrr/gggg/bbbb`, ended the way the query was, and with neither there is no reply, as in tmux. The client sends the active pane's colour to the terminal, and the terminal's own back on the way out.
+
+Two limits:
+
+- The inbox conhost passes on the colour a program sets but drops `ESC ] 112` and the query, so on that console host a program's colour is not taken, as it would stay after the program had gone. `cursor-colour` works there. Through OpenConsole (`PSMUX_CONPTY_DIR`) all three arrive.
+- A program's colour is read as `#rrggbb`, `rgb:rr/gg/bb`, `rgb:rrrr/gggg/bbbb` or `r,g,b`, as for `ESC ] 4`. tmux also takes X11 names such as `orange` and `cmyk:` forms; psmux has no table of the names, so those are ignored.
+
 ### Git Revision in `psmux -V`
 
 `psmux -V` reports the commit the binary was built from. `git` is the preferred source, and when it is unavailable the build falls back, in order, to `.cargo_vcs_info.json` (present in every crates.io tarball), to the cargo git checkout directory name (`cargo install --git` checks a revision out into a directory named after its short hash), and finally to a `PSMUX_GIT_SHA` environment variable that release tooling can set (#647):

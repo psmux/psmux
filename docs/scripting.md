@@ -432,6 +432,7 @@ bind-key -n C-h if-shell -F "#{pane_at_left}" "send-keys C-h" "select-pane -L"
 |----------|-------------|
 | `#{cursor_x}` / `#{cursor_y}` | Cursor position in the active pane, zero based |
 | `#{cursor_character}` | Character under the cursor |
+| `#{cursor_colour}` | Cursor colour of the pane: the one its program set with `ESC ] 12` as `#rrggbb`, then `cursor-colour` by its colour name, then `none` |
 | `#{mouse_x}` / `#{mouse_y}` | Where the mouse event of the running binding happened: the cell in its pane, or the column and status line for a status line event; empty outside a mouse binding |
 | `#{mouse_line}` | Full line under the mouse event, in the pane it happened in |
 | `#{mouse_word}` | Word under the mouse event, in the pane it happened in |

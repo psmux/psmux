@@ -4501,7 +4501,8 @@ pub fn clear_active_pane_history(app: &mut AppState) {
             // The pane's options are unchanged too (#980).
             let pane_colours = parser.screen().pane_colours().cloned();
             let scroll_on_clear = parser.screen().scroll_on_clear();
-            *parser = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
+            let old = std::mem::replace(&mut *parser, vt100::Parser::new(p.last_rows, p.last_cols, history_limit));
+            parser.screen_mut().keep_colours(old.screen());
             parser.screen_mut().set_pane_colours(pane_colours);
             parser.screen_mut().set_scroll_on_clear(scroll_on_clear);
             // The console host is unchanged, and it asked for win32 input mode

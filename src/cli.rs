@@ -1544,6 +1544,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     synchronize-panes   Bool Send input to all panes (default: off)
     remain-on-exit      Keep panes after process exits: off, on, failed, key, failed-key (default: off)
     scroll-on-clear     Bool Send the screen to history when it is cleared (default: on)
+    cursor-colour       Str  Colour of the cursor, under OSC 12 from the pane (default: none)
     aggressive-resize   Bool Resize to smallest client (default: off)
     set-titles          Bool Update terminal title (default: off)
     set-titles-string   Str  Terminal title format

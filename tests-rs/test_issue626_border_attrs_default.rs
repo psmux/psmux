@@ -199,7 +199,7 @@ fn border_leaf(id: usize, active: bool) -> LayoutJson {
         alternate_screen: false,
         wants_mouse: false,
         hide_cursor: true,
-        cursor_shape: 0,
+        cursor_shape: 0, cursor_colour: None,
         active,
         copy_mode: false,
         scroll_offset: 0,

@@ -50,7 +50,7 @@ fn leaf(
         alternate_screen: false,
         wants_mouse: false,
         hide_cursor: true,
-        cursor_shape: 0,
+        cursor_shape: 0, cursor_colour: None,
         active,
         copy_mode,
         scroll_offset: 0,

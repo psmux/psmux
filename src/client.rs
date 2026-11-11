@@ -2418,6 +2418,7 @@ pub fn render_layout_json(
             wants_mouse: _,
             hide_cursor: _,
             cursor_shape: _,
+            cursor_colour: _,
             active,
             copy_mode,
             scroll_offset,
@@ -4551,6 +4552,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // `tty_update_cursor` (tty.c): for `SCREEN_CURSOR_DEFAULT` it sends `Se`,
     // or `Ss 0`, only `if (tty->cstyle != SCREEN_CURSOR_DEFAULT)`.
     let mut last_cursor_style: u8 = 0;
+    // The cursor colour last written, `None` for the terminal's own, which is
+    // where it starts, as tmux's `tty->ccolour` starts at -1 (tty.c:114).
+    let mut last_cursor_colour: Option<String> = None;
     // The blink this client last asserted on its own, through DEC private mode
     // 12, for a `cursor-style` that names no shape. `None` is "said nothing",
     // which is where every client starts and what an unset `cursor-blink`
@@ -10801,6 +10805,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
             let effective = find_active_cursor_shape(&root)
                 .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
+            fn find_active_cursor_colour(node: &LayoutJson) -> Option<&str> {
+                match node {
+                    LayoutJson::Leaf { active, cursor_colour, .. } => {
+                        if *active { cursor_colour.as_deref() } else { None }
+                    }
+                    LayoutJson::Split { children, .. } => {
+                        children.iter().find_map(find_active_cursor_colour)
+                    }
+                }
+            }
+            let effective_colour = find_active_cursor_colour(&root);
             let content_chunk = {
                 let sz = terminal.size().unwrap_or_default();
                 let constraints = if status_at_top {
@@ -10895,6 +10910,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 last_cursor_style = effective;
                 crate::rendering::note_cursor_code(effective);
                 let _ = terminal.backend_mut().queue_raw(format!("\x1b[{} q", effective).as_bytes());
+            }
+            // The cursor colour when it changes, as tmux's
+            // `tty_force_cursor_colour` (tty.c:770 at tag 3.8) writes `Cs` or
+            // `Cr`: `ESC ] 12 ; rgb:rr/gg/bb BEL`, or `ESC ] 112 BEL` for the
+            // terminal's own.
+            if effective_colour != last_cursor_colour.as_deref() {
+                let bytes = match effective_colour.and_then(crate::rendering::cursor_colour_set) {
+                    Some(set) => set,
+                    None => crate::rendering::CURSOR_COLOUR_RESET.to_string(),
+                };
+                crate::rendering::note_cursor_colour(effective_colour.is_some());
+                last_cursor_colour = effective_colour.map(str::to_string);
+                let _ = terminal.backend_mut().queue_raw(bytes.as_bytes());
             }
             // A shape carries its own blink, so mode 12 is only for the blink
             // on its own: `cursor-blink` set while `cursor-style` names no

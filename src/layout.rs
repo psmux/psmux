@@ -272,6 +272,12 @@ pub enum LayoutJson {
         hide_cursor: bool,
         #[serde(default)]
         cursor_shape: u8,
+        /// The colour the terminal is to draw the cursor in, as `#rrggbb`:
+        /// the program's (`OSC 12`), then the pane's `cursor-colour`. Absent
+        /// for the terminal's own, and in the fast path for every pane but
+        /// the active one, so an ordinary frame does not grow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor_colour: Option<String>,
         active: bool,
         copy_mode: bool,
         scroll_offset: usize,
@@ -483,6 +489,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             wants_mouse: false,
                             hide_cursor: true,
                             cursor_shape: 0,
+                            cursor_colour: None,
                             active: *cur_path == active_path, copy_mode: false,
                             scroll_offset: 0,
                             view_offset: 0,
@@ -505,6 +512,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                         wants_mouse: false,
                         hide_cursor: false,
                         cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
+                        cursor_colour: None,
                         active: *cur_path == active_path, copy_mode: false,
                         scroll_offset: 0,
                         view_offset: 0,
@@ -698,6 +706,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                     wants_mouse,
                     hide_cursor: hide_cursor_flag,
                     cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
+                    cursor_colour: screen.cursor_colour().map(cursor_colour_json),
                     active: false,
                     // The pane's OWN mode (#607).  `mark_active` overwrites
                     // this for the focused pane with the live global mode.
@@ -853,6 +862,11 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         }
     }
     Ok(root)
+}
+
+/// A cursor colour as the layout JSON carries it, `#rrggbb`.
+fn cursor_colour_json((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 /// Direct JSON serialisation of the layout tree – writes JSON straight into
@@ -1050,12 +1064,13 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     rows_v2: Vec<RowSnap>,
                     content: Vec<Vec<CopyCell>>,
                     images: Vec<crate::server::helpers::ImageDesc>,
+                    cursor_colour: Option<(u8, u8, u8)>,
                 }
 
                 let snap = 'snap: {
                     let parser = match p.term.lock() {
                         Ok(g) => g,
-                        Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, wants_mouse: false, hide_cursor: false, view_offset: 0, rows_v2: vec![], content: vec![], images: vec![] },
+                        Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, wants_mouse: false, hide_cursor: false, view_offset: 0, rows_v2: vec![], content: vec![], images: vec![], cursor_colour: None },
                     };
                     let screen = parser.screen();
                     // Issue #685: this pane's OSC 4 palette, read once for the
@@ -1230,7 +1245,9 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         screen, p.last_rows, img_scroll_off,
                     );
 
-                    LeafSnap { cr, cc, alt, wants_mouse, hide_cursor, view_offset, rows_v2: snap_rows, content: snap_content, images }
+                    // Only the active pane's cursor is drawn.
+                    let cursor_colour = if is_active { screen.cursor_colour() } else { None };
+                    LeafSnap { cr, cc, alt, wants_mouse, hide_cursor, view_offset, rows_v2: snap_rows, content: snap_content, images, cursor_colour }
                 };
                 // ── Parser mutex is now RELEASED ──
                 // All JSON string building below happens without holding the lock,
@@ -1256,6 +1273,9 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     cs,
                     is_active, pane_in_copy, so, snap.view_offset,
                 ));
+                if let Some(rgb) = snap.cursor_colour {
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("\"cursor_colour\":\"{}\",", cursor_colour_json(rgb)));
+                }
 
                 // selection bounds + copy cursor position
                 if is_active && in_copy {

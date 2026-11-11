@@ -324,7 +324,7 @@ fn render_copy_leaf_hl(sel: Option<((u16, u16), (u16, u16))>, cursor: (u16, u16)
     let content: Vec<Vec<CellJson>> = (0..h).map(|_| (0..w).map(|_| cell('x')).collect()).collect();
     let leaf = LayoutJson::Leaf {
         id: 0, rows: h, cols: w, cursor_row: 0, cursor_col: 0,
-        alternate_screen: false, wants_mouse: false, hide_cursor: true, cursor_shape: 0,
+        alternate_screen: false, wants_mouse: false, hide_cursor: true, cursor_shape: 0, cursor_colour: None,
         active: true, copy_mode: true, scroll_offset: 0, view_offset: 0,
         sel_start_row: sel.map(|s| s.0 .0), sel_start_col: sel.map(|s| s.0 .1),
         sel_end_row: sel.map(|s| s.1 .0), sel_end_col: sel.map(|s| s.1 .1),

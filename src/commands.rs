@@ -4079,6 +4079,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         // The pane's options are unchanged too (#980).
                         fresh.screen_mut().set_pane_colours(parser.screen().pane_colours().cloned());
                         fresh.screen_mut().set_scroll_on_clear(parser.screen().scroll_on_clear());
+                        fresh.screen_mut().keep_colours(parser.screen());
                         *parser = fresh;
                     }
                 }

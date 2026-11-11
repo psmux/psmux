@@ -268,6 +268,12 @@ pub struct Screen {
     /// keeps it.
     scroll_on_clear: bool,
 
+    /// The cursor colour: the program's (`OSC 12`), and the default the
+    /// pane's `cursor-colour` option gives (tmux's `s->ccolour` and
+    /// `s->default_ccolour`, screen.c:91-92 at tag 3.8). Both survive RIS and
+    /// a respawn, since `screen_reinit` touches neither.
+    cursor_colour: CursorColour,
+
     /// True once the output stream asked its terminal for win32 input mode
     /// (`CSI ?9001h`).  On a psmux pane that request comes from the pane's
     /// console host itself, as the very first bytes it writes (`ESC[?9001h
@@ -356,6 +362,23 @@ pub fn xtmodkeys_off_mode(current: u8, ek: u8, resource: u16) -> u8 {
     if ek == 2 { 1 } else { 0 }
 }
 
+/// See [`Screen::cursor_colour`].
+#[derive(Clone, Copy, Debug)]
+struct CursorColour {
+    /// Set by `OSC 12`, cleared by `OSC 112`.
+    program: Option<(u8, u8, u8)>,
+    /// From the `cursor-colour` option.
+    default: Option<(u8, u8, u8)>,
+    /// See [`Screen::set_program_cursor_colour_enabled`].
+    program_enabled: bool,
+}
+
+impl CursorColour {
+    const fn new() -> Self {
+        Self { program: None, default: None, program_enabled: true }
+    }
+}
+
 /// A pane's `pane-colours` default palette and the palette it draws with:
 /// the defaults with the OSC 4 entries laid over them, kept up to date as
 /// either changes so that drawing reads one table, as it did before #980.
@@ -437,6 +460,7 @@ impl Screen {
             audible_bell_count: 0,
             allow_alternate_screen: true,
             scroll_on_clear: true,
+            cursor_colour: CursorColour::new(),
             win32_input_requested: false,
             extended_keys_mode: initial_extended_keys_mode(),
         }
@@ -537,6 +561,7 @@ impl Screen {
         let palette_generation = self.palette_generation;
         let allow_alternate_screen = self.allow_alternate_screen;
         let scroll_on_clear = self.scroll_on_clear;
+        let cursor_colour = self.cursor_colour;
         let mut program_status = std::mem::take(&mut self.program_status);
         program_status.clear();
         let program_status_enabled = self.program_status_enabled;
@@ -550,6 +575,55 @@ impl Screen {
         self.palette_generation = palette_generation;
         self.allow_alternate_screen = allow_alternate_screen;
         self.scroll_on_clear = scroll_on_clear;
+        self.cursor_colour = cursor_colour;
+    }
+
+    /// The cursor colour the terminal is to draw: the program's, then the
+    /// `cursor-colour` default, `None` for the terminal's own.
+    #[must_use]
+    pub fn cursor_colour(&self) -> Option<(u8, u8, u8)> {
+        self.cursor_colour.program.or(self.cursor_colour.default)
+    }
+
+    /// The colour the program set with `OSC 12`, `None` when it set none or
+    /// reset it with `OSC 112`.
+    #[must_use]
+    pub fn program_cursor_colour(&self) -> Option<(u8, u8, u8)> {
+        self.cursor_colour.program
+    }
+
+    /// Set the default the `cursor-colour` option gives. Returns whether the
+    /// colour to draw changed.
+    pub fn set_default_cursor_colour(&mut self, colour: Option<(u8, u8, u8)>) -> bool {
+        let before = self.cursor_colour();
+        self.cursor_colour.default = colour;
+        before != self.cursor_colour()
+    }
+
+    /// Whether `OSC 12` and `OSC 112` from the program are taken. On by
+    /// default. A host that passes on the colour a program sets but drops the
+    /// reset, as the inbox Windows console host does, turns it off, so that a
+    /// colour never outlives the program that set it.
+    pub fn set_program_cursor_colour_enabled(&mut self, enabled: bool) {
+        self.cursor_colour.program_enabled = enabled;
+        if !enabled {
+            self.cursor_colour.program = None;
+        }
+    }
+
+    /// Take the colours a program and the pane's options set, the two cursor
+    /// colours, from the screen this one replaces. psmux's `clear-history`
+    /// starts the screen again, where tmux clears only the history and keeps
+    /// them (cmd-capture-pane.c:424 at tag 3.8).
+    pub fn keep_colours(&mut self, from: &Self) {
+        self.cursor_colour = from.cursor_colour;
+    }
+
+    /// Set or reset the program's cursor colour, unless that is turned off.
+    pub(crate) fn set_program_cursor_colour(&mut self, colour: Option<(u8, u8, u8)>) {
+        if self.cursor_colour.program_enabled {
+            self.cursor_colour.program = colour;
+        }
     }
 
     /// The `scroll-on-clear` option. See the field.
@@ -2558,6 +2632,7 @@ impl Screen {
         // screen's rows go to history rather than being lost. The hyperlink
         // table stays because history cells point into it.
         let scroll_on_clear = self.scroll_on_clear;
+        let cursor_colour = self.cursor_colour;
         if scroll_on_clear {
             self.grid
                 .erase_all_into_history(crate::attrs::Attrs::default());
@@ -2572,6 +2647,7 @@ impl Screen {
         self.grid.set_frozen(frozen);
         self.hyperlinks = hyperlinks;
         self.scroll_on_clear = scroll_on_clear;
+        self.cursor_colour = cursor_colour;
         if let Some(defaults) = pane_colours {
             self.pane_colours = Some(Box::new(PaneColours::new(defaults, None)));
         }

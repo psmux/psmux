@@ -662,6 +662,11 @@ fn run(ns: Option<String>) -> ! {
                 }
                 // scroll-on-clear: the same, and nothing to redraw.
                 crate::scroll_on_clear::reconcile(app);
+                // cursor-colour: the same; a new colour to draw goes out with
+                // a frame.
+                if crate::cursor_colour::reconcile(app) {
+                    lp.state_dirty = true;
+                }
             })
             .into_iter()
             .map(|sid| (sid, "panic")),

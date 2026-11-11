@@ -210,6 +210,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `remain-on-exit` | Choice | `off` | Whether a pane stays after its program exits, as in tmux: `off`, `on`, `failed` (only when it exited with a nonzero status), `key` (until a key is typed in it in a client; `send-keys` does not close it) or `failed-key` (tmux 3.8: a clean exit closes it, a failed one stays until a key is typed in it). `split-window -k` sets `key` on the new pane |
 | `remain-on-exit-format` | Str | `Pane is dead (status N, time)` | Text written on the bottom line of a pane `remain-on-exit` kept, a format expanded for that pane (`#{pane_dead_status}`, `#{t:pane_dead_time}`). Empty writes nothing. Window and pane scope; `split-window -m text` sets it on the new pane |
 | `scroll-on-clear` | Bool | `on` | Whether clearing the whole screen sends what it showed to history first, as in tmux: `ESC[2J`, `ESC[H ESC[J`, RIS (`ESC c`) and `send-keys -R`, not in the alternate screen. PSReadLine's Ctrl+L is an `ESC[2J`, so what it clears stays in copy mode. `cls`, `Clear-Host` and `clear` also clear the history, so they leave nothing. Window and pane scope. On the inbox console host `ESC[H ESC[J` reaches psmux as a redraw of the screen, which cannot be told apart from one after a resize, so that form keeps nothing there. A program that writes `ESC[2J` instead keeps its screen on both console hosts |
+| `cursor-colour` | Str | empty | Colour of the cursor: a colour name, `colourN` or `#rrggbb`, or empty for the terminal's own. A program's `ESC ] 12` wins over it until `ESC ] 112`. Window and pane scope. tmux also takes the spelling `cursor-color`; psmux does not. See [Cursor](#cursor) |
 | `@kill-descendants` | Bool | `on` | Terminate a self-exited pane shell's background children (psmux extension) |
 | `@mouse-force` | Bool | `off` | Pane scoped only (`set-option -p -t %N @mouse-force on`). Forward the wheel into this pane even though its application registered for the mouse through neither channel psmux can see. psmux normally forwards only to a pane that asked, either by sending a mouse DECSET or by holding `ENABLE_MOUSE_INPUT` on its console, and it keeps that authorization for as long as the process that earned it is alive, so a `node` child entering raw mode can no longer take it away. Some applications never register through either channel on Windows: conhost can swallow their DECSET before psmux parses it, and libuv raw mode leaves their console without the mouse bit. Set this for that pane. Leave it off for panes running programs that do not read the mouse, which receive the report as literal keystrokes (psmux extension) |
 | `aggressive-resize` | Bool | `off` | Resize to smallest client |
@@ -486,6 +487,21 @@ That last form is the one terminals differ on. Windows Terminal acts on mode
 drawing the cursor it was drawing. Both of them act on the blink a DECSCUSR
 code carries, so naming a shape is the form that works everywhere:
 `set -g cursor-style blinking-bar`, or `bar` with `cursor-blink on`.
+
+`cursor-colour` is the colour, as in tmux a window and pane option, empty by
+default for the terminal's own:
+
+```tmux
+set -g cursor-colour colour208
+set -w cursor-colour "#ff8800"
+set -gu cursor-colour
+```
+
+A program in the pane can set the colour too, with `ESC ] 12 ; colour`, and
+that wins until it resets it with `ESC ] 112`. psmux sends the active pane's
+colour to the terminal as tmux does, `ESC ] 12 ; rgb:rr/gg/bb BEL`, and
+`ESC ] 112 BEL` for the terminal's own, and puts the terminal's own back on the
+way out. A palette colour goes out as its xterm value, so `blue` is `#000080`.
 
 ### Popup and Window Styling
 
