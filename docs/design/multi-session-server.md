@@ -520,7 +520,9 @@ spares inside the process; and per session status-interval hooks. A command run
 from inside the loop (a hook, the config) that targets ANOTHER session of the
 same server goes over TCP to that session's listener, which this same loop
 serves, so it waits for its reply timeout; the server wide writes are delivered
-from connection threads for exactly that reason. The config is loaded once per
+from connection threads for exactly that reason. A hook's `set` of a user
+option of a different session is different in some conditions. The known
+differences below give these conditions. The config is loaded once per
 session (as each per session server loads it), so a config's `run-shell` runs per
 session.
 
@@ -541,6 +543,61 @@ session at the next frame of that session. With no `-c` or a relative `-c`, the
 start directory of the hook's session must be an absolute directory that is on
 the disk. If it is not, the start gives an error, but the `per-session` mode
 makes the session.
+
+A hook of A can set a user option of a different session B, or remove it with
+`-u`. The command then operates on the state of B in the loop, after the
+request of A. This occurs only when the command agrees with all of these
+conditions, after psmux changes the target `B`, `B*` or `=B` to `B:`:
+
+- The command is `set` or `set-option`, with no flags other than `-t`, `-q`
+  and `-u`.
+- The command has one `-t`, and its target names only the session, for
+  example `B` or `B:`.
+- The option name starts with `@`, has one or more ASCII letters, numbers,
+  `_` or `-` after it, and is not `@plugin`.
+- The command has no value with `-u`, and one value without `-u`.
+- No word has a space, a quote, `;`, `\` or `#`, and the value does not start
+  with `-`.
+- The words have one space between them.
+
+Two such commands for B in one hook keep their sequence, thus
+`set -t B: @x 1 \; set -t B: @x 2` gives `2` on B. If B stops before the loop
+gets to the command, the command does not operate.
+
+The loop operates these commands at four points of each cycle. The part of the
+cycle between two such points is an interval. An interval is one request, the
+`upkeep` of all the sessions, or all the session starts in the queue of the
+hooks. When a command for B goes to the control port of B, each subsequent
+command for B in the interval also goes to the port. This occurs also when the
+command agrees with the conditions.
+
+Thus the two commands of `set -t B: @x "a b" \; set -t B: @x c` go to the
+port, as before. An interval can hold more than one hook. If a hook sends a
+command for B to the port, a `set` for B in a subsequent hook of the interval
+also goes there.
+
+The errors of other commands for a different session show where they showed
+before. For example, the hook `kill-window -t B:9 \; set -t B: @x 1` shows
+`can't find window: 9` on the status line of B, and the `set` also sets `@x`
+on B. In `tmux`, the error stops the remaining commands of the group
+(`cmd-queue.c`).
+
+Other commands for a different session keep the previous path through the
+control port of that session. These include `new-window`, `split-window`,
+`send-keys`, each server wide write, and each other `set`. Such a command can
+operate after a subsequent command of the same hook.
+
+A command for B on the port can come from one interval, and a `set` for B in
+the loop from a subsequent interval. These two commands can operate in the
+opposite sequence. This also applies to a server wide write and to a command
+from a thread other than the loop. This can change the result when they write
+or read the same option.
+
+This also applies to a hook of B that the command on the port starts. For
+example, the hook of one request sends
+`new-window -t B:`, the `after-new-window` hook of B sets `@x`, and the hook of
+the next request sends `set -t B: @x c`. The `set` can operate before the hook
+of B, and then B keeps the value from the hook of B.
 
 **Measured** (`tests/perf_issue798_shared_vs_per_session.ps1`, 5 rounds of three
 `new-session -d` in a fresh namespace, Windows 11 26200, metrics JSON in
@@ -801,6 +858,10 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
      selected there by the destination's own copied arm (its hooks fire
      there), then the client switches as for a session target. A target
      that does not resolve is the error, and nothing changes anywhere.
+   * A hook's `set` of a user option of a different session can operate on
+     that session in the loop (`set -t B: @x 1`). The known differences give
+     the conditions. Most other commands of a hook for a different session go
+     to the control port of that session.
    * `new-session` from a binding or the prompt: the protocol handler runs it
      on a connection thread and starts `psmux server -s NAME ...` as a per
      session server would; inside the shared server `check_server_start`
@@ -819,9 +880,6 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
      (one more loopback hop per frame, and `#{client_pid}` and the read
      only check would have to be carried over), or a narrow hook in
      `connection.rs`.
-   * Commands the in server route runs in place rather than sending them to
-     the listener (`set -t B: ...`, `kill-window -t B:1`, ...) from a hook:
-     they act on, or fail in, the hook's own session.
    * `new-session` from a hook: the call in `commands.rs`
      (`queue_loop_start`) puts the start in a queue of the loop. The loop
      makes the session after the hook, in the same loop cycle or in the next

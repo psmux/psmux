@@ -3136,6 +3136,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
         return Ok(());
     }
 
+    if crate::server::shared::run_in_other_session(app, &parts, cmd) { return Ok(()); }
     // A `-t` naming another session runs on that session's server (#938).
     if forward_to_other_session(app, &parts, cmd) {
         return Ok(());
