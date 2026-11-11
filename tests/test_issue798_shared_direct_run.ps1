@@ -38,7 +38,7 @@ function DefaultLs {
     $out = @(& $Exe ls -F '#{session_name} #{session_created}' 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     $code = $LASTEXITCODE
     if ($code -eq 0 -and @($out | Where-Object { $_ -notmatch ' \d+$' }).Count -eq 0) { return , $out }
-    if ($code -ne 0 -and $out.Count -eq 1 -and $out[0] -match '^no server running') { return , @() }
+    if ($code -ne 0 -and $out.Count -eq 1 -and $out[0] -match '^(psmux: )?no server running') { return , @() }
     $null
 }
 $defaultBefore = DefaultLs

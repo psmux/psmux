@@ -240,3 +240,21 @@ fn u8_each_drain_clears_the_sessions_on_the_port() {
     assert!(!PORTED_SESSIONS.with(|ported| admit(&mut ported.borrow_mut(), "B", true)));
     PORTED_SESSIONS.with(|ported| ported.borrow_mut().clear());
 }
+
+#[test]
+fn u9_outside_the_shared_server_the_call_returns_false_and_queues_nothing() {
+    let _lock = crate::util::lock_test_env();
+    // A test process never runs the shared server, as a default server never does.
+    assert!(!in_shared_server());
+    queue(&[]);
+    let app = AppState::new("A".to_string());
+    let line = "set -t B: @x 1";
+    let parts: Vec<&str> = line.split(' ').collect();
+    for on_loop in [false, true] {
+        ON_LOOP.with(|c| c.set(on_loop));
+        assert!(!crate::server::shared::run_in_other_session(&app, &parts, line));
+        assert_eq!(queued(), 0);
+        assert!(PORTED_SESSIONS.with(|p| p.borrow().is_empty()));
+    }
+    ON_LOOP.with(|c| c.set(false));
+}
