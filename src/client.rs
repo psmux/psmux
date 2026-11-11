@@ -2415,6 +2415,10 @@ pub fn render_layout_json(
                     let row = &content[r as usize];
                     let max_c = inner.width.min(row.len() as u16);
                     let mut c: u16 = 0;
+                    // OSC 8 run being collected on this row (#1030): the
+                    // linked cells drawn from `content` get the same overlay
+                    // the `rows_v2` branch gives its linked runs.
+                    let mut link_run: Option<HyperlinkRun> = None;
                     while c < max_c {
                         let cell = &row[c as usize];
                         let mut fg = map_color(&cell.fg);
@@ -2473,9 +2477,27 @@ pub fn render_layout_json(
                         });
                         let char_width = vt100::str_width(&text) as u16;
                         if char_width >= 2 && c + char_width > max_c {
+                            if let Some(done) = link_run.take() { frame_hyperlinks_push(done); }
                             spans.push(Span::styled(" ", style));
                             c += 1;
                         } else {
+                            match (&cell.link, &mut link_run) {
+                                (Some(uri), Some(open))
+                                    if open.uri == *uri && open.style == style =>
+                                {
+                                    open.text.push_str(&text);
+                                }
+                                (Some(uri), _) => {
+                                    if let Some(done) = link_run.take() { frame_hyperlinks_push(done); }
+                                    link_run = Some(HyperlinkRun {
+                                        x: inner.x + c, y: inner.y + r,
+                                        text: text.to_string(), uri: uri.clone(), style,
+                                    });
+                                }
+                                (None, _) => {
+                                    if let Some(done) = link_run.take() { frame_hyperlinks_push(done); }
+                                }
+                            }
                             spans.push(Span::styled(text, style));
                             if char_width >= 2 {
                                 c += 2;
@@ -2484,6 +2506,7 @@ pub fn render_layout_json(
                             }
                         }
                     }
+                    if let Some(done) = link_run.take() { frame_hyperlinks_push(done); }
                     if c < inner.width {
                         let last_bg = if !spans.is_empty() {
                             spans.last().unwrap().style.bg.unwrap_or(Color::Reset)

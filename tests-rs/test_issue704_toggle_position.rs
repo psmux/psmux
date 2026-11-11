@@ -136,7 +136,7 @@ fn indicator_row(hide_position: bool) -> String {
     let cell = |ch: char| CellJson {
         text: ch.to_string(), fg: String::new(), bg: String::new(),
         bold: false, italic: false, underline: false, inverse: false,
-        dim: false, blink: false, hidden: false, strikethrough: false, overline: false,
+        dim: false, blink: false, hidden: false, strikethrough: false, overline: false, link: None,
     };
     let content: Vec<Vec<CellJson>> = (0..h).map(|_| (0..w).map(|_| cell('X')).collect()).collect();
     let leaf = LayoutJson::Leaf {
