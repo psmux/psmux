@@ -2782,6 +2782,10 @@ mod tests_issue662_mouse_flag_formats;
 mod tests_issue985_bracket_paste_flag;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue1032_1034_vt_formats.rs"]
+mod tests_issue1032_1034_vt_formats;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue272_format_shell_cache.rs"]
 mod tests_issue272_format_shell_cache;
 
