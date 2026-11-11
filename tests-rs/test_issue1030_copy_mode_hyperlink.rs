@@ -283,3 +283,29 @@ fn client_copy_mode_render_without_links_queues_nothing() {
     let layout: LayoutJson = serde_json::from_str(&json).expect("parses");
     assert!(client_runs(&layout).is_empty());
 }
+
+// ── perf sanity (run by hand: cargo test copy_mode_dump_perf -- --ignored --nocapture) ──
+
+fn timed_copy_dump(bytes: &[u8], iters: u32) -> (usize, f64) {
+    let mut app = make_app(bytes);
+    crate::copy_mode::enter_copy_mode(&mut app);
+    let len = crate::layout::dump_layout_json_fast(&mut app).expect("fast dump").len();
+    let start = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(crate::layout::dump_layout_json_fast(&mut app).expect("fast dump"));
+    }
+    (len, start.elapsed().as_secs_f64() * 1e6 / iters as f64)
+}
+
+#[test]
+#[ignore]
+fn copy_mode_dump_perf() {
+    let plain: Vec<u8> = (0..ROWS).flat_map(|i| format!("plain row {i} with some ordinary text\r\n").into_bytes()).collect();
+    let linked: Vec<u8> = (0..ROWS)
+        .flat_map(|i| format!("\x1b]8;;https://example.com/row/{i}\x1b\\linked row {i} with text here\x1b]8;;\x1b\\\r\n").into_bytes())
+        .collect();
+    for (name, bytes) in [("plain", &plain), ("linked", &linked)] {
+        let (len, us) = timed_copy_dump(bytes, 2000);
+        println!("PERF1030 {name}: copy mode frame {len} bytes, {us:.1} us per dump");
+    }
+}
