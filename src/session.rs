@@ -1844,10 +1844,44 @@ fn prune_stale_server_markers(
     psmux_dir: &Path,
     owned_pids: &std::collections::HashMap<u32, Option<u64>>,
 ) {
+    prune_stale_server_markers_with(
+        psmux_dir,
+        owned_pids,
+        crate::platform::process_is_alive,
+        crate::platform::process_kill::process_creation_time,
+        UNPARSABLE_MARKER_MIN_AGE,
+    );
+}
+
+/// How old a marker whose body is not `pid:creation` must be before the
+/// pruner deletes it. A marker is written in one small write, so a reader can
+/// only catch it half written for a moment; anything this old was torn for
+/// good (a crash or power loss mid write leaves the file full of zeros).
+const UNPARSABLE_MARKER_MIN_AGE: Duration = Duration::from_secs(60);
+
+/// [`prune_stale_server_markers`] with the process table and the torn marker
+/// age passed in, so the policy is testable.
+///
+/// A process that has exited but whose object something still holds open (a
+/// zombie) still answers OpenProcess and GetProcessTimes with its original
+/// creation time, so creation time alone kept the marker of every such server
+/// for ever: one machine had 85 of them, one per server since its first
+/// failed launch. Liveness is checked as well, as the spawner check in
+/// server/mod.rs does. A marker that does not parse names no process, so it
+/// can authorise nothing, and was never deleted either: it goes once it is
+/// old enough not to be a write in progress.
+fn prune_stale_server_markers_with(
+    psmux_dir: &Path,
+    owned_pids: &std::collections::HashMap<u32, Option<u64>>,
+    is_running: impl Fn(u32) -> bool,
+    creation_of: impl Fn(u32) -> Option<u64>,
+    unparsable_min_age: Duration,
+) {
+    let servers = psmux_dir.join("servers");
     for (&pid, &recorded_creation) in owned_pids {
-        let live_creation = crate::platform::process_kill::process_creation_time(pid);
+        let live_creation = if is_running(pid) { creation_of(pid) } else { None };
         let still_ours = match (live_creation, recorded_creation) {
-            // Process is gone.
+            // Process is gone, or has exited and only its object remains.
             (None, _) => false,
             // Same PID, different process: the original exited and the PID was
             // reused, so this claim is stale.
@@ -1858,7 +1892,27 @@ fn prune_stale_server_markers(
             (Some(_), None) => true,
         };
         if !still_ours {
-            let _ = std::fs::remove_file(psmux_dir.join("servers").join(pid.to_string()));
+            let _ = std::fs::remove_file(servers.join(pid.to_string()));
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(&servers) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let parses = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| parse_pid_file_contents(&body))
+            .is_some();
+        if parses {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .map_or(false, |age| age >= unparsable_min_age);
+        if old_enough {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -3862,3 +3916,7 @@ mod tests_unstorable_names;
 #[cfg(test)]
 #[path = "../tests-rs/test_halfclose_filter_reply.rs"]
 mod tests_halfclose_filter_reply;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_server_marker_prune_zombie.rs"]
+mod tests_server_marker_prune_zombie;
