@@ -799,17 +799,64 @@ impl Grid {
         }
     }
 
+    /// DECSTBM, rows counted from 0. As both console hosts do it: a region
+    /// whose bottom is past the screen, or of one line or less, is ignored and
+    /// the cursor stays, and a region that is set sends the cursor home, which
+    /// is the top of the region in origin mode. tmux differs in three places,
+    /// all on purpose here so that psmux's screen stays where the host's is on
+    /// the `OpenConsole` route: it homes to the top left of the screen in origin
+    /// mode, it cuts a bottom past the screen to the last row, and it ignores
+    /// `ESC[0;0r`, which it reads as a one line region (screen-write.c:1775,
+    /// input.c:1620 at tag 3.8). Measured with `OpenConsole` and the inbox conhost.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
-        let bottom = bottom.min(self.size().rows - 1);
-        if top < bottom {
-            self.scroll_top = top;
-            self.scroll_bottom = bottom;
-        } else {
-            self.scroll_top = 0;
-            self.scroll_bottom = self.size().rows - 1;
+        if bottom >= self.size().rows || top >= bottom {
+            return;
         }
-        self.pos.row = self.scroll_top;
-        self.pos.col = 0;
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+        self.set_pos(Pos { row: 0, col: 0 });
+    }
+
+    /// The scroll region, its top and bottom rows counted from 0, as
+    /// `#{scroll_region_upper}` and `#{scroll_region_lower}` show them.
+    pub fn scroll_region(&self) -> (u16, u16) {
+        (self.scroll_top, self.scroll_bottom)
+    }
+
+    pub fn origin_mode(&self) -> bool {
+        self.origin_mode
+    }
+
+    /// VPA: to row `row` and keep the column. In origin mode the row counts
+    /// from the top of the scroll region and stops at its bottom, as tmux's
+    /// `screen_write_cursormove` does with `origin` (screen-write.c:1716 at tag 3.8).
+    pub fn row_set_in_origin(&mut self, row: u16) {
+        if self.origin_mode {
+            let span = self.scroll_bottom - self.scroll_top;
+            self.pos.row = self.scroll_top + row.min(span);
+        } else {
+            self.row_set(row);
+        }
+    }
+
+    /// DECALN: every cell an `E` with the default attributes, the scroll
+    /// region the whole screen, and the cursor at the top left
+    /// (`screen_write_alignmenttest`, screen-write.c:1316 at tag 3.8). Origin
+    /// mode goes off too, which tmux keeps and both console hosts clear.
+    pub fn alignment_pattern(&mut self) {
+        let cols = self.size.cols;
+        for row in self.drawing_rows_mut() {
+            row.clear(crate::attrs::Attrs::default());
+            for col in 0..cols {
+                if let Some(cell) = row.get_mut(col) {
+                    cell.set('E', crate::attrs::Attrs::default());
+                }
+            }
+        }
+        self.scroll_top = 0;
+        self.scroll_bottom = self.size.rows - 1;
+        self.origin_mode = false;
+        self.pos = Pos { row: 0, col: 0 };
     }
 
     fn in_scroll_region(&self) -> bool {
@@ -880,12 +927,6 @@ impl Grid {
 
     pub fn col_dec(&mut self, count: u16) {
         self.pos.col = self.pos.col.saturating_sub(count);
-    }
-
-    pub fn col_tab(&mut self) {
-        self.pos.col -= self.pos.col % 8;
-        self.pos.col += 8;
-        self.col_clamp();
     }
 
     pub fn col_set(&mut self, i: u16) {

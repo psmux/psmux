@@ -5,7 +5,7 @@
 // format.c format_cb_window_layout dumps saved_layout_root), and
 // %layout-change carries #{window_raw_flags}, Z included
 // (control-notify.c control_window_layout_changed_cb).
-// #827: #{pane_tabs} lists the default tab stops (screen.c
+// #827: #{pane_tabs} lists the tab stops, every 8 columns by default (screen.c
 // screen_reset_tabs); a layout string's cells come back exactly
 // (layout-custom.c layout_parse); a pane entering or leaving a mode is
 // announced as %pane-mode-changed (control_pane_mode_changed_cb).
@@ -137,11 +137,12 @@ fn layout_change_flags_follow_the_window() {
 
 #[test]
 fn pane_tabs_are_every_eight_columns_from_eight() {
-    assert_eq!(crate::format::pane_tab_stops(100), "8,16,24,32,40,48,56,64,72,80,88,96");
-    assert_eq!(crate::format::pane_tab_stops(120), "8,16,24,32,40,48,56,64,72,80,88,96,104,112");
-    assert_eq!(crate::format::pane_tab_stops(9), "8");
-    assert_eq!(crate::format::pane_tab_stops(8), "");
-    assert_eq!(crate::format::pane_tab_stops(0), "");
+    let stops = |cols| crate::format::pane_tab_stops(vt100::Parser::new(10, cols, 0).screen());
+    assert_eq!(stops(100), "8,16,24,32,40,48,56,64,72,80,88,96");
+    assert_eq!(stops(120), "8,16,24,32,40,48,56,64,72,80,88,96,104,112");
+    assert_eq!(stops(9), "8");
+    assert_eq!(stops(8), "");
+    assert_eq!(stops(1), "");
 }
 
 /// The cells a parsed layout split gives its children in `area`.

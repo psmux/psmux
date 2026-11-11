@@ -289,6 +289,14 @@ pub struct Screen {
     /// exactly as tmux's input.c does (INPUT_CSI_MODSET / INPUT_CSI_MODOFF),
     /// and reset by RIS.  Issue #860.
     extended_keys_mode: u8,
+    /// The tab stops, one per column, as tmux's `s->tabs`. Both screens share
+    /// them, as tmux keeps one table for the normal and the alternate screen,
+    /// and a change of width puts back the default (screen.c:373 at tag 3.8).
+    /// Last, so the fields read for every printed character keep their place.
+    tabs: Vec<bool>,
+    /// Whether HTS or TBC changed `tabs` since it was last the default, so HT
+    /// can keep to the arithmetic of every eighth column until then.
+    tabs_changed: bool,
 }
 
 /// The `extended-keys` server option as a number, tmux's
@@ -393,6 +401,8 @@ impl Screen {
         Self {
             grid,
             alternate_grid: crate::grid::Grid::new(size, 0),
+            tabs: default_tabs(size.cols),
+            tabs_changed: false,
 
             attrs: crate::attrs::Attrs::default(),
             saved_attrs: crate::attrs::Attrs::default(),
@@ -434,6 +444,13 @@ impl Screen {
 
     /// Resizes the terminal.
     pub fn set_size(&mut self, rows: u16, cols: u16) {
+        // tmux puts the default stops back when the width changes, and
+        // keeps them for a change of height alone (screen_resize, screen.c:371
+        // to :374 at tag 3.8).
+        if cols != self.grid.size().cols {
+            self.tabs = default_tabs(cols);
+            self.tabs_changed = false;
+        }
         self.grid.set_size(crate::grid::Size { rows, cols });
         self.alternate_grid
             .set_size(crate::grid::Size { rows, cols });
@@ -2360,8 +2377,85 @@ impl Screen {
         self.grid_mut().col_dec(1);
     }
 
+    /// HT: to the next tab stop, or the last column when there is none, and
+    /// nowhere from the last column (input.c:1331-1350 at tag 3.8).
     pub(crate) fn tab(&mut self) {
-        self.grid_mut().col_tab();
+        let last = self.grid().size().cols.saturating_sub(1);
+        let mut col = self.grid().pos().col;
+        if col >= last {
+            return;
+        }
+        if self.tabs_changed {
+            loop {
+                col += 1;
+                if col >= last || self.is_tab_stop(col) {
+                    break;
+                }
+            }
+        } else {
+            // The default table, every eighth column, without reading it.
+            col = (col - col % 8 + 8).min(last);
+        }
+        self.grid_mut().col_set(col);
+    }
+
+    /// The tab stops, the columns `#{pane_tabs}` lists.
+    pub fn tab_stops(&self) -> impl Iterator<Item = u16> + '_ {
+        (0u16..)
+            .zip(self.tabs.iter())
+            .filter(|&(_, &set)| set)
+            .map(|(col, _)| col)
+    }
+
+    fn is_tab_stop(&self, col: u16) -> bool {
+        self.tabs.get(usize::from(col)).copied().unwrap_or(false)
+    }
+
+    // ESC H: a tab stop at the cursor, unless it waits past the last column
+    // (input.c:1420-1423).
+    pub(crate) fn hts(&mut self) {
+        let col = usize::from(self.grid().pos().col);
+        if let Some(stop) = self.tabs.get_mut(col) {
+            *stop = true;
+            self.tabs_changed = true;
+        }
+    }
+
+    // CSI Ps g: 0 clears the stop at the cursor, 3 every stop, and any other
+    // value nothing (input.c:1854-1868).
+    pub(crate) fn tbc(&mut self, mode: u16) {
+        match mode {
+            0 => {
+                let col = usize::from(self.grid().pos().col);
+                if let Some(stop) = self.tabs.get_mut(col) {
+                    *stop = false;
+                    self.tabs_changed = true;
+                }
+            }
+            3 => {
+                self.tabs.fill(false);
+                self.tabs_changed = true;
+            }
+            _ => {}
+        }
+    }
+
+    // CSI Ps Z: back to the previous tab stop, `count` times, or to column 0,
+    // from the last column when the cursor waits past it (input.c:1491-1505).
+    pub(crate) fn cbt(&mut self, count: u16) {
+        let last = self.grid().size().cols.saturating_sub(1);
+        let mut col = self.grid().pos().col.min(last);
+        let mut count = count;
+        while col > 0 && count > 0 {
+            count -= 1;
+            loop {
+                col -= 1;
+                if col == 0 || self.is_tab_stop(col) {
+                    break;
+                }
+            }
+        }
+        self.grid_mut().col_set(col);
     }
 
     pub(crate) fn lf(&mut self) {
@@ -2678,9 +2772,30 @@ impl Screen {
         self.erase_image_cells(line, 1, pos.col, pos.col.saturating_add(count));
     }
 
-    // CSI d
+    // CSI d, counted from the top of the scroll region in origin mode
+    // (input.c:1870 at tag 3.8).
     pub(crate) fn vpa(&mut self, row: u16) {
-        self.grid_mut().row_set(row - 1);
+        self.grid_mut().row_set_in_origin(row - 1);
+    }
+
+    // ESC # 8
+    pub(crate) fn decaln(&mut self) {
+        self.grid_mut().alignment_pattern();
+        // tmux drops the images with them (screen-write.c:1327).
+        self.drop_current_grid_images();
+    }
+
+    /// The scroll region of the screen in use, its top and bottom rows
+    /// counted from 0 (format.c:2834 and :2843 at tag 3.8).
+    #[must_use]
+    pub fn scroll_region(&self) -> (u16, u16) {
+        self.grid().scroll_region()
+    }
+
+    /// Whether origin mode (DECOM) is on, as `#{origin_flag}` shows it.
+    #[must_use]
+    pub fn origin_mode(&self) -> bool {
+        self.grid().origin_mode()
     }
 
     // CSI ? h
@@ -3001,6 +3116,12 @@ impl Screen {
     pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
     }
+}
+
+/// Every eighth column from column 8, as tmux's `screen_reset_tabs` sets them
+/// (screen.c:190-202 at tag 3.8).
+fn default_tabs(cols: u16) -> Vec<bool> {
+    (0..cols).map(|col| col != 0 && col % 8 == 0).collect()
 }
 
 fn u16_to_u8(i: u16) -> Option<u8> {

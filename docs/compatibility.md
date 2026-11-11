@@ -362,6 +362,21 @@ Three deliberate choices:
 
 One platform limit, measured on Windows 11 build 26200: conhost swallows a **bare** `ESC]104 ESC\` on the ConPTY output path, so a pane child running under ConPTY cannot reach the clear-everything form. `ESC]104;4 ESC\` arrives normally.
 
+### Scroll Region, Origin Mode and DECALN
+
+A pane's scroll region and origin mode are what `#{scroll_region_upper}`, `#{scroll_region_lower}` and `#{origin_flag}` show:
+
+| Sequence | Effect |
+|---|---|
+| `ESC [ top ; bottom r` (DECSTBM) | Sets the region and moves the cursor home: the top left of the screen, or of the region in origin mode. A missing or 0 bottom is the last row and a missing or 0 top the first, so `ESC [ r` and `ESC [ 0 ; 0 r` give the whole screen. A region of one line or less, or with its bottom past the screen, is ignored and the cursor stays |
+| `ESC [ ? 6 h` / `l` (DECOM) | Origin mode on or off, the cursor home either way |
+| `ESC [ row d` (VPA) | To `row`, counted from the top of the region in origin mode and stopping at its bottom, keeping the column |
+| `ESC # 8` (DECALN) | Fills the screen with `E` in the default colours, puts the region back to the whole screen, turns origin mode off and moves the cursor to the top left. The colours for text written after it are unchanged |
+
+Four of these follow the console hosts, which agree with each other, rather than tmux, so that psmux's screen stays where the host's is: tmux homes DECSTBM to the top left of the screen in origin mode, cuts a bottom past the screen to the last row, ignores `ESC [ 0 ; 0 r` as a one line region, and keeps origin mode across DECALN.
+
+The inbox conhost keeps the region and origin mode to itself and hands psmux the result, so the cursor and the screen are right there, and the three formats show the whole screen and `0`. Through OpenConsole (`PSMUX_CONPTY_DIR`) psmux reads the sequences, and the formats follow the program.
+
 ### Sixel Limits Query (XTSMGRAPHICS)
 
 `CSI ? item ; action ; value S` asks a terminal for its sixel limits. psmux answers it itself and does not ask the outer terminal, as tmux's `input_csi_dispatch_sm_graphics` does not. Which answer a pane gets follows what its programs were told by DA1:
@@ -372,6 +387,22 @@ One platform limit, measured on Windows 11 build 26200: conhost swallows a **bar
 | Inbox conhost | its own, not listing sixel | `CSI ? 1;3;value S`, failure | `CSI ? item;3;value S`, failure |
 
 The inbox conhost differs from tmux on purpose: it drops a pane's sixel before psmux sees it, so reporting colour registers there would describe images nothing can draw. A query with more than three parameters gets no reply, as in tmux. psmux reads a parameter as at most 65535, where tmux reads up to `INT_MAX`.
+
+### Tab Stops (HTS, TBC, CBT, HPA)
+
+Each pane keeps a table of tab stops, every 8 columns to begin with, which `#{pane_tabs}` lists, as tmux keeps `s->tabs`:
+
+| Sequence | Effect |
+|---|---|
+| `HT` (tab) | To the next stop, or the last column when there is none. Nothing from the last column |
+| `ESC H` (HTS) | A stop at the cursor, unless it waits past the last column |
+| `ESC [ g` or `ESC [ 0 g` (TBC) | Clears the stop at the cursor. `ESC [ 3 g` clears them all, and any other value nothing |
+| `ESC [ n Z` (CBT) | Back `n` stops (0 counts as 1), or to column 0 |
+| ``ESC [ n ` `` (HPA) | To column `n`, the same as `ESC [ n G` |
+
+The normal and the alternate screen share the table. A change of width, RIS, `send-keys -R` and a respawn put the default back, and a change of height alone keeps it.
+
+The inbox conhost keeps a table of its own and hands psmux plain cursor moves instead of these sequences, so the cursor lands where it should there too, but `#{pane_tabs}` stays at the default. Through OpenConsole (`PSMUX_CONPTY_DIR`) psmux reads them, and the table follows the program.
 
 ### Progress Indicator (OSC 9;4)
 

@@ -219,10 +219,10 @@ fn real_active_idx(app: &AppState) -> usize {
     app.temp_focus_saved_active.unwrap_or(app.active_idx)
 }
 
-/// #{pane_tabs} for a pane `cols` wide: the default tab stops, one every 8
-/// columns from column 8 (tmux screen_reset_tabs), comma separated.
-pub fn pane_tab_stops(cols: u16) -> String {
-    (8..cols).step_by(8).map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+/// #{pane_tabs}: the screen's tab stops, comma separated, as
+/// format_cb_pane_tabs lists them (format.c:1051 at tag 3.8).
+pub fn pane_tab_stops(screen: &vt100::Screen) -> String {
+    screen.tab_stops().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
 }
 
 /// #{window_raw_flags} of window `win_idx` (tmux window_printable_flags).
@@ -2184,11 +2184,10 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             .unwrap_or_default(),
         "pane_start_path" => String::new(),
         // tmux format_cb_pane_tabs lists the set tab stops of the pane's
-        // screen.  The pane emulator keeps the default stops only (every 8
-        // columns from column 8, as tmux screen_reset_tabs sets them), so
-        // they follow from the pane width (#827).
+        // screen (#827), which ESC H and CSI g change. From the live parser,
+        // as tmux reads `wp->base`.
         "pane_tabs" => target_pane()
-            .map(|p| pane_tab_stops(p.last_cols))
+            .and_then(|p| p.live_parser().lock().ok().map(|parser| pane_tab_stops(parser.screen())))
             .unwrap_or_default(),
         "pane_fg" => {
             if let Some(p) = target_pane() {
@@ -2352,13 +2351,20 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                     .unwrap_or_default()
             } else { String::new() }
         }
-        "scroll_region_upper" => "0".into(),
-        "scroll_region_lower" => {
-            if let Some(p) = active_pane(&win.root, &win.active_path) {
-                return p.last_rows.saturating_sub(1).to_string();
-            }
-            "0".into()
-        }
+        // The pane's scroll region and origin mode, from the live parser
+        // (format.c:2834, :2843 at tag 3.8).
+        "scroll_region_upper" | "scroll_region_lower" | "origin_flag" => target_pane()
+            .and_then(|p| {
+                let parser = p.live_parser().lock().ok()?;
+                let screen = parser.screen();
+                let (upper, lower) = screen.scroll_region();
+                Some(match var {
+                    "scroll_region_upper" => upper.to_string(),
+                    "scroll_region_lower" => lower.to_string(),
+                    _ => if screen.origin_mode() { "1" } else { "0" }.to_string(),
+                })
+            })
+            .unwrap_or_else(|| "0".into()),
 
         // ── Buffer ──
         "buffer_size" => {
@@ -2533,7 +2539,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
 
         // ── Misc ──
-        "origin_flag" | "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
+        "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
         "wrap_flag" => "1".into(),
         "line" | "command" | "command_list_name" | "command_list_alias" | "command_list_usage" | "config_files" => String::new(),
         "current_file" => crate::config::current_config_file(),
@@ -2774,6 +2780,10 @@ mod tests_issue662_mouse_flag_formats;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue985_bracket_paste_flag.rs"]
 mod tests_issue985_bracket_paste_flag;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1032_1034_vt_formats.rs"]
+mod tests_issue1032_1034_vt_formats;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue272_format_shell_cache.rs"]
