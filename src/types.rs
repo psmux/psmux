@@ -4128,8 +4128,11 @@ pub enum CtrlReq {
     ScrollUp(u64,u16, u16),
     ScrollDown(u64,u16, u16),
     /// Client-side semantic mouse event: pane-relative coordinates, targeted by pane ID.
-    /// Fields: client_id, pane_id, sgr_button, col_0based, row_0based, press
-    PaneMouse(u64, usize, u8, i16, i16, bool),
+    /// Fields: client_id, pane_id, sgr_button, col_0based, row_0based, press,
+    /// replay. `replay` marks a press the client sends again for a gesture the
+    /// server already saw go down (`pane-mouse ... R`, mouse-drag-enter-copy-mode
+    /// anchoring its selection): it is not a new click (#1031).
+    PaneMouse(u64, usize, u8, i16, i16, bool, bool),
     /// Client-side semantic scroll: targeted by pane ID.
     /// Fields: client_id, pane_id, up (true=up, false=down), pointer position as
     /// pane-relative 0-based (col, row).  The position is optional because older

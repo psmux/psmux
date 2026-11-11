@@ -4179,14 +4179,18 @@ match cmd {
         }
     }
     "pane-mouse" => {
-        // pane-mouse PANE_ID BUTTON COL ROW M|m
+        // pane-mouse PANE_ID BUTTON COL ROW M|m|R
+        // R is a press replayed for a gesture already pressed (#1031): it
+        // acts like M but is not counted as a click. A server that predates
+        // R reads it as a press, as before.
         if args.len() >= 5 {
             if let (Ok(pane_id), Ok(button), Ok(col), Ok(row)) = (
                 args[0].parse::<usize>(), args[1].parse::<u8>(),
                 args[2].parse::<i16>(), args[3].parse::<i16>()
             ) {
                 let press = args[4] != "m";
-                let _ = tx.send(CtrlReq::PaneMouse(client_id, pane_id, button, col, row, press));
+                let replay = args[4] == "R";
+                let _ = tx.send(CtrlReq::PaneMouse(client_id, pane_id, button, col, row, press, replay));
             }
         }
     }
