@@ -8,6 +8,9 @@
 //
 // Build: csc /nologo /out:native_mouse_child.exe native_mouse_child.cs
 // Log:   %TEMP%\psmux_native_mouse.txt
+//
+// Optional argument `vti`: also turn ENABLE_VIRTUAL_TERMINAL_INPUT on, the
+// Bubble Tea shape (keys as VT, mouse still read as MOUSE_EVENT records).
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -60,7 +63,8 @@ class NativeMouse {
         [FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent;
     }
 
-    static int Main() {
+    static int Main(string[] args) {
+        bool vti = args.Length > 0 && args[0] == "vti";
         string log = Path.Combine(Environment.GetEnvironmentVariable("TEMP"), "psmux_native_mouse.txt");
         File.WriteAllText(log, "NATIVE_MOUSE START\n");
 
@@ -68,7 +72,8 @@ class NativeMouse {
         uint mode;
         if (GetConsoleMode(h, out mode)) {
             uint newMode = (mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_QUICK_EDIT_MODE))
-                           | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS;
+                           | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS
+                           | (vti ? 0x0200u : 0u);
             SetConsoleMode(h, newMode);
             File.AppendAllText(log, string.Format("mode {0:X} -> {1:X}\n", mode, newMode));
         } else {
