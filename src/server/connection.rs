@@ -677,7 +677,7 @@ fn bare_target_rewrite(
     let end = crate::cli::outer_target_scan_end(cmd, args).min(args.len());
     let Some(i) = args[..end].iter().position(|a| *a == "-t") else { return Ok(None) };
     let Some(t) = args.get(i + 1) else { return Ok(None) };
-    if !crate::cli::bare_target_token(t) {
+    if !crate::commands::target_resolved_in_server(kind, t) {
         return Ok(None);
     }
     let (s, r) = mpsc::channel();
@@ -3505,8 +3505,8 @@ if persistent && client_readonly && !readonly_client_may_run(cmd) {
 // same treatment, as the command's own `-t`.
 let target_line_args: Vec<&str>;
 let probe_args: &[&str] = match global_raw_target.as_deref() {
-    Some(g) if crate::cli::bare_target_token(g)
-        && crate::commands::in_server_target_kind(cmd).is_some()
+    Some(g) if crate::commands::in_server_target_kind(cmd)
+            .is_some_and(|kind| crate::commands::target_resolved_in_server(kind, g))
         && !args[..crate::cli::outer_target_scan_end(cmd, &args).min(args.len())].contains(&"-t") =>
     {
         target_line_args = ["-t", g].into_iter().chain(args.iter().copied()).collect();

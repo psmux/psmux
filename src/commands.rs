@@ -2023,6 +2023,17 @@ pub(crate) fn in_server_target_kind(cmd: &str) -> Option<InServerTarget> {
     }
 }
 
+/// Must a `kind` `-t` be resolved on live state (and rewritten to its id)
+/// before the command runs? A bare token always (a window or pane of this
+/// session before a session name), and for a pane target also a
+/// `window.pane` whose pane half is a special token (`.-`, `:.+`, `1.!`):
+/// the generic parser reads no pane at all there and the command fell back
+/// to the active pane (issue #1040).
+pub(crate) fn target_resolved_in_server(kind: InServerTarget, t: &str) -> bool {
+    crate::cli::bare_target_token(t)
+        || (kind == InServerTarget::Pane && crate::cli::split_special_pane_target(t).is_some())
+}
+
 /// Resolve a window or pane `-t` on the in server route to the `@id` or
 /// `%id` it names. `Ok(None)` leaves the target to the command as it is: an
 /// id already, a mouse, marked or layout token, or a session other than this
@@ -2050,7 +2061,7 @@ pub(crate) fn resolve_in_server_target(app: &AppState, kind: InServerTarget, t: 
             Ok(Some(format!("@{}", app.windows[pos].id)))
         }
         InServerTarget::Pane => {
-            if plain.starts_with('{') {
+            if plain.starts_with('{') && !crate::cli::special_pane_token(plain) {
                 return Ok(None);
             }
             // This session's own name, when no window has it, is the session
@@ -3176,7 +3187,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
         if let Some(t_pos) = parts.iter().position(|p| *p == "-t") {
             if let Some(t) = parts.get(t_pos + 1) {
                 has_target = true;
-                let resolved = if crate::cli::bare_target_token(t) {
+                let resolved = if target_resolved_in_server(kind, t) {
                     resolve_in_server_target(app, kind, t)
                 } else {
                     Ok(None)

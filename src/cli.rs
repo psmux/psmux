@@ -1916,6 +1916,43 @@ pub fn bare_target_token(target: &str) -> bool {
         && !t.starts_with(['%', '@', '$', '~', '='])
 }
 
+/// Is `p` one of the pane tokens tmux resolves against the live window
+/// instead of by index or name?
+///
+/// tmux's `cmd_find_pane_table` (cmd-find.c:59) maps `{last}` to `!`,
+/// `{next}` to `+`, `{previous}` to `-`, keeps the `{up-of}` family as is and
+/// turns `{top}` and friends into layout positions; `cmd_find_get_pane_with_window`
+/// (cmd-find.c:599 to :640) then reads `!` as the window's last pane, the
+/// `{up-of}` family as the active pane's neighbour, and `+N` / `-N` as an
+/// offset by pane number from the active pane (issue #1040).
+pub fn special_pane_token(p: &str) -> bool {
+    match p {
+        "!" | "{last}" | "{next}" | "{previous}"
+        | "{up-of}" | "{down-of}" | "{left-of}" | "{right-of}"
+        | "{top}" | "{bottom}" | "{left}" | "{right}"
+        | "{top-left}" | "{top-right}" | "{bottom-left}" | "{bottom-right}" => true,
+        _ => p
+            .strip_prefix(['+', '-'])
+            .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())),
+    }
+}
+
+/// Split a `window.pane` target whose pane half is a [`special_pane_token`]
+/// into the part before the dot (session and window, possibly empty) and that
+/// token. tmux splits on the first `.` after the `:` (or the first `.` at all
+/// without one, cmd-find.c:1066 to :1075), so `.-`, `:.+`, `sess:1.!` and
+/// `2.{last}` all qualify. Anything else is `None` and keeps its old reading.
+pub fn split_special_pane_target(target: &str) -> Option<(&str, &str)> {
+    let t = strip_exact_match_prefix(target.trim());
+    if t.starts_with('%') {
+        return None;
+    }
+    let from = t.find(':').map_or(0, |c| c + 1);
+    let dot = from + t[from..].find('.')?;
+    let pane = &t[dot + 1..];
+    special_pane_token(pane).then(|| (&t[..dot], pane))
+}
+
 /// Commands whose `-t` is a window target, where a bare token must be read as
 /// a window before it is read as a session.
 ///
