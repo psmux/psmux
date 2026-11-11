@@ -6479,7 +6479,7 @@ match cmd {
     }
     "show-hooks" => {
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::ShowHooks(rtx));
+        let _ = tx.send(CtrlReq::ShowHooks(args.iter().map(|a| a.to_string()).collect(), rtx));
         if let Ok(text) = rrx.recv() {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("show-hooks".to_string(), text));
@@ -7221,12 +7221,20 @@ match cmd {
         }
     }
     "list-commands" | "lscm" => {
-        let cmds = TMUX_COMMANDS.join("\n");
-        if persistent {
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::ListCommands(args.iter().map(|a| a.to_string()).collect(), rtx));
+        let cmds = rrx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
+        if let Some(msg) = cmds.strip_prefix("ERROR: ") {
+            if persistent {
+                let _ = tx.send(CtrlReq::StatusMessage(msg.to_string()));
+            } else {
+                let _ = writeln!(write_stream, "ERROR: {}", msg);
+                let _ = write_stream.flush();
+            }
+        } else if persistent {
             let _ = tx.send(CtrlReq::ShowTextPopup("list-commands".to_string(), cmds));
-        } else {
+        } else if !cmds.is_empty() {
             write_listing(&mut write_stream, &cmds);
-            let _ = write_stream.flush();
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
@@ -8702,7 +8710,7 @@ fn dispatch_control_command(
         }
         "show-hooks" => {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ShowHooks(rtx));
+            let _ = tx.send(CtrlReq::ShowHooks(args.iter().map(|a| a.to_string()).collect(), rtx));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }
@@ -8718,7 +8726,7 @@ fn dispatch_control_command(
         }
         "list-commands" | "lscm" => {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ListCommands(rtx));
+            let _ = tx.send(CtrlReq::ListCommands(args.iter().map(|a| a.to_string()).collect(), rtx));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }

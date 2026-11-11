@@ -274,7 +274,8 @@ fn multiple_events_multiple_commands() {
 fn show_hooks_includes_pane_died() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "set-hook pane-died \"display-message test\"").unwrap();
-    let output = generate_show_hooks(&app);
+    // pane-died is a pane hook: tmux lists it under -w (window and pane hooks).
+    let output = generate_show_hooks(&app, &["-w"]);
     assert!(output.contains("pane-died"), "show-hooks should list pane-died, got: {}", output);
 }
 

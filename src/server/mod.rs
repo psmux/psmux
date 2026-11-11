@@ -8007,9 +8007,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     state_dirty = true;
                 }
-                CtrlReq::ListCommands(resp) => {
-                    let cmds = TMUX_COMMANDS.join("\n");
-                    let _ = resp.send(cmds);
+                CtrlReq::ListCommands(args, resp) => {
+                    // An unknown or ambiguous command is the command's error.
+                    let args = crate::list_commands::ListCommandsArgs::parse(&args);
+                    let text = crate::list_commands::render_with_app(&app, &args)
+                        .unwrap_or_else(|e| format!("ERROR: {}", e));
+                    let _ = resp.send(text);
                 }
                 CtrlReq::LockClient => {
                     app.status_message = Some(("lock: not available on Windows".to_string(), std::time::Instant::now(), None));
@@ -8095,20 +8098,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         entry.push(cmd);
                     }
                 }
-                CtrlReq::ShowHooks(resp) => {
-                    let mut output = String::new();
-                    for (name, commands) in &app.hooks {
-                        if commands.len() == 1 {
-                            output.push_str(&format!("{} -> {}\n", name, commands[0]));
-                        } else {
-                            for (i, cmd) in commands.iter().enumerate() {
-                                output.push_str(&format!("{}[{}] -> {}\n", name, i, cmd));
-                            }
-                        }
-                    }
-                    if output.is_empty() {
-                        output.push_str("(no hooks)\n");
-                    }
+                CtrlReq::ShowHooks(args, resp) => {
+                    let output = crate::show_hooks::format_show_hooks(&app.hooks, &crate::show_hooks::ShowHooksArgs::parse(&args));
                     let _ = resp.send(output);
                 }
                 CtrlReq::RemoveHook(hook) => {

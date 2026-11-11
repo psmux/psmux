@@ -372,12 +372,13 @@ fn lscm_alias_matches_list_commands() {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn show_hooks_empty_says_no_hooks() {
+fn show_hooks_empty_prints_nothing() {
+    // tmux prints nothing for show-hooks when no session hook is set.
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "show-hooks").unwrap();
     let (cmd, out) = extract_popup(&app);
     assert_eq!(cmd, "show-hooks");
-    assert_eq!(out.trim(), "(no hooks)");
+    assert_eq!(out, "");
 }
 
 #[test]
@@ -387,16 +388,18 @@ fn show_hooks_lists_all_hooks_with_commands() {
         vec!["run-shell 'echo new'".to_string(), "display-message 'created'".to_string()]);
     app.hooks.insert("pane-died".to_string(),
         vec!["kill-pane".to_string()]);
+    // show-hooks lists the session hooks; pane-died is a pane hook, which
+    // tmux lists under -w.
     execute_command_string(&mut app, "show-hooks").unwrap();
     let (_, out) = extract_popup(&app);
     let lines: Vec<&str> = out.lines().collect();
-    // 2 indexed commands for after-new-window + 1 for pane-died = 3 lines
-    assert_eq!(lines.len(), 3, "should have 3 hook entries, got:\n{}", out);
-    // Multi-command hooks use indexed format: name[0] -> cmd, name[1] -> cmd
-    assert!(out.contains("after-new-window[0] -> run-shell"), "should show indexed hook[0] -> command");
-    assert!(out.contains("after-new-window[1] -> display-message"), "should show indexed hook[1] -> command");
-    // Single-command hook uses plain format: name -> cmd
-    assert!(out.contains("pane-died -> kill-pane"), "should show pane-died hook");
+    assert_eq!(lines.len(), 2, "should have 2 hook entries, got:\n{}", out);
+    // tmux's array rows: name[i] cmd, also for a single command.
+    assert!(out.contains("after-new-window[0] run-shell"), "should show indexed hook[0] command");
+    assert!(out.contains("after-new-window[1] display-message"), "should show indexed hook[1] command");
+    execute_command_string(&mut app, "show-hooks -w").unwrap();
+    let (_, out) = extract_popup(&app);
+    assert_eq!(out, "pane-died[0] kill-pane\n");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
