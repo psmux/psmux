@@ -2357,6 +2357,33 @@ pub fn client_spec_matches(tty: &str, spec: &str) -> bool {
     !t.is_empty() && (tty == t || tty.strip_prefix("/dev/") == Some(t))
 }
 
+/// The session whose server has the most recently active client, from each
+/// session's `list-clients -F '#{client_activity}'` reply, as tmux's
+/// `cmd_find_best_client` picks the current client for a command run outside
+/// any client (cmd-find.c at tag 3.8). psmux runs a server per session, so
+/// the client a `switch-client` acts on may be on any of them. Activity is in
+/// seconds, so a tie goes to `preferred` (where routing already pointed),
+/// then to the first listed. `None` when no session has a client.
+pub fn best_client_session(listings: &[(String, String)], preferred: Option<&str>) -> Option<String> {
+    let mut best: Option<(u64, bool, &str)> = None;
+    for (session, reply) in listings {
+        let Some(activity) = reply.lines().filter_map(|l| l.trim().parse::<u64>().ok()).max() else {
+            continue;
+        };
+        let is_preferred = preferred == Some(session.as_str());
+        let better = match best {
+            None => true,
+            Some((best_activity, best_preferred, _)) => {
+                activity > best_activity || (activity == best_activity && is_preferred && !best_preferred)
+            }
+        };
+        if better {
+            best = Some((activity, is_preferred, session));
+        }
+    }
+    best.map(|(_, _, session)| session.to_string())
+}
+
 /// The client flags an `attach-session` argument list asks for.
 ///
 /// tmux spells read only `-r` (cmd-attach-session.c, "c:dEf:rt:x", which sets
@@ -2621,6 +2648,10 @@ mod tests_issue829_client_path;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue865_display_reply_error.rs"]
 mod tests_issue865_display_reply_error;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_switch_client_best_client.rs"]
+mod tests_switch_client_best_client;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_empty_pane_target.rs"]

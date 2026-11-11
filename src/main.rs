@@ -797,6 +797,40 @@ fn session_holding_client(ns: Option<&str>, spec: &str) -> Option<String> {
         .map(|(name, _)| name)
 }
 
+/// The session whose server has the client a `switch-client` acts on, or
+/// `None` to keep the routing already chosen. tmux finds that client before
+/// anything else (cmd-queue.c, CMD_CLIENT_CFLAG at tag 3.8): `-c` names it,
+/// inside a pane it is the pane's own client, and otherwise it is the most
+/// recently active client (cmd_find_best_client). psmux has a server per
+/// session, so that client may be on any of them. With no client anywhere the
+/// routing stays as it was. A `-c` that names no client is tmux's
+/// `can't find client`. Shared server mode has one server for every session,
+/// so routing there is left alone.
+fn switch_client_route(ns: Option<&str>, client: Option<&str>) -> Option<String> {
+    if crate::server::shared::resolve_for_this_process() == Ok(crate::server::shared::ServerMode::Shared) {
+        return None;
+    }
+    if let Some(c) = client {
+        let wanted = client_target_tty(c).unwrap_or_else(|| c.to_string());
+        return match session_holding_client(ns, &wanted) {
+            Some(sess) => Some(sess),
+            None => {
+                eprintln!("psmux: can't find client: {}", c);
+                std::process::exit(1);
+            }
+        };
+    }
+    let tmux_env = env::var("TMUX").ok();
+    let psmux_dir = std::path::PathBuf::from(crate::paths::psmux_dir());
+    if crate::session::pane_session_in_namespace(ns, tmux_env.as_deref(), &psmux_dir).is_some() {
+        return None;
+    }
+    let line = format!("list-clients -F {}\n", crate::util::quote_arg("#{client_activity}"));
+    let listings = query_every_session(ns, &line);
+    let routed = env::var("PSMUX_TARGET_SESSION").ok();
+    crate::cli::best_client_session(&listings, routed.as_deref())
+}
+
 /// A CLI command list (see [`crate::cli::split_cli_command_list`]): `args`
 /// cut to its first command, and the one line the whole list goes to the
 /// server as. `None` dispatches `args` whole, as before. Control mode reads
@@ -2307,7 +2341,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 // Parse -L socket name for namespace isolation
                 let server_socket_name = args.iter().position(|a| a == "-L").and_then(|i| args.get(i+1)).map(|s| s.clone());
                 // Check for initial command via -c flag (shell-wrapped)
-                let initial_cmd = args.iter().position(|a| a == "-c").and_then(|i| args.get(i+1)).map(|s| s.clone());
+                let initial_cmd = args.iter().position(|a| a.as_str() == "-c").and_then(|i| args.get(i+1)).map(|s| s.clone());
                 // Parse start directory via -d flag
                 let srv_start_dir = args.iter().position(|a| a == "-d").and_then(|i| args.get(i+1)).map(|s| s.clone());
                 // Parse window name via -n flag
@@ -5651,6 +5685,20 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
+                // The command goes to the server the CLIENT is on, as tmux
+                // finds the client before anything else (cmd_find_client).
+                // Routing so far picked a session, and from outside a pane
+                // that is the most recent one, which need not have any client:
+                // a session made after the client attached took the command
+                // and it did nothing (follow up to #1028).
+                let client_arg = cmd_args
+                    .iter()
+                    .position(|a| a.as_str() == "-c")
+                    .and_then(|i| cmd_args.get(i + 1))
+                    .map(|s| s.to_string());
+                if let Some(sess) = switch_client_route(l_socket_name.as_deref(), client_arg.as_deref()) {
+                    env::set_var("PSMUX_TARGET_SESSION", &sess);
+                }
                 // #483: the server validates a -t target and replies "ERROR
                 // <reason>" for an unresolvable window/pane/session so scripts
                 // see a non-zero exit instead of a silent success. A missing/
