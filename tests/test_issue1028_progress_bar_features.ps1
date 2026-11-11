@@ -107,9 +107,12 @@ function Bar($pair, $end = $ST) { "\e]9;4;$pair$end" }
 function Pane($target, $format = '#{pane_pb_state} #{pane_pb_progress}') { "$(P display-message -p -t $target $format)" }
 
 # A server with this config, and a client on the pipe route with this TERM.
-function Up($config = @(), $term = $null) {
+function Up($config = @(), $term = $null, $other = $null) {
     $script:NS = "pbf_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
     Set-Content -Path $env:PSMUX_CONFIG_FILE -Value ($config -join "`n")
+    # A second session, made before the client attaches so a later
+    # switch-client from outside the client finds that client.
+    if ($other) { P new-session -d -s $other -x 120 -y 30 | Out-Null }
     P new-session -d -s s -x 120 -y 30 | Out-Null
     Start-Sleep -Milliseconds 2500
     $script:Log = Join-Path $TempHome "outer_$($script:NS).txt"
@@ -232,9 +235,7 @@ function Run-Cases($route) {
     # carries over a switch-client. psmux runs a server per session and the
     # client starts its frame loop again against the other one.
     Write-Host "  -- switching sessions" -ForegroundColor DarkCyan
-    Up
-    P new-session -d -s t -x 120 -y 30 | Out-Null
-    Start-Sleep -Milliseconds 2500
+    Up @() $null 't'
     Set-Bar s '1;50'
     $seen = @(Bar '1;50')
     Check "${route}: a bar in the session" (Logged) ($seen -join ' ')
