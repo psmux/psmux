@@ -266,6 +266,35 @@ pub fn apply_blink_only<W: Write>(out: &mut W, blink: Option<bool>) -> io::Resul
     Ok(())
 }
 
+/// Whether the cursor colour this client last wrote was one of its own, so
+/// teardown owes the terminal an `OSC 112`, as tmux's `tty_stop_tty` sends
+/// `Cr` when `tty->ccolour` is set (tty.c:495 at tag 3.8).
+static CURSOR_COLOUR_ASSERTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `Cr`: back to the terminal's own cursor colour.
+pub(crate) const CURSOR_COLOUR_RESET: &str = "\x1b]112\x07";
+
+/// `Cs` for a cursor colour as the layout carries it, `#rrggbb`, in the form
+/// tmux writes it (`rgb:%02hhx/%02hhx/%02hhx`, tty.c:782). `None` for
+/// anything else.
+pub(crate) fn cursor_colour_set(colour: &str) -> Option<String> {
+    let hex = colour.strip_prefix('#').filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    let hex = hex.to_ascii_lowercase();
+    Some(format!("\x1b]12;rgb:{}/{}/{}\x07", &hex[0..2], &hex[2..4], &hex[4..6]))
+}
+
+/// Record the cursor colour this client just wrote: one of its own, or the
+/// reset.
+pub(crate) fn note_cursor_colour(asserted: bool) {
+    CURSOR_COLOUR_ASSERTED.store(asserted, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether teardown has a cursor colour to take back.
+pub(crate) fn cursor_colour_restore() -> bool {
+    CURSOR_COLOUR_ASSERTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Record a DECSCUSR code this client just wrote to the terminal.
 pub(crate) fn note_cursor_code(code: u8) {
     LAST_CURSOR_CODE.store(code, std::sync::atomic::Ordering::Relaxed);

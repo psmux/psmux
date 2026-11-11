@@ -2283,6 +2283,18 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             }
             "0".into()
         }
+        // The program's OSC 12 colour as #rrggbb, then the cursor-colour
+        // option by its colour name, then `none` (format.c
+        // format_cb_cursor_colour at tag 3.8).
+        "cursor_colour" => {
+            match target_pane() {
+                Some(p) => {
+                    let program = p.live_parser().lock().ok().and_then(|parser| parser.screen().program_cursor_colour());
+                    crate::cursor_colour::format_value(program, &crate::cursor_colour::pane_value(app, win, p))
+                }
+                None => "none".into(),
+            }
+        }
 
         // ── Mouse ──
         // tmux format.c format_cb_mouse_x / _y / _line / _word /

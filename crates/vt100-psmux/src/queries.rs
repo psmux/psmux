@@ -60,6 +60,9 @@ pub(crate) fn osc_query(params: &[&[u8]], program_status: bool, bel: bool) -> Op
         [b"7501", b"?"] if program_status => Some(TerminalQuery::ProgramStatus),
         [b"10", b"?"] => Some(TerminalQuery::ForegroundColour { bel }),
         [b"11", b"?"] => Some(TerminalQuery::BackgroundColour { bel }),
+        // The colour is filled in by the live parser; the detector only
+        // needs to know a reply may be due.
+        [b"12", b"?"] => Some(TerminalQuery::CursorColour { colour: None, bel }),
         // OSC 4 can hold several queries among its sets, so the live parser
         // takes them pair by pair (`palette_pairs`), not here.
         _ => None,

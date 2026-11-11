@@ -470,6 +470,15 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     fn osc_dispatch(&mut self, params: &[&[u8]], bel_terminated: bool) {
         self.last_printed = None;
         if let Some(query) = crate::queries::osc_query(params, self.screen.program_status_enabled(), bel_terminated) {
+            // The cursor colour is the one at this point of the stream, so a
+            // set just before the query is what it reports.
+            let query = match query {
+                crate::TerminalQuery::CursorColour { bel, .. } => crate::TerminalQuery::CursorColour {
+                    colour: self.screen.cursor_colour(),
+                    bel,
+                },
+                other => other,
+            };
             self.screen.query(query);
             return;
         }
@@ -522,6 +531,20 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                     // An unparseable colour is skipped, not fatal
                     // (input.c:2959 `s = next; continue;`).
                 }
+            }
+            // ---- OSC 12 / OSC 112 : the cursor colour ----
+            // tmux reads everything after `12;` as one colour
+            // (`input_osc_12`, input.c:3164 at tag 3.8), so a second `;` makes
+            // it unreadable and it is ignored, as is a colour psmux cannot
+            // parse. OSC 112 resets it only with nothing after it
+            // (`input_osc_112`, input.c:3189).
+            [b"12", spec] => {
+                if let Some(rgb) = crate::palette::parse_x11_colour(spec) {
+                    self.screen.set_program_cursor_colour(Some(rgb));
+                }
+            }
+            [b"112"] | [b"112", b""] => {
+                self.screen.set_program_cursor_colour(None);
             }
             // ---- OSC 104 : reset palette entries (issue #685) ----
             // Bare `\e]104\e\\` (and `\e]104;\e\\`, which vte hands us as an

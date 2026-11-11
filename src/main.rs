@@ -72,6 +72,7 @@ mod environ;
 mod program_status;
 mod pane_colours;
 mod scroll_on_clear;
+mod cursor_colour;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;
@@ -6883,6 +6884,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     }
     if let Some(on) = crate::rendering::blink_restore() {
         let _ = execute!(out, crossterm::style::Print(if on { "\x1b[?12h" } else { "\x1b[?12l" }));
+    }
+    // The cursor colour back to the terminal's own, when this client set one.
+    if crate::rendering::cursor_colour_restore() {
+        let _ = execute!(out, crossterm::style::Print(crate::rendering::CURSOR_COLOUR_RESET));
     }
     let _ = execute!(out, DisableMouseCapture, DisableBracketedPaste);
     // Leaves the alternate screen, or with `rmcup@` clears the main one (#700).
