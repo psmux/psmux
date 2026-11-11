@@ -6,7 +6,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Namespace = 'e2e_win10_ssh_pipe'
+# A per run namespace so a parallel or leftover run never collides.
+$Namespace = "e2e_win10_ssh_pipe_$(Get-Random -Maximum 999999)"
 $Session = 'pipe_mouse'
 $script:Passed = 0
 $script:Failed = 0
@@ -47,7 +48,7 @@ function Wait-ForHistory([int]$Minimum = 50) {
 
 function Get-State {
     $base = "${Namespace}__${Session}"
-    $dataDir = Join-Path $env:USERPROFILE '.psmux'
+    $dataDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { Join-Path $env:USERPROFILE '.psmux' }
     $port = [int](Get-Content (Join-Path $dataDir "$base.port") -Raw).Trim()
     $key = (Get-Content (Join-Path $dataDir "$base.key") -Raw).Trim()
     $tcp = [Net.Sockets.TcpClient]::new('127.0.0.1', $port)

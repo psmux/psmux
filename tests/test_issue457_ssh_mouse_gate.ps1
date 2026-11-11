@@ -14,7 +14,7 @@
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue457"
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $logFile  = "$psmuxDir\ssh_input.log"
 $script:TestsPassed = 0
 $script:TestsFailed = 0

@@ -17,7 +17,7 @@ $PSMUX = (Get-Command psmux -EA SilentlyContinue).Source
 if (-not $PSMUX) { Write-Host "[FAIL] psmux not found in PATH" -ForegroundColor Red; exit 1 }
 
 $SESSION  = "gap8"
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 $script:TestsSkipped = 0
