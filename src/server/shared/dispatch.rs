@@ -2794,7 +2794,7 @@ pub(crate) fn dispatch(
                 // client redraws, against 0 while idle.  With this gate and the
                 // client-side one in client.rs it is 1, the same as idle.
                 // copied from server/mod.rs run_server (line 4365 at 86a78100)
-                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); handle_pane_mouse(&mut app, pane_id, button, col, row, press); if button == 0 && press { crate::window_ops::note_pane_press(&mut app, pane_id, col, row); } if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
+                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press, replay) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); crate::window_ops::handle_client_pane_mouse(&mut app, pane_id, button, col, row, press, replay); if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 // copied from server/mod.rs run_server (line 4371 at 86a78100)
                 CtrlReq::PaneScroll(cid, pane_id, up, at, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_pane_wheel(&mut app, pane_id, up, at, mods); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 // copied from server/mod.rs run_server (line 4247 at 86a78100)

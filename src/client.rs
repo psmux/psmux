@@ -1261,9 +1261,24 @@ fn copy_release_commands(
     cmds
 }
 
+/// The press a mouse-drag-enter-copy-mode drag sends again after
+/// `copy-enter`, so the selection anchors at the press cell. `R` marks it as
+/// a replay: the server ran the click timer for the real press already, and
+/// counting this one too made the drag a double click (#1031).
+fn copy_drag_replay_press(pane_id: usize, col: i16, row: i16) -> String {
+    format!("pane-mouse {} 0 {} {} R\n", pane_id, col, row)
+}
+
 #[cfg(test)]
 mod copy_release_repin_tests {
-    use super::{copy_release_commands, copy_release_repin};
+    use super::{copy_drag_replay_press, copy_release_commands, copy_release_repin};
+
+    #[test]
+    fn the_copy_drag_replay_is_marked_so_it_is_not_a_click() {
+        // #1031: the press replayed after copy-enter must not reach the
+        // server as a plain M press, which its click timer counts.
+        assert_eq!(copy_drag_replay_press(7, 14, 3), "pane-mouse 7 0 14 3 R\n");
+    }
 
     #[test]
     fn the_repin_reports_the_painted_cell_as_a_drag() {
@@ -7951,10 +7966,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             // First drag of the gesture: enter copy mode and
                                             // replay the press so the selection anchors where
                                             // the button went down, like tmux's
-                                            // MouseDragStart -> copy-mode -M.
+                                            // MouseDragStart -> copy-mode -M. The server
+                                            // already counted this press when the button
+                                            // went down, so it goes as a replay (R) that
+                                            // the click timer skips (#1031).
                                             cmd_batch.push("copy-enter\n".into());
                                             client_drawn_sel = None; // a new gesture: nothing painted yet
-                                            cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", pending_id, pending_col, pending_row));
+                                            cmd_batch.push(copy_drag_replay_press(pending_id, pending_col, pending_row));
                                             copy_drag_pane = Some((pending_id, pending_rect));
                                         }
                                         // Route the drag to the pane it started in (falling

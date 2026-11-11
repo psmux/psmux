@@ -41,7 +41,7 @@ use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remot
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down,
     swap_pane, swap_pane_with_path, unzoom_if_zoomed, resize_pane_vertical,
     resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane,
-    handle_pane_mouse, copy_drag_begin, handle_split_set_sizes, handle_split_resize_done};
+    copy_drag_begin, handle_split_set_sizes, handle_split_resize_done};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding};
 use crate::commands::{parse_command_to_action, parse_menu_definition, execute_command_string};
 use crate::util::{list_windows_json, list_tree_json, list_windows_tmux};
@@ -4725,7 +4725,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // pointer 60 times across a pane running nvim drove 24 full
                 // client redraws, against 0 while idle.  With this gate and the
                 // client-side one in client.rs it is 1, the same as idle.
-                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); handle_pane_mouse(&mut app, pane_id, button, col, row, press); if button == 0 && press { crate::window_ops::note_pane_press(&mut app, pane_id, col, row); } if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
+                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press, replay) => { if app.mouse_enabled { app.latest_client_id = Some(cid); let inert = crate::window_ops::pane_mouse_is_inert_motion(&app, pane_id, button); crate::window_ops::handle_client_pane_mouse(&mut app, pane_id, button, col, row, press, replay); if !inert { state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } } }
                 CtrlReq::CopyDragBegin(cid, pane_id, a_col, a_row, c_col, c_row, rect_sel) => { if app.mouse_enabled { app.latest_client_id = Some(cid); copy_drag_begin(&mut app, pane_id, a_col, a_row, c_col, c_row, rect_sel); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::StatusWheel(cid, up, mods) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_status_wheel(&mut app, up, mods); state_dirty = true; meta_dirty = true; } }
                 CtrlReq::MouseKey(cid, name, target, col, row, btn) => { if app.mouse_enabled { app.latest_client_id = Some(cid); crate::window_ops::handle_mouse_key(&mut app, &name, &target, col, row, btn); state_dirty = true; meta_dirty = true; } }

@@ -2455,6 +2455,20 @@ pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press:
     inject_mouse_combined(pane, col, row, btn, press, 0, flags, &win_name);
 }
 
+/// A client `pane-mouse` event, as the server loop runs it. A left press
+/// goes through the click timer unless it is a `replay`: the client sends the
+/// press again when a drag enters copy mode (mouse-drag-enter-copy-mode), so
+/// the selection anchors at the press cell. tmux's copy-mode -M starts that
+/// drag from the press it already counted and never sees a second button
+/// down, so the replay must not count either: counted, it made the drag a
+/// double click 300 ms in (#1031).
+pub fn handle_client_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool, replay: bool) {
+    handle_pane_mouse(app, pane_id, button, col, row, press);
+    if button == 0 && press && !replay {
+        note_pane_press(app, pane_id, col, row);
+    }
+}
+
 /// tmux's click timer for a left press in a pane (server-client.c
 /// server_client_check_mouse and server_client_click_timer). Called for every
 /// left press psmux sees in a pane. A press inside the double click window
@@ -3162,6 +3176,9 @@ mod window_ops_tests {
         });
         app
     }
+
+    #[path = "../../../tests-rs/test_issue1031_drag_replay_click.rs"]
+    mod test_issue1031_drag_replay_click;
 
     #[test]
     fn swap_with_path_updates_mru_for_focused_pane_after_swap() {
