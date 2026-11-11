@@ -48,6 +48,87 @@ pub(crate) struct FloatJson {
     #[serde(default)] pub bstyle: String,
 }
 
+fn layout_default_status_line(
+    mut left: Vec<Span<'static>>,
+    tabs: Vec<Span<'static>>,
+    mut right: Vec<Span<'static>>,
+    tab_ranges: &[(usize, usize, usize)],
+    active: Option<usize>,
+    width: usize,
+    justify: &str,
+    base: Style,
+) -> crate::style::LayoutResult {
+    use crate::style::{layout_status_list, overlay_status_spans, spans_visual_width,
+        truncate_spans_keep_tail, truncate_spans_to_width, LayoutResult, StatusRangeType};
+
+    // tmux's default status-format (format-draw.c): the window list is
+    // trimmed first, then status-right, then status-left. With
+    // absolute-centre the list is trimmed only against the full width and
+    // drawn over status-left and status-right.
+    truncate_spans_to_width(&mut left, width);
+    let left_w = spans_visual_width(&left);
+    truncate_spans_keep_tail(&mut right, width - left_w);
+    let right_w = spans_visual_width(&right);
+    let right_start = width - right_w;
+    let absolute = matches!(justify, "absolute-centre" | "absolute-center");
+    let available = if absolute { width } else { right_start - left_w };
+    // Without an active window tmux keeps the list start in view, or its
+    // middle for centred lists.
+    let focus = tab_ranges.iter().find(|(idx, _, _)| Some(*idx) == active)
+        .map(|(_, start, end)| *start..*end)
+        .unwrap_or_else(|| match justify {
+            "centre" | "center" | "absolute-centre" | "absolute-center" => {
+                let middle = spans_visual_width(&tabs) / 2;
+                middle..middle
+            }
+            _ => 0..0,
+        });
+    let list = layout_status_list(
+        &tabs, available, focus, &[Span::styled("<", base)], &[Span::styled(">", base)],
+    );
+    let tabs_w = spans_visual_width(&list.spans);
+    let tabs_start = match justify {
+        "centre" | "center" => left_w + (right_start - left_w) / 2 - tabs_w / 2,
+        "absolute-centre" | "absolute-center" => (width - tabs_w) / 2,
+        "right" => right_start - tabs_w,
+        _ => left_w,
+    };
+    // Ranges keep tmux's order (left, windows, right): a click on a list
+    // cell drawn over status-left still resolves to the first match.
+    let mut ranges = Vec::new();
+    if left_w > 0 { ranges.push((StatusRangeType::Left, 0, left_w as u16)); }
+    for &(idx, start, end) in tab_ranges {
+        if let Some((start, end)) = list.project_range(start, end) {
+            ranges.push((StatusRangeType::Window(idx),
+                (tabs_start + start) as u16, (tabs_start + end) as u16));
+        }
+    }
+    if right_w > 0 {
+        ranges.push((StatusRangeType::Right, right_start as u16, width as u16));
+    }
+    let spans = if tabs_start >= left_w && tabs_start + tabs_w <= right_start {
+        let mut spans = left;
+        if tabs_start > left_w {
+            spans.push(Span::styled(" ".repeat(tabs_start - left_w), base));
+        }
+        spans.extend(list.spans);
+        if right_start > tabs_start + tabs_w {
+            spans.push(Span::styled(" ".repeat(right_start - tabs_start - tabs_w), base));
+        }
+        spans.extend(right);
+        spans
+    } else {
+        // Only absolute-centre gets here: the list covers part of a side.
+        let mut line = left;
+        if right_start > left_w {
+            line.push(Span::styled(" ".repeat(right_start - left_w), base));
+        }
+        line.extend(right);
+        overlay_status_spans(&line, tabs_start, list.spans, width)
+    };
+    LayoutResult { spans, ranges }
+}
+
 /// Content rect of a float on screen: the same placement and border inset
 /// `render_float_overlays` draws it with. `None` for a float too small to draw.
 pub(crate) fn float_inner_rect(content_chunk: Rect, fl: &FloatJson) -> Option<Rect> {
@@ -10073,8 +10154,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
             // Window tabs (the window list)
             let mut tab_spans_all: Vec<Span> = Vec::new();
-            let mut tab_rel_positions: Vec<(usize, u16, u16)> = Vec::new();
-            let mut tab_cursor: u16 = 0;
+            let mut tab_rel_positions: Vec<(usize, usize, usize)> = Vec::new();
+            let mut tab_cursor: usize = 0;
             for (i, w) in windows.iter().enumerate() {
                 let tab_text = if !w.tab_text.is_empty() {
                     w.tab_text.clone()
@@ -10088,7 +10169,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if i > 0 {
                     // Parse inline styles in separator (e.g. "#[fg=#44475a]|")
                     let sep_spans = crate::style::parse_inline_styles(&win_status_sep, sb_base);
-                    let sep_w: u16 = sep_spans.iter().map(|s| vt100::str_width(s.content.as_ref()) as u16).sum();
+                    let sep_w = crate::style::spans_visual_width(&sep_spans);
                     tab_spans_all.extend(sep_spans);
                     tab_cursor += sep_w;
                 }
@@ -10158,7 +10239,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 let parsed = crate::style::parse_inline_styles(&tab_text, fallback_style);
                 let tab_start = tab_cursor;
-                let tab_w: u16 = parsed.iter().map(|s| vt100::str_width(s.content.as_ref()) as u16).sum();
+                let tab_w = crate::style::spans_visual_width(&parsed);
                 tab_cursor += tab_w;
                 tab_rel_positions.push((w.idx, tab_start, tab_cursor));
                 tab_spans_all.extend(parsed);
@@ -10181,101 +10262,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             crate::style::truncate_spans_to_width(&mut left_spans, state.status_left_length);
             crate::style::truncate_spans_to_width(&mut right_spans, state.status_right_length);
 
-            // Measure widths using Unicode display width
-            let left_w: usize = left_spans.iter().map(|s| vt100::str_width(s.content.as_ref())).sum();
-            let tabs_w: usize = tab_spans_all.iter().map(|s| vt100::str_width(s.content.as_ref())).sum();
-            let right_w: usize = right_spans.iter().map(|s| vt100::str_width(s.content.as_ref())).sum();
             let total_width = status_chunk.width as usize;
-
-            // Assemble final spans based on status-justify
-            let mut status_spans: Vec<Span> = Vec::new();
-            match status_justify_str.as_str() {
-                "centre" | "center" => {
-                    // Centre: [left] [pad1] [tabs] [pad2] [right]
-                    // Tabs are centred in the space between left and right.
-                    let avail = total_width.saturating_sub(left_w).saturating_sub(right_w);
-                    let pad_before = avail.saturating_sub(tabs_w) / 2;
-                    let pad_after = avail.saturating_sub(tabs_w).saturating_sub(pad_before);
-                    status_spans.extend(left_spans);
-                    if pad_before > 0 { status_spans.push(Span::styled(" ".repeat(pad_before), sb_base)); }
-                    status_spans.extend(tab_spans_all);
-                    if pad_after > 0 { status_spans.push(Span::styled(" ".repeat(pad_after), sb_base)); }
-                    status_spans.extend(right_spans);
-                }
-                "absolute-centre" | "absolute-center" => {
-                    // Absolute-centre: tabs centred on the total terminal width
-                    let tabs_start = total_width.saturating_sub(tabs_w) / 2;
-                    status_spans.extend(left_spans);
-                    let pad_before = tabs_start.saturating_sub(left_w);
-                    if pad_before > 0 { status_spans.push(Span::styled(" ".repeat(pad_before), sb_base)); }
-                    status_spans.extend(tab_spans_all);
-                    let used = left_w + pad_before + tabs_w;
-                    let pad_after = total_width.saturating_sub(used).saturating_sub(right_w);
-                    if pad_after > 0 { status_spans.push(Span::styled(" ".repeat(pad_after), sb_base)); }
-                    status_spans.extend(right_spans);
-                }
-                "right" => {
-                    // Right: [left] [pad] [tabs] [right]
-                    status_spans.extend(left_spans);
-                    let used = left_w + tabs_w + right_w;
-                    let pad = total_width.saturating_sub(used);
-                    if pad > 0 { status_spans.push(Span::styled(" ".repeat(pad), sb_base)); }
-                    status_spans.extend(tab_spans_all);
-                    status_spans.extend(right_spans);
-                }
-                _ => {
-                    // Left (default): [left] [tabs] [pad] [right]
-                    status_spans.extend(left_spans);
-                    status_spans.extend(tab_spans_all);
-                    let used = left_w + tabs_w + right_w;
-                    let pad = total_width.saturating_sub(used);
-                    if pad > 0 { status_spans.push(Span::styled(" ".repeat(pad), sb_base)); }
-                    status_spans.extend(right_spans);
-                }
-            }
-            // Compute absolute tab positions based on status-justify layout
-            let tabs_x_offset: u16 = status_chunk.x + match status_justify_str.as_str() {
-                "centre" | "center" => {
-                    let avail = total_width.saturating_sub(left_w).saturating_sub(right_w);
-                    let pad_before = avail.saturating_sub(tabs_w) / 2;
-                    (left_w + pad_before) as u16
-                }
-                "absolute-centre" | "absolute-center" => {
-                    let tabs_start = total_width.saturating_sub(tabs_w) / 2;
-                    tabs_start as u16
-                }
-                "right" => {
-                    let used = left_w + tabs_w + right_w;
-                    let pad = total_width.saturating_sub(used);
-                    (left_w + pad) as u16
-                }
-                _ => left_w as u16, // "left" default
-            };
-            // tmux's default status-format marks status-left range=left, the
-            // window list range=window|N and status-right range=right
-            // (options-table.c OPTIONS_TABLE_STATUS_FORMAT1); this layout
-            // draws the same three parts, so it gets the same ranges.
-            client_status_ranges.clear();
-            if left_w > 0 {
-                client_status_ranges.push((status_chunk.y, crate::style::StatusRangeType::Left,
-                    status_chunk.x, status_chunk.x + left_w.min(total_width) as u16));
-            }
-            client_status_ranges.extend(tab_rel_positions.iter().map(|&(idx, s, e)| {
-                (status_chunk.y, crate::style::StatusRangeType::Window(idx), s + tabs_x_offset, e + tabs_x_offset)
-            }));
-            if right_w > 0 {
-                let tabs_end = (tabs_x_offset - status_chunk.x) as usize + tabs_w;
-                let right_start = total_width.saturating_sub(right_w).max(tabs_end).min(total_width);
-                client_status_ranges.push((status_chunk.y, crate::style::StatusRangeType::Right,
-                    status_chunk.x + right_start as u16, status_chunk.x + total_width as u16));
-            }
+            let layout = layout_default_status_line(
+                left_spans, tab_spans_all, right_spans, &tab_rel_positions,
+                windows.iter().find(|w| w.active).map(|w| w.idx),
+                total_width, &status_justify_str, sb_base,
+            );
+            let status_spans = layout.spans;
+            client_status_ranges = layout.ranges.into_iter().map(|(kind, start, end)| {
+                (status_chunk.y, kind, status_chunk.x + start, status_chunk.x + end)
+            }).collect();
             client_status_fallback_rows.clear();
             client_status_fallback_rows.push(status_chunk.y);
             client_status_row = status_chunk.y;
             client_status_rows = status_chunk.height;
             client_window_indices = windows.iter().map(|w| w.idx).collect();
-            // Truncate overall status line to fit the available width
-            crate::style::truncate_spans_to_width(&mut status_spans, total_width);
             // If a display-message is active, show it on the status bar
             // instead of the normal status content (tmux parity).
             // Uses message-style (default: bg=yellow,fg=black) matching tmux.
@@ -12119,6 +12120,10 @@ mod test_keystroke_echo_window;
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_cursor_rect.rs"]
 mod test_zoom_cursor_rect;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_default_status_overflow.rs"]
+mod test_default_status_overflow;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_border_status_cursor.rs"]
