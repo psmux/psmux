@@ -109,7 +109,11 @@ function Run-AllTabs {
     Write-Host "    status row $($s.Row): [$($s.Text.TrimEnd())]"
     $bad = @()
     for ($w = $Base; $w -lt $Base + $Windows; $w++) {
-        if (-not $s.Tabs.ContainsKey($w)) { $bad += "tab $w not rendered"; continue }
+        # Read the row again before every click: when the list overflows it
+        # scrolls to keep the window selected by the last click in view
+        # (tmux parity, #1038), so earlier columns go stale.
+        $s = Get-Tabs $cpid
+        if (-not $s.Tabs.ContainsKey($w)) { $bad += "tab $w not rendered in [$($s.Text.TrimEnd())]"; continue }
         # Aim at the ':' character, inside the tab text.
         $x = $s.Tabs[$w] + "$w".Length
         if ($script:UseVT) {
