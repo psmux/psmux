@@ -3477,16 +3477,8 @@ pub fn resolve_routing_target_with(
     route_warm: Option<&str>,
 ) -> Option<String> {
     // Adopt the current server (named by `$TMUX`) only when it is in-namespace.
-    if let Some(tmux_val) = tmux_env {
-        if let Some(base) = session_base_owning_tmux_port(tmux_val, psmux_dir) {
-            let in_namespace = match l_socket_name {
-                Some(ns) => base.starts_with(&format!("{}__", ns)),
-                None => true,
-            };
-            if in_namespace {
-                return Some(base);
-            }
-        }
+    if let Some(base) = pane_session_in_namespace(l_socket_name, tmux_env, psmux_dir) {
+        return Some(base);
     }
     // Otherwise the most recent real session in the namespace,
     if let Some(name) = resolve_last_session_name_ns_in(psmux_dir, l_socket_name) {
@@ -3503,6 +3495,22 @@ pub fn resolve_routing_target_with(
     // else a namespaced `X__default` so `-L X` never leaks to the un-namespaced
     // `default` server. With no `-L`, stay unresolved (the caller keeps "default").
     l_socket_name.map(|ns| format!("{}__default", ns))
+}
+
+/// The session of the pane this command runs in, named by `$TMUX`, when it is
+/// in the `-L` namespace: the server [`resolve_routing_target_with`] adopts
+/// before anything else.
+pub fn pane_session_in_namespace(
+    l_socket_name: Option<&str>,
+    tmux_env: Option<&str>,
+    psmux_dir: &std::path::Path,
+) -> Option<String> {
+    let base = session_base_owning_tmux_port(tmux_env?, psmux_dir)?;
+    let in_namespace = match l_socket_name {
+        Some(ns) => base.starts_with(&format!("{}__", ns)),
+        None => true,
+    };
+    in_namespace.then_some(base)
 }
 
 /// Find the session port-file base whose control port matches the one encoded
