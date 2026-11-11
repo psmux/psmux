@@ -3527,7 +3527,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                         continue;
                     };
-                    let mutates_state = !matches!(&req,
+                    let mutates_state = !req.is_read_only_query() && !matches!(&req,
                         CtrlReq::DumpState(..)
                         | CtrlReq::SendText(_)
                         | CtrlReq::SendKey(_)
@@ -4151,6 +4151,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(text);
                 }
                 CtrlReq::ClientAttach(cid, pid, features) => {
+                    crate::types::invalidate_delivered_frames();
                     // Registration and the attached counter are one idempotent
                     // operation. A duplicate attach for the same connection
                     // must not leave the session permanently ghost-attached.
@@ -4498,7 +4499,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // fields like bell and clipboard reach all clients.
                     // The cached copy omits them for NC dedup safety.
                     crate::pty_trace::mark_plain("s", combined_buf.len());
-                    crate::types::push_frame(&combined_buf);
+                    crate::types::push_frame_answered(&combined_buf, Some(dump_client_id));
                     let _ = resp.send(combined_buf.clone());
                     dump_state_seen_full.insert(dump_client_id);
                 }
@@ -4644,6 +4645,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::copy_mode::toggle_rectangle(&mut app);
                 }
                 CtrlReq::ClientSize(cid, w, h) => { 
+                    crate::types::invalidate_delivered_frames();
                     app.client_sizes.insert(cid, (w, h));
                     app.latest_client_id = Some(cid);
                     app.latest_size_client_id = Some(cid);
@@ -8023,6 +8025,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // client repaints from scratch, discarding any painted sixel,
                     // so re-ship every visible blob on the next frame.
                     app.shipped_image_ids.clear();
+                    crate::types::invalidate_delivered_frames();
                     state_dirty = true;
                     meta_dirty = true;
                 }

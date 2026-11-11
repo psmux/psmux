@@ -5437,7 +5437,7 @@ pub fn shutdown_client_stream(client_id: u64) {
         });
     }
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
-        v.retain(|(cid, _, _)| *cid != client_id);
+        v.retain(|r| r.client_id != client_id);
     }
     remove_directive_channel(client_id);
 }
@@ -5491,7 +5491,17 @@ pub enum WriterWake {
     Frame,
 }
 
-static FRAME_PUSH_SLOTS: std::sync::Mutex<Vec<(u64, FrameSlot, mpsc::Sender<WriterWake>)>> =
+/// One persistent client's push slot.
+struct FrameReceiver {
+    client_id: u64,
+    slot: FrameSlot,
+    poke: mpsc::Sender<WriterWake>,
+    /// [`frame_key`] of the last frame this client was given (pushed, or
+    /// answered to its own dump-state), `None` before the first one.
+    last_key: Option<u64>,
+}
+
+static FRAME_PUSH_SLOTS: std::sync::Mutex<Vec<FrameReceiver>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Register a frame slot for a persistent connection's writer thread.
@@ -5501,9 +5511,73 @@ static FRAME_PUSH_SLOTS: std::sync::Mutex<Vec<(u64, FrameSlot, mpsc::Sender<Writ
 pub fn register_frame_channel(client_id: u64, poke: mpsc::Sender<WriterWake>) -> FrameSlot {
     let slot: FrameSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
-        v.push((client_id, slot.clone(), poke));
+        v.push(FrameReceiver { client_id, slot: slot.clone(), poke, last_key: None });
     }
     slot
+}
+
+/// What identifies a frame's content for [`frame_owed`]: a hash of the
+/// whole line, or `None` when it carries a one shot (bell, clipboard write,
+/// image bytes). Those are events, not screen state, so such a frame is
+/// always delivered even when an earlier frame looked the same.
+pub(crate) fn frame_key(frame: &str) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut probe = frame.to_string();
+    if !crate::frame_oneshot::take(&mut probe).is_empty() {
+        return None;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    frame.hash(&mut h);
+    Some(h.finish())
+}
+
+/// Whether a client must be sent a frame whose key is `key`.
+///
+/// tmux redraws a client only when something it shows changed: a command
+/// that changes nothing (a `list-sessions`, a `show-options`, a
+/// `display-message -p` from a script polling the session) puts nothing on
+/// the client's tty. Here every request used to end in a pushed frame, so
+/// anything querying a session once a second sent its attached clients a
+/// byte for byte copy of the screen they already had, and the client parsed
+/// and repainted all of it (the #232 status-interval suite saw a second frame
+/// tens of milliseconds after each real one).
+///
+/// The same content is skipped only when the client already has it and
+/// nothing older is still waiting in its slot: an unread older frame must be
+/// replaced, or the writer would put the stale screen on the wire last.
+pub(crate) fn frame_owed(last_key: Option<u64>, key: Option<u64>, slot_pending: bool) -> bool {
+    match key {
+        None => true,
+        Some(k) => slot_pending || last_key != Some(k),
+    }
+}
+
+impl CtrlReq {
+    /// A request that only reads state and answers on its channel: it
+    /// changes nothing an attached client draws, so it owes no frame (tmux
+    /// redraws nothing for a `list-sessions` or a `show-options`). Requests
+    /// that look like queries but write as they read (list-panes and
+    /// display-message copy pane titles over first) are not listed.
+    pub(crate) fn is_read_only_query(&self) -> bool {
+        matches!(self,
+            CtrlReq::SessionInfo(_)
+            | CtrlReq::SessionInfoFormat(..)
+            | CtrlReq::HasSession(_)
+            | CtrlReq::ListTree(_)
+            | CtrlReq::DumpLayout(_)
+            | CtrlReq::ExpandFormat(..)
+            | CtrlReq::SessionOptionQuery(..)
+            | CtrlReq::ScopeSessionListing(..)
+            | CtrlReq::ShowOptions(_)
+            | CtrlReq::ShowWindowOptions(_)
+            | CtrlReq::ListKeys(_)
+            | CtrlReq::ListKeyNotes(..)
+            | CtrlReq::ListBuffers(_)
+            | CtrlReq::ListBuffersFormat(..)
+            | CtrlReq::ShowBuffer(_)
+            | CtrlReq::ShowNamedBuffer(..)
+        )
+    }
 }
 
 /// Push a serialized frame to all persistent clients.
@@ -5511,11 +5585,41 @@ pub fn register_frame_channel(client_id: u64, poke: mpsc::Sender<WriterWake>) ->
 /// the latest matters. The lock is held only for the duration of an
 /// Option::replace, never across I/O.
 /// Dead slots (poisoned mutex) are pruned automatically.
+/// A client that already has this exact frame is not sent it again
+/// ([`frame_owed`]).
 pub fn push_frame(frame: &str) {
+    push_frame_answered(frame, None);
+}
+
+/// Forget what every client was last given, so the next frame reaches all
+/// of them even if nothing in it changed: `refresh-client` asks for exactly
+/// that redraw, and an attach or a client resize repaints from scratch.
+pub fn invalidate_delivered_frames() {
     if let Ok(mut slots) = FRAME_PUSH_SLOTS.lock() {
-        slots.retain(|(_, slot, poke)| {
+        for r in slots.iter_mut() {
+            r.last_key = None;
+        }
+    }
+}
+
+/// [`push_frame`] for a frame that was also the dump-state reply to the
+/// client `answered`: that client is not sent it a second time.
+pub fn push_frame_answered(frame: &str, answered: Option<u64>) {
+    let key = frame_key(frame);
+    if let Ok(mut slots) = FRAME_PUSH_SLOTS.lock() {
+        slots.retain_mut(|r| {
+            let FrameReceiver { client_id, slot, poke, last_key } = r;
             match slot.lock() {
                 Ok(mut s) => {
+                    if Some(*client_id) == answered && s.is_none() {
+                        // The reply carried this frame (one shots included).
+                        *last_key = key;
+                        return true;
+                    }
+                    if !frame_owed(*last_key, key, s.is_some()) {
+                        return true;
+                    }
+                    *last_key = key;
                     // Only an empty->full transition needs a poke. If a frame
                     // is already waiting the writer has not drained it yet, so
                     // it is either running or already has a wake queued: this
@@ -5552,7 +5656,7 @@ pub fn has_frame_receivers() -> bool {
 /// returns false when no live clients remain.
 pub fn deregister_frame_channel(client_id: u64) {
     if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
-        v.retain(|(cid, _, _)| *cid != client_id);
+        v.retain(|r| r.client_id != client_id);
     }
 }
 
@@ -5675,6 +5779,10 @@ pub struct ParsedTarget {
 #[cfg(test)]
 #[path = "../tests-rs/test_pr267_backpressure_proof.rs"]
 mod tests_pr267_backpressure;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue232_unchanged_frame.rs"]
+mod tests_issue232_unchanged_frame;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_client_connection_teardown.rs"]
