@@ -111,3 +111,75 @@ fn exchange_ends_an_unterminated_request_with_a_newline() {
     assert_eq!(got, "done\n");
 }
 
+
+#[test]
+fn reply_required_only_for_commands_that_always_print() {
+    for l in [
+        "display-message -p -- \"#{session_name}\"\n",
+        "display -pt main x\n",
+        "list-sessions\n",
+        "list-windows -a -F \"#{window_id}\"\n",
+        "list-panes -F \"#{pane_id}\"\n",
+        "list-keys\n",
+        "capture-pane -p\n",
+        "new-session -d -P -F \"#{session_name}\" -s x\n",
+        "split-window -dP\n",
+    ] {
+        assert!(reply_required(l), "{l:?} always prints on success");
+    }
+    for l in [
+        "set-option -g status off\n",
+        "display-message hello\n",
+        "list-windows -f \"#{==:#{window_name},x}\"\n",
+        "list-keys -T copy-mode\n",
+        "capture-pane\n",
+        "new-session -d -s x\n",
+        "send-keys -t main -- -p\n",
+        "display-message -p a ; set -g status off\n",
+        "list-buffers\n",
+        "show-options -w\n",
+        "\n",
+    ] {
+        assert!(!reply_required(l), "{l:?} may succeed silently");
+    }
+}
+
+#[test]
+fn ack_then_reset_with_no_reply_is_an_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 256];
+        let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+        let _ = s.read(&mut buf);
+        let _ = s.write_all(b"OK\n");
+        // Abort: linger 0 makes the close a reset.
+        socket_with_zero_linger(&s);
+        drop(s);
+    });
+    let got = exchange_on_port(port, "k", None, "display-message -p x\n", Some(Duration::from_secs(3)));
+    server.join().unwrap();
+    let err = got.expect_err("an ack followed by a reset is a lost reply");
+    assert!(err.to_string().contains("no reply from server") || err.to_string().contains("no response"), "{err}");
+}
+
+#[cfg(windows)]
+fn socket_with_zero_linger(s: &std::net::TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    #[repr(C)]
+    struct Linger { l_onoff: u16, l_linger: u16 }
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn setsockopt(s: usize, level: i32, name: i32, val: *const u8, len: i32) -> i32;
+    }
+    const SOL_SOCKET: i32 = 0xffff;
+    const SO_LINGER: i32 = 0x0080;
+    let l = Linger { l_onoff: 1, l_linger: 0 };
+    unsafe {
+        setsockopt(s.as_raw_socket() as usize, SOL_SOCKET, SO_LINGER,
+            &l as *const Linger as *const u8, std::mem::size_of::<Linger>() as i32);
+    }
+}
+#[cfg(not(windows))]
+fn socket_with_zero_linger(_s: &std::net::TcpStream) {}

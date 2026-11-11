@@ -3110,6 +3110,11 @@ pub fn send_control(line: String) -> io::Result<()> {
 // left of our input and closes. So the request is complete when its last
 // line ends in a newline, and the reply is complete at the server's EOF.
 
+/// How often an unbounded wait in [`exchange_on_port`] looks at the server's
+/// end of the connection. Only reached after a whole tick without a byte, so
+/// it costs nothing on the replies that matter for latency.
+const UNBOUNDED_WAIT_TICK: Duration = Duration::from_millis(1000);
+
 /// The error for a one-shot connection that closed without a single byte:
 /// not even the AUTH acknowledgement, which the server writes before it reads
 /// the command. Never an empty result.
@@ -3172,7 +3177,53 @@ fn control_endpoint(line: &str) -> io::Result<(u16, String, Option<String>)> {
 
 fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
     let (port, key, target) = control_endpoint(&line)?;
-    exchange_on_port(port, &key, target.as_deref(), &line, read_timeout)
+    let reply = exchange_on_port(port, &key, target.as_deref(), &line, read_timeout)?;
+    if reply.is_empty() && reply_required(&line) {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("no reply from server for '{}' (the connection closed before the reply arrived)",
+                line.split_whitespace().next().unwrap_or("")),
+        ));
+    }
+    Ok(reply)
+}
+
+/// Whether a successful `line` always prints something, so an empty reply can
+/// only mean the reply was lost on the way (a loopback filter that drops it).
+///
+/// Deliberately narrow: one command (no `;` list), and only commands whose
+/// success output is never empty in tmux: `display-message -p` (at least a
+/// newline), the unfiltered `list-sessions`, `list-windows`, `list-panes`
+/// (there is always a session, window and pane to list), `list-keys` of all
+/// tables,
+/// `list-commands`, `capture-pane -p` (one line per pane row) and any `-P`
+/// print of what a command created. Everything else, `set-option` above all,
+/// may succeed silently and keeps exiting 0 with no output.
+pub(crate) fn reply_required(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let Some(&cmd) = tokens.first() else { return false };
+    if tokens.iter().any(|t| *t == ";" || *t == "\\;" || t.ends_with("\\;")) {
+        return false;
+    }
+    // Flags before `--` only; a clustered `-pt` counts as -p and -t.
+    let flags: Vec<&str> = tokens[1..]
+        .iter()
+        .take_while(|t| **t != "--")
+        .filter(|t| t.len() > 1 && t.starts_with('-') && !t.starts_with("--"))
+        .copied()
+        .collect();
+    let has = |c: char| flags.iter().any(|f| f[1..].contains(c));
+    match cmd {
+        "display-message" | "display" => has('p'),
+        "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp" => !has('f'),
+        // One table (`-T`) may hold no bindings at all.
+        "list-keys" | "lsk" => !has('T'),
+        "list-commands" | "lscm" => true,
+        "capture-pane" | "capturep" => has('p'),
+        "new-session" | "new" | "new-window" | "neww" | "split-window" | "splitw"
+        | "break-pane" | "breakp" => has('P'),
+        _ => false,
+    }
 }
 
 /// How the CLI's run-shell went: the server ran it and replied natively, or
@@ -3275,7 +3326,10 @@ pub fn exchange_on_port(
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad server address"))?;
     let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1000))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(read_timeout);
+    // An unbounded wait (a forwarded if-shell, run-shell or source-file, and a
+    // source job's own commands) reads in ticks so it can look at the server's
+    // end of the connection while it waits (see `server_end_lost` below).
+    let _ = stream.set_read_timeout(read_timeout.or(Some(UNBOUNDED_WAIT_TICK)));
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
@@ -3288,13 +3342,38 @@ pub fn exchange_on_port(
     let mut temp = [0u8; 4096];
     let mut timed_out = false;
     let mut read_error: Option<io::Error> = None;
+    let mut server_end_lost = false;
+    let our_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
     loop {
         match std::io::Read::read(&mut stream, &mut temp) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&temp[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => { timed_out = true; break; }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                if read_timeout.is_some() {
+                    timed_out = true;
+                    break;
+                }
+                // No time bound: the command may legitimately run for hours
+                // (run-shell). The wait ends on the server's EOF, or once the
+                // server's end of this connection is gone or closing without
+                // that EOF ever reaching us, which a loopback filter that
+                // swallows FINs does. On an ordinary machine the FIN arrives
+                // with the close and ends the read first, so this never fires.
+                if our_port != 0
+                    && crate::platform::process_kill::loopback_server_end_closed(port, our_port)
+                {
+                    server_end_lost = true;
+                    break;
+                }
+            }
             Err(e) => { read_error = Some(e); break; }
         }
+    }
+    if server_end_lost {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "lost the connection to the server: it closed, but the end of its reply never arrived",
+        ));
     }
     // Not even the AUTH acknowledgement came back: the connection was cut off
     // before the server answered. An empty reply here used to print nothing
@@ -3327,6 +3406,19 @@ pub fn exchange_on_port(
     // prefix: capture-pane and show-buffer return arbitrary pane content, which
     // may legitimately begin with the word ERROR, and misreading that as a
     // refusal would be a worse bug than the one being fixed.
+    //
+    // The server acknowledged, then the connection was reset before a single
+    // byte of the reply: the reply was lost, which is not an empty result.
+    // (A server ends a one-shot connection with shutdown, drain and close, so
+    // a reset is never how a complete reply ends.)
+    if result.is_empty() {
+        if let Some(e) = read_error {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("no reply from server (the connection was reset after it answered: {})", e),
+            ));
+        }
+    }
     let trimmed = result.trim();
     if trimmed == "ERROR: Authentication required" || trimmed == "ERROR: Invalid session key" {
         return Err(io::Error::new(
@@ -3334,8 +3426,8 @@ pub fn exchange_on_port(
             trimmed.trim_start_matches("ERROR:").trim().to_string(),
         ));
     }
-    // A read timeout means the reply is INCOMPLETE. The half-close above makes a
-    // complete reply end in a definitive server-side EOF (Ok(0)), so landing in
+    // A read timeout means the reply is INCOMPLETE. The server ends a complete
+    // reply with a definitive server-side EOF (Ok(0)), so landing in
     // the timeout branch at all means we did not get the whole answer, whatever
     // is already in `buf`. The old guard also required `buf.is_empty()`, which
     // the OK ack made permanently false on any authenticated connection, so a
