@@ -700,6 +700,12 @@ pub(crate) struct HyperlinkRun {
     pub style: ratatui::style::Style,
 }
 
+/// The OSC 9;4 value this client last wrote or decided not to write, kept for
+/// the life of the client process so a switch-client, which starts
+/// `run_remote` again against another server, compares against what the
+/// terminal shows (issue #1028). `None` until the first change.
+static LAST_HOST_PROGRESS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 thread_local! {
     /// Hyperlink runs collected during the current frame's render, drained and
     /// emitted after `terminal.draw()`. Thread-local because the client renders
@@ -4415,9 +4421,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Last OSC 0 (host terminal title) value emitted to the host terminal.
     // Tracked across iterations so we only re-emit when the title changes.
     let mut last_emitted_host_title: Option<String> = None;
-    // Issue #269: last OSC 9;4 (host terminal progress) value emitted.
-    // Same debounce pattern as host_title.
-    let mut last_emitted_host_progress: Option<String> = None;
+    // Issue #269: last OSC 9;4 (host terminal progress) value seen. Hidden to
+    // begin with, as tmux's zeroed `c->progress_bar`, so a pane that never set
+    // one writes nothing at attach. It belongs to the client, not to one
+    // server, so it carries over a switch-client to another session, which
+    // then clears a bar the old session left (tmux keeps `c->progress_bar`
+    // across `server_client_set_session`).
+    let mut last_emitted_host_progress = LAST_HOST_PROGRESS
+        .lock()
+        .ok()
+        .and_then(|last| last.clone())
+        .unwrap_or_else(|| String::from("0;0"));
     // ── Sixel graphics (#431) ───────────────────────────────────────
     // Session-lifetime blob cache: image id -> decoded raw ESC P..ST bytes.
     // Blobs are shipped ONCE per id in the dump-state `image_blobs` map, so
@@ -9042,8 +9056,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // new OSC 0 sequence if it has changed.  Stored as a local so
         // it survives `state` being moved into its other fields below.
         let host_title_this_frame: Option<String> = state.host_title.clone();
-        // Issue #269: capture host_progress for post-draw OSC 9;4 emit.
-        let host_progress_this_frame: Option<String> = state.host_progress.clone();
+        // Issue #269: capture host_progress for the post-draw write. A frame
+        // with none is a pane that never set one, which tmux's zeroed
+        // `base.progress_bar` writes as hidden, so switching to it clears the
+        // terminal (server-client.c:2659 at tag 3.8). The options ride on the
+        // frame, and are read only when the value changes.
+        // A frame with no change compares one short string and allocates
+        // nothing.
+        let host_progress_this_frame = state.host_progress.as_deref().unwrap_or("0;0");
+        let host_progress_change = if host_progress_this_frame != last_emitted_host_progress {
+            let sequence = crate::terminal_overrides::progress_sequence(
+                state.client_render_options.terminal_features.as_deref(),
+                state.client_render_options.terminal_overrides.as_deref().unwrap_or(&[]),
+                &crate::terminal_overrides::client_term(),
+                host_progress_this_frame,
+            );
+            Some((host_progress_this_frame.to_string(), sequence))
+        } else {
+            None
+        };
 
         // Update prefix key from server config (if provided)
         if let Some(ref prefix_str) = state.prefix {
@@ -10916,26 +10947,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
         // ── Post-draw: forward OSC 9;4 progress (issue #269) ─────────
         // host_progress is "<state>;<value>" e.g. "1;50" (default, 50%) or
-        // "0;0" (hide).  Re-emit ESC ] 9 ; 4 ; <state> ; <value> ESC \ to
-        // the host terminal so Windows Terminal / iTerm2 / kitty render
-        // the progress indicator that the pane app intended.
-        if host_progress_this_frame != last_emitted_host_progress {
-            if let Some(ref prog) = host_progress_this_frame {
-                if let Some((s, v)) = prog.split_once(';') {
-                    if !s.is_empty() && !v.is_empty()
-                        && s.bytes().all(|b| b.is_ascii_digit())
-                        && v.bytes().all(|b| b.is_ascii_digit())
-                    {
-                        use std::io::Write;
-                        let mut out = std::io::stdout().lock();
-                        let _ = out.write_all(b"\x1b]9;4;");
-                        let _ = out.write_all(s.as_bytes());
-                        let _ = out.write_all(b";");
-                        let _ = out.write_all(v.as_bytes());
-                        let _ = out.write_all(b"\x1b\\");
-                        let _ = out.flush();
-                    }
-                }
+        // "0;0" (hide). The bytes are this client's `Spb`, from `terminal-features`
+        // and `terminal-overrides`, ESC ] 9 ; 4 ; <state> ; <value> ESC \ unless
+        // an override changed it, and nothing without one (tty.c:3219 at tag
+        // 3.8). The value counts as seen either way, as tmux keeps it in
+        // `c->progress_bar` before it looks for the capability.
+        if let Some((host_progress_this_frame, sequence)) = host_progress_change {
+            if let Some(sequence) = sequence {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(sequence.as_bytes());
+                let _ = out.flush();
+            }
+            if let Ok(mut last) = LAST_HOST_PROGRESS.lock() {
+                *last = Some(host_progress_this_frame.clone());
             }
             last_emitted_host_progress = host_progress_this_frame;
         }

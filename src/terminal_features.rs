@@ -7,10 +7,17 @@ impl TerminalFeatures {
     pub const RGB: Self = Self(1 << 1);
     pub const HYPERLINKS: Self = Self(1 << 2);
     pub const TITLE: Self = Self(1 << 3);
+    /// Not reported by a client: the server takes it from `terminal-features`
+    /// and the client's TERM, see [`progressbar_enabled`].
+    pub const PROGRESSBAR: Self = Self(1 << 4);
 
     pub const fn from_bits(bits: u64) -> Self { Self(bits) }
     pub const fn bits(self) -> u64 { self.0 }
     pub const fn contains(self, feature: Self) -> bool { self.0 & feature.0 == feature.0 }
+    /// This mask with `feature` set or cleared.
+    pub const fn with(self, feature: Self, on: bool) -> Self {
+        if on { Self(self.0 | feature.0) } else { Self(self.0 & !feature.0) }
+    }
 
     pub fn from_hex(report: &str) -> Option<Self> {
         let digits = report.strip_prefix("0x")?;
@@ -27,6 +34,7 @@ impl std::fmt::Display for TerminalFeatures {
         for (feature, name) in [
             (Self::COLOR_256, "256"), (Self::RGB, "RGB"),
             (Self::HYPERLINKS, "hyperlinks"), (Self::TITLE, "title"),
+            (Self::PROGRESSBAR, "progressbar"),
         ] {
             if self.contains(feature) {
                 write!(f, "{separator}{name}")?;
@@ -35,6 +43,55 @@ impl std::fmt::Display for TerminalFeatures {
         }
         Ok(())
     }
+}
+
+/// The feature names tmux 3.8 knows (`tty_features`, tty-features.c:391).
+/// tmux stops reading an element at a name it does not know, so these decide
+/// whether a `progressbar` later in the same element is reached.
+const TMUX_FEATURES: [&str; 23] = [
+    "256", "appesc", "bpaste", "ccolour", "clipboard", "hyperlinks", "cstyle", "extkeys",
+    "focus", "ignorefkeys", "margins", "mouse", "osc7", "overline", "progressbar", "rectfill",
+    "RGB", "sixel", "strikethrough", "sync", "title", "usstyle", "utf8",
+];
+
+/// Whether `terminal-features` gives a client with this TERM the `progressbar`
+/// feature, read as tmux reads the option (tty-term.c:619-629 at tag 3.8) and
+/// each element's features (`tty_parse_features`, tty-features.c:426):
+/// elements in array order, a name in any case, `name@` removes the feature
+/// and stops any later element adding it, and a name tmux does not know ends
+/// that element.
+pub fn progressbar_enabled<I, S>(entries: I, term: &str) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let (mut enabled, mut disabled) = (false, false);
+    for entry in entries {
+        let Some((pattern, features)) = crate::terminal_overrides::split_pattern(entry.as_ref()) else {
+            continue;
+        };
+        if !crate::terminal_overrides::fnmatch(&pattern, term) {
+            continue;
+        }
+        for name in features.split(':') {
+            let (name, remove) = match name.strip_suffix('@') {
+                Some(name) => (name, true),
+                None => (name, false),
+            };
+            if !TMUX_FEATURES.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                break;
+            }
+            if name.eq_ignore_ascii_case("progressbar") {
+                if remove {
+                    enabled = false;
+                    disabled = true;
+                } else if !disabled {
+                    enabled = true;
+                }
+            }
+        }
+    }
+    enabled
 }
 
 #[cfg(test)]

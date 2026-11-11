@@ -1528,7 +1528,17 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
             }
         },
         "client_termname" | "client_termtype" => env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()),
-        "client_termfeatures" => format_client(app).map(|ci| ci.termfeatures.to_string()).unwrap_or_default(),
+        // tmux lists the feature whatever `Spb` then does with it (measured
+        // from tmux 3.8 with `Spb@`), so only `terminal-features` decides here.
+        "client_termfeatures" => format_client(app).map(|ci| {
+            let progressbar = crate::terminal_features::progressbar_enabled(
+                app.terminal_features.iter().map(|(_, entry)| entry),
+                &ci.term,
+            );
+            ci.termfeatures
+                .with(crate::terminal_features::TerminalFeatures::PROGRESSBAR, progressbar)
+                .to_string()
+        }).unwrap_or_default(),
         "client_utf8" => "1".into(),
         "client_cell_width" => "8".into(),
         "client_cell_height" => "16".into(),
@@ -1995,6 +2005,19 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 } else { String::new() }
             } else { String::new() }
         }
+        // format.c:2612 and :2623 at tag 3.8. A pane that never set one reads
+        // as hidden and 0.
+        "pane_pb_state" => target_pane().map_or(String::new(), |p| {
+            match p.progress().0 {
+                0 => "hidden",
+                1 => "normal",
+                2 => "error",
+                3 => "indeterminate",
+                _ => "paused",
+            }
+            .to_string()
+        }),
+        "pane_pb_progress" => target_pane().map_or(String::new(), |p| p.progress().1.to_string()),
         "pane_pid" => {
             if let Some(p) = target_pane() {
                 p.child_pid.map(|pid| pid.to_string()).unwrap_or_default()

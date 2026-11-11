@@ -578,6 +578,7 @@ pub(crate) fn dispatch(
                         // environment, so it never changed anything, and it
                         // dropped a missing name instead of recording -NAME.
                         if let Some(src) = app.env_scopes.pending_client_environ.take() {
+                            app.client_registry.get_mut(&cid).unwrap().term = crate::terminal_overrides::environ_term(&src);
                             let patterns = app.update_environment.values();
                             crate::environ::update_environment(&mut app.environment, &mut app.env_scopes, &patterns, &src, false);
                         }

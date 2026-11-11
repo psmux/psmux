@@ -236,9 +236,9 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `warm` | Bool | `on` | Pre-spawn shells for instant window/pane creation (see [warm-sessions.md](warm-sessions.md)) |
 | `copy-command` | Str | | Shell command for clipboard pipe |
 | `codepoint-widths` | Str | | Array of overrides for how many columns Unicode codepoints occupy, comma separated or one element with `codepoint-widths[N]` (see [Codepoint widths](#codepoint-widths)) |
-| `terminal-features` | Str | *(tmux 3.8 defaults)* | Array of `pattern:feature:feature` entries, comma separated or one element with `terminal-features[N]`, starting as tmux's `xterm*:clipboard:ccolour:cstyle:focus:title`, `screen*:title` and `rxvt*:ignorefkeys`. psmux keeps it for `set`, `show` and `#{terminal-features}` so a tmux config carries over, but takes a client's features from the client itself at attach, so the entries change nothing |
+| `terminal-features` | Str | *(tmux 3.8 defaults)* | Array of `pattern:feature:feature` entries, comma separated or one element with `terminal-features[N]`, starting as tmux's `xterm*:clipboard:ccolour:cstyle:focus:title`, `screen*:title` and `rxvt*:ignorefkeys`, then `*:progressbar`, which is psmux's own. Only `progressbar` is read, for whether a client writes the progress indicator (`*:progressbar@` stops it, see [Progress Indicator](compatibility.md#progress-indicator-osc-94)). psmux keeps the rest for `set`, `show` and `#{terminal-features}` so a tmux config carries over, and takes a client's other features from the client itself at attach |
 | `user-keys` | Str | | Array of key sequences the outer terminal sends, comma separated or one element with `user-keys[N]`; the sequence of element N is the key `UserN` for `bind-key`. Read where psmux parses VT input itself, which the console input route does not (see [User keys](#user-keys)) |
-| `terminal-overrides` | Str | `linux*:AX@` | Array of `pattern:cap:cap` entries matched against the client's `TERM`. `smcup@` and `rmcup@` keep the attached client off the host terminal's alternate screen (see [Terminal overrides](#terminal-overrides)) |
+| `terminal-overrides` | Str | `linux*:AX@` | Array of `pattern:cap:cap` entries matched against the client's `TERM`. `smcup@` and `rmcup@` keep the attached client off the host terminal's alternate screen, and `Spb` changes or removes what it writes for the progress indicator (see [Terminal overrides](#terminal-overrides)) |
 | `set-clipboard` | Str | `external` | Clipboard interaction (`on`/`off`/`external`). A copy mode yank reaches the Windows clipboard on every value, with OSC 52 to the outer terminal unless `off`. An application's own OSC 52 creates a paste buffer only on `on`, as in tmux; on `external` psmux still forwards it to the outer terminal and the Windows clipboard, where tmux ignores it; `off` ignores it |
 | `main-pane-width` | String | `80` | Main pane width in the main-vertical layout, in cells or a percentage such as `30%` |
 | `main-pane-height` | String | `24` | Main pane height in the main-horizontal layout, in cells or a percentage such as `30%` |
@@ -1629,12 +1629,13 @@ where every key keeps its modifiers without any of this.
 `terminal-overrides` is the tmux option for adjusting what psmux assumes about
 the terminal a client is attached from. psmux has no terminfo database: the
 client writes VT sequences directly. So of all the capabilities tmux knows,
-psmux honours the two that change what the client sends on its own account:
+psmux honours the three that change what the client sends on its own account:
 
 | Capability | Effect |
 |---|---|
 | `smcup` | Entering the host terminal's alternate screen (`ESC[?1049h`) when a client attaches |
 | `rmcup` | Leaving it again (`ESC[?1049l`) when the client detaches or exits |
+| `Spb` | The progress indicator of the active pane, see [Progress Indicator](compatibility.md#progress-indicator-osc-94) |
 
 Every other capability is accepted, kept, shown by `show-options`, and ignored.
 
@@ -1671,7 +1672,8 @@ How entries are read, the same way tmux reads them:
 
 The option is read by the server, from the config file or from a `set` at
 runtime, and each client decides when it attaches. A change made while a
-client is attached applies from the next attach.
+client is attached applies from the next attach, except `Spb`, which applies
+from the next time the indicator changes.
 
 Read it back with:
 

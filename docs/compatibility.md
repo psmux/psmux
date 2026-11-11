@@ -406,7 +406,7 @@ The inbox conhost keeps a table of its own and hands psmux plain cursor moves in
 
 ### Progress Indicator (OSC 9;4)
 
-A pane sets the progress indicator with `ESC]9;4;state;value ESC\`, and the client writes the active pane's to the host terminal. The fields are read as tmux's `input_osc_9` reads them:
+A pane sets the progress indicator with `ESC]9;4;state;value ESC\`. Each pane keeps its own, `#{pane_pb_state}` (`hidden`, `normal`, `error`, `indeterminate` or `paused`) and `#{pane_pb_progress}` read it, and the client writes the active pane's to the host terminal when it changes. The fields are read as tmux's `input_osc_9` reads them:
 
 ```
 ESC]9;4;1;50 ESC\              state and value
@@ -414,7 +414,23 @@ ESC]9;4;3 ESC\                 state only (a trailing ; is the same), the value 
 ESC]9;4;3;70 ESC\              indeterminate never takes a value, the value stays
 ```
 
-The state is one digit, 0 hidden, 1 normal, 2 error, 3 indeterminate, 4 paused. The value is at most 100. Anything else leaves the indicator as it was. The client always writes both fields, so `ESC]9;4;3 ESC\` after a value of 50 reaches the host terminal as `ESC]9;4;3;50 ESC\`, as it does from tmux. RIS leaves the indicator alone, and a respawn clears it.
+The state is one digit, 0 hidden, 1 normal, 2 error, 3 indeterminate, 4 paused. The value is at most 100. Anything else leaves the indicator as it was. The client always writes both fields, so `ESC]9;4;3 ESC\` after a value of 50 reaches the host terminal as `ESC]9;4;3;50 ESC\`, as it does from tmux. RIS leaves the indicator alone, copy mode does not stop it, a dead pane keeps it, and a respawn clears it. A pane that never set one reads as `hidden` and `0`, so switching to it writes `ESC]9;4;0;0 ESC\`. A detach writes nothing, as in tmux, so the host terminal keeps showing what it last got.
+
+What the client writes is the `Spb` capability, which the `progressbar` feature of `terminal-features` gives it:
+
+| Config | The client writes |
+|---|---|
+| The default | `ESC]9;4;state;value ESC\` |
+| `set -as terminal-features '*:progressbar@'` | Nothing. A later `*:progressbar` does not bring it back |
+| `set -g terminal-features 'xterm*:title'` | Nothing, since that list no longer has the feature |
+| `set -as terminal-overrides '*:Spb@'` | Nothing, though `#{client_termfeatures}` still lists the feature |
+| `set -as terminal-overrides '*:Spb=\E]9;4;%p1%d;%p2%d\a'` | The same ending in BEL, with or without the feature |
+
+Three things differ from tmux:
+
+- `terminal-features` holds one more element, `*:progressbar`. tmux turns the feature on for the terminals it identifies, which do not include Windows Terminal, so there it has to be added by hand. psmux does not ask the terminal which one it is, so it starts on for all of them.
+- An option set while a client is attached counts from the next write. tmux reads both at attach.
+- `Spb` is expanded for `%p1`, `%p2`, `%d` and `%%`. A value with any other terminfo operator writes nothing, and so does a value that does not use `%p2`, which is also what tmux does for that one.
 
 ## Behavioral Differences from tmux
 

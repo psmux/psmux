@@ -139,6 +139,10 @@ pub(crate) fn version(app: &AppState) -> u64 {
             pane.id.hash(&mut version);
             if let Ok(parser) = pane.live_parser().lock() {
                 parser.screen().program_status().generation().hash(&mut version);
+                // A window's status formats can read #{pane_pb_state} and
+                // #{pane_pb_progress}, and tmux redraws the status line for
+                // an OSC 9;4 in any window (input.c:3018 at tag 3.8).
+                parser.screen().progress().hash(&mut version);
             }
         });
     }

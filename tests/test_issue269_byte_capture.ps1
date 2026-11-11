@@ -82,8 +82,9 @@ if ($titleFound) {
 # Test 3: Source code inspection - the OSC 9;4 emit block has the
 #         expected shape (3 separate write_all calls + flush, mirrors OSC 0).
 # =============================================================================
+# The bytes come from terminal_overrides.rs, the capability the client writes.
 Write-Host "`n[Test 3] client.rs has the OSC 9;4 emit block with correct shape" -ForegroundColor Yellow
-$clientSrc = Get-Content "$PSScriptRoot\..\src\client.rs" -Raw
+$clientSrc = (Get-Content "$PSScriptRoot\..\src\client.rs" -Raw) + (Get-Content "$PSScriptRoot\..\src\terminal_overrides.rs" -Raw)
 $shapeChecks = @(
     @{ Pattern = '\\x1b\]9;4;'; Label = 'Emit literal: \x1b]9;4;' }
     @{ Pattern = 'host_progress_this_frame\s*!=\s*last_emitted_host_progress'; Label = 'Debounce comparison' }

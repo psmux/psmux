@@ -488,7 +488,8 @@ pub fn parse_display_message_args<S: AsRef<str>>(args: &[S]) -> Result<DisplayMe
 
 /// The format variables `display-message -a` lists, sorted like tmux's: the
 /// names tmux 3.4 prints for `display -p -a` (measured) that psmux's format
-/// expander also knows. Each is printed as `name=value`.
+/// expander also knows, and `pane_pb_progress` and `pane_pb_state`, which
+/// tmux 3.8 prints too. Each is printed as `name=value`.
 pub const DISPLAY_ALL_VARIABLES: &[&str] = &[
     "alternate_on", "alternate_saved_x", "alternate_saved_y", "command", "config_files",
     "cursor_character", "cursor_flag", "cursor_x", "cursor_y", "history_bytes", "history_limit",
@@ -498,7 +499,7 @@ pub const DISPLAY_ALL_VARIABLES: &[&str] = &[
     "pane_at_left", "pane_at_right", "pane_at_top", "pane_bg", "pane_bottom",
     "pane_current_command", "pane_current_path", "pane_dead", "pane_fg", "pane_format",
     "pane_height", "pane_id", "pane_in_mode", "pane_index", "pane_input_off", "pane_last",
-    "pane_left", "pane_marked", "pane_marked_set", "pane_path", "pane_pid", "pane_pipe",
+    "pane_left", "pane_marked", "pane_marked_set", "pane_path", "pane_pb_progress", "pane_pb_state", "pane_pid", "pane_pipe",
     "pane_right", "pane_search_string", "pane_start_command", "pane_start_path",
     "pane_synchronized", "pane_tabs", "pane_title", "pane_top", "pane_tty",
     "pane_unseen_changes", "pane_width", "pid", "scroll_region_lower", "scroll_region_upper",
