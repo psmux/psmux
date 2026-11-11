@@ -102,6 +102,10 @@ name = "issue980_pane_colours"
 path = "tests/issue980_pane_colours.rs"
 
 [[test]]
+name = "clipboard_query"
+path = "tests/clipboard_query.rs"
+
+[[test]]
 name = "palette_queries"
 path = "tests/palette_queries.rs"
 

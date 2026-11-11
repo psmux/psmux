@@ -63,6 +63,13 @@ pub(crate) fn osc_query(params: &[&[u8]], program_status: bool, bel: bool) -> Op
         [b"10", b"?"] => Some(TerminalQuery::ForegroundColour { colour: None, bel }),
         [b"11", b"?"] => Some(TerminalQuery::BackgroundColour { colour: None, bel }),
         [b"12", b"?"] => Some(TerminalQuery::CursorColour { colour: None, bel }),
+        // tmux keeps the selection characters it knows, each once, and
+        // answers with the first (`input_osc_52_parse`, input.c:3371 at tag
+        // 3.8), so `xc` is `c` and `x` or nothing is none.
+        [b"52", selection, b"?"] => Some(TerminalQuery::Clipboard {
+            selection: selection.iter().copied().find(|c| b"cpqs01234567".contains(c)).unwrap_or(0),
+            bel,
+        }),
         // OSC 4 can hold several queries among its sets, so the live parser
         // takes them pair by pair (`palette_pairs`), not here.
         _ => None,

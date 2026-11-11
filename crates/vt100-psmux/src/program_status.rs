@@ -375,6 +375,16 @@ pub enum TerminalQuery {
         /// 3.8).
         bel: bool,
     },
+    /// The clipboard (`OSC 52 ; selection ; ?`), answered from the paste
+    /// buffers or the system clipboard as the host's options say
+    /// (`input_osc_52_reply`, input.c:3341 at tag 3.8).
+    Clipboard {
+        /// The selection the reply names: the first of `cpqs01234567` the
+        /// query gave, or 0 for none.
+        selection: u8,
+        /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
+        bel: bool,
+    },
 }
 
 /// The fixed capability reply contains no application-controlled text.

@@ -685,6 +685,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("codepoint-widths",           "\"\""),
     ("terminal-overrides",         "linux*:AX@"),
     ("set-clipboard",              "external"),
+    ("get-clipboard",              "buffer"),
     ("set-titles-string",          "\"\""),
     // psmux extensions
     ("cursor-style",               "default"),
