@@ -406,7 +406,8 @@ fn deliver(p: &Peer, line: &str) {
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = write!(s, "AUTH {}\n{}\n", p.key, line);
     let _ = s.flush();
-    let _ = s.shutdown(std::net::Shutdown::Write);
+    // No half-close: see NO CLIENT HALF-CLOSE in session.rs. The handler
+    // closes this one-shot connection once the command has run.
     let mut sink = [0u8; 4096];
     while let Ok(k) = io::Read::read(&mut s, &mut sink) {
         if k == 0 {
