@@ -983,6 +983,16 @@ pub fn layout_status_list(
     }
 }
 
+/// Keep the last `max_width` columns of `spans`, the way tmux trims
+/// status-right when the line is too narrow for it (format_draw_put with a
+/// start of `right->cx - width_right`). A wide glyph cut in half becomes a blank.
+pub fn truncate_spans_keep_tail(spans: &mut Vec<Span<'static>>, max_width: usize) {
+    let total = spans_visual_width(spans);
+    if total > max_width {
+        *spans = clip_status_list(spans, total - max_width, total).0;
+    }
+}
+
 /// Draw `over` on top of `line` starting at column `at`, the way tmux draws
 /// an absolute-centre list over the sides. Glyphs of `line` cut by the
 /// overlay become blanks; the result is clipped to `width`.

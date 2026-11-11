@@ -59,7 +59,7 @@ fn layout_default_status_line(
     base: Style,
 ) -> crate::style::LayoutResult {
     use crate::style::{layout_status_list, overlay_status_spans, spans_visual_width,
-        truncate_spans_to_width, LayoutResult, StatusRangeType};
+        truncate_spans_keep_tail, truncate_spans_to_width, LayoutResult, StatusRangeType};
 
     // tmux's default status-format (format-draw.c): the window list is
     // trimmed first, then status-right, then status-left. With
@@ -67,7 +67,7 @@ fn layout_default_status_line(
     // drawn over status-left and status-right.
     truncate_spans_to_width(&mut left, width);
     let left_w = spans_visual_width(&left);
-    truncate_spans_to_width(&mut right, width - left_w);
+    truncate_spans_keep_tail(&mut right, width - left_w);
     let right_w = spans_visual_width(&right);
     let right_start = width - right_w;
     let absolute = matches!(justify, "absolute-centre" | "absolute-center");

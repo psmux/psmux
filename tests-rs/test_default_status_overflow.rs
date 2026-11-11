@@ -104,6 +104,16 @@ fn matches_tmux_default_status_line() {
         (7, "left", " | ", 60, "[s] < 5:pwsh  | 6:pwsh  | 7:pwsh* | 8:pwsh  | 9:pwsh  >RIGHT"),
         (14, "left", " ", 20, "[s] <  14:pwsh*RIGHT"),
         (7, "left", " ", 12, "[s] <w>RIGHT"),
+        (7, "left", " ", 11, "[s] <wRIGHT"),
+        // No room for the list: status-right keeps its end, as in tmux.
+        (7, "left", " ", 7, "[s] GHT"),
+        (7, "left", " ", 5, "[s] T"),
+        (7, "left", " ", 3, "[s]"),
+        (7, "left", " ", 2, "[s"),
+        (7, "absolute-centre", " ", 11, "< 7:pwsh* >"),
+        (7, "absolute-centre", " ", 7, "<:pwsh>"),
+        (7, "absolute-centre", " ", 3, "<w>"),
+        (7, "absolute-centre", " ", 2, "<w"),
     ] {
         let (tabs, ranges) = tabs_for(active, sep);
         let layout = layout_default_status_line(vec![Span::raw("[s] ")], tabs,
