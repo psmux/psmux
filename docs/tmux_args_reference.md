@@ -109,7 +109,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `set-window-option` | `setw` | `guaqopswUt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-buffer` | `showb` | `b:` | CLI, SRV, CFG, CTL |
 | `show-environment` | `showenv` | `gsht:` | CLI, SRV, CFG, CTL |
-| `show-hooks` | *(none)* | `g` | CLI, SRV, CFG, CTL |
+| `show-hooks` | *(none)* | `gpwt:` | CLI, SRV, CFG, CTL |
 | `show-messages` | `showmsgs` | none | CLI, SRV, CFG, CTL |
 | `show-options` | `show`, `show-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-prompt-history` | `showphist` | none | SRV |
@@ -498,7 +498,8 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 **set-hook** and **show-hooks**
 - Boolean: `-u` (unset, also as `-gu` or `-ug`), `-a` (append, also as `-ga` or `-ag`), `-g` (global, accepted and absorbed)
 - Not accepted: `-p`, `-R`, `-w`, `-t`
-- `set-hook` accepts **any** hook name with no validation, so a typo silently never fires.
+- `set-hook` and `show-hooks` refuse a name that is no hook or option (`invalid option: NAME`, exit 1).
+- `show-hooks` prints tmux's rows: `name[N] command` for every handler. Without `-g` only the hooks that are set; `-g` every session hook (bare names for empty ones); `-w` / `-gw` the window and pane hooks (`pane-exited`, `pane-died`, ...); `-p` the pane hooks; a hook name (or `name[N]`) prints that hook. See scripting.md, "show-hooks output".
 
 **set-environment** (`setenv`)
 - Boolean: `-g` (global), `-r` (remove from the environment), `-u` (unset), `-h` (hidden)

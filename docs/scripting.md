@@ -787,7 +787,7 @@ psmux set-hook -g session-created "set -g status-left '[#S] ' \; display-message
 | `set-hook -ga <name> <command>` | The same, written globally. `-ag` is also accepted |
 | `set-hook -u <name>` | Unset, removing every handler for `<name>` |
 | `set-hook -gu <name>` | The same, globally. `-ug` is also accepted |
-| `show-hooks` | Print every registered hook and its handlers |
+| `show-hooks [-gpw] [hook]` | Print hooks and their handlers, as tmux does (see below) |
 
 The plain (non append) form **replaces**, so re-running a config cannot stack handlers on a hook
 you set with `set-hook`. Appends are **deduplicated**: appending a command that is already
@@ -799,31 +799,52 @@ psmux set-hook -ga after-new-window "display-message one"
 psmux set-hook -ga after-new-window "display-message one"   # ignored, identical
 psmux set-hook -ga after-new-window "display-message two"
 psmux show-hooks
-# after-new-window[0] -> display-message one
-# after-new-window[1] -> display-message two
+# after-new-window[0] display-message one
+# after-new-window[1] display-message two
 ```
 
-`show-hooks` prints `name -> command` when a hook has a single handler and `name[N] -> command`
-when it has several.
+### show-hooks output
 
-### Warning: hook names are not validated
+`show-hooks` prints what tmux 3.8 prints. Hooks are array options there, so every handler is one
+row `name[N] command`, indexed even when there is only one. Which hooks are listed depends on the
+scope, as in tmux:
 
-`set-hook` stores **any** name you give it. A misspelled hook is accepted silently, appears in
-`show-hooks`, and then simply never fires:
+| Form | Lists |
+|------|-------|
+| `show-hooks` | The session hooks that are set. Nothing at all when none is |
+| `show-hooks -g` | Every session hook in tmux's table order: set ones as `name[N] command` rows, empty ones as the bare name |
+| `show-hooks -w` / `-p` | The window and pane hooks that are set (`-p`: the pane hooks only) |
+| `show-hooks -gw` | Every window and pane hook (`pane-exited`, `pane-died`, `window-renamed`, ...), bare names for empty ones |
+| `show-hooks [-g] <hook>` | That hook's rows. Under `-g` an empty hook prints its bare name. `<hook>[N]` prints one row |
+
+Pane and window hooks such as `pane-died` and `pane-exited` are window options in tmux, so they
+are listed by `-w` / `-gw`, not by `-g`. After `set-hook -gu <name>` the hook is empty, so
+`show-hooks -g` still prints its bare name: check for `name[` to see whether a handler is set.
 
 ```powershell
-psmux set-hook -g after-new-windwo "display-message oops"   # accepted, never fires
-psmux show-hooks
-# after-new-windwo -> display-message oops
+psmux set-hook -g pane-exited "display-message bye"
+psmux show-hooks -gw | Select-String pane-exited
+# pane-exited[0] display-message bye
+psmux show-hooks -g session-created
+# session-created
 ```
 
-There is no error and no warning. After adding a hook, run `show-hooks` and check the name
-against the table below before assuming the hook is broken for some other reason.
+### Hook names are validated
+
+`set-hook` and `show-hooks` refuse a name that is no hook (or option), as tmux does:
+
+```powershell
+psmux set-hook -g after-new-windwo "display-message oops"
+# psmux: invalid option: after-new-windwo   (exit 1)
+```
+
+A name tmux knows but psmux does not fire yet is accepted. Check the table below for the hooks
+psmux fires.
 
 ### Available Hook Events
 
-Every hook below is fired by psmux. Names not in this table are accepted by `set-hook` but never
-fire.
+Every hook below is fired by psmux. Other tmux hook names are accepted by `set-hook` but never
+fire; a name that is no hook at all is refused.
 
 | Hook | Fires when... |
 |------|---------------|

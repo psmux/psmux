@@ -771,10 +771,11 @@ one place so the two documents cannot drift.
 
 Three things matter when a tool installs hooks rather than a human:
 
-1. **Hook names are not validated.** `set-hook` stores any name it is given. A typo is accepted
-   silently, shows up in `show-hooks` like a real hook, and simply never fires. There is no
-   error to catch. After installing hooks, read `show-hooks` back and diff it against what you
-   intended.
+1. **Read hooks back in tmux's format.** `set-hook` refuses a name that is no hook
+   (`invalid option: NAME`, exit 1), but a tmux hook psmux does not fire is accepted. Read the
+   hooks back with `show-hooks` (session hooks) or `show-hooks -w` (pane and window hooks such
+   as `pane-exited`); every handler is a `name[N] command` row. Under `-g` the empty hooks are
+   listed too, as bare names, so look for `name[` rather than the bare name.
 2. **Use `-a` / `-ga` to coexist with other tools.** The plain form replaces the whole handler
    list for that event, which will silently uninstall another tool's handler. The append form
    keeps both. Appends are deduplicated, so a tool that re-runs its own setup, or a user who
@@ -785,8 +786,8 @@ Three things matter when a tool installs hooks rather than a human:
 ```powershell
 psmux set-hook -ga after-new-window "run-shell 'my-tool notify window'"
 psmux show-hooks
-# after-new-window[0] -> select-layout tiled
-# after-new-window[1] -> run-shell 'my-tool notify window'
+# after-new-window[0] select-layout tiled
+# after-new-window[1] run-shell 'my-tool notify window'
 ```
 
 Many of these events also surface as control mode notifications (`%window-add`, `%window-close`,
