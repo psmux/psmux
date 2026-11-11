@@ -14,7 +14,7 @@
 # server in a private namespace then checks the ordinary paths end to end.
 #
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_halfclose_filter_reply.ps1
-#      ($env:PSMUX_BIN picks the binary; default target\release\psmux.exe)
+#      ($env:PSMUX_TEST_BIN picks the binary; default target\release\psmux.exe)
 
 $ErrorActionPreference = "Continue"
 $script:TestsPassed = 0
@@ -24,7 +24,7 @@ function Write-Pass { param($msg) Write-Host "[PASS] $msg" -ForegroundColor Gree
 function Write-Fail { param($msg) Write-Host "[FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 
-$PSMUX = $env:PSMUX_BIN
+$PSMUX = $env:PSMUX_TEST_BIN
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path }
 if (-not $PSMUX -or -not (Test-Path $PSMUX)) { Write-Error "psmux binary not found"; exit 1 }
 Write-Info "Using: $PSMUX"
