@@ -42,7 +42,9 @@ fn a_real_blank_last_row_inside_the_text_is_kept() {
 
 #[test]
 fn list_commands_text_ends_in_exactly_one_newline() {
-    let t = crate::cli::commands_text();
+    let args = crate::list_commands::ListCommandsArgs::default();
+    let t = crate::list_commands::render(&args, &mut |_, e| crate::list_commands::default_row(e)).unwrap();
+    let t = t.as_str();
     assert!(t.ends_with('\n'));
     assert!(!t.ends_with("\n\n"));
     assert!(!t.ends_with("\r\n\r\n"));

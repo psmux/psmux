@@ -109,7 +109,7 @@ else { Write-Fail "remain-on-exit expected 'on', got: '$remainVal'" }
 Write-Host "`n[Test 2] Register pane-died hook via CLI" -ForegroundColor Yellow
 & $PSMUX set-hook -t $SESSION_A pane-died "set -g @pane-died-227 fired" 2>&1 | Out-Null
 Start-Sleep -Milliseconds 500
-$hooks = & $PSMUX show-hooks -t $SESSION_A 2>&1 | Out-String
+$hooks = & $PSMUX show-hooks -w -t $SESSION_A 2>&1 | Out-String
 if ($hooks -match "pane-died") { Write-Pass "pane-died hook registered" }
 else { Write-Fail "pane-died hook not found in show-hooks output: $hooks" }
 
@@ -117,7 +117,7 @@ else { Write-Fail "pane-died hook not found in show-hooks output: $hooks" }
 Write-Host "`n[Test 3] Register pane-exited hook via CLI" -ForegroundColor Yellow
 & $PSMUX set-hook -t $SESSION_A pane-exited "set -g @pane-exited-227 fired" 2>&1 | Out-Null
 Start-Sleep -Milliseconds 500
-$hooks = & $PSMUX show-hooks -t $SESSION_A 2>&1 | Out-String
+$hooks = & $PSMUX show-hooks -w -t $SESSION_A 2>&1 | Out-String
 if ($hooks -match "pane-exited") { Write-Pass "pane-exited hook registered" }
 else { Write-Fail "pane-exited hook not found in show-hooks output: $hooks" }
 
@@ -190,7 +190,7 @@ Write-Host "`n[Test 8] Register hook via raw TCP" -ForegroundColor Yellow
 $resp = Send-TcpCommand -Session $SESSION_TCP -Command "set-option -g remain-on-exit on"
 $resp2 = Send-TcpCommand -Session $SESSION_TCP -Command "set-hook pane-died set -g @tcp-died fired"
 # Verify hook is registered
-$hooks = Send-TcpCommand -Session $SESSION_TCP -Command "show-hooks"
+$hooks = Send-TcpCommand -Session $SESSION_TCP -Command "show-hooks -w"
 if ($hooks -match "pane-died") { Write-Pass "TCP: pane-died hook registered" }
 else { Write-Fail "TCP: hook not registered. show-hooks: $hooks" }
 
@@ -198,7 +198,7 @@ else { Write-Fail "TCP: hook not registered. show-hooks: $hooks" }
 Write-Host "`n[Test 9] set-hook -u via TCP" -ForegroundColor Yellow
 Send-TcpCommand -Session $SESSION_TCP -Command "set-hook -u pane-died" | Out-Null
 Start-Sleep -Milliseconds 300
-$hooks2 = Send-TcpCommand -Session $SESSION_TCP -Command "show-hooks"
+$hooks2 = Send-TcpCommand -Session $SESSION_TCP -Command "show-hooks -w"
 if ($hooks2 -notmatch "pane-died" -or $hooks2 -match "no hooks") { 
     Write-Pass "TCP: set-hook -u removed pane-died" 
 }
@@ -209,8 +209,8 @@ Write-Host "`n[Test 10] set-hook -a via TCP appends" -ForegroundColor Yellow
 Send-TcpCommand -Session $SESSION_TCP -Command "set-hook pane-died set -g @first yes" | Out-Null
 Send-TcpCommand -Session $SESSION_TCP -Command "set-hook -a pane-died set -g @second yes" | Out-Null
 Start-Sleep -Milliseconds 300
-$hooks3 = Send-TcpCommand -Session $SESSION_TCP -Command "show-hooks"
-# When show-hooks has multiple commands, it uses indexed format: pane-died[0] -> ...
+$hooks3 = Send-TcpCommand -Session $SESSION_TCP -Command "show-hooks -w"
+# pane-died is a pane hook (listed under -w), rows are pane-died[0] cmd ...
 # Send-TcpCommand only reads one line, so we verify the [0] index format proves append worked
 if ($hooks3 -match "pane-died\[0\]") { 
     Write-Pass "TCP: set-hook -a appended (indexed format confirms multi-command)" 
@@ -248,7 +248,7 @@ Write-Host "`n[Test 11] source-file with hook config" -ForegroundColor Yellow
 & $PSMUX source-file -t $SESSION_CFG $confFile 2>&1 | Out-Null
 Start-Sleep -Seconds 1
 
-$hooks = & $PSMUX show-hooks -t $SESSION_CFG 2>&1 | Out-String
+$hooks = & $PSMUX show-hooks -w -t $SESSION_CFG 2>&1 | Out-String
 if ($hooks -match "pane-died" -and $hooks -match "pane-exited") {
     Write-Pass "Config: both hooks loaded via source-file"
 }
@@ -307,7 +307,7 @@ if ($LASTEXITCODE -ne 0) {
     & $psmuxExe set-hook -t $SESSION_TUI pane-died "set -g @tui-died-proof yes" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    $tuiHooks = & $psmuxExe show-hooks -t $SESSION_TUI 2>&1 | Out-String
+    $tuiHooks = & $psmuxExe show-hooks -w -t $SESSION_TUI 2>&1 | Out-String
     if ($tuiHooks -match "pane-died") { Write-Pass "TUI: Hook registered on visible session" }
     else { Write-Fail "TUI: Hook not registered. Got: $tuiHooks" }
 

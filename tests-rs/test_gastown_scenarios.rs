@@ -369,8 +369,8 @@ fn list_panes_popup_has_correct_title() {
 #[test]
 fn show_hooks_empty_produces_sentinel() {
     let app = mock_app();
-    let output = generate_show_hooks(&app);
-    assert_eq!(output, "(no hooks)\n", "no hooks must produce sentinel line");
+    let output = generate_show_hooks(&app, &[]);
+    assert_eq!(output, "", "no hooks prints nothing, as tmux does");
 }
 
 #[test]
@@ -380,10 +380,10 @@ fn show_hooks_single_command_uses_arrow_format() {
         "after-new-window".to_string(),
         vec!["run-shell -b echo fired".to_string()],
     );
-    let output = generate_show_hooks(&app);
+    let output = generate_show_hooks(&app, &[]);
     assert!(
-        output.contains("after-new-window -> run-shell -b echo fired"),
-        "single-command hook must use 'name -> cmd' format; got: {}",
+        output.contains("after-new-window[0] run-shell -b echo fired"),
+        "single-command hook uses tmux's 'name[0] cmd' format; got: {}",
         output
     );
 }
@@ -398,14 +398,14 @@ fn show_hooks_multiple_commands_use_indexed_format() {
             "run-shell -b cmd2".to_string(),
         ],
     );
-    let output = generate_show_hooks(&app);
+    let output = generate_show_hooks(&app, &[]);
     assert!(
-        output.contains("session-created[0] -> run-shell -b cmd1"),
+        output.contains("session-created[0] run-shell -b cmd1"),
         "first hook command must be indexed as [0]; got: {}",
         output
     );
     assert!(
-        output.contains("session-created[1] -> run-shell -b cmd2"),
+        output.contains("session-created[1] run-shell -b cmd2"),
         "second hook command must be indexed as [1]; got: {}",
         output
     );

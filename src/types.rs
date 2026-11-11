@@ -4774,7 +4774,7 @@ pub enum CtrlReq {
     ShowEnvironment(crate::environ::ShowEnvArgs, mpsc::Sender<Result<String, String>>),
     SetHook(String, String),
     AppendHook(String, String),
-    ShowHooks(mpsc::Sender<String>),
+    ShowHooks(Vec<String>, mpsc::Sender<String>),
     RemoveHook(String),
     /// End THIS server only. What a one-shot CLI connection asks for: the CLI
     /// has already worked out the scope and is fanning the request out itself,
@@ -4841,7 +4841,7 @@ pub enum CtrlReq {
     /// (issue #640); the attached client sends its own latch updates over the
     /// persistent connection and passes `None`.
     SwitchClientTable(String, Option<mpsc::Sender<String>>),
-    ListCommands(mpsc::Sender<String>),
+    ListCommands(Vec<String>, mpsc::Sender<String>),
     ResizeWindow(
         crate::resize_window::ResizeWindowRequest,
         mpsc::Sender<Result<(), String>>,

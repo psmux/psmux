@@ -46,22 +46,24 @@ fn test_generate_list_clients() {
 #[test]
 fn test_generate_show_hooks_empty() {
     let app = mock_app();
-    let output = generate_show_hooks(&app);
-    assert_eq!(output, "(no hooks)\n");
+    // tmux prints nothing when no hook is set on the session.
+    let output = generate_show_hooks(&app, &[]);
+    assert_eq!(output, "");
 }
 
 #[test]
 fn test_generate_show_hooks_with_hooks() {
     let mut app = mock_app();
     app.hooks.insert("after-new-window".to_string(), vec!["run-shell 'echo hello'".to_string()]);
-    let output = generate_show_hooks(&app);
+    let output = generate_show_hooks(&app, &[]);
     assert!(output.contains("after-new-window"), "should contain hook name");
     assert!(output.contains("run-shell"), "should contain hook command");
 }
 
 #[test]
 fn test_generate_list_commands() {
-    let output = generate_list_commands();
+    let app = mock_app();
+    let output = generate_list_commands(&app, &[]);
     assert!(output.contains("list-windows"), "should list list-windows command");
     assert!(output.contains("show-hooks"), "should list show-hooks command");
     assert!(output.contains("list-commands"), "should list list-commands command");
@@ -176,7 +178,7 @@ fn test_show_hooks_command_prompt_sets_popup() {
     match &app.mode {
         Mode::PopupMode { command, output, .. } => {
             assert_eq!(command, "show-hooks");
-            assert!(output.contains("no hooks"), "empty hooks should show (no hooks)");
+            assert_eq!(output, "", "no session hook set: tmux prints nothing");
         }
         other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
     }

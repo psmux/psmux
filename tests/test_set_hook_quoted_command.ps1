@@ -77,10 +77,10 @@ function Split-Fresh {
     P kill-pane -a -t demo | Out-Null
     P split-window -t demo | Out-Null
 }
-function Hook-Line([string]$name) { return ((P show-hooks -g) | Where-Object { "$_" -match "^$name " } | Select-Object -First 1) }
+function Hook-Line([string]$name) { return ((P show-hooks -g) | Where-Object { "$_" -match "^$name\[0\] " } | Select-Object -First 1) }
 function Check-Hook([string]$label, [string]$expectWin) {
     $hl = "$(Hook-Line 'after-split-window')"
-    if ($hl -match "-> new-window -d -n $expectWin$") { Write-Pass "$label stored '$hl'" } else { Write-Fail "$label stored '$hl'" }
+    if ($hl -match "\] new-window -d -n $expectWin$") { Write-Pass "$label stored '$hl'" } else { Write-Fail "$label stored '$hl'" }
     Split-Fresh
     if (Wait-Until { (Names) -contains $expectWin } 4000) { Write-Pass "$label hook ran (window $expectWin)" } else { Write-Fail "$label hook did not run: windows $((Names) -join ',')" }
     P set-hook -gu after-split-window | Out-Null

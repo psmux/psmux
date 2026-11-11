@@ -843,22 +843,9 @@ fn generate_list_clients(app: &AppState) -> String {
     crate::format::format_list_clients(app, crate::format::default_list_clients_format(), None)
 }
 
-/// Generate show-hooks output from AppState.
-fn generate_show_hooks(app: &AppState) -> String {
-    let mut output = String::new();
-    for (name, commands) in &app.hooks {
-        if commands.len() == 1 {
-            output.push_str(&format!("{} -> {}\n", name, commands[0]));
-        } else {
-            for (i, cmd) in commands.iter().enumerate() {
-                output.push_str(&format!("{}[{}] -> {}\n", name, i, cmd));
-            }
-        }
-    }
-    if output.is_empty() {
-        output.push_str("(no hooks)\n");
-    }
-    output
+/// Generate show-hooks output from AppState (see crate::show_hooks).
+fn generate_show_hooks(app: &AppState, args: &[&str]) -> String {
+    crate::show_hooks::format_show_hooks(&app.hooks, &crate::show_hooks::ShowHooksArgs::parse(args))
 }
 
 /// Generate show-options output locally (embedded mode fallback).
@@ -1201,9 +1188,11 @@ pub(crate) fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pa
     true
 }
 
-/// Generate list-commands output.
-fn generate_list_commands() -> String {
-    crate::help::cli_command_lines().join("\n")
+/// list-commands as tmux prints it (crate::list_commands); an unknown
+/// command is shown as its error.
+fn generate_list_commands(app: &AppState, args: &[&str]) -> String {
+    let args = crate::list_commands::ListCommandsArgs::parse(args);
+    crate::list_commands::render_with_app(app, &args).unwrap_or_else(|e| e)
 }
 
 /// Build the choose-tree data for the WindowChooser mode.
@@ -3532,11 +3521,11 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             show_output_popup(app, "list-clients", output);
         }
         "list-commands" | "lscm" => {
-            let output = generate_list_commands();
+            let output = generate_list_commands(app, &parts[1..]);
             show_output_popup(app, "list-commands", output);
         }
         "show-hooks" => {
-            let output = generate_show_hooks(app);
+            let output = generate_show_hooks(app, &parts[1..]);
             show_output_popup(app, "show-hooks", output);
         }
         "zoom-pane" | "zoom" | "resizep -Z" => {

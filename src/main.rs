@@ -17,6 +17,8 @@ mod render_state;
 mod rendering;
 mod config;
 mod commands;
+mod show_hooks;
+mod list_commands;
 mod run_shell;
 mod pane;
 mod pipe_pane;
@@ -83,7 +85,7 @@ use crossterm::{execute};
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste};
 
 use crate::platform::enable_virtual_terminal_processing;
-use crate::cli::{print_help, print_version, print_commands};
+use crate::cli::{print_help, print_version};
 use crate::session::{cleanup_stale_port_files, reap_orphaned_servers, read_session_key, send_control,
     send_control_with_response, resolve_default_session_name};
 use crate::rendering::apply_cursor_style;
@@ -1828,8 +1830,17 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             print_version();
             return Ok(());
         }
-        "list-commands" | "lscm" => {
-            print_commands();
+        // Without -F the rows need no server; -F takes the server route below,
+        // where the format engine is.
+        "list-commands" | "lscm" if crate::list_commands::ListCommandsArgs::parse(&cmd_args[1..]).format.is_none() => {
+            let args = crate::list_commands::ListCommandsArgs::parse(&cmd_args[1..]);
+            match crate::list_commands::render(&args, &mut |_, e| crate::list_commands::default_row(e)) {
+                Ok(text) => print!("{}", text),
+                Err(e) => {
+                    eprintln!("psmux: {}", e);
+                    std::process::exit(1);
+                }
+            }
             return Ok(());
         }
         // Hidden internal command for empirical preview rendering tests.
@@ -5960,9 +5971,14 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 }
                 return Ok(());
             }
-            // list-commands - List all commands (duplicate handled above but kept for match completeness)
+            // list-commands -F: expanded by the server's format engine.
             "list-commands" | "lscm" => {
-                print_commands();
+                let resp = send_control_with_response(format!("{}\n", crate::util::quoted_wire_line(&cmd_args)))?;
+                if let Some(msg) = resp.trim_start().strip_prefix("ERROR: ") {
+                    eprintln!("psmux: {}", msg.trim_end());
+                    std::process::exit(1);
+                }
+                print!("{}", resp);
                 return Ok(());
             }
             // set-hook - Set a hook

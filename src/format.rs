@@ -20,6 +20,8 @@ thread_local! {
     static PANE_POS_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static BUFFER_IDX_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static NAMED_BUFFER_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+    // The command list-commands -F is expanding a row for: name, alias, usage.
+    static COMMAND_LIST_OVERRIDE: RefCell<Option<(String, String, String)>> = const { RefCell::new(None) };
     static CLIENT_OVERRIDE: Cell<Option<u64>> = const { Cell::new(None) };
     // Set while expanding a format the way tmux's format_expand does (no
     // strftime pass). See `expand_format_untimed`.
@@ -185,6 +187,12 @@ pub fn set_buffer_idx_override(idx: Option<usize>) {
 /// Set the named buffer override for per-buffer format expansion in list-buffers -F.
 pub fn set_named_buffer_override(name: Option<String>) {
     NAMED_BUFFER_OVERRIDE.with(|c| *c.borrow_mut() = name);
+}
+
+/// Set the command for #{command_list_name}, #{command_list_alias} and
+/// #{command_list_usage} while list-commands -F expands its rows.
+pub fn set_command_list_override(entry: Option<(String, String, String)>) {
+    COMMAND_LIST_OVERRIDE.with(|c| *c.borrow_mut() = entry);
 }
 
 // ─────────────────────────── public API ───────────────────────────
@@ -2389,6 +2397,15 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             })
             .unwrap_or_else(|| "0".into()),
 
+        // ── list-commands (cmd-list-commands.c) ──
+        "command_list_name" | "command_list_alias" | "command_list_usage" => {
+            COMMAND_LIST_OVERRIDE.with(|c| c.borrow().as_ref().map(|(n, a, u)| match var {
+                "command_list_name" => n.clone(),
+                "command_list_alias" => a.clone(),
+                _ => u.clone(),
+            })).unwrap_or_default()
+        }
+
         // ── Buffer ──
         "buffer_size" => {
             // Check named buffer override first
@@ -2564,7 +2581,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         // ── Misc ──
         "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
         "wrap_flag" => "1".into(),
-        "line" | "command" | "command_list_name" | "command_list_alias" | "command_list_usage" | "config_files" => String::new(),
+        "line" | "command" | "config_files" => String::new(),
         "current_file" => crate::config::current_config_file(),
 
         // A user option resolves for THIS pane first (#728): tmux's

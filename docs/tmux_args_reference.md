@@ -62,7 +62,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `link-window` | `linkw` | `abdks:t:` | CLI, SRV, CFG, CTL |
 | `list-buffers` | `lsb` | `F:t:` | CLI, SRV, CFG, CTL |
 | `list-clients` | `lsc` | `F:` (SRV and CTL only) | CLI, SRV, CFG, CTL |
-| `list-commands` | `lscm` | none | CLI, SRV, CFG, CTL |
+| `list-commands` | `lscm` | `F:` | CLI, SRV, CFG, CTL |
 | `list-keys` | `lsk` | `T:t:` | CLI, SRV, CFG, CTL |
 | `list-panes` | `lsp` | `asF:t:` | CLI, SRV, CFG, CTL |
 | `list-sessions` | `ls` | `F:f:` | CLI, SRV, CFG, CTL |
@@ -109,7 +109,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `set-window-option` | `setw` | `guaqopswUt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-buffer` | `showb` | `b:` | CLI, SRV, CFG, CTL |
 | `show-environment` | `showenv` | `gsht:` | CLI, SRV, CFG, CTL |
-| `show-hooks` | *(none)* | `g` | CLI, SRV, CFG, CTL |
+| `show-hooks` | *(none)* | `gpwt:` | CLI, SRV, CFG, CTL |
 | `show-messages` | `showmsgs` | none | CLI, SRV, CFG, CTL |
 | `show-options` | `show`, `show-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-prompt-history` | `showphist` | none | SRV |
@@ -498,7 +498,8 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 **set-hook** and **show-hooks**
 - Boolean: `-u` (unset, also as `-gu` or `-ug`), `-a` (append, also as `-ga` or `-ag`), `-g` (global, accepted and absorbed)
 - Not accepted: `-p`, `-R`, `-w`, `-t`
-- `set-hook` accepts **any** hook name with no validation, so a typo silently never fires.
+- `set-hook` and `show-hooks` refuse a name that is no hook or option (`invalid option: NAME`, exit 1).
+- `show-hooks` prints tmux's rows: `name[N] command` for every handler. Without `-g` only the hooks that are set; `-g` every session hook (bare names for empty ones); `-w` / `-gw` the window and pane hooks (`pane-exited`, `pane-died`, ...); `-p` the pane hooks; a hook name (or `name[N]`) prints that hook. See scripting.md, "show-hooks output".
 
 **set-environment** (`setenv`)
 - Boolean: `-g` (global), `-r` (remove from the environment), `-u` (unset), `-h` (hidden)
@@ -515,8 +516,9 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - One or more paths, each of which may be a glob. They are read in order.
 
 **list-commands** (`lscm`)
-- No flags.
-- Not accepted: `-F`
+- Value: `-F <format>`, expanded per command with `#{command_list_name}`, `#{command_list_alias}` and `#{command_list_usage}`; a row that expands to nothing is left out.
+- Operand: an optional command, found as tmux finds it (alias, name or unique prefix); an unknown or ambiguous one is an error at exit 1.
+- Without `-F` each row is tmux's `name (alias) usage`, in tmux's command order.
 
 ### Display and overlay commands
 

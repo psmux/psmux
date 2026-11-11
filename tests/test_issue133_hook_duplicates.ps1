@@ -51,7 +51,7 @@ Test "set-hook does NOT have the first command" ($hooks -notmatch 'display-messa
 Start-Sleep -Milliseconds 200
 
 $hooks2 = & $exe show-hooks -g 2>&1 | Out-String
-Test "set-hook -gu removes hook" ($hooks2 -notmatch 'client-attached')
+Test "set-hook -gu removes hook" ($hooks2 -notmatch 'client-attached\[')
 
 # ── Test 3: Multiple different hooks coexist ──
 & $exe set-hook -g client-attached "display-message a"

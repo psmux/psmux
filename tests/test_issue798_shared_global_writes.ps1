@@ -224,7 +224,7 @@ try {
             Test-Line $sessions @('bind', '-T', 'root', 'F8', 'send-keys', '-t', 'B:', '-l', 'XQ') $bindQuery '(?m)^bind-key\s+-T root\s+F8\s+send-keys -t B: -l XQ\s*$'
             Test-Line $sessions @('bind', '-n', 'F7', 'kill-window', '-t', 'B:1') $bindQuery '(?m)^bind-key\s+-T root\s+F7\s+kill-window -t B:1\s*$'
             Test-Line $sessions @('bind', '-n', 'F7', 'send-keys', '-t', 'B:', '-l', 'XQ') $bindQuery '(?m)^bind-key\s+-T root\s+F7\s+send-keys -t B: -l XQ\s*$'
-            Test-Line $sessions @('set-hook', '-g', 'after-new-window', 'new-window', '-t', 'B:') $hookQuery '(?m)^after-new-window -> new-window -t B:\s*$'
+            Test-Line $sessions @('set-hook', '-g', 'after-new-window', 'new-window', '-t', 'B:') $hookQuery '(?m)^after-new-window\[0\] new-window -t B:\s*$'
             Test-Line $sessions @('set', '-g', '@tagged', 'value', '-t', 'B:') 'show -gv @tagged' '(?m)^value\s*$'
             Test-Line $sessions @('set', '-ga', '@tagged', 'y', '-t', 'B:') 'show -gv @tagged' '(?m)^xy\s*$' 'set -g @tagged x'
             Test-Line $sessions @('set', '-ga', '-t', 'B:', '@tagged', 'y') 'show -gv @tagged' '(?m)^xy\s*$' 'set -g @tagged x'

@@ -2143,20 +2143,8 @@ pub(crate) fn dispatch(
                     let _ = resp.send(crate::environ::show(&app.environment, &app.env_scopes, &args));
                 }
                 // copied from server/mod.rs run_server (line 7737 at 86a78100)
-                CtrlReq::ShowHooks(resp) => {
-                    let mut output = String::new();
-                    for (name, commands) in &app.hooks {
-                        if commands.len() == 1 {
-                            output.push_str(&format!("{} -> {}\n", name, commands[0]));
-                        } else {
-                            for (i, cmd) in commands.iter().enumerate() {
-                                output.push_str(&format!("{}[{}] -> {}\n", name, i, cmd));
-                            }
-                        }
-                    }
-                    if output.is_empty() {
-                        output.push_str("(no hooks)\n");
-                    }
+                CtrlReq::ShowHooks(args, resp) => {
+                    let output = crate::show_hooks::format_show_hooks(&app.hooks, &crate::show_hooks::ShowHooksArgs::parse(&args));
                     let _ = resp.send(output);
                 }
                 // copied from server/mod.rs run_server (line 7717 at 86a78100)

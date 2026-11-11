@@ -24,7 +24,7 @@ function Opt($n) { ((P show -gv $n) -join '') }
 function Hook { ((P show-hooks -g | Select-String 'after-new-window') -join ' | ') }
 # The hook as stored, that nothing ran yet, and what one new-window does.
 function Verify([string]$Label, [string]$WantHook) {
-    Check "${Label}: stored hook" (Hook) "after-new-window -> $WantHook"
+    Check "${Label}: stored hook" (Hook) "after-new-window[0] $WantHook"
     Check "${Label}: nothing ran at set-hook time" ("a=" + (Opt '@a') + " b=" + (Opt '@b')) "a= b="
     P new-window -t s | Out-Null; Start-Sleep -Milliseconds 800
     Check "${Label}: one new-window runs both" ("a=" + (Opt '@a') + " b=" + (Opt '@b')) "a=x b=y"
@@ -69,7 +69,8 @@ try {
     Write-Host "`n[5] other CLI set-hook forms unchanged" -ForegroundColor Yellow
     P set-hook -g pane-exited 'display hi' | Out-Null
     P set-hook -ga pane-exited 'display bye' | Out-Null
-    Check "-ga appends" ((P show-hooks -g | Select-String 'pane-exited') -join ' | ') "pane-exited[0] -> display hi | pane-exited[1] -> display bye"
+    # pane-exited is a pane hook: tmux lists it under -gw, not -g.
+Check "-ga appends" ((P show-hooks -gw | Select-String 'pane-exited') -join ' | ') "pane-exited[0] display hi | pane-exited[1] display bye"
     P set-hook -g after-split-window "set -g @p 'C:\a b\c'" | Out-Null
     P split-window -t s | Out-Null; Start-Sleep -Milliseconds 800
     Check "backslash path in the hook" (Opt '@p') 'C:\a b\c'
