@@ -1188,7 +1188,6 @@ pub(crate) fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pa
     true
 }
 
-/// Generate list-commands output.
 /// list-commands as tmux prints it (crate::list_commands); an unknown
 /// command is shown as its error.
 fn generate_list_commands(app: &AppState, args: &[&str]) -> String {

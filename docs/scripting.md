@@ -708,8 +708,10 @@ Treat both as unavailable rather than as documented behaviour.
 ## Advanced Commands
 
 ```powershell
-# Discover supported commands
+# Discover supported commands (tmux's rows: name (alias) usage)
 psmux list-commands
+psmux list-commands split-window               # one command, by name, alias or prefix
+psmux list-commands -F '#{command_list_name}'  # names only
 
 # Server/session management
 psmux kill-server

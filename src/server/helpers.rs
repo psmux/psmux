@@ -1638,7 +1638,8 @@ pub(crate) fn drain_color_queries(node: &mut crate::types::Node, colors: &crate:
     }
 }
 
-/// Complete list of supported tmux-compatible commands (for list-commands).
+/// The tmux-compatible command names and aliases, for validating a command
+/// name (list-commands prints crate::list_commands::COMMAND_TABLE instead).
 pub(crate) const TMUX_COMMANDS: &[&str] = &[
     "attach-session (attach)",
     "bind-key (bind)",
