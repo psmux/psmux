@@ -161,6 +161,12 @@ pub struct CellJson {
     /// SGR 53 overline; written only when set, as `CellRunJson::ol` is.
     #[serde(default, skip_serializing_if = "crate::layout::is_false")]
     pub overline: bool,
+    /// OSC 8 hyperlink URI of this cell, if any (#1030).  Copy mode draws the
+    /// active pane from these cells, so without it every link scrolled into
+    /// view there came out dead.  Omitted when absent, so cells without a
+    /// link cost nothing extra on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -609,11 +615,15 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             if need_full_content {
                                 let fg_str = crate::util::color_to_name(cell_fg).into_owned();
                                 let bg_str = crate::util::color_to_name(cell_bg).into_owned();
+                                let cell_uri = if cell_link != 0 {
+                                    screen.hyperlink_uri(cell_link).map(|s| s.to_string())
+                                } else { None };
                                 row.push(CellJson {
                                     text: t.to_string(), fg: fg_str.clone(), bg: bg_str.clone(),
                                     bold: cell.bold(), italic: cell.italic(),
                                     underline: cell.underline(), inverse: cell.inverse(), dim: cell.dim(),
                                     blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(), overline: cell.overline(),
+                                    link: cell_uri,
                                 });
                                 for _ in 1..w {
                                     row.push(CellJson {
@@ -621,6 +631,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                                         bold: cell.bold(), italic: cell.italic(),
                                         underline: cell.underline(), inverse: cell.inverse(), dim: cell.dim(),
                                         blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(), overline: cell.overline(),
+                                        link: None,
                                     });
                                 }
                             }
@@ -645,6 +656,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                                     text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(),
                                     bold: false, italic: false, underline: false, inverse: false, dim: false,
                                     blink: false, hidden: false, strikethrough: false, overline: false,
+                                    link: None,
                                 });
                             }
                             (1u16, vt100::Color::Default, vt100::Color::Default, 0u8, 0u32)
@@ -669,6 +681,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                                 blink: false,
                                 hidden: false,
                                 strikethrough: false, overline: false,
+                                link: None,
                             });
                         }
                         lines.push(row);
@@ -1025,7 +1038,10 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 // in the ConPTY pipe while we build the JSON string.
                 struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16, link: Option<String>, ul: u8, ulc: vt100::Color, ol: bool }
                 struct RowSnap { runs: Vec<Run> }
-                struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, strikethrough: bool, overline: bool, width: u16 }
+                // `link` is the cell's OSC 8 URI (#1030).  Shared between the
+                // cells of one link, so a linked cell costs a refcount bump,
+                // and `None` for every cell without one.
+                struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, strikethrough: bool, overline: bool, width: u16, link: Option<std::rc::Rc<str>> }
                 struct LeafSnap {
                     cr: u16, cc: u16, alt: bool,
                     wants_mouse: bool,
@@ -1157,6 +1173,11 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     // Snapshot content (copy-mode only)
                     let mut snap_content: Vec<Vec<CopyCell>> = Vec::new();
                     if need_content {
+                        // Copy mode draws the pane from these cells, so they
+                        // must carry the hyperlink too, or every row drawn
+                        // after entering copy mode loses its link (#1030).
+                        // One URI lookup per link, not per cell.
+                        let mut link_cache: Option<(u32, Option<std::rc::Rc<str>>)> = None;
                         for r in 0..p.last_rows {
                             let mut row_cells: Vec<CopyCell> = Vec::new();
                             let mut c = 0u16;
@@ -1165,18 +1186,33 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                     let t = cell.contents();
                                     let t = if t.is_empty() { " " } else { t };
                                     let w: u16 = if cell.is_wide() { 2 } else { 1 }; // #749: the grid's width
+                                    let clink = cell.hyperlink_id();
+                                    let link = if clink == 0 {
+                                        None
+                                    } else {
+                                        match &link_cache {
+                                            Some((id, uri)) if *id == clink => uri.clone(),
+                                            _ => {
+                                                let uri: Option<std::rc::Rc<str>> = screen.hyperlink_uri(clink).map(std::rc::Rc::from);
+                                                link_cache = Some((clink, uri.clone()));
+                                                uri
+                                            }
+                                        }
+                                    };
                                     row_cells.push(CopyCell {
                                         // Issue #685: copy mode paints the same
                                         // cells, so it resolves the palette too.
                                         text: t.to_string(), fg: pal_resolve(pal, cell.fgcolor()), bg: pal_resolve(pal, cell.bgcolor()),
                                         bold: cell.bold(), italic: cell.italic(), underline: cell.underline(),
                                         inverse: cell.inverse(), dim: cell.dim(), blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(), overline: cell.overline(), width: w,
+                                        link,
                                     });
                                     c += w;
                                 } else {
                                     row_cells.push(CopyCell {
                                         text: " ".to_string(), fg: vt100::Color::Default, bg: vt100::Color::Default,
                                         bold: false, italic: false, underline: false, inverse: false, dim: false, blink: false, hidden: false, strikethrough: false, overline: false, width: 1,
+                                        link: None,
                                     });
                                     c += 1;
                                 }
@@ -1318,6 +1354,12 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden, cell.strikethrough,
                             ));
                             if cell.overline { out.push_str(",\"overline\":true"); }
+                            // Only linked cells grow a field (#1030).
+                            if let Some(uri) = &cell.link {
+                                out.push_str(",\"link\":\"");
+                                json_esc(uri, out);
+                                out.push('"');
+                            }
                             out.push('}');
                             // Emit width-2 filler cells
                             for _ in 1..cell.width {
@@ -1850,6 +1892,10 @@ mod test_issue361_serialize_hyperlink;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue361_fastdump_hyperlink.rs"]
 mod test_issue361_fastdump_hyperlink;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1030_copy_mode_hyperlink.rs"]
+mod test_issue1030_copy_mode_hyperlink;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue685_pane_palette.rs"]

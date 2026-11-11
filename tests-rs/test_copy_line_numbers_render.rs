@@ -13,7 +13,7 @@ fn cell(ch: char) -> CellJson {
     CellJson {
         text: ch.to_string(), fg: String::new(), bg: String::new(),
         bold: false, italic: false, underline: false, inverse: false,
-        dim: false, blink: false, hidden: false, strikethrough: false, overline: false,
+        dim: false, blink: false, hidden: false, strikethrough: false, overline: false, link: None,
     }
 }
 

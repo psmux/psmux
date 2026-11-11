@@ -17,7 +17,7 @@ fn full_cell(text: &str, fg: &str, bg: &str) -> CellJson {
         dim: false,
         blink: false,
         hidden: false,
-        strikethrough: false, overline: false,
+        strikethrough: false, overline: false, link: None,
     }
 }
 
