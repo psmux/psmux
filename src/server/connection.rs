@@ -6483,7 +6483,8 @@ match cmd {
         if let Ok(text) = rrx.recv() {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("show-hooks".to_string(), text));
-            } else {
+            } else if !text.is_empty() {
+                // Nothing to show prints nothing, as in tmux.
                 write_listing(&mut write_stream, &text);
             }
         }
