@@ -935,6 +935,30 @@ pub(crate) fn hwheel_record(btn: u8) -> Option<(u32, u32)> {
     Some((((delta as i32) << 16) as u32, mouse_inject::MOUSE_HWHEELED))
 }
 
+/// Would the #277 wheel record be a SECOND copy of the notch?
+///
+/// The record channel exists for a child whose console has
+/// ENABLE_VIRTUAL_TERMINAL_INPUT on: there the host hands the pipe's SGR
+/// report over as KEY_EVENT text, and an app that reads its mouse as records
+/// (Bubble Tea) would get nothing without it. `ensure_vti` turns VTI on for
+/// that reason, except for a deliberate record reader (#623), whose console
+/// it leaves alone. With VTI off and ENABLE_MOUSE_INPUT on, a host from
+/// CONPTY_MOUSE_MIN_BUILD on (inbox conhost and OpenConsole alike, measured)
+/// converts the SGR report into a MOUSE_WHEELED record by itself, so the
+/// injected one doubled every notch: 5 notches arrived as 10 records, 5 with
+/// delta 128 from the host and 5 with delta 120 from psmux.
+///
+/// Only the vertical wheel: the host converts no SGR 66/67, so the horizontal
+/// record (MOUSE_HWHEELED) is the only copy. Below the build the pipe report
+/// never arrives (#597), and an unknown VTI or console mode keeps the record,
+/// as before.
+pub(crate) fn wheel_record_is_duplicate(event_flags: u32, legacy_build: bool, vti_on: Option<bool>, console_mode: Option<u32>) -> bool {
+    event_flags & mouse_inject::MOUSE_WHEELED != 0
+        && !legacy_build
+        && vti_on == Some(false)
+        && console_mode.map_or(false, |m| m & ENABLE_MOUSE_INPUT != 0 && m & ENABLE_VIRTUAL_TERMINAL_INPUT == 0)
+}
+
 /// Inject a mouse event into a pane using the best available method.
 ///
 /// Architecture (mirrors Windows Terminal):
@@ -1140,7 +1164,14 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // tmux parity: tmux writes SGR bytes and has no record channel at
         // all.  The MOUSE_EVENT bypass is a Windows only extension that
         // exists because conhost sits between psmux and the pane child.
-        if record_bypass_applies(_event_flags) {
+        if record_bypass_applies(_event_flags) && wheel_record_is_duplicate(
+            _event_flags,
+            crate::ssh_input::conpty_needs_mouse_record_bypass(),
+            pane.vti_mode_cache.map(|(_, on)| on),
+            console_input_mode(pane),
+        ) {
+            mouse_log("  -> Win32 MOUSE_EVENT NOT injected: VTI is off and mouse input is on, so the                        console host already turned the pipe report into a wheel record (double notch fix)");
+        } else if record_bypass_applies(_event_flags) {
             let reason = if _event_flags & WHEEL_FLAGS != 0 {
                 "wheel, fixes #277"
             } else {
@@ -4849,6 +4880,10 @@ mod test_issue629_ssh_vt_wheel;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue1036_hwheel_mouse_keys.rs"]
 mod test_issue1036_hwheel_mouse_keys;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_wheel_record_once.rs"]
+mod test_wheel_record_once;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_respawn_pane_refusal_survives.rs"]
