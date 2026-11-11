@@ -6078,7 +6078,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             }
             // mouse-* - forward raw mouse events to the server (debug / testing aid)
             "mouse-down" | "mouse-drag" | "mouse-up" | "mouse-down-right" | "mouse-up-right"
-            | "pane-mouse" | "pane-scroll" | "copy-drag-begin" => {
+            | "pane-mouse" | "pane-scroll" | "pane-hwheel" | "copy-drag-begin" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| s.to_string()).collect();
                 send_control(format!("{}\n", parts.join(" ")))?;
                 return Ok(());

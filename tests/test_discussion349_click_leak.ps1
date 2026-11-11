@@ -19,7 +19,7 @@
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_disc349_click"
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 function Write-Pass($m) { Write-Host "  [PASS] $m" -ForegroundColor Green; $script:TestsPassed++ }

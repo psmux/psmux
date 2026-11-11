@@ -4141,6 +4141,9 @@ pub enum CtrlReq {
     /// pane-scroll: client, pane, up, pointer cell, tmux modifier mask
     /// (shift 4, meta 8, ctrl 16; 0 from an older client).
     PaneScroll(u64, usize, bool, Option<(i16, i16)>, u8),
+    /// A horizontal wheel notch over a pane (#1036): client id, pane id,
+    /// right (else left), pane relative position, tmux modifier mask.
+    PaneHWheel(u64, usize, bool, Option<(i16, i16)>, u8),
     /// send-keys -M: forward the mouse event that triggered the running
     /// mouse binding to its pane (tmux cmd-send-keys.c).
     SendMouse(u64),
