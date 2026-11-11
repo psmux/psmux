@@ -340,6 +340,25 @@ Two limits:
 - The inbox conhost passes on the colour a program sets but drops `ESC ] 112` and the query, so on that console host a program's colour is not taken, as it would stay after the program had gone. `cursor-colour` works there. Through OpenConsole (`PSMUX_CONPTY_DIR`) all three arrive.
 - A program's colour is read as `#rrggbb`, `rgb:rr/gg/bb`, `rgb:rrrr/gggg/bbbb` or `r,g,b`, as for `ESC ] 4`. tmux also takes X11 names such as `orange` and `cmyk:` forms; psmux has no table of the names, so those are ignored.
 
+### Default Colours (OSC 10 and OSC 11)
+
+A pane's default foreground and background are the ones its program set with `ESC ] 10 ; colour` and `ESC ] 11 ; colour`, until `ESC ] 110` or `ESC ] 111` takes them back, as tmux keeps them in the pane's palette. RIS, a bare `ESC ] 104` and `send-keys -R` take them back too, as they clear that palette, and a respawn, `clear-history` and the alternate screen keep them. The client draws the pane's cells in the default colours with them, in tmux's order with the window styles (`tty_default_colours`):
+
+| Pane | Its default colour |
+|---|---|
+| The active pane | `window-active-style`'s, then the program's, then `window-style`'s |
+| Any other pane | `window-style`'s, then the program's |
+
+So the program's colour beats `window-style` in the active pane and loses to it in the others. `ESC ] 10 ; ?` and `ESC ] 11 ; ?` are answered with the same colour as `ESC ] 10 ; rgb:rrrr/gggg/bbbb`, ended the way the query was, and with none of them with the outer terminal's colour, as before. A float's `new-pane -s` style counts as both of its window styles.
+
+Three differences:
+
+- The inbox conhost passes on the colours a program sets but drops a bare `ESC ] 110` and `ESC ] 111`, so on that console host a program's colours are not taken, as for the cursor colour, and a query is answered from the window styles or the outer terminal. The inbox conhost of build 26300 drops the queries too, so no reply comes there; the Windows 10 one (build 19045) passes them on when it next draws. Through OpenConsole (`PSMUX_CONPTY_DIR`) all of them arrive.
+- psmux keeps `window-style` and `window-active-style` only as global options (`set -w` sets the global value and `set -p` is refused), so the replies use those, as the drawing does. tmux uses a window's or a pane's own value.
+- tmux clears the colours on RIS and `ESC ] 104` but goes on drawing and answering with the old ones until the pane's style next changes, as it keeps them in a cache. psmux takes them back at once.
+
+A program's colour is read as for the cursor colour, so X11 names are ignored.
+
 ### Git Revision in `psmux -V`
 
 `psmux -V` reports the commit the binary was built from. `git` is the preferred source, and when it is unavailable the build falls back, in order, to `.cargo_vcs_info.json` (present in every crates.io tarball), to the cargo git checkout directory name (`cargo install --git` checks a revision out into a directory named after its short hash), and finally to a `PSMUX_GIT_SHA` environment variable that release tooling can set (#647):

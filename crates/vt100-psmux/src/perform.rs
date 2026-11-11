@@ -523,11 +523,19 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     fn osc_dispatch(&mut self, params: &[&[u8]], bel_terminated: bool) {
         self.last_printed = None;
         if let Some(query) = crate::queries::osc_query(params, self.screen.program_status_enabled(), bel_terminated) {
-            // The cursor colour is the one at this point of the stream, so a
-            // set just before the query is what it reports.
+            // The colours are the ones at this point of the stream, so a set
+            // just before the query is what it reports.
             let query = match query {
                 crate::TerminalQuery::CursorColour { bel, .. } => crate::TerminalQuery::CursorColour {
                     colour: self.screen.cursor_colour(),
+                    bel,
+                },
+                crate::TerminalQuery::ForegroundColour { bel, .. } => crate::TerminalQuery::ForegroundColour {
+                    colour: self.screen.default_foreground(),
+                    bel,
+                },
+                crate::TerminalQuery::BackgroundColour { bel, .. } => crate::TerminalQuery::BackgroundColour {
+                    colour: self.screen.default_background(),
                     bel,
                 },
                 other => other,
@@ -598,6 +606,27 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             }
             [b"112"] | [b"112", b""] => {
                 self.screen.set_program_cursor_colour(None);
+            }
+            // ---- OSC 10 / 11 and OSC 110 / 111 : the default colours ----
+            // Read as OSC 12 and OSC 112 are (`input_osc_10`, `input_osc_110`,
+            // `input_osc_11` and `input_osc_111`, input.c:3070, 3105, 3121 and
+            // 3148 at tag 3.8). They are the pane's own default foreground and
+            // background, under the styles' colours (see `StyleColour`).
+            [b"10", spec] => {
+                if let Some(rgb) = crate::palette::parse_x11_colour(spec) {
+                    self.screen.set_program_foreground(Some(rgb));
+                }
+            }
+            [b"11", spec] => {
+                if let Some(rgb) = crate::palette::parse_x11_colour(spec) {
+                    self.screen.set_program_background(Some(rgb));
+                }
+            }
+            [b"110"] | [b"110", b""] => {
+                self.screen.set_program_foreground(None);
+            }
+            [b"111"] | [b"111", b""] => {
+                self.screen.set_program_background(None);
             }
             // ---- OSC 104 : reset palette entries (issue #685) ----
             // Bare `\e]104\e\\` (and `\e]104;\e\\`, which vte hands us as an

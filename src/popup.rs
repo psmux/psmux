@@ -982,12 +982,15 @@ pub fn serialize_floats_json(app: &AppState) -> String {
         let mut cur_row: u16 = 0;
         let mut cur_col: u16 = 0;
         let mut cur_hidden = false;
+        // The program's default colours, as a tiled pane's leaf carries them.
+        let mut default_colours = None;
         if let Ok(parser) = fp.pane.term.lock() {
             let screen = parser.screen();
             let (cr, cc) = screen.cursor_position();
             cur_row = cr;
             cur_col = cc;
             cur_hidden = screen.hide_cursor();
+            default_colours = crate::layout::default_colours_json(screen.program_default_colours());
             let rows_data = serialize_screen_rows(screen, inner_h, inner_w);
             for (j, row) in rows_data.iter().enumerate() {
                 if j > 0 {
@@ -1015,6 +1018,10 @@ pub fn serialize_floats_json(app: &AppState) -> String {
             }
         }
         out.push(']');
+        if let Some([fg, bg]) = default_colours {
+            let one = |c: Option<String>| c.map_or_else(|| "null".to_string(), |c| format!("\"{c}\""));
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!(",\"default_colours\":[{},{}]", one(fg), one(bg)));
+        }
         let _ = std::fmt::Write::write_fmt(
             &mut out,
             format_args!(
