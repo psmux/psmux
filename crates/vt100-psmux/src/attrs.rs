@@ -105,6 +105,20 @@ pub struct Attrs {
 }
 
 impl Attrs {
+    /// What an erase, an inserted line or cell, or a line scrolled in is
+    /// filled with: the blank cell with the current background and nothing
+    /// else, so no foreground, underline, reverse or link. tmux clears with
+    /// `ictx->cell.cell.bg` alone (`grid_clear_cell`, grid.c:264 at tag 3.8,
+    /// from input.c:1365-1425 and 1613-1852), and both console hosts show the
+    /// same.
+    #[must_use]
+    pub fn erased(&self) -> Self {
+        Self {
+            bgcolor: self.bgcolor,
+            ..Self::default()
+        }
+    }
+
     pub fn bold(&self) -> bool {
         self.mode & TEXT_MODE_BOLD != 0
     }

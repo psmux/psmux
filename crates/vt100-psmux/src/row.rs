@@ -32,6 +32,16 @@ impl Row {
         }
     }
 
+    /// A row of `cols` copies of `cell`, built in one pass, for a line
+    /// scrolled in or inserted with a background (`Grid::blank_row`).
+    pub fn filled(cols: u16, cell: crate::Cell) -> Self {
+        Self {
+            cells: vec![cell; usize::from(cols)],
+            cols,
+            wrapped: false,
+        }
+    }
+
     fn cols(&self) -> u16 {
         self.cols
     }

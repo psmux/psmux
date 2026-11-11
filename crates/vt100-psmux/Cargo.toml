@@ -82,6 +82,10 @@ name = "issue641_scrollback_compaction"
 path = "tests/issue641_scrollback_compaction.rs"
 
 [[test]]
+name = "background_erase"
+path = "tests/background_erase.rs"
+
+[[test]]
 name = "issue685_osc4_palette"
 path = "tests/issue685_osc4_palette.rs"
 
