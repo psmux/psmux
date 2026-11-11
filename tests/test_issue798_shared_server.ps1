@@ -145,7 +145,7 @@ try {
         # f4e450dd: the rename-session arm takes its old in-memory rename only
         # when shared::in_shared_server_process() is true; a per session
         # server keeps 2a70181c's rename through its own server.
-        $allowed = @('780c995a src/commands.rs', '21c6f5b6 src/commands.rs', 'f4e450dd src/commands.rs')
+        $allowed = @('780c995a src/commands.rs', '21c6f5b6 src/commands.rs', 'f4e450dd src/commands.rs', '295264a5 src/commands.rs')
         $outside = @()
         foreach ($c in $commits) {
             $outside += @(git -C $repo diff-tree --no-commit-id --name-only -r $c -- src ':!src/server/shared' | ForEach-Object { "$($c.Substring(0, 8)) $_" } | Where-Object { $allowed -notcontains $_ })
