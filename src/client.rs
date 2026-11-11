@@ -700,6 +700,12 @@ pub(crate) struct HyperlinkRun {
     pub style: ratatui::style::Style,
 }
 
+/// The OSC 9;4 value this client last wrote or decided not to write, kept for
+/// the life of the client process so a switch-client, which starts
+/// `run_remote` again against another server, compares against what the
+/// terminal shows (issue #1028). `None` until the first change.
+static LAST_HOST_PROGRESS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 thread_local! {
     /// Hyperlink runs collected during the current frame's render, drained and
     /// emitted after `terminal.draw()`. Thread-local because the client renders
@@ -4379,8 +4385,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut last_emitted_host_title: Option<String> = None;
     // Issue #269: last OSC 9;4 (host terminal progress) value seen. Hidden to
     // begin with, as tmux's zeroed `c->progress_bar`, so a pane that never set
-    // one writes nothing at attach.
-    let mut last_emitted_host_progress = String::from("0;0");
+    // one writes nothing at attach. It belongs to the client, not to one
+    // server, so it carries over a switch-client to another session, which
+    // then clears a bar the old session left (tmux keeps `c->progress_bar`
+    // across `server_client_set_session`).
+    let mut last_emitted_host_progress = LAST_HOST_PROGRESS
+        .lock()
+        .ok()
+        .and_then(|last| last.clone())
+        .unwrap_or_else(|| String::from("0;0"));
     // ── Sixel graphics (#431) ───────────────────────────────────────
     // Session-lifetime blob cache: image id -> decoded raw ESC P..ST bytes.
     // Blobs are shipped ONCE per id in the dump-state `image_blobs` map, so
@@ -8993,14 +9006,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // `base.progress_bar` writes as hidden, so switching to it clears the
         // terminal (server-client.c:2659 at tag 3.8). The options ride on the
         // frame, and are read only when the value changes.
-        let host_progress_this_frame = state.host_progress.clone().unwrap_or_else(|| String::from("0;0"));
-        let host_progress_write = if host_progress_this_frame != last_emitted_host_progress {
-            crate::terminal_overrides::progress_sequence(
+        // A frame with no change compares one short string and allocates
+        // nothing.
+        let host_progress_now = state.host_progress.as_deref().unwrap_or("0;0");
+        let host_progress_change = if host_progress_now != last_emitted_host_progress {
+            let sequence = crate::terminal_overrides::progress_sequence(
                 state.client_render_options.terminal_features.as_deref(),
                 state.client_render_options.terminal_overrides.as_deref().unwrap_or(&[]),
                 &crate::terminal_overrides::client_term(),
-                &host_progress_this_frame,
-            )
+                host_progress_now,
+            );
+            Some((host_progress_now.to_string(), sequence))
         } else {
             None
         };
@@ -10881,14 +10897,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // an override changed it, and nothing without one (tty.c:3219 at tag
         // 3.8). The value counts as seen either way, as tmux keeps it in
         // `c->progress_bar` before it looks for the capability.
-        if host_progress_this_frame != last_emitted_host_progress {
-            if let Some(sequence) = host_progress_write {
+        if let Some((value, sequence)) = host_progress_change {
+            if let Some(sequence) = sequence {
                 use std::io::Write;
                 let mut out = std::io::stdout().lock();
                 let _ = out.write_all(sequence.as_bytes());
                 let _ = out.flush();
             }
-            last_emitted_host_progress = host_progress_this_frame;
+            if let Ok(mut last) = LAST_HOST_PROGRESS.lock() {
+                *last = Some(value.clone());
+            }
+            last_emitted_host_progress = value;
         }
 
         // ── Periodic mouse-enable refresh (ALL input modes) ──────────

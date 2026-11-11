@@ -228,6 +228,25 @@ function Run-Cases($route) {
     Check "${route}: a hide with no value keeps it" (Logged) ($seen -join ' ')
     Down
 
+    # The value is the client's (c->progress_bar), not the session's, so it
+    # carries over a switch-client. psmux runs a server per session and the
+    # client starts its frame loop again against the other one.
+    Write-Host "  -- switching sessions" -ForegroundColor DarkCyan
+    Up
+    P new-session -d -s t -x 120 -y 30 | Out-Null
+    Start-Sleep -Milliseconds 2500
+    Set-Bar s '1;50'
+    $seen = @(Bar '1;50')
+    Check "${route}: a bar in the session" (Logged) ($seen -join ' ')
+    foreach ($step in @(@('t', '0;0', 'switch to a session with none'), @('s', '1;50', 'switch back'))) {
+        P switch-client -t $step[0] | Out-Null
+        for ($k = 0; $k -lt 25 -and "$(P list-clients)" -notmatch ": $($step[0]) \["; $k++) { Start-Sleep -Milliseconds 200 }
+        Start-Sleep -Milliseconds 900
+        $seen += (Bar $step[1])
+        Check "${route}: $($step[2])" (Logged) ($seen -join ' ')
+    }
+    Down
+
     Write-Host "  -- the status line" -ForegroundColor DarkCyan
     Up @("set -g window-status-format 'WSF#{window_index}[#{pane_pb_state}:#{pane_pb_progress}]'")
     New-Pane @('new-window', '-t', 's')
