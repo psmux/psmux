@@ -538,8 +538,17 @@ pub fn parse_inline_styles(text: &str, base_style: Style) -> Vec<Span<'static>> 
 
 /// Measure the same per-span graphemes the status renderer and clipper draw.
 pub fn spans_visual_width(spans: &[Span]) -> usize {
-    spans.iter().flat_map(|s| s.styled_graphemes(Style::default()))
-        .map(|g| usize::from(g.symbol.cell_width())).sum()
+    spans.iter().map(|s| {
+        let text = s.content.as_ref();
+        // Printable ASCII is one column per byte; skip grapheme segmentation
+        // for it, since the status line is measured on every frame.
+        if text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            text.len()
+        } else {
+            s.styled_graphemes(Style::default())
+                .map(|g| usize::from(g.symbol.cell_width())).sum()
+        }
+    }).sum()
 }
 
 /// Truncate a list of styled spans so their total visual width fits within
@@ -890,6 +899,20 @@ fn clip_status_list(
     let mut visible = start..end;
     let mut previous_visible = false;
     for span in spans {
+        let content = span.content.as_ref();
+        if content.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            // Printable ASCII: one column per byte, so slice it directly.
+            if col >= end && !content.is_empty() { break; }
+            let next = col + content.len();
+            if next > start {
+                let a = start.max(col) - col;
+                let b = end.min(next) - col;
+                if a < b { result.push(Span::styled(content[a..b].to_string(), span.style)); }
+            }
+            if !content.is_empty() { previous_visible = next > start && next <= end; }
+            col = next;
+            continue;
+        }
         let mut text = String::new();
         let mut finished = false;
         // Paragraph uses CellWidth, including its halfwidth sound-mark adjustment.
