@@ -112,11 +112,13 @@ function Unregister-FakeSession($name) {
 
 function Invoke-Psmux {
     param([string[]]$CliArgs)
-    $errFile = Join-Path $DATA "stderr.txt"
-    $out = & $PSMUX @CliArgs 2>$errFile
+    # stderr lines come back as ErrorRecords under Windows PowerShell 5.1:
+    # keep their text only, so the messages read the same in pwsh and 5.1.
+    $all = & $PSMUX @CliArgs 2>&1
     $rc = $LASTEXITCODE
-    $err = if (Test-Path $errFile) { (Get-Content $errFile -Raw) } else { '' }
-    [pscustomobject]@{ Out = (($out | Out-String).Trim()); Err = ("$err".Trim()); Rc = $rc }
+    $out = @($all | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] }) -join "`n"
+    $err = @($all | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { $_.Exception.Message }) -join "`n"
+    [pscustomobject]@{ Out = $out.Trim(); Err = $err.Trim(); Rc = $rc }
 }
 
 # === Test 1: a reply the filter would drop on a client half-close ==========
