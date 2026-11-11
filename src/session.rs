@@ -3858,3 +3858,7 @@ mod tests_discussion844_namespace_names;
 #[cfg(test)]
 #[path = "../tests-rs/test_unstorable_names.rs"]
 mod tests_unstorable_names;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_halfclose_filter_reply.rs"]
+mod tests_halfclose_filter_reply;
