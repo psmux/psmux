@@ -74,6 +74,7 @@ mod pane_colours;
 mod scroll_on_clear;
 mod cursor_colour;
 mod style_colours;
+mod clipboard_read;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;

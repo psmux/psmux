@@ -581,6 +581,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 },
                 other => other,
             };
+            if let (crate::TerminalQuery::Clipboard { .. }, [_, ty, _]) = (query, params) {
+                self.callbacks.paste_from_clipboard(&mut self.screen, ty);
+            }
             self.screen.query(query);
             return;
         }
@@ -743,14 +746,11 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 self.screen.set_hyperlink(id_params, &uri);
             }
             [b"52", ty, data] => {
+                // `?` is a query, taken by `osc_query` above.
                 match (
                     ty.iter().all(|c| CLIPBOARD_SELECTOR.contains(c)),
                     *data,
                 ) {
-                    (true, b"?") => {
-                        self.callbacks
-                            .paste_from_clipboard(&mut self.screen, ty);
-                    }
                     // tmux parity: b64_pton skips ASCII whitespace anywhere
                     // in an OSC 52 payload, so producers that wrap long
                     // base64 must still get through this gate. The server

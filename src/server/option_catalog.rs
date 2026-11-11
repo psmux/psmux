@@ -93,6 +93,8 @@ pub enum ChoiceKind {
     StatusJustify,
     /// tmux `options_table_status_position_list` (options-table.c:53-55 at 3.8).
     StatusPosition,
+    /// tmux `options_table_get_clipboard_list` (options-table.c:87 at 3.8).
+    GetClipboard,
 }
 
 /// The values tmux's CHOICE option `status-justify` takes.
@@ -145,6 +147,14 @@ impl ChoiceKind {
                     Err(format!("unknown value: {}", value))
                 }
             }
+            // options_find_choice compares with strcmp, as for status-justify.
+            Self::GetClipboard => {
+                if crate::clipboard_read::GET_CLIPBOARD_CHOICES.contains(&value) {
+                    Ok(())
+                } else {
+                    Err(format!("unknown value: {}", value))
+                }
+            }
             Self::RemainOnExit => crate::types::RemainOnExit::parse(value.trim())
                 .map(|_| ())
                 .ok_or_else(|| format!("unknown value: {}", value)),
@@ -179,7 +189,7 @@ impl ChoiceKind {
         match self {
             Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
             | Self::ExtendedKeys | Self::ExtendedKeysFormat | Self::RemainOnExit | Self::Sixel
-            | Self::StatusJustify | Self::StatusPosition => true,
+            | Self::StatusJustify | Self::StatusPosition | Self::GetClipboard => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -188,7 +198,7 @@ impl ChoiceKind {
         match self {
             Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
             | Self::ExtendedKeys | Self::ExtendedKeysFormat | Self::RemainOnExit | Self::Sixel
-            | Self::StatusJustify | Self::StatusPosition => true,
+            | Self::StatusJustify | Self::StatusPosition | Self::GetClipboard => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -290,7 +300,7 @@ impl ValidationOnlyOptionDef {
     }
 }
 
-use ChoiceKind::{Priority, StatusJustify, StatusPosition, Unvalidated};
+use ChoiceKind::{GetClipboard, Priority, StatusJustify, StatusPosition, Unvalidated};
 use NumberKind::{I64, Index, InputBufferSize, RepeatTime, StatusLength, U64, Usize};
 use OptionScope::{Pane, Server, Session, Window};
 use OptionType::{Boolean, Choice, Number};
@@ -306,6 +316,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "history-limit", scope: Server, option_type: Number(Usize), default: "2000", description: "Maximum scrollback lines per pane" },
     OptionDef { name: "alternate-screen", scope: Server, option_type: Boolean, default: "on", description: "Honour DEC 47/1049 alt-screen mode (off = TUI output goes to scrollback, #88)" },
     OptionDef { name: "set-clipboard", scope: Server, option_type: UNVALIDATED_CHOICE, default: "external", description: "OSC 52 clipboard integration" },
+    OptionDef { name: "get-clipboard", scope: Server, option_type: Choice(GetClipboard), default: "buffer", description: "What a pane's OSC 52 clipboard query is answered with (off/buffer/request/both)" },
     OptionDef { name: "default-shell", scope: Server, option_type: OptionType::String, default: "", description: "Default shell for new panes" },
     OptionDef { name: "default-terminal", scope: Server, option_type: OptionType::String, default: "xterm-256color", description: "TERM value for new panes" },
     OptionDef { name: "copy-command", scope: Server, option_type: OptionType::String, default: "", description: "External copy command (pipe selection)" },

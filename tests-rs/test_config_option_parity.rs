@@ -38,6 +38,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "history-limit" => "4321",
         "alternate-screen" => "off",
         "set-clipboard" => "off",
+        "get-clipboard" => "request",
         "default-shell" => "cmd.exe",
         "default-terminal" => "screen-256color",
         "copy-command" => "clip.exe",

@@ -3125,6 +3125,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // replies: two compares and a look at the floats until a style names
         // a colour.
         crate::style_colours::reconcile(&mut app);
+        // A pane's OSC 52 query: answer it and deliver its batch. One atomic
+        // load while nothing waits.
+        crate::clipboard_read::serve(&mut app, |_, _| true);
         // Set when this iteration marked the state dirty only because a pty
         // batch is still PENDING in `PTY_DATA_READY`. See the request arm and
         // the end of iteration push.
