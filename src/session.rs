@@ -1323,7 +1323,9 @@ pub fn kill_servers_in_scope(
                         let _ = stream.flush();
                         let _ = stream.write_all(b"kill-server\n");
                         let _ = stream.flush();
-                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        // No half-close (see NO CLIENT HALF-CLOSE): a filter
+                        // that aborts it ended this wait before the server
+                        // had even run the command.
                         // Wait for the server to exit (EOF = done).
                         // Longer than the server's own hold (KILL_SERVER_HOLD),
                         // so the EOF that ends this wait is the server exiting
@@ -2386,16 +2388,22 @@ pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<S
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = write!(s, "AUTH {}\n", key);
     let _ = std::io::Write::write_all(&mut s, cmd);
+    if !cmd.ends_with(b"\n") {
+        let _ = std::io::Write::write_all(&mut s, b"\n");
+    }
     let _ = s.flush();
-    // Nothing more is coming from this side: say so, so the server's reader
-    // sees end of input and closes the connection as soon as it has answered.
-    // Without it the reply's EOF waited out the server's 10 ms read timeout on
-    // the next line (measured on the warm claim: OK written at 83 ms, the CLI
-    // saw it end at 98 ms), which is the same half-close `send_control` does.
-    let _ = s.shutdown(std::net::Shutdown::Write);
+    // No half-close (see NO CLIENT HALF-CLOSE): the server closes the
+    // connection as soon as it has answered. claim-session, the hot caller,
+    // ends its one-shot connection right after its reply, so the reply's EOF
+    // does not wait out the server's 10 ms batching read either.
     let mut br = std::io::BufReader::new(std::io::Read::take(&mut s, MAX_AUTHED_RESPONSE_BYTES));
     let mut auth_line = String::new();
     let _ = std::io::BufRead::read_line(&mut br, &mut auth_line);
+    // Not even the AUTH acknowledgement: the connection was cut off before
+    // the server answered, which no caller may take for an empty reply.
+    if auth_line.is_empty() {
+        return Err(no_reply_error());
+    }
     let mut buf = String::new();
     let _ = std::io::Read::read_to_string(&mut br, &mut buf);
     Ok(buf)
@@ -3008,24 +3016,64 @@ pub fn send_control(line: String) -> io::Result<()> {
     // simply never answered — that path is covered by the caller's verify-retry.
     let _ = write!(stream, "session-info\n");
     let _ = stream.flush();
-    // Half-close the write side so the server observes EOF *after* our bytes.
-    // TCP guarantees all sent data is delivered before the FIN, so the server's
-    // read_line always sees the full command before its loop ends — eliminating
-    // the RST-on-close race that used to silently drop fire-and-forget commands
-    // (the old 50ms "drain" read was only a partial mitigation).
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-    // Read to EOF (bounded by the read timeout): blocks until the server has
-    // processed the barrier — i.e. the command has executed — or the connection
-    // closes / times out.
+    // No half-close here: see NO CLIENT HALF-CLOSE below. The server ends a one-shot
+    // connection itself once the command has run, and reads off whatever we
+    // sent that it did not need before it closes, so it never resets the
+    // connection on us. Reading to EOF (bounded by the read timeout) is what
+    // makes this wait until the command has executed, and the client never
+    // closes with the ack unread, which is what used to reset the connection
+    // and drop fire-and-forget commands.
     let mut buf = [0u8; 256];
+    let mut received = 0usize;
     loop {
         match std::io::Read::read(&mut stream, &mut buf) {
             Ok(0) => break,
-            Ok(_) => continue,
+            Ok(n) => received += n,
             Err(_) => break,
         }
     }
+    // The server acknowledges AUTH before it reads the command, so a
+    // connection that ends without a single byte was cut off before the
+    // server answered at all: the command may never have run. Saying nothing
+    // here turned that into a silent success (exit 0, nothing done).
+    if received == 0 {
+        return Err(no_reply_error());
+    }
     Ok(())
+}
+
+// NO CLIENT HALF-CLOSE: why no request on a one-shot connection shuts down
+// its write side.
+//
+// Every CLI request used to `shutdown(SD_SEND)` right after writing, so the
+// server saw EOF at once. Some loopback stream filters (seen with a WFP
+// network driver of an ad blocker, 8.0 series) abort the connection when the
+// connecting side half-closes, and they do it silently: the client then reads
+// zero bytes and a clean EOF, the server's reply is thrown away, and every
+// command that prints something printed nothing at exit 0. The server never
+// needed our EOF: a one-shot connection ends after its command (and its
+// `\;` list) has run, the server half-closes its own side, drains what is
+// left of our input and closes. So the request is complete when its last
+// line ends in a newline, and the reply is complete at the server's EOF.
+
+/// The error for a one-shot connection that closed without a single byte:
+/// not even the AUTH acknowledgement, which the server writes before it reads
+/// the command. Never an empty result.
+pub(crate) fn no_reply_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "no response from server (the connection closed before any reply)",
+    )
+}
+
+/// `line` with a newline at its end, so the server reads the last command as
+/// a whole line without needing our EOF (see NO CLIENT HALF-CLOSE above).
+pub(crate) fn terminated_request(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.is_empty() || line.ends_with('\n') {
+        std::borrow::Cow::Borrowed(line)
+    } else {
+        std::borrow::Cow::Owned(format!("{}\n", line))
+    }
 }
 
 pub fn send_control_with_response(line: String) -> io::Result<String> {
@@ -3142,9 +3190,10 @@ pub(crate) fn send_run_shell_with_response(line: &str, cwd: &std::path::Path) ->
     let cwd = base64::engine::general_purpose::STANDARD.encode(cwd.to_string_lossy().as_bytes());
     // The only command submission point in this native path.
     writeln!(stream, "CLIENT_CWD {}", cwd)?;
-    stream.write_all(line.as_bytes())?;
+    stream.write_all(terminated_request(line).as_bytes())?;
     stream.flush()?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    // No half-close (see NO CLIENT HALF-CLOSE): the framed reply below ends
+    // the exchange, and the server closes once it has written it.
     crate::run_shell::read_reply(&mut reader).map(RunShellRoute::Native)
 }
 
@@ -3177,22 +3226,30 @@ pub fn exchange_on_port(
     if let Some(ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
     }
-    let _ = write!(stream, "{}", line);
+    let _ = write!(stream, "{}", terminated_request(line));
     let _ = stream.flush();
-    // Half-close so the server sees EOF after our request and closes the socket
-    // once the reply is complete — giving a definitive Ok(0) end-of-response
-    // instead of relying on an idle-gap timeout to guess the reply is done.
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    // No half-close (see NO CLIENT HALF-CLOSE above): the server closes the socket
+    // once the reply is complete, which is the definitive Ok(0) end of reply.
     let mut buf = Vec::new();
     let mut temp = [0u8; 4096];
     let mut timed_out = false;
+    let mut read_error: Option<io::Error> = None;
     loop {
         match std::io::Read::read(&mut stream, &mut temp) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&temp[..n]),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => { timed_out = true; break; }
-            Err(_) => break,
+            Err(e) => { read_error = Some(e); break; }
         }
+    }
+    // Not even the AUTH acknowledgement came back: the connection was cut off
+    // before the server answered. An empty reply here used to print nothing
+    // at exit 0, the same as an empty result.
+    if buf.is_empty() && !timed_out {
+        return Err(match read_error {
+            Some(e) => io::Error::new(e.kind(), format!("no response from server ({})", e)),
+            None => no_reply_error(),
+        });
     }
     let result = String::from_utf8_lossy(&buf).to_string();
     // Strip the "OK\n" AUTH response prefix if present. This is protocol
