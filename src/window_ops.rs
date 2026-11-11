@@ -4061,11 +4061,85 @@ pub struct BrokenPane {
 /// `can't find pane: <spec>` on a miss. psmux used to resolve both halves
 /// inside the ACTIVE window only, so a spec naming another window either hit
 /// the wrong pane or silently resolved to the same pane twice.
+/// The pane a [`crate::cli::special_pane_token`] names in window `wi`, the way
+/// tmux's `cmd_find_get_pane_with_window` reads it (cmd-find.c:599 to :640):
+///
+/// * `!` / `{last}`: the window's last pane (`TAILQ_FIRST(&w->last_panes)`,
+///   with no fallback, unlike `last-pane`). psmux remembers it for the
+///   current window only.
+/// * `+N` / `{next}`, `-N` / `{previous}`: N panes on (back) by pane number
+///   from the active pane, wrapping (`window_pane_next_by_number`).
+/// * `{up-of}`, `{down-of}`, `{left-of}`, `{right-of}`: the active pane's
+///   neighbour, wrapping round the window edge (`window_pane_find_up` ...).
+/// * `{top}`, `{bottom-right}` ...: the pane at that place in the layout.
+pub fn resolve_special_pane_token(app: &AppState, wi: usize, token: &str) -> Option<Vec<usize>> {
+    let win = app.windows.get(wi)?;
+    let token = match token {
+        "{last}" => "!",
+        "{next}" => "+",
+        "{previous}" => "-",
+        t => t,
+    };
+    let dir = match token {
+        "!" => {
+            let last = &app.last_pane_path;
+            return (wi == app.active_idx
+                && !last.is_empty()
+                && *last != win.active_path
+                && crate::tree::path_exists(&win.root, last))
+                .then(|| last.clone());
+        }
+        "{up-of}" => FocusDir::Up,
+        "{down-of}" => FocusDir::Down,
+        "{left-of}" => FocusDir::Left,
+        "{right-of}" => FocusDir::Right,
+        t if t.starts_with('{') => {
+            let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+            compute_rects(&win.root, app.last_window_area, &mut rects);
+            return resolve_position_token(t, app.last_window_area, &rects);
+        }
+        t => {
+            let (sign, count) = t.split_at(1);
+            // tmux: strtonum(pane + 1, 1, INT_MAX), a bare sign is 1.
+            let n: usize = if count.is_empty() { 1 } else { count.parse().unwrap_or(0) };
+            let paths = crate::tree::pane_paths(&win.root);
+            let len = paths.len();
+            let cur = paths.iter().position(|p| *p == win.active_path)?;
+            let step = n % len;
+            let at = if sign == "+" { (cur + step) % len } else { (cur + len - step) % len };
+            return paths.into_iter().nth(at);
+        }
+    };
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, app.last_window_area, &mut rects);
+    let ai = rects.iter().position(|(p, _)| *p == win.active_path)?;
+    let arect = rects[ai].1;
+    let pane_ids: Vec<usize> = rects.iter()
+        .map(|(p, _)| crate::tree::get_active_pane_id(&win.root, p).unwrap_or(usize::MAX))
+        .collect();
+    crate::input::find_best_pane_in_direction(&rects, ai, &arect, dir, &pane_ids, &win.pane_mru)
+        .or_else(|| crate::input::find_wrap_target(&rects, ai, &arect, dir, &pane_ids, &win.pane_mru))
+        .map(|i| rects[i].0.clone())
+}
+
 pub fn resolve_pane_spec(app: &AppState, spec: &str) -> Result<(usize, Vec<usize>), String> {
     let spec = crate::cli::strip_exact_match_prefix(spec.trim());
     let miss = || format!("can't find pane: {}", spec);
     if app.windows.is_empty() { return Err(miss()); }
     let active = app.active_idx.min(app.windows.len() - 1);
+    // A bare special token is a pane of the current window first, and only
+    // then a window (cmd_find_get_pane, cmd-find.c:529 to :543): `-t -` is
+    // the previous pane, not the previous window (issue #1040).
+    if crate::cli::special_pane_token(spec) {
+        if let Some(p) = resolve_special_pane_token(app, active, spec) {
+            return Ok((active, p));
+        }
+    }
+    // `.-`, `:.+`, `sess:1.!`: the token is a pane of the window before it.
+    if let Some((win_spec, token)) = crate::cli::split_special_pane_target(spec) {
+        let (wp, _) = resolve_pane_spec(app, win_spec)?;
+        return resolve_special_pane_token(app, wp, token).map(|p| (wp, p)).ok_or_else(miss);
+    }
     // A `{position}` token is layout geometry in the current window.
     if spec.starts_with('{') {
         return pane_path_at_position(app, spec).map(|p| (active, p)).ok_or_else(miss);
@@ -4083,6 +4157,12 @@ pub fn resolve_pane_spec(app: &AppState, spec: &str) -> Result<(usize, Vec<usize
         }
     } else if let Some(d) = pt.window {
         win_pos = Some(app.win_pos(d).ok_or_else(|| format!("can't find window: {}", d))?);
+    } else if let Some(ref n) = pt.window_name.as_ref().filter(|n| crate::cli::special_window_token(n)) {
+        // `sess:+`, `:!`, `:{end}`: the window table and offsets
+        // (cmd-find.c:51 and :390), not a window called "+" (#1040).
+        win_pos = Some(app.resolve_window_spec(n, false)
+            .map_err(|_| format!("can't find window: {}", n))?
+            .pos().ok_or_else(|| format!("can't find window: {}", n))?);
     } else if let Some(ref n) = pt.window_name {
         win_pos = Some(app.windows.iter().position(|w| w.name == *n)
             .ok_or_else(|| format!("can't find window: {}", n))?);

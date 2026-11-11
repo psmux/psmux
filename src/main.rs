@@ -1642,8 +1642,11 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             // a session of that name exists, it routes like no `-t` at all
             // and the server resolves it; it used to die here with "no server
             // running on session '<ns>__w2'".
+            // `0.{previous}` and `w.!` are a window and a special pane of
+            // this session too (cmd-find.c:1089), never a session (#1040).
             let bare_window_or_pane = window_or_pane_command
-                && crate::cli::bare_target_token(&target)
+                && (crate::cli::bare_target_token(&target)
+                    || (!target.contains(':') && crate::cli::split_special_pane_target(&target).is_some()))
                 && !std::path::Path::new(&crate::paths::port_file(&port_file_base)).exists();
             // set-buffer's -t is only used for -w in tmux, and a client that
             // does not exist is not an error. psmux keeps buffers per session,
