@@ -195,7 +195,7 @@ function Install-Hook {
     if ($null -eq $first -or $null -eq $second) { return $false }
     $shown = Request 'A' 'show-hooks -t A' -WantBody
     if ($null -eq $shown) { return $false }
-    $expected = "after-select-window[0] -> $Forward`nafter-select-window[1] -> $Mark"
+    $expected = "after-select-window[0] $Forward`nafter-select-window[1] $Mark"
     $got = $shown.Body -replace '(\r?\n)+$', ''
     if ($got -cne $expected) { Fail 3 "hooks of A are [$(Show $got)], expected [$(Show $expected)]"; return $false }
     Pass "hooks of A are [$(Show $got)]"

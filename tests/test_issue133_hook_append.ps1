@@ -80,7 +80,8 @@ $hooks = & $exe show-hooks -g 2>&1 | Out-String
 Test "2.1 -ga on missing hook creates it" ($hooks -match 'after-new-window')
 Test "2.2 Contains correct command" ($hooks -match 'created-by-ga')
 # Single handler should NOT use indexed format
-Test '2.3 Single handler uses plain format (no index)' ($hooks -match 'after-new-window -> ' -and $hooks -notmatch 'after-new-window\[')
+# tmux indexes every array element, a single one too: name[0] command.
+Test '2.3 Single handler is listed as element 0' ($hooks -match 'after-new-window\[0\] created-by-ga' -and $hooks -notmatch 'after-new-window\[1\]')
 
 # ════════════════════════════════════════════════════════════════════
 # Test Group 3: -g (replace) clears all appended handlers
@@ -208,7 +209,7 @@ $detachLines = ($hooks -split "`n" | Where-Object { $_ -match 'client-detached' 
 Test "7.1 client-attached has 2 handlers" ($attachLines.Count -eq 2)
 Test "7.2 after-new-window has 2 handlers" ($newwinLines.Count -eq 2)
 Test "7.3 client-detached has 1 handler (plain format)" ($detachLines.Count -eq 1)
-Test '7.4 client-detached uses plain format (no index)' ($hooks -match 'client-detached -> ' -and $hooks -notmatch 'client-detached\[')
+Test '7.4 client-detached is listed as element 0' ($hooks -match 'client-detached\[0\] ' -and $hooks -notmatch 'client-detached\[1\]')
 
 # Removing one hook doesn't affect others
 & $exe set-hook -gu after-new-window
@@ -237,15 +238,15 @@ Test "8.1 Empty hooks shows (no hooks)" ($hooks -match '\(no hooks\)')
 & $exe set-hook -g client-attached 'display-message "solo"'
 Start-Sleep -Milliseconds 200
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
-Test '8.2 Single handler: plain format "name -> cmd"' ($hooks -match '^client-attached -> display-message' -or $hooks -match 'client-attached -> display-message')
+Test '8.2 Single handler: tmux format "name[0] cmd"' ($hooks -match '(?m)^client-attached\[0\] display-message')
 Test '8.3 Single handler: no brackets' ($hooks -notmatch 'client-attached\[')
 
 # Multi handler: indexed format
 & $exe set-hook -ga client-attached 'display-message "duo"'
 Start-Sleep -Milliseconds 200
 $hooks = & $exe show-hooks -g 2>&1 | Out-String
-Test '8.4 Multi handler: indexed format "name[0] -> cmd"' ($hooks -match 'client-attached\[0\] ->')
-Test '8.5 Multi handler: indexed format "name[1] -> cmd"' ($hooks -match 'client-attached\[1\] ->')
+Test '8.4 Multi handler: indexed format "name[0] cmd"' ($hooks -match 'client-attached\[0\] \S')
+Test '8.5 Multi handler: indexed format "name[1] cmd"' ($hooks -match 'client-attached\[1\] \S')
 
 # ════════════════════════════════════════════════════════════════════
 # Test Group 9: Continuum-style reload scenario (the original bug)

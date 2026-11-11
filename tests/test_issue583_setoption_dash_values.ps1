@@ -105,7 +105,7 @@ if ($r.rc -eq 0 -and $hooks -match 'after-new-window' -and $hooks -notmatch 'no 
 
 $r = Invoke-Psmux @('set-hook','-t',$SESSION,'-u','after-new-window')
 $hooks = (Invoke-Psmux @('show-hooks','-t',$SESSION)).out
-if ($r.rc -eq 0 -and $hooks -match 'no hooks') { Write-Pass "set-hook -u <name> still unsets" }
+if ($r.rc -eq 0 -and $hooks -notmatch 'after-new-window') { Write-Pass "set-hook -u <name> still unsets" }
 else { Write-Fail "hook unset regressed: rc=$($r.rc) hooks=[$hooks]" }
 
 # --- Arm 6: #580 pane scope unaffected ---

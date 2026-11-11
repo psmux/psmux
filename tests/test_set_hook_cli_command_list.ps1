@@ -24,7 +24,7 @@ function Opt($n) { ((P show -gv $n) -join '') }
 function Hook { ((P show-hooks -g | Select-String 'after-new-window') -join ' | ') }
 # The hook as stored, that nothing ran yet, and what one new-window does.
 function Verify([string]$Label, [string]$WantHook) {
-    Check "${Label}: stored hook" (Hook) "after-new-window -> $WantHook"
+    Check "${Label}: stored hook" (Hook) "after-new-window[0] $WantHook"
     Check "${Label}: nothing ran at set-hook time" ("a=" + (Opt '@a') + " b=" + (Opt '@b')) "a= b="
     P new-window -t s | Out-Null; Start-Sleep -Milliseconds 800
     Check "${Label}: one new-window runs both" ("a=" + (Opt '@a') + " b=" + (Opt '@b')) "a=x b=y"
