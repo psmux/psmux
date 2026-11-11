@@ -262,6 +262,23 @@ pub(crate) fn split_refusal(reply: &str) -> Option<&str> {
     reply.strip_prefix("psmux: ").filter(|m| m.starts_with("split-window: "))
 }
 
+/// The terminator a listing reply needs: one newline, unless the producer
+/// already ended its text with one. Some producers build their rows with a
+/// newline after each row and others join them, so a fixed `{}\n` printed a
+/// stray empty last line after list-panes, list-keys, show-options and more
+/// (tmux never prints one). An empty text still gets its newline: registry
+/// readers expect every reply to end in one (#809).
+pub(crate) fn listing_terminator(text: &str) -> &'static str {
+    if text.ends_with('\n') { "" } else { "\n" }
+}
+
+/// Write a listing reply ending in exactly one newline (see
+/// `listing_terminator`) and flush it.
+fn write_listing(write_stream: &mut ReplyStream, text: &str) {
+    let _ = write!(write_stream, "{}{}", text, listing_terminator(text));
+    let _ = write_stream.flush();
+}
+
 /// Write a split-window reply. A refusal on a one-shot connection is the
 /// command's error reply, `ERROR: split-window: <why>`, so the rest of a
 /// list does not run and the CLI exits 1 with it on stderr, as tmux stops a
@@ -4298,7 +4315,7 @@ match cmd {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-windows".to_string(), text));
                 } else {
-                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                    write_listing(&mut write_stream, &text);
                 }
             }
         } else if args.iter().any(|a| *a == "-J") {
@@ -4309,7 +4326,7 @@ match cmd {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-windows".to_string(), text));
                 } else {
-                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                    write_listing(&mut write_stream, &text);
                 }
             }
         } else {
@@ -4320,13 +4337,13 @@ match cmd {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-windows".to_string(), text));
                 } else {
-                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                    write_listing(&mut write_stream, &text);
                 }
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
     }
-    "list-tree" => { let (rtx, rrx) = mpsc::channel::<String>(); let _ = tx.send(CtrlReq::ListTree(rtx)); if let Ok(text) = rrx.recv() { if persistent { let _ = tx.send(CtrlReq::ShowTextPopup("list-tree".to_string(), text)); } else { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); } } if !persistent && pending_chain.is_empty() { break; } }
+    "list-tree" => { let (rtx, rrx) = mpsc::channel::<String>(); let _ = tx.send(CtrlReq::ListTree(rtx)); if let Ok(text) = rrx.recv() { if persistent { let _ = tx.send(CtrlReq::ShowTextPopup("list-tree".to_string(), text)); } else { write_listing(&mut write_stream, &text); } } if !persistent && pending_chain.is_empty() { break; } }
     "window-layout" => {
         // Issue #257: return simplified layout JSON for a given window id.
         // Usage: window-layout <window_id>
@@ -4479,7 +4496,7 @@ match cmd {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("list-panes".to_string(), text));
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &text);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -4753,7 +4770,7 @@ match cmd {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("list-buffers".to_string(), text));
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &text);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -4832,7 +4849,7 @@ match cmd {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("choose-buffer".to_string(), text));
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &text);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -5443,7 +5460,7 @@ match cmd {
             } else if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("list-keys".to_string(), filtered));
             } else {
-                let _ = write!(write_stream, "{}\n", filtered); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &filtered);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -6018,7 +6035,7 @@ match cmd {
                     } else if !text.is_empty() {
                         // A window that owns nothing prints NOTHING, not the
                         // blank line a bare `{}\n` would emit (#655).
-                        let _ = write!(write_stream, "{}\n", text);
+                        write_listing(&mut write_stream, &text);
                         let _ = write_stream.flush();
                     }
                 }
@@ -6036,7 +6053,7 @@ match cmd {
                     if persistent {
                         let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), text));
                     } else {
-                        let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                        write_listing(&mut write_stream, &text);
                     }
                 }
             }
@@ -6185,7 +6202,7 @@ match cmd {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("find-window".to_string(), text));
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &text);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -6441,7 +6458,7 @@ match cmd {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("show-hooks".to_string(), text));
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &text);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -6935,7 +6952,7 @@ match cmd {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-sessions".to_string(), text));
                 } else {
-                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                    write_listing(&mut write_stream, &text);
                 }
             }
         } else {
@@ -6945,7 +6962,7 @@ match cmd {
                 if persistent {
                     let _ = tx.send(CtrlReq::ShowTextPopup("list-sessions".to_string(), text));
                 } else {
-                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                    write_listing(&mut write_stream, &text);
                 }
             }
         }
@@ -7182,7 +7199,7 @@ match cmd {
         if persistent {
             let _ = tx.send(CtrlReq::ShowTextPopup("list-commands".to_string(), cmds));
         } else {
-            let _ = write!(write_stream, "{}\n", cmds);
+            write_listing(&mut write_stream, &cmds);
             let _ = write_stream.flush();
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -7197,7 +7214,7 @@ match cmd {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("show-messages".to_string(), text));
             } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                write_listing(&mut write_stream, &text);
             }
         }
         if !persistent && pending_chain.is_empty() { break; }
@@ -9308,3 +9325,7 @@ mod tests_issue954_command_list_stops;
 #[cfg(test)]
 #[path = "../../tests-rs/test_set_option_forward_line.rs"]
 mod tests_set_option_forward_line;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_list_trailing_newline.rs"]
+mod tests_list_trailing_newline;

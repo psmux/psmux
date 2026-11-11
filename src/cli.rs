@@ -1707,8 +1707,10 @@ pub fn print_version() {
     println!("{}", build_version_string());
 }
 
-pub fn print_commands() {
-    println!(r#"Available commands:
+/// The list-commands text. It already ends in a newline, so print_commands
+/// prints it as is: println! after it printed an empty last line.
+pub fn commands_text() -> &'static str {
+    r#"Available commands:
   attach-session (attach)   - Attach to a session
   bind-key (bind)           - Bind a key to a command
   break-pane                - Break a pane into a new window
@@ -1786,7 +1788,11 @@ pub fn print_commands() {
   unlink-window (unlinkw)   - Unlink a window
   wait-for (wait)           - Wait for a signal
   zoom-pane (zoom)          - Toggle pane zoom
-"#);
+"#
+}
+
+pub fn print_commands() {
+    print!("{}", commands_text());
 }
 
 /// Strip the tmux exact-match marker from a raw target specification.
