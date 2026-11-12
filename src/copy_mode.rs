@@ -1479,7 +1479,12 @@ pub fn paste_latest(app: &mut AppState) -> io::Result<()> {
     // stack is empty, so prefix+] pastes externally-copied text.
     let internal = app.paste_top().unwrap_or_default().to_string();
     let text = if internal.is_empty() {
-        crate::clipboard::read_from_system_clipboard().unwrap_or_default()
+        // A clipboard another window holds open is read off the server loop;
+        // the paste lands when it is free (commands::PendingClipboardPaste).
+        match crate::commands::clipboard_text_or_wait(app, crate::commands::ClipboardPasteDelivery::Raw) {
+            Some(text) => text,
+            None => return Ok(()),
+        }
     } else {
         internal
     };

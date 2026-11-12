@@ -1952,6 +1952,10 @@ pub struct AppState {
     pub copy_register_pending: bool,
     /// Currently selected named register (a-z), None = default unnamed
     pub copy_register: Option<char>,
+    /// A paste of the OS clipboard (empty paste stack, #428) still waiting for
+    /// a clipboard another window holds open.  The server loop holds every
+    /// later request behind it so nothing overtakes the paste.
+    pub clipboard_paste_pending: Option<crate::commands::PendingClipboardPaste>,
     /// Copy-mode mark set by `X` (set-mark): (scroll_offset, row, col).
     /// `M-x` (jump-to-mark) swaps the cursor with it, so pressing it twice
     /// returns you to where you started, same as tmux (#498).
@@ -3518,6 +3522,7 @@ impl AppState {
             copy_text_object_pending: None,
             copy_register_pending: false,
             copy_register: None,
+            clipboard_paste_pending: None,
             copy_mark: None,
             copy_last_jump: None,
             copy_refresh_live: false,
