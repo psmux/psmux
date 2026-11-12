@@ -1655,6 +1655,7 @@ pub mod mouse_inject {
         // Always log to file for Ctrl+C events (critical signal path).
         fn log(msg: &str) {
             debug_log(&format!("ctrl_c: {}", msg));
+            ctrlc_trace(msg);
         }
 
         // Decide up-front whether the pane's foreground process wants a console
