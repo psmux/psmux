@@ -178,8 +178,9 @@ foreach ($mode in 'ackonly', 'ackreset') {
     $cmds = @(
         @('display-message', '-p', '-t', 'ack', '#{session_name}'),
         @('list-panes', '-t', 'ack', '-F', '#{pane_id}'))
-    # A reset is never how a reply ends, so it is an error for every command.
-    if ($mode -eq 'ackreset') { $cmds += , @('capture-pane', '-p', '-t', 'ack') }
+    # capture-pane -p is not checked here: its correct answer can be empty,
+    # so after the read-only retry a reset on the first try and a clean close
+    # on the second read as an empty capture, which is the honest limit.
     foreach ($cmd in $cmds) {
         $r = Invoke-Psmux (@('-L', $NS) + $cmd)
         Write-Info ("{0} {1}: rc={2} out=[{3}] err=[{4}]" -f $mode, $cmd[0], $r.Rc, $r.Out, $r.Err)
