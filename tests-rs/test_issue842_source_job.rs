@@ -174,6 +174,21 @@ fn warnings_are_written_the_way_warn_config_writes_them() {
 
 // ── the transport ───────────────────────────────────────────────────────────
 
+/// Read `n` newline terminated lines from a fake server's accepted stream,
+/// without waiting for the client to close its side.
+fn read_request_lines(stream: &mut std::net::TcpStream, n: usize) -> String {
+    use std::io::Read;
+    let mut request = String::new();
+    let mut byte = [0u8; 1];
+    while request.matches('\n').count() < n {
+        match stream.read(&mut byte) {
+            Ok(1) => request.push(byte[0] as char),
+            _ => break,
+        }
+    }
+    request
+}
+
 #[test]
 fn exchange_on_port_returns_the_whole_reply_after_the_server_closes() {
     use std::io::{Read, Write};
@@ -182,9 +197,10 @@ fn exchange_on_port_returns_the_whole_reply_after_the_server_closes() {
     let (seen_tx, seen_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            // The client half-closes after its request, so this read ends.
-            let mut request = String::new();
-            let _ = stream.read_to_string(&mut request);
+            // The client no longer half closes (loopback filters abort that),
+            // so read the request line by line the way the server does: the
+            // AUTH line, then the command line.
+            let request = read_request_lines(&mut stream, 2);
             let _ = stream.write_all(b"OK\nline one\nline two\n");
             let _ = seen_tx.send(request);
         }
@@ -202,8 +218,7 @@ fn exchange_on_port_reports_a_refused_key() {
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut request = String::new();
-            let _ = stream.read_to_string(&mut request);
+            let _ = read_request_lines(&mut stream, 2);
             let _ = stream.write_all(b"ERROR: Invalid session key\n");
         }
     });
