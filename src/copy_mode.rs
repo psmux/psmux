@@ -2023,6 +2023,10 @@ mod test_copy_mode_resize_reanchor;
 mod test_copy_mode_snapshot;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue673_snapshot_sharing.rs"]
+mod test_issue673_snapshot_sharing;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_copy_cancel_stale_state.rs"]
 mod tests_copy_cancel_stale_state;
 
