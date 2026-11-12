@@ -354,7 +354,11 @@ if ((Test-Path $portFile) -and (Test-Path $keyFile)) {
         $writer.Write("PERSISTENT`n"); $writer.Flush()
         for ($i = 0; $i -lt 10; $i++) {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $writer.Write("list-sessions`n"); $writer.Flush()
+            # dump-state is always answered (a frame, or NC when nothing changed).
+            # A query such as list-sessions is not: since #232 an unchanged frame
+            # is not pushed again, so waiting for a line after it measures the
+            # read timeout, not the round trip.
+            $writer.Write("dump-state`n"); $writer.Flush()
             $stream.ReadTimeout = 5000
             try { $null = $reader.ReadLine() } catch {}
             $sw.Stop()
