@@ -2132,6 +2132,102 @@ fn deliver_paste_buffer(app: &mut AppState, text: &str, pb: &PasteBufferArgs) ->
     }
 }
 
+/// How a paste of the OS clipboard is written once the text is known: raw, as
+/// prefix + ] (copy_mode::paste_latest) writes it, or as the `paste-buffer`
+/// that asked for it.
+#[derive(Debug, Clone)]
+pub(crate) enum ClipboardPasteDelivery {
+    Raw,
+    Buffer(PasteBufferArgs),
+}
+
+/// A paste of the OS clipboard (the paste stack was empty, #428) waiting for a
+/// clipboard another window holds open.
+///
+/// A clipboard history listener, a VNC server or a graphics driver panel opens
+/// the clipboard for 10 to 25 ms after every change; the plain read retries for
+/// about 10 ms, so prefix + ] and `paste-buffer` pasted nothing at all
+/// (test_issue428_proof F2 in the 2026-11-12 sweep; a 100 ms holder made 5 of 5
+/// pastes vanish).  Waiting on the server loop would freeze every pane, so a
+/// thread waits for the clipboard and the loop holds every later request
+/// (server::holds_behind_paste) until the text is written or the wait gives
+/// up: keys typed after the paste never overtake it and are never lost.
+pub(crate) struct PendingClipboardPaste {
+    rx: std::sync::mpsc::Receiver<Option<String>>,
+    deadline: std::time::Instant,
+    pane_id: Option<usize>,
+    delivery: ClipboardPasteDelivery,
+}
+
+impl std::fmt::Debug for PendingClipboardPaste {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingClipboardPaste")
+            .field("pane_id", &self.pane_id)
+            .field("delivery", &self.delivery)
+            .finish()
+    }
+}
+
+/// The OS clipboard text for a paste whose stack is empty.  `Some` when it
+/// could be read now; `None` when another window holds the clipboard open, in
+/// which case a pending paste was started and the caller writes nothing.
+pub(crate) fn clipboard_text_or_wait(app: &mut AppState, delivery: ClipboardPasteDelivery) -> Option<String> {
+    match crate::clipboard::try_read_from_system_clipboard() {
+        Ok(text) => Some(text.unwrap_or_default()),
+        Err(crate::clipboard::ClipboardBusy) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::clipboard::read_from_system_clipboard_waiting(
+                    crate::clipboard::PASTE_GESTURE_TIMEOUT,
+                ));
+            });
+            let deadline = std::time::Instant::now()
+                + crate::clipboard::PASTE_GESTURE_TIMEOUT
+                + std::time::Duration::from_millis(250);
+            start_pending_clipboard_paste(app, rx, deadline, delivery);
+            None
+        }
+    }
+}
+
+/// Park a paste on `app` until `rx` answers or `deadline` passes; the pane it
+/// was asked for is the active one now.
+pub(crate) fn start_pending_clipboard_paste(
+    app: &mut AppState,
+    rx: std::sync::mpsc::Receiver<Option<String>>,
+    deadline: std::time::Instant,
+    delivery: ClipboardPasteDelivery,
+) {
+    let pane_id = crate::copy_mode::active_pane_id(app);
+    app.clipboard_paste_pending = Some(PendingClipboardPaste { rx, deadline, pane_id, delivery });
+}
+
+/// Finish the pending clipboard paste if its read has answered or is overdue,
+/// writing the text to the pane it was asked for.  `true` when nothing is
+/// pending any more (the held requests may run), `false` while it still waits.
+pub(crate) fn poll_pending_clipboard_paste(app: &mut AppState) -> bool {
+    let Some(p) = app.clipboard_paste_pending.as_ref() else { return true };
+    let text = match p.rx.try_recv() {
+        Ok(text) => text,
+        Err(std::sync::mpsc::TryRecvError::Empty) if std::time::Instant::now() < p.deadline => return false,
+        Err(_) => None,
+    };
+    let Some(p) = app.clipboard_paste_pending.take() else { return true };
+    if let (Some(text), Some(id)) = (text.filter(|t| !t.is_empty()), p.pane_id) {
+        let _ = with_paste_target(app, &format!("%{}", id), |app| match &p.delivery {
+            ClipboardPasteDelivery::Raw => {
+                let win = &mut app.windows[app.active_idx];
+                if let Some(pane) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                    let _ = write!(pane.writer, "{}", text);
+                }
+                Ok(())
+            }
+            ClipboardPasteDelivery::Buffer(pb) => deliver_paste_buffer(app, &text, pb),
+        });
+    }
+    true
+}
+
 /// Parse a `paste-buffer` command line.
 ///
 /// `args` is the command line WITHOUT the command name.  In the in server
@@ -2313,8 +2409,14 @@ fn run_paste_buffer_here(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result
             let top = app.paste_top().unwrap_or_default().to_string();
             if top.is_empty() {
                 // Issue #428: an empty stack falls back to the OS clipboard, the
-                // same fallback server/connection.rs applies.
-                crate::clipboard::read_from_system_clipboard().unwrap_or_default()
+                // same fallback server/connection.rs applies.  A clipboard
+                // another window holds open is waited for off the server
+                // loop, and the paste lands when it is free.
+                let delivery = ClipboardPasteDelivery::Buffer(PasteBufferArgs { target: None, ..pb.clone() });
+                match clipboard_text_or_wait(app, delivery) {
+                    Some(text) => text,
+                    None => return Ok(None),
+                }
             } else {
                 top
             }
@@ -5332,3 +5434,7 @@ mod tests_issue1040_special_pane_targets;
 #[cfg(test)]
 #[path = "../tests-rs/test_run_shell_store_fallback.rs"]
 mod tests_run_shell_store_fallback;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_clipboard_paste_hold.rs"]
+mod tests_clipboard_paste_hold;

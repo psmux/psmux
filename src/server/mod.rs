@@ -1811,6 +1811,17 @@ pub(crate) fn note_pane_focus_change(app: &AppState, events: &mut Vec<&'static s
 /// The (window id, pane id) the session is focused on, which is what tmux
 /// compares when it decides whether a `select-pane` changed anything
 /// (cmd-select-pane.c:269, `if (wp == w->active) return`).
+/// Whether a request waits behind a paste that is still reading a busy
+/// clipboard.  Everything a client or a command asks for does, so nothing
+/// overtakes the paste; only frame requests and the loop's own wake go on.
+pub(crate) fn holds_behind_paste(req: &CtrlReq) -> bool {
+    !matches!(req,
+        CtrlReq::DumpState(..)
+        | CtrlReq::DumpLayout(_)
+        | CtrlReq::WindowDump(..)
+        | CtrlReq::PtyWake)
+}
+
 pub(crate) fn active_pane_identity(app: &AppState) -> (usize, usize) {
     match app.windows.get(app.active_idx) {
         Some(win) => (
@@ -3043,6 +3054,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // CtrlReq::Targeted request runs with its target focused; Some only
     // inside that one request's iteration (see server::temp_target).
     let mut temp_focus_restore: Option<temp_target::SavedFocus> = None;
+    // Requests that arrived while a paste was waiting for a clipboard another
+    // window holds open (commands::PendingClipboardPaste).  tmux pastes in
+    // order, so keys typed after prefix + ] wait here and run, in order, once
+    // the paste lands or gives up.
+    let mut held_behind_paste: Vec<CtrlReq> = Vec::new();
     // The file #{current_file} named before a CtrlReq::InFile request set
     // it; Some only inside that one request's iteration.
     let mut current_file_restore: Option<String> = None;
@@ -3424,9 +3440,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::commands::fire_hooks(&mut app, event);
             }
         }
+        // A paste waiting for a busy clipboard: finish it once the read is
+        // done or overdue, then release what was held behind it.
+        let released: Vec<CtrlReq> = if app.clipboard_paste_pending.is_some() {
+            if crate::commands::poll_pending_clipboard_paste(&mut app) {
+                state_dirty = true;
+                std::mem::take(&mut held_behind_paste)
+            } else {
+                Vec::new()
+            }
+        } else {
+            std::mem::take(&mut held_behind_paste)
+        };
+        let timeout_ms = if app.clipboard_paste_pending.is_some() { timeout_ms.min(5) } else { timeout_ms };
         if let Some(rx) = app.control_rx.as_ref() {
-            if let Ok(req) = rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-                let mut pending = vec![req];
+            let first = if released.is_empty() {
+                rx.recv_timeout(Duration::from_millis(timeout_ms)).ok()
+            } else {
+                rx.try_recv().ok()
+            };
+            if first.is_some() || !released.is_empty() {
+                let mut pending = released;
+                pending.extend(first);
                 // Drain any additional queued messages without blocking
                 while let Ok(r) = rx.try_recv() {
                     pending.push(r);
@@ -3489,6 +3524,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // of its iteration) is put back before this one runs.
                     temp_target::restore_temp_focus(&mut app, &mut temp_focus_restore);
                     crate::config::restore_current_config_file(&mut current_file_restore);
+                    // Behind a paste still waiting for the clipboard, input and
+                    // commands queue up in order; frames are still served.
+                    if app.clipboard_paste_pending.is_some() && holds_behind_paste(&req) {
+                        held_behind_paste.push(req);
+                        continue;
+                    }
                     // A source job's command runs with its file as
                     // #{current_file} (source_job::CURRENT_FILE_PREFIX).
                     let req = match req {
