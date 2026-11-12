@@ -166,9 +166,15 @@ if (-not $codexExe) {
         Start-Sleep -Milliseconds 500
         & $PSMUX send-keys -t $SESSION ("codex exec --skip-git-repo-check `"$prompt`"") Enter 2>&1 | Out-Null
 
-        # Wait for codex to finish (look for the last marker).  Give
-        # it up to 3 minutes since the model latency is the wild card.
-        if (Wait-Output -Target $SESSION -Marker "codex line 199" -TimeoutMs 240000) {
+        # Wait for codex to finish (look for the last marker), or for codex to
+        # report an error (usage limit, no login, network): then nothing more
+        # comes and the count cannot be measured. The wait stays under the
+        # runner's 240 s suite limit so a slow model skips instead of timing out.
+        $codexDone = Wait-Output -Target $SESSION -Marker "codex line 199|(?m)^ERROR:" -TimeoutMs 180000
+        $codexCap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        if ($codexDone -and $codexCap -notmatch "codex line 199" -and $codexCap -match "(?m)^ERROR:.*") {
+            Write-Info "T3: codex reported an error, skipping the count assertion: $($Matches[0].Trim())"
+        } elseif ($codexDone) {
             Start-Sleep -Seconds 3
             $deep = & $PSMUX capture-pane -t $SESSION -S -2000 -p 2>&1 | Out-String
             $matches = [regex]::Matches($deep, '(?m)^codex line (\d+)\b')
@@ -185,7 +191,7 @@ if (-not $codexExe) {
                 Write-Fail "T3: BUG CONFIRMED — only $count of 200 codex lines retained"
             }
         } else {
-            Write-Info "T3: codex did not finish within 4 minutes (skipping count assertion)"
+            Write-Info "T3: codex did not finish within 3 minutes (skipping count assertion)"
             $cap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
             $tail = $cap.Substring([Math]::Max(0, $cap.Length - 500))
             Write-Info "T3: pane tail:`n$tail"
