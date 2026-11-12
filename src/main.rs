@@ -3051,7 +3051,15 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         // used to come back as single spaces (#734 follow up).
                         match send_control_with_response(format!("display-message -p {}\n", crate::util::quote_arg(&fmt))) {
                             Ok(resp) => { let trimmed = resp.trim(); if !trimmed.is_empty() { println!("{}", trimmed); } }
-                            Err(_) => {}
+                            // The caller asked where the session landed and
+                            // relies on the line (a launcher reads the window
+                            // it made from it). Losing it silently at exit 0
+                            // told the caller nothing was made.
+                            Err(e) => {
+                                eprintln!("psmux: new-session: session '{}' was created, but its -P reply was lost: {}",
+                                    name, e);
+                                std::process::exit(1);
+                            }
                         }
                     }
                     let list_status = run_new_session_list(command_list.as_ref(), &port_file_base, l_socket_name.as_deref());

@@ -37,10 +37,18 @@ pub(crate) const DISPLAY_MESSAGE_DEFAULT_FMT: &str =
 pub fn resolve_run_shell() -> (String, Vec<String>) {
     #[cfg(windows)]
     {
-        if let Ok(path) = which::which("pwsh") {
+        // A Store packaged pwsh cannot start under an SSH command or in
+        // session 0 (ACCESS_DENIED from MSIX activation): every run-shell and
+        // if-shell condition then failed with "Access is denied" while the
+        // panes, which skip it (pane::cached_shell), worked. Skip it the same
+        // way here; classic powershell.exe is never Store packaged.
+        let usable = |p: &std::path::Path| {
+            !crate::pane::is_store_shell_path(&p.to_string_lossy()) || !crate::pane::store_shell_unusable()
+        };
+        if let Some(path) = which::which("pwsh").ok().filter(|p| usable(p)) {
             return (path.to_string_lossy().into_owned(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
         }
-        if let Ok(path) = which::which("powershell") {
+        if let Some(path) = which::which("powershell").ok().filter(|p| usable(p)) {
             return (path.to_string_lossy().into_owned(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
         }
         if let Ok(system_root) = std::env::var("SystemRoot").or_else(|_| std::env::var("SYSTEMROOT")) {
@@ -5320,3 +5328,7 @@ mod tests_issue964_kill_pane_all;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue1040_special_pane_targets.rs"]
 mod tests_issue1040_special_pane_targets;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_run_shell_store_fallback.rs"]
+mod tests_run_shell_store_fallback;

@@ -2237,7 +2237,8 @@ fn relay_to_session(write_stream: &mut ReplyStream, port: u16, key: &str, line: 
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(format!("AUTH {}\n{}\n", key, line).as_bytes())?;
     stream.flush()?;
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    // No half-close: see NO CLIENT HALF-CLOSE in session.rs. The session
+    // server closes this connection once it has answered.
     let mut reply = Vec::new();
     let _ = io::Read::read_to_end(&mut stream, &mut reply);
     let text = String::from_utf8_lossy(&reply);
@@ -4671,6 +4672,12 @@ match cmd {
                 let _ = write_stream.flush();
             }
         }
+        // The claim is the CLI's only request on its connection, and the
+        // CLI no longer half-closes (NO CLIENT HALF-CLOSE in session.rs): end
+        // the connection with the reply rather than wait out the 10 ms
+        // batching read for a next line that never comes. This is the launch
+        // path, where those milliseconds show.
+        if !persistent && pending_chain.is_empty() { break; }
     }
     "swap-pane" | "swapp" => {
         let detach = args.iter().any(|a| *a == "-d");

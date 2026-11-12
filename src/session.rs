@@ -1323,7 +1323,9 @@ pub fn kill_servers_in_scope(
                         let _ = stream.flush();
                         let _ = stream.write_all(b"kill-server\n");
                         let _ = stream.flush();
-                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        // No half-close (see NO CLIENT HALF-CLOSE): a filter
+                        // that aborts it ended this wait before the server
+                        // had even run the command.
                         // Wait for the server to exit (EOF = done).
                         // Longer than the server's own hold (KILL_SERVER_HOLD),
                         // so the EOF that ends this wait is the server exiting
@@ -1842,10 +1844,44 @@ fn prune_stale_server_markers(
     psmux_dir: &Path,
     owned_pids: &std::collections::HashMap<u32, Option<u64>>,
 ) {
+    prune_stale_server_markers_with(
+        psmux_dir,
+        owned_pids,
+        crate::platform::process_is_alive,
+        crate::platform::process_kill::process_creation_time,
+        UNPARSABLE_MARKER_MIN_AGE,
+    );
+}
+
+/// How old a marker whose body is not `pid:creation` must be before the
+/// pruner deletes it. A marker is written in one small write, so a reader can
+/// only catch it half written for a moment; anything this old was torn for
+/// good (a crash or power loss mid write leaves the file full of zeros).
+const UNPARSABLE_MARKER_MIN_AGE: Duration = Duration::from_secs(60);
+
+/// [`prune_stale_server_markers`] with the process table and the torn marker
+/// age passed in, so the policy is testable.
+///
+/// A process that has exited but whose object something still holds open (a
+/// zombie) still answers OpenProcess and GetProcessTimes with its original
+/// creation time, so creation time alone kept the marker of every such server
+/// for ever: one machine had 85 of them, one per server since its first
+/// failed launch. Liveness is checked as well, as the spawner check in
+/// server/mod.rs does. A marker that does not parse names no process, so it
+/// can authorise nothing, and was never deleted either: it goes once it is
+/// old enough not to be a write in progress.
+fn prune_stale_server_markers_with(
+    psmux_dir: &Path,
+    owned_pids: &std::collections::HashMap<u32, Option<u64>>,
+    is_running: impl Fn(u32) -> bool,
+    creation_of: impl Fn(u32) -> Option<u64>,
+    unparsable_min_age: Duration,
+) {
+    let servers = psmux_dir.join("servers");
     for (&pid, &recorded_creation) in owned_pids {
-        let live_creation = crate::platform::process_kill::process_creation_time(pid);
+        let live_creation = if is_running(pid) { creation_of(pid) } else { None };
         let still_ours = match (live_creation, recorded_creation) {
-            // Process is gone.
+            // Process is gone, or has exited and only its object remains.
             (None, _) => false,
             // Same PID, different process: the original exited and the PID was
             // reused, so this claim is stale.
@@ -1856,7 +1892,27 @@ fn prune_stale_server_markers(
             (Some(_), None) => true,
         };
         if !still_ours {
-            let _ = std::fs::remove_file(psmux_dir.join("servers").join(pid.to_string()));
+            let _ = std::fs::remove_file(servers.join(pid.to_string()));
+        }
+    }
+    // A marker is named by its pid, so one whose name is among the pids just
+    // parsed is a good one: only the rest are looked at, by name and age, with
+    // no second read of any file (this runs at every CLI start).
+    let Ok(entries) = std::fs::read_dir(&servers) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let named_pid = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok());
+        if named_pid.map_or(false, |pid| owned_pids.contains_key(&pid)) {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .map_or(false, |age| age >= unparsable_min_age);
+        if old_enough {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -2386,16 +2442,22 @@ pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<S
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = write!(s, "AUTH {}\n", key);
     let _ = std::io::Write::write_all(&mut s, cmd);
+    if !cmd.ends_with(b"\n") {
+        let _ = std::io::Write::write_all(&mut s, b"\n");
+    }
     let _ = s.flush();
-    // Nothing more is coming from this side: say so, so the server's reader
-    // sees end of input and closes the connection as soon as it has answered.
-    // Without it the reply's EOF waited out the server's 10 ms read timeout on
-    // the next line (measured on the warm claim: OK written at 83 ms, the CLI
-    // saw it end at 98 ms), which is the same half-close `send_control` does.
-    let _ = s.shutdown(std::net::Shutdown::Write);
+    // No half-close (see NO CLIENT HALF-CLOSE): the server closes the
+    // connection as soon as it has answered. claim-session, the hot caller,
+    // ends its one-shot connection right after its reply, so the reply's EOF
+    // does not wait out the server's 10 ms batching read either.
     let mut br = std::io::BufReader::new(std::io::Read::take(&mut s, MAX_AUTHED_RESPONSE_BYTES));
     let mut auth_line = String::new();
     let _ = std::io::BufRead::read_line(&mut br, &mut auth_line);
+    // Not even the AUTH acknowledgement: the connection was cut off before
+    // the server answered, which no caller may take for an empty reply.
+    if auth_line.is_empty() {
+        return Err(no_reply_error());
+    }
     let mut buf = String::new();
     let _ = std::io::Read::read_to_string(&mut br, &mut buf);
     Ok(buf)
@@ -3008,24 +3070,69 @@ pub fn send_control(line: String) -> io::Result<()> {
     // simply never answered — that path is covered by the caller's verify-retry.
     let _ = write!(stream, "session-info\n");
     let _ = stream.flush();
-    // Half-close the write side so the server observes EOF *after* our bytes.
-    // TCP guarantees all sent data is delivered before the FIN, so the server's
-    // read_line always sees the full command before its loop ends — eliminating
-    // the RST-on-close race that used to silently drop fire-and-forget commands
-    // (the old 50ms "drain" read was only a partial mitigation).
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-    // Read to EOF (bounded by the read timeout): blocks until the server has
-    // processed the barrier — i.e. the command has executed — or the connection
-    // closes / times out.
+    // No half-close here: see NO CLIENT HALF-CLOSE below. The server ends a one-shot
+    // connection itself once the command has run, and reads off whatever we
+    // sent that it did not need before it closes, so it never resets the
+    // connection on us. Reading to EOF (bounded by the read timeout) is what
+    // makes this wait until the command has executed, and the client never
+    // closes with the ack unread, which is what used to reset the connection
+    // and drop fire-and-forget commands.
     let mut buf = [0u8; 256];
+    let mut received = 0usize;
     loop {
         match std::io::Read::read(&mut stream, &mut buf) {
             Ok(0) => break,
-            Ok(_) => continue,
+            Ok(n) => received += n,
             Err(_) => break,
         }
     }
+    // The server acknowledges AUTH before it reads the command, so a
+    // connection that ends without a single byte was cut off before the
+    // server answered at all: the command may never have run. Saying nothing
+    // here turned that into a silent success (exit 0, nothing done).
+    if received == 0 {
+        return Err(no_reply_error());
+    }
     Ok(())
+}
+
+// NO CLIENT HALF-CLOSE: why no request on a one-shot connection shuts down
+// its write side.
+//
+// Every CLI request used to `shutdown(SD_SEND)` right after writing, so the
+// server saw EOF at once. Some loopback stream filters (seen with a WFP
+// network driver of an ad blocker, 8.0 series) abort the connection when the
+// connecting side half-closes, and they do it silently: the client then reads
+// zero bytes and a clean EOF, the server's reply is thrown away, and every
+// command that prints something printed nothing at exit 0. The server never
+// needed our EOF: a one-shot connection ends after its command (and its
+// `\;` list) has run, the server half-closes its own side, drains what is
+// left of our input and closes. So the request is complete when its last
+// line ends in a newline, and the reply is complete at the server's EOF.
+
+/// How often an unbounded wait in [`exchange_on_port`] looks at the server's
+/// end of the connection. Only reached after a whole tick without a byte, so
+/// it costs nothing on the replies that matter for latency.
+const UNBOUNDED_WAIT_TICK: Duration = Duration::from_millis(1000);
+
+/// The error for a one-shot connection that closed without a single byte:
+/// not even the AUTH acknowledgement, which the server writes before it reads
+/// the command. Never an empty result.
+pub(crate) fn no_reply_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "no response from server (the connection closed before any reply)",
+    )
+}
+
+/// `line` with a newline at its end, so the server reads the last command as
+/// a whole line without needing our EOF (see NO CLIENT HALF-CLOSE above).
+pub(crate) fn terminated_request(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.is_empty() || line.ends_with('\n') {
+        std::borrow::Cow::Borrowed(line)
+    } else {
+        std::borrow::Cow::Owned(format!("{}\n", line))
+    }
 }
 
 pub fn send_control_with_response(line: String) -> io::Result<String> {
@@ -3070,7 +3177,131 @@ fn control_endpoint(line: &str) -> io::Result<(u16, String, Option<String>)> {
 
 fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
     let (port, key, target) = control_endpoint(&line)?;
-    exchange_on_port(port, &key, target.as_deref(), &line, read_timeout)
+    exchange_with_read_only_retry(port, &key, target.as_deref(), &line, read_timeout)
+}
+
+/// One CLI request, and for a read-only command whose reply was lost on the
+/// way, ONE more try on a fresh connection.
+///
+/// Some loopback filters drop a reply or the server's end of it now and then
+/// (one machine lost about one request in four). Asking again is safe only
+/// for a command that changes nothing ([`read_only_retryable`]), and only
+/// after a loss of the transport kind ([`reply_was_lost`]): a refusal, an
+/// unknown session or a command error is an answer, not a loss. The retry
+/// runs only after a failure, so a reply that arrives costs nothing extra.
+pub(crate) fn exchange_with_read_only_retry(
+    port: u16,
+    key: &str,
+    target: Option<&str>,
+    line: &str,
+    read_timeout: Option<Duration>,
+) -> io::Result<String> {
+    let first = exchange_requiring_reply(port, key, target, line, read_timeout);
+    match first {
+        Err(ref e) if reply_was_lost(e) && read_only_retryable(line) => {
+            exchange_requiring_reply(port, key, target, line, read_timeout)
+        }
+        other => other,
+    }
+}
+
+/// [`exchange_on_port`], plus: an empty reply to a command that always
+/// prints on success ([`reply_required`]) is a lost reply.
+fn exchange_requiring_reply(
+    port: u16,
+    key: &str,
+    target: Option<&str>,
+    line: &str,
+    read_timeout: Option<Duration>,
+) -> io::Result<String> {
+    let reply = exchange_on_port(port, key, target, line, read_timeout)?;
+    if reply.is_empty() && reply_required(line) {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("no reply from server for '{}' (the connection closed before the reply arrived)",
+                line.split_whitespace().next().unwrap_or("")),
+        ));
+    }
+    Ok(reply)
+}
+
+/// Whether `e` says the reply was lost in transport (cut off, reset, timed
+/// out, or empty where a reply is required), as opposed to an answer.
+pub(crate) fn reply_was_lost(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::BrokenPipe
+    )
+}
+
+/// Whether `line` is one command that only reads, so running it twice is the
+/// same as running it once: `display-message -p`, `list-*`, `show-*`,
+/// `capture-pane -p` and `has-session`. Without `-p`, display-message shows a
+/// message and capture-pane fills a buffer, so those are not. A `;` list is
+/// never retried, whatever it holds.
+pub(crate) fn read_only_retryable(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let Some(&cmd) = tokens.first() else { return false };
+    if tokens.iter().any(|t| *t == ";" || *t == "\\;" || t.ends_with("\\;")) {
+        return false;
+    }
+    let has_p = tokens[1..]
+        .iter()
+        .take_while(|t| **t != "--")
+        .any(|t| t.len() > 1 && t.starts_with('-') && !t.starts_with("--") && t[1..].contains('p'));
+    match cmd {
+        "display-message" | "display" | "capture-pane" | "capturep" => has_p,
+        "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp"
+        | "list-keys" | "lsk" | "list-buffers" | "lsb" | "list-clients" | "lsc"
+        | "list-commands" | "lscm" => true,
+        "show-options" | "show" | "show-window-options" | "showw" | "show-environment"
+        | "showenv" | "show-hooks" | "show-buffer" | "showb" | "show-messages" | "showmsgs" => true,
+        "has-session" | "has" => true,
+        _ => false,
+    }
+}
+
+/// Whether a successful `line` always prints something, so an empty reply can
+/// only mean the reply was lost on the way (a loopback filter that drops it).
+///
+/// Deliberately narrow: one command (no `;` list), and only commands whose
+/// success output is never empty in tmux: `display-message -p` (at least a
+/// newline), the unfiltered `list-sessions`, `list-windows`, `list-panes`
+/// (there is always a session, window and pane to list), `list-keys` of all
+/// tables,
+/// `list-commands`, `capture-pane -p` (one line per pane row) and any `-P`
+/// print of what a command created. Everything else, `set-option` above all,
+/// may succeed silently and keeps exiting 0 with no output.
+pub(crate) fn reply_required(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let Some(&cmd) = tokens.first() else { return false };
+    if tokens.iter().any(|t| *t == ";" || *t == "\\;" || t.ends_with("\\;")) {
+        return false;
+    }
+    // Flags before `--` only; a clustered `-pt` counts as -p and -t.
+    let flags: Vec<&str> = tokens[1..]
+        .iter()
+        .take_while(|t| **t != "--")
+        .filter(|t| t.len() > 1 && t.starts_with('-') && !t.starts_with("--"))
+        .copied()
+        .collect();
+    let has = |c: char| flags.iter().any(|f| f[1..].contains(c));
+    match cmd {
+        "display-message" | "display" => has('p'),
+        "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp" => !has('f'),
+        // One table (`-T`) may hold no bindings at all.
+        "list-keys" | "lsk" => !has('T'),
+        "list-commands" | "lscm" => true,
+        "capture-pane" | "capturep" => has('p'),
+        "new-session" | "new" | "new-window" | "neww" | "split-window" | "splitw"
+        | "break-pane" | "breakp" => has('P'),
+        _ => false,
+    }
 }
 
 /// How the CLI's run-shell went: the server ran it and replied natively, or
@@ -3142,9 +3373,10 @@ pub(crate) fn send_run_shell_with_response(line: &str, cwd: &std::path::Path) ->
     let cwd = base64::engine::general_purpose::STANDARD.encode(cwd.to_string_lossy().as_bytes());
     // The only command submission point in this native path.
     writeln!(stream, "CLIENT_CWD {}", cwd)?;
-    stream.write_all(line.as_bytes())?;
+    stream.write_all(terminated_request(line).as_bytes())?;
     stream.flush()?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    // No half-close (see NO CLIENT HALF-CLOSE): the framed reply below ends
+    // the exchange, and the server closes once it has written it.
     crate::run_shell::read_reply(&mut reader).map(RunShellRoute::Native)
 }
 
@@ -3172,27 +3404,63 @@ pub fn exchange_on_port(
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad server address"))?;
     let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1000))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(read_timeout);
+    // An unbounded wait (a forwarded if-shell, run-shell or source-file, and a
+    // source job's own commands) reads in ticks so it can look at the server's
+    // end of the connection while it waits (see `server_end_lost` below).
+    let _ = stream.set_read_timeout(read_timeout.or(Some(UNBOUNDED_WAIT_TICK)));
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
     }
-    let _ = write!(stream, "{}", line);
+    let _ = write!(stream, "{}", terminated_request(line));
     let _ = stream.flush();
-    // Half-close so the server sees EOF after our request and closes the socket
-    // once the reply is complete — giving a definitive Ok(0) end-of-response
-    // instead of relying on an idle-gap timeout to guess the reply is done.
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    // No half-close (see NO CLIENT HALF-CLOSE above): the server closes the socket
+    // once the reply is complete, which is the definitive Ok(0) end of reply.
     let mut buf = Vec::new();
     let mut temp = [0u8; 4096];
     let mut timed_out = false;
+    let mut read_error: Option<io::Error> = None;
+    let mut server_end_lost = false;
+    let our_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
     loop {
         match std::io::Read::read(&mut stream, &mut temp) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&temp[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => { timed_out = true; break; }
-            Err(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                if read_timeout.is_some() {
+                    timed_out = true;
+                    break;
+                }
+                // No time bound: the command may legitimately run for hours
+                // (run-shell). The wait ends on the server's EOF, or once the
+                // server's end of this connection is gone or closing without
+                // that EOF ever reaching us, which a loopback filter that
+                // swallows FINs does. On an ordinary machine the FIN arrives
+                // with the close and ends the read first, so this never fires.
+                if our_port != 0
+                    && crate::platform::process_kill::loopback_server_end_closed(port, our_port)
+                {
+                    server_end_lost = true;
+                    break;
+                }
+            }
+            Err(e) => { read_error = Some(e); break; }
         }
+    }
+    if server_end_lost {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "lost the connection to the server: it closed, but the end of its reply never arrived",
+        ));
+    }
+    // Not even the AUTH acknowledgement came back: the connection was cut off
+    // before the server answered. An empty reply here used to print nothing
+    // at exit 0, the same as an empty result.
+    if buf.is_empty() && !timed_out {
+        return Err(match read_error {
+            Some(e) => io::Error::new(e.kind(), format!("no response from server ({})", e)),
+            None => no_reply_error(),
+        });
     }
     let result = String::from_utf8_lossy(&buf).to_string();
     // Strip the "OK\n" AUTH response prefix if present. This is protocol
@@ -3216,6 +3484,19 @@ pub fn exchange_on_port(
     // prefix: capture-pane and show-buffer return arbitrary pane content, which
     // may legitimately begin with the word ERROR, and misreading that as a
     // refusal would be a worse bug than the one being fixed.
+    //
+    // The server acknowledged, then the connection was reset before a single
+    // byte of the reply: the reply was lost, which is not an empty result.
+    // (A server ends a one-shot connection with shutdown, drain and close, so
+    // a reset is never how a complete reply ends.)
+    if result.is_empty() {
+        if let Some(e) = read_error {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("no reply from server (the connection was reset after it answered: {})", e),
+            ));
+        }
+    }
     let trimmed = result.trim();
     if trimmed == "ERROR: Authentication required" || trimmed == "ERROR: Invalid session key" {
         return Err(io::Error::new(
@@ -3223,8 +3504,8 @@ pub fn exchange_on_port(
             trimmed.trim_start_matches("ERROR:").trim().to_string(),
         ));
     }
-    // A read timeout means the reply is INCOMPLETE. The half-close above makes a
-    // complete reply end in a definitive server-side EOF (Ok(0)), so landing in
+    // A read timeout means the reply is INCOMPLETE. The server ends a complete
+    // reply with a definitive server-side EOF (Ok(0)), so landing in
     // the timeout branch at all means we did not get the whole answer, whatever
     // is already in `buf`. The old guard also required `buf.is_empty()`, which
     // the OK ack made permanently false on any authenticated connection, so a
@@ -3801,3 +4082,11 @@ mod tests_discussion844_namespace_names;
 #[cfg(test)]
 #[path = "../tests-rs/test_unstorable_names.rs"]
 mod tests_unstorable_names;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_halfclose_filter_reply.rs"]
+mod tests_halfclose_filter_reply;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_server_marker_prune_zombie.rs"]
+mod tests_server_marker_prune_zombie;

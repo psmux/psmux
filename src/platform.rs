@@ -4278,7 +4278,7 @@ pub mod process_kill {
     const TCP_TABLE_OWNER_PID_CONNECTIONS: u32 = 4;
 
     /// One IPv4 TCP table row whose local address is 127.0.0.1.
-    struct LoopbackTcpRow { local_port: u16, remote_port: u16, pid: u32 }
+    struct LoopbackTcpRow { state: u32, local_port: u16, remote_port: u16, pid: u32 }
 
     fn loopback_tcp_rows(table_class: u32) -> Vec<LoopbackTcpRow> {
         let mut out = Vec::new();
@@ -4319,6 +4319,7 @@ pub mod process_kill {
                 let local_addr = (row.add(4) as *const u32).read_unaligned();
                 if local_addr != LOOPBACK_ADDR { continue; }
                 out.push(LoopbackTcpRow {
+                    state: (row as *const u32).read_unaligned(),
                     local_port: port_of((row.add(8) as *const u32).read_unaligned()),
                     remote_port: port_of((row.add(16) as *const u32).read_unaligned()),
                     pid: (row.add(20) as *const u32).read_unaligned(),
@@ -4340,6 +4341,34 @@ pub mod process_kill {
             .into_iter()
             .find(|r| r.local_port == peer_port && r.remote_port == our_port && r.pid != 0)
             .map(|r| r.pid)
+    }
+
+    /// Whether the SERVER end of our loopback connection has closed: the row
+    /// whose local port is the server's and whose remote port is ours is gone,
+    /// or is in a closing state (MIB_TCP_STATE: FIN_WAIT1 6, FIN_WAIT2 7,
+    /// CLOSING 9, LAST_ACK 10, TIME_WAIT 11, CLOSED 1, DELETE_TCB 12).
+    ///
+    /// A client waiting for EOF asks this when its read has been idle for a
+    /// while. On an ordinary machine the server's FIN reaches the client at
+    /// once, so the read ends first and this is never decisive. Some loopback
+    /// stream filters swallow that FIN: the server is done and gone while the
+    /// client sits ESTABLISHED for ever. The kernel's own table is the one
+    /// witness the filter cannot hide.
+    pub fn loopback_server_end_closed(server_port: u16, our_port: u16) -> bool {
+        const CLOSED: u32 = 1;
+        const FIN_WAIT1: u32 = 6;
+        const FIN_WAIT2: u32 = 7;
+        const CLOSING: u32 = 9;
+        const LAST_ACK: u32 = 10;
+        const TIME_WAIT: u32 = 11;
+        const DELETE_TCB: u32 = 12;
+        match loopback_tcp_rows(TCP_TABLE_OWNER_PID_CONNECTIONS)
+            .into_iter()
+            .find(|r| r.local_port == server_port && r.remote_port == our_port)
+        {
+            None => true,
+            Some(r) => matches!(r.state, CLOSED | FIN_WAIT1 | FIN_WAIT2 | CLOSING | LAST_ACK | TIME_WAIT | DELETE_TCB),
+        }
     }
 
     /// Current system time as a FILETIME (100ns ticks). Callers capture this
@@ -4393,6 +4422,7 @@ pub mod process_kill {
     // Orphaned-server reaper stubs (issue #448) — no-ops off Windows.
     pub fn loopback_listener_pids() -> Vec<(u32, u16)> { Vec::new() }
     pub fn loopback_peer_pid(_peer_port: u16, _our_port: u16) -> Option<u32> { None }
+    pub fn loopback_server_end_closed(_server_port: u16, _our_port: u16) -> bool { false }
     pub fn now_process_filetime() -> u64 { 0 }
     pub fn process_creation_time(_pid: u32) -> Option<u64> { None }
     pub fn terminate_server_pid(_pid: u32, _max_creation_ft: Option<u64>) {}
