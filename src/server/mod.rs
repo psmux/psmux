@@ -4514,7 +4514,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // whenever a prompt was open before the key or is open
                     // after it, which also covers the one that opens or
                     // closes it.
-                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some(); let mode_before = !matches!(app.mode, Mode::Passthrough);
+                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
+                    let mode_before = !matches!(app.mode, Mode::Passthrough);
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_text(&mut app);
                     // Typing into a direct-scrolled pane shows its live screen
@@ -4555,7 +4556,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SendKey(k) => {
                     // Same as SendText above: a prompt edit owes a frame even
                     // though no cell changed.
-                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some(); let mode_before = !matches!(app.mode, Mode::Passthrough);
+                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
+                    let mode_before = !matches!(app.mode, Mode::Passthrough);
                     crate::pty_trace::mark("g", 0, k.as_bytes());
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_key(&mut app, &k);
@@ -4576,10 +4578,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     echo_pending_until = Some(Instant::now());
                 }
                 CtrlReq::SendPaste(s) => {
+                    let mode_before = !matches!(app.mode, Mode::Passthrough);
                     if crate::input::snap_interactive_to_live(&mut app) {
                         state_dirty = true;
                     }
                     send_paste_to_active(&mut app, &s)?;
+                    // A paste a mode takes (a prompt, copy mode) has no pane
+                    // echo to bring its frame, like a key (see SendKey).
+                    if mode_before || !matches!(app.mode, Mode::Passthrough) {
+                        state_dirty = true;
+                    }
                     echo_pending_until = Some(Instant::now());
                 }
                 CtrlReq::PasteBuffer(pb, resp) => {

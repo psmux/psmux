@@ -38,6 +38,39 @@ fn moving_the_cursor_one_column_changes_the_version() {
     assert_ne!(before, combined_data_version(&app));
 }
 
+#[test]
+fn the_selection_shape_and_position_indicator_change_the_version() {
+    let mut app = crate::types::AppState::new("disc694d".to_string());
+    app.copy_anchor = Some((4, 22));
+    app.copy_pos = Some((4, 26));
+    let ch = combined_data_version(&app);
+    app.copy_selection_mode = crate::types::SelectionMode::Line;
+    let line = combined_data_version(&app);
+    app.copy_selection_mode = crate::types::SelectionMode::Rect;
+    let rect = combined_data_version(&app);
+    assert_ne!(ch, line, "V keeps both ends but changes what is drawn");
+    assert_ne!(line, rect);
+    assert_ne!(ch, rect, "a rectangle toggle keeps both ends");
+    let shown = combined_data_version(&app);
+    app.copy_hide_position = true;
+    assert_ne!(shown, combined_data_version(&app), "the position indicator going away is a change");
+}
+
+/// Every input a mode can take (key, text, paste) asks for its frame while a
+/// mode is open, or when it opens or closes one: there is no pane echo.
+#[test]
+fn keys_text_and_paste_taken_by_a_mode_mark_the_frame_dirty() {
+    let src = include_str!("../src/server/mod.rs");
+    for arm in ["CtrlReq::SendText(s) => {", "CtrlReq::SendKey(k) => {", "CtrlReq::SendPaste(s) => {"] {
+        let i = src.find(arm).unwrap_or_else(|| panic!("{arm} not found"));
+        let rest = &src[i + arm.len()..];
+        let end = rest.find("\n                CtrlReq::").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(body.contains("let mode_before = !matches!(app.mode, Mode::Passthrough);"), "{arm}: mode before the input");
+        assert!(body.contains("mode_before || !matches!(app.mode, Mode::Passthrough)"), "{arm}: dirty if a mode took it");
+    }
+}
+
 /// Both routes to other-end ask for their frame.
 #[test]
 fn other_end_asks_for_a_redraw() {
