@@ -1,0 +1,20 @@
+fix(#912): choose-tree runs its template for the chosen row, with %% as the row's target
+
+tmux's window_tree_init keeps args_string(args, 0) as the chooser's command
+(default switch-client -Zt '%%'), and Enter or a jump key runs it through
+mode_tree_run_command with the first %% and every %1 set to the row's target
+from window_tree_get_target: =s: for a session, =s:idx. for a window and
+=s:idx.%id for a pane. psmux read only the flags: parse_command_to_action
+turned every choose-tree into the bare WindowChooser / SessionChooser actions,
+the CHOOSE-TREE directive carried no template, and the client's Enter always
+switched.
+
+A choose-tree with a template now stays a whole command, the directive
+carries the template as a JSON string, and the client's tree and session
+choosers run it (split on ; as the prompt does) instead of switching. Without
+a template nothing changes. An empty template runs nothing, as in tmux. Every
+route carries it: prefix and root bindings, the command prompt, the CLI and
+hooks, in per session and shared server modes.
+
+tests/test_issue912_choose_tree_template.ps1: 36 of 36 (20 fail on master
+f23b8c13). Unit tests in tests-rs/test_issue912_choose_tree_template.rs.
