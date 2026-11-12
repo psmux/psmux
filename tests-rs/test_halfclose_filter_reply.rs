@@ -292,3 +292,68 @@ fn an_empty_but_correct_reply_stays_empty_at_success() {
     server.join().unwrap();
     assert_eq!(got.unwrap(), "\n");
 }
+
+/// A connected pair: the client end reading in short ticks, and the server
+/// end handed to `serve`.
+fn ticking_pair(serve: impl FnOnce(std::net::TcpStream) + Send + 'static) -> (std::net::TcpStream, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (s, _) = listener.accept().unwrap();
+        serve(s);
+    });
+    let client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    (client, server)
+}
+
+#[test]
+fn a_reply_still_on_its_way_when_the_table_says_closed_is_read_whole() {
+    // #853: the kernel's TCP table shows the server closing at the very moment
+    // it closes, while its reply and FIN may still be unread here. With the
+    // check answering "closed" on every tick, the reply that arrives after the
+    // first tick must still be read to its EOF, not reported as lost.
+    let (mut client, server) = ticking_pair(|mut s| {
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = s.write_all(b"OK\nwarning from the job\n");
+        let _ = s.shutdown(std::net::Shutdown::Write);
+        let mut sink = [0u8; 64];
+        let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+        while matches!(s.read(&mut sink), Ok(n) if n > 0) {}
+    });
+    let (buf, timed_out, err, lost) = read_reply_to_eof(&mut client, false, &|| true);
+    server.join().unwrap();
+    assert!(!lost, "a reply that arrives inside the grace is not a lost connection");
+    assert!(!timed_out && err.is_none());
+    assert_eq!(String::from_utf8_lossy(&buf), "OK\nwarning from the job\n");
+}
+
+#[test]
+fn a_closed_server_end_with_nothing_after_the_grace_is_a_lost_connection() {
+    // The FIN never arrives (a filter swallowed it): the server's end is gone,
+    // the socket stays open here. That still ends the wait as lost.
+    let (mut client, server) = ticking_pair(|s| {
+        std::thread::sleep(Duration::from_millis(900));
+        drop(s);
+    });
+    let started = std::time::Instant::now();
+    let (_buf, _timed_out, _err, lost) = read_reply_to_eof(&mut client, false, &|| true);
+    assert!(lost);
+    assert!(started.elapsed() < Duration::from_millis(800), "lost is reported after the grace, not at the server's close");
+    server.join().unwrap();
+}
+
+#[test]
+fn an_open_server_end_keeps_an_unbounded_wait_waiting() {
+    // A long run-shell: the server's end is open, so ticks go by until the
+    // reply comes, however long it takes.
+    let (mut client, server) = ticking_pair(|mut s| {
+        std::thread::sleep(Duration::from_millis(700));
+        let _ = s.write_all(b"OK\ndone\n");
+        let _ = s.shutdown(std::net::Shutdown::Write);
+    });
+    let (buf, _t, _e, lost) = read_reply_to_eof(&mut client, false, &|| false);
+    server.join().unwrap();
+    assert!(!lost);
+    assert_eq!(String::from_utf8_lossy(&buf), "OK\ndone\n");
+}

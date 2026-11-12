@@ -3110,6 +3110,56 @@ pub fn send_control(line: String) -> io::Result<()> {
 // left of our input and closes. So the request is complete when its last
 // line ends in a newline, and the reply is complete at the server's EOF.
 
+/// How long an unbounded wait keeps reading once the kernel says the server's
+/// end of the connection is closing. A server's reply and FIN reach a loopback
+/// client in microseconds, so anything that is coming arrives well inside it.
+const SERVER_END_CLOSED_GRACE: Duration = Duration::from_millis(250);
+
+/// Read one reply until the server's EOF.
+///
+/// Bounded (`bounded`, the socket's read timeout is the bound): a timeout ends
+/// the read as `timed_out`. Unbounded: the socket reads in ticks, and after a
+/// tick with no byte `server_end_closed` is asked whether the server's end of
+/// the connection has gone. It answers from the kernel's TCP table, which
+/// shows the server closing at the very moment it closes, while its last
+/// reply bytes and its FIN may still sit unread in this socket: a tick that
+/// ends just then used to report a live, complete reply as a lost connection
+/// (#853, a source-file whose job finished on a tick). So a closed answer only
+/// starts a short grace read ([`SERVER_END_CLOSED_GRACE`]); the reply and its
+/// EOF end it the ordinary way, and only a grace that also passes with no byte
+/// means the FIN was swallowed and the connection is lost.
+///
+/// Returns the bytes, whether a bounded read timed out, a read error, and
+/// whether the connection was lost.
+pub(crate) fn read_reply_to_eof(
+    stream: &mut std::net::TcpStream,
+    bounded: bool,
+    server_end_closed: &dyn Fn() -> bool,
+) -> (Vec<u8>, bool, Option<io::Error>, bool) {
+    let mut buf = Vec::new();
+    let mut temp = [0u8; 4096];
+    let mut grace = false;
+    loop {
+        match std::io::Read::read(stream, &mut temp) {
+            Ok(0) => return (buf, false, None, false),
+            Ok(n) => buf.extend_from_slice(&temp[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                if bounded {
+                    return (buf, true, None, false);
+                }
+                if grace {
+                    return (buf, false, None, true);
+                }
+                if server_end_closed() {
+                    grace = true;
+                    let _ = stream.set_read_timeout(Some(SERVER_END_CLOSED_GRACE));
+                }
+            }
+            Err(e) => return (buf, false, Some(e), false),
+        }
+    }
+}
+
 /// How often an unbounded wait in [`exchange_on_port`] looks at the server's
 /// end of the connection. Only reached after a whole tick without a byte, so
 /// it costs nothing on the replies that matter for latency.
@@ -3419,37 +3469,12 @@ pub fn exchange_on_port(
     let _ = stream.flush();
     // No half-close (see NO CLIENT HALF-CLOSE above): the server closes the socket
     // once the reply is complete, which is the definitive Ok(0) end of reply.
-    let mut buf = Vec::new();
-    let mut temp = [0u8; 4096];
-    let mut timed_out = false;
-    let mut read_error: Option<io::Error> = None;
-    let mut server_end_lost = false;
     let our_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
-    loop {
-        match std::io::Read::read(&mut stream, &mut temp) {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&temp[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
-                if read_timeout.is_some() {
-                    timed_out = true;
-                    break;
-                }
-                // No time bound: the command may legitimately run for hours
-                // (run-shell). The wait ends on the server's EOF, or once the
-                // server's end of this connection is gone or closing without
-                // that EOF ever reaching us, which a loopback filter that
-                // swallows FINs does. On an ordinary machine the FIN arrives
-                // with the close and ends the read first, so this never fires.
-                if our_port != 0
-                    && crate::platform::process_kill::loopback_server_end_closed(port, our_port)
-                {
-                    server_end_lost = true;
-                    break;
-                }
-            }
-            Err(e) => { read_error = Some(e); break; }
-        }
-    }
+    let server_end_closed = || {
+        our_port != 0 && crate::platform::process_kill::loopback_server_end_closed(port, our_port)
+    };
+    let (buf, timed_out, read_error, server_end_lost) =
+        read_reply_to_eof(&mut stream, read_timeout.is_some(), &server_end_closed);
     if server_end_lost {
         return Err(io::Error::new(
             io::ErrorKind::ConnectionAborted,
