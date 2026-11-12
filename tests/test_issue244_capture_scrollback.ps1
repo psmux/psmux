@@ -231,28 +231,26 @@ if ((Test-Path $portFile) -and (Test-Path $keyFile)) {
         $null = $reader.ReadLine()
         $writer.Write("PERSISTENT`n"); $writer.Flush()
 
-        # Send capture-pane with -S - via persistent handler
+        # On a PERSISTENT (attached client) connection, capture-pane -p shows
+        # its output in a text popup, as tmux shows a command's output in view
+        # mode for an attached client; the text arrives in the frame's
+        # popup_lines, never as raw lines on the socket. (Until #232 this test
+        # counted raw lines: it read the loop cap of 500 identical frames that
+        # an open popup pushed every server loop, not the capture.)
         $writer.Write("capture-pane -p -S -`n"); $writer.Flush()
-        Start-Sleep -Milliseconds 500
-        $stream.ReadTimeout = 2000
-        $persistLines = [System.Collections.ArrayList]::new()
-        $readCount = 0
-        try {
-            while ($readCount -lt 500) {
-                $line = $reader.ReadLine()
-                if ($null -eq $line) { break }
-                [void]$persistLines.Add($line)
-                $readCount++
-                # After getting some lines, reduce timeout to avoid hanging
-                if ($readCount -gt 5) { $stream.ReadTimeout = 500 }
+        $stream.ReadTimeout = 1000
+        $popup = $null
+        $deadline = [DateTime]::Now.AddSeconds(8)
+        while ($null -eq $popup -and [DateTime]::Now -lt $deadline) {
+            try { $line = $reader.ReadLine() } catch { $writer.Write("dump-state`n"); $writer.Flush(); continue }
+            if ($null -eq $line) { break }
+            if ($line.StartsWith('{') -and $line.Contains('"popup_active":true')) {
+                try { $popup = $line | ConvertFrom-Json } catch {}
             }
-        } catch [System.IO.IOException] {
-            # Timeout is expected after all data is read
-        } catch {}
+        }
         $tcp.Close()
 
-        $persistText = $persistLines -join "`n"
-        $persistMarkers = $persistText.Split("`n") | Where-Object { $_ -match "SCROLLTEST-LINE-\d+" }
+        $persistMarkers = @(if ($popup) { $popup.popup_lines | Where-Object { $_ -match "SCROLLTEST-LINE-\d+" } })
         $persistCount = $persistMarkers.Count
         Write-Host "    Persistent -S - found $persistCount SCROLLTEST lines"
 
