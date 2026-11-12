@@ -280,8 +280,16 @@ if ($inMode -ne "0") { P send-keys -t $SESS -X cancel | Out-Null }
 # Measured in tmux 3.8 with `command-prompt -b -t <client> -p say` and
 # send-keys -K, word-separators "-./": `a-b.c`, M-b, X gives `a-b.Xc`, and a
 # C-w after that cuts only the X again.
+#
+# -b, as in that measurement: without it the command line waits until the
+# prompt closes (cmd-command-prompt.c returns CMD_RETURN_WAIT), so this
+# script, which types into the prompt only after the command returns, would
+# wait for ever. Older psmux CLIs half-closed their request, and Windows ends
+# a half-closed connection after its FIN_WAIT_2 timeout (120 s), so the wait
+# used to give up by itself with "no response from server (timed out)": the
+# suite passed only after a two minute stall.
 Write-Head "6. command-prompt -p from the command line"
-P command-prompt -t $SESS -p "say" "set -g @said '%%'" | Out-Null
+P command-prompt -b -t $SESS -p "say" "set -g @said '%%'" | Out-Null
 Start-Sleep -Milliseconds 600
 Inj "a-b.c"
 Inj "{ALT:b}X"
