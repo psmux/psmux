@@ -354,6 +354,11 @@ static RECONNECT_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| 
 static RECONNECT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 const RECONNECT_LOG_CAP: u32 = 20000;
 
+/// Returns `true` if the reconnect trace is active.
+pub fn reconnect_log_enabled() -> bool {
+    RECONNECT_LOG.lock().ok().map_or(false, |g| g.is_some())
+}
+
 /// Log a reconnect-path message. No-op unless `PSMUX_RECONNECT_TRACE=1`.
 pub fn reconnect_log(component: &str, msg: &str) {
     if RECONNECT_LOG_COUNT.fetch_add(1, Ordering::Relaxed) >= RECONNECT_LOG_CAP { return; }

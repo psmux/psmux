@@ -2232,6 +2232,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // this process, including the input poll below, rounds up to the default
     // 15.6ms tick. See src/timer_res.rs.
     crate::timer_res::set_high(true);
+    // Diagnostic only (PSMUX_RECONNECT_TRACE=1): a panic in the client's event
+    // loop ends the process with nothing in the Windows event log, which looks
+    // exactly like a clean detach from the outside. Name it in the trace so a
+    // "the client is simply gone" report can be told apart from a quit.
+    if crate::debug_log::reconnect_log_enabled() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            crate::debug_log::reconnect_log("client", &format!("EXIT: panic {}", info));
+            prev(info);
+        }));
+    }
     crate::startup_trace::mark("cli.attach");
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
@@ -3093,7 +3104,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
         }
-        if quit && !got_frame { break; }
+        if quit && !got_frame {
+            crate::debug_log::reconnect_log("client", "EXIT: quit set and no frame pending");
+            break;
+        }
 
         // ── STEP 1: Poll events with adaptive timeout ────────────────────
         let since_dump = last_dump_time.elapsed().as_millis() as u64;
@@ -3265,7 +3279,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
 
         {
-            let mut _pending_evt = input.read_timeout(Duration::from_millis(poll_ms))?;
+            let mut _pending_evt = match input.read_timeout(Duration::from_millis(poll_ms)) {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::debug_log::reconnect_log("client", &format!(
+                        "EXIT: input.read_timeout failed: {:?} {}", e.kind(), e));
+                    return Err(e);
+                }
+            };
             if crate::pty_trace::on() && matches!(_pending_evt, Some(Event::Key(_))) {
                 crate::pty_trace::mark_plain("k", poll_ms as usize);
             }
@@ -5271,7 +5292,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                             // Advance to the next pending event without falling
                             // through to the underlying-pane mouse handler.
-                            _pending_evt = input.try_read()?;
+                            _pending_evt = match input.try_read() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    crate::debug_log::reconnect_log("client", &format!(
+                                        "EXIT: input.try_read (mouse) failed: {:?} {}", e.kind(), e));
+                                    return Err(e);
+                                }
+                            };
                             continue;
                         }
                         match me.kind {
@@ -5934,11 +5962,24 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     }
                     _ => {}
                 }
-                if quit { break; }
-                _pending_evt = input.try_read()?;
+                if quit {
+                    crate::debug_log::reconnect_log("client", "EXIT: quit set during event drain");
+                    break;
+                }
+                _pending_evt = match input.try_read() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        crate::debug_log::reconnect_log("client", &format!(
+                            "EXIT: input.try_read failed: {:?} {}", e.kind(), e));
+                        return Err(e);
+                    }
+                };
             }
         }
-        if quit { break; }
+        if quit {
+            crate::debug_log::reconnect_log("client", "EXIT: quit set after event drain");
+            break;
+        }
 
         // ── Windows zero-latency typing flush (post-event) ─────────────
         // After exhausting all available events, if paste_pend has 1-2
@@ -6053,7 +6094,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Send client-size if changed
         let mut size_changed = false;
         {
-            let ts = terminal.size()?;
+            let ts = match terminal.size() {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::debug_log::reconnect_log("client", &format!(
+                        "EXIT: terminal.size failed: {:?} {}", e.kind(), e));
+                    return Err(e);
+                }
+            };
             let new_size = (ts.width, ts.height.saturating_sub(last_status_lines));
             if new_size != last_sent_size {
                 last_sent_size = new_size;
@@ -7764,6 +7812,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
 
+        }).map_err(|e| {
+            crate::debug_log::reconnect_log("client", &format!(
+                "EXIT: terminal.draw failed: {:?} {}", e.kind(), e));
+            e
         })?;
         if client_log_enabled() {
             client_log("draw", &format!("draw OK, render={}us overlays: popup={} confirm={} menu={} display_panes={}",
@@ -7998,6 +8050,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     }
 
     // Clean disconnect on persistent connection
+    crate::debug_log::reconnect_log("client", "run_remote returning: sending client-detach");
     let _ = writer.write_all(b"client-detach\n");
     let _ = writer.flush();
     // detach-client -P parity (issue #275): kill the parent shell so the host
