@@ -206,7 +206,17 @@ exit 7
                             # Accept AUTH-only reconnects too, so fallback attempts cannot hide behind a refused second connection.
                             $answer = if ($record.Auth -eq "AUTH $key") { "OK`n" } else { $ack }
                             $writer.Write($answer)
-                            $record.Body = $reader.ReadToEnd()
+                            # The client never half-closes (its request ends with a
+                            # newline and it waits for the reply), so read lines until
+                            # it closes or goes quiet instead of waiting for its EOF.
+                            $tcp.ReceiveTimeout = 700
+                            $body = [Text.StringBuilder]::new()
+                            while ($true) {
+                                try { $line = $reader.ReadLine() } catch { break }
+                                if ($null -eq $line) { break }
+                                $null = $body.Append($line).Append("`n")
+                            }
+                            $record.Body = $body.ToString()
                             if ($record.Auth -ne "AUTH $key") { $writer.Write($reply) }
                         } finally { $tcp.Dispose() }
                     }
