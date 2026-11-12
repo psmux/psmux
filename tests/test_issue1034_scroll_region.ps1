@@ -87,6 +87,22 @@ $cases = @(
     @('decsc_origin',      "${E}[3;6r${E}[?6h${E}7${E}[?6l${E}8",     '0,2', '2-5', '1', '')
 )
 foreach ($c in $cases) { [IO.File]::WriteAllBytes("$TempHome\p\$($c[0]).bin", [Text.Encoding]::UTF8.GetBytes($c[1])) }
+# Hosts without DECALN. The inbox conhost of Windows 10 (19041 family, still
+# shipping on 19045) ignores ESC # 8 itself: in a plain console window, with
+# no psmux, the screen stays blank and the cursor stays put, and through
+# ConPTY it never forwards ESC # 8 to psmux at all (a PSMUX_PANE_RAW capture
+# holds only the clear and the cursor move). The pane then shows what the
+# host shows, which is all psmux can show: the app's DECALN never reaches it.
+# The host's own cursor after decaln_region (it records it in the .host
+# file) tells the two kinds apart: 0,0 when it filled and homed, 9,4 when it
+# ignored ESC # 8. On such a host these are the expectations, cursor and row 0:
+$NoDecaln = @{
+    'decaln'          = @('0,0', '')
+    'decaln_region'   = @('9,4', '')
+    'decaln_text'     = @('3,0', 'abc')
+    'decaln_origin'   = @('0,2', '')
+    'decaln_then_cup' = @('0,2', '')
+}
 Set-Content -Path "$TempHome\show.ps1" -Value @(
     'param([string]$Payload)'
     '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
@@ -112,16 +128,23 @@ function Run-Cases($route, $regionSeen) {
         Start-Sleep -Milliseconds 250
     }
     Start-Sleep -Milliseconds 800
+    $hostDecaln = "$((Get-Content "$TempHome\p\decaln_region.bin.host" -EA SilentlyContinue) -join '')"
+    $hostIgnoresDecaln = $hostDecaln -eq '9,4'
+    if ($hostIgnoresDecaln) {
+        Write-Info "${route}: this console host ignores DECALN (ESC # 8 left its cursor at $hostDecaln), the decaln cases expect what it shows"
+    }
     foreach ($c in $cases) {
         $name = $c[0]
+        $wantCursor = $c[2]; $wantRow0 = $c[5]
+        if ($hostIgnoresDecaln -and $NoDecaln.ContainsKey($name)) { $wantCursor = $NoDecaln[$name][0]; $wantRow0 = $NoDecaln[$name][1] }
         $size = "$(P display -p -t "s:$name" '#{pane_width}x#{pane_height}')"
         if ($size -ne '40x10') { Write-Fail "${route}: $name pane is $size, not 40x10"; continue }
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x},#{cursor_y}')"
         $hostPos = "$((Get-Content "$TempHome\p\$name.bin.host" -EA SilentlyContinue) -join '')"
-        Check "${route}: $name cursor" $cursor $c[2]
+        Check "${route}: $name cursor" $cursor $wantCursor
         Check "${route}: $name cursor is the console host's" $cursor $hostPos
         $row0 = "$((P capture-pane -p -t "s:$name") | Select-Object -First 1)".TrimEnd()
-        Check "${route}: $name row 0" $row0 $c[5]
+        Check "${route}: $name row 0" $row0 $wantRow0
         if ($regionSeen) {
             Check "${route}: $name region" "$(P display -p -t "s:$name" '#{scroll_region_upper}-#{scroll_region_lower}')" $c[3]
             Check "${route}: $name origin_flag" "$(P display -p -t "s:$name" '#{origin_flag}')" $c[4]
