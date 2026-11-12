@@ -1,0 +1,25 @@
+
+r1 bc2c load=0 gate exit=0 | new-window         [26, 27, 27, 1715, 77, 15, 15, 14, 15, 15] | split-window -v    [16, 17, 17, 754, 296, 17, 16, 16, 17, 17] | split-window -h    [17, 16, 16, 988, 16, 17, 16, 17, 17, 17] | split -f           [28, 17, 16, 316, 239] | FAIL: 
+r1 bc2c load=0 661 exit=0 | [20, 20, 18, 268, 657, 17, 15, 16, 14, 27, 15, 16, 16, 15, 16, 16, 16, 16, 16, 15, 16, 16, 17, 14] | FAIL: 
+r1 bc2c load=0 686 exit=0 | per call: 24 19 19 237 22 20 19 589 443 30 | FAIL: 
+r1 bc2c load=0 spf exit=1 |  | FAIL: 
+r1 fix load=0 gate exit=1 | new-window         [26, 26, 13, 943, 14, 78, 15, 865, 15, 45] | split-window -v    [16, 17, 17, 252, 16, 159, 16, 63, 17, 237] | split-window -h    [16, 16, 18, 221, 16, 16, 16, 221, 16, 16] | split -f           [13, 18, 16, 112, 17] | FAIL: new-window p90 865ms exceeds 600ms  [26, 26, 13, 943, 14, 78, 15, 865, 15, 45] ; split-window -v 3 of 10 creations over 150ms, budget 2 - creations are waiting out a shell startup  [16, 17, 17, 252, 16, 159, 16, 63, 17, 237]
+r1 fix load=0 661 exit=0 | [34, 16, 16, 17, 16, 16, 18, 16, 15, 16, 16, 15, 15, 15, 15, 15, 15, 17, 17, 15, 17, 15, 16, 16] | FAIL: 
+r1 fix load=0 686 exit=0 | per call: 23 17 16 192 17 17 417 332 267 21 | FAIL: 
+r1 fix load=0 spf exit=1 |  | FAIL: 
+r2 bc2c load=0 gate exit=0 | new-window         [26, 27, 14, 1730, 363, 14, 14, 15, 13, 15] | split-window -v    [16, 17, 16, 752, 235, 17, 17, 16, 16, 16] | split-window -h    [16, 17, 15, 974, 158, 18, 18, 16, 17, 16] | split -f           [13, 18, 16, 792, 174] | FAIL: 
+r2 bc2c load=0 661 exit=0 | [20, 23, 16, 459, 657, 16, 15, 16, 15, 17, 16, 16, 16, 15, 16, 16, 17, 17, 18, 17, 15, 15, 15, 17] | FAIL: 
+r2 bc2c load=0 686 exit=0 | per call: 35 27 32 302 475 142 706 330 22 188 | FAIL: 
+r2 bc2c load=0 spf exit=1 |  | FAIL: 
+r2 fix load=0 gate exit=1 | new-window         [26, 27, 14, 908, 16, 15, 109, 707, 15, 15] | split-window -v    [16, 17, 16, 220, 16, 143, 16, 63, 16, 110] | split-window -h    [18, 17, 17, 234, 16, 16, 16, 234, 16, 16] | split -f           [28, 17, 17, 63, 48] | FAIL: new-window p90 707ms exceeds 600ms  [26, 27, 14, 908, 16, 15, 109, 707, 15, 15]
+r2 fix load=0 661 exit=0 | [20, 17, 19, 17, 17, 18, 15, 18, 16, 16, 17, 15, 16, 16, 17, 16, 16, 17, 29, 15, 16, 16, 16, 15] | FAIL: 
+r2 fix load=0 686 exit=1 | per call: 26 17 16 227 270 328 253 196 21 21 | FAIL: no four spare spawns ever started together; the surge did not run concurrently at all
+r2 fix load=0 spf exit=1 |  | FAIL: 
+r3 bc2c load=0 gate exit=0 | new-window         [24, 27, 42, 1780, 15, 46, 15, 16, 78, 109] | split-window -v    [16, 17, 16, 832, 157, 16, 17, 16, 16, 17] | split-window -h    [16, 17, 16, 522, 733, 16, 16, 17, 16, 17] | split -f           [14, 17, 16, 564, 300] | FAIL: 
+r3 bc2c load=0 661 exit=0 | [18, 18, 16, 350, 691, 15, 17, 15, 16, 16, 16, 15, 17, 16, 17, 16, 15, 16, 17, 16, 16, 16, 17, 16] | FAIL: 
+r3 bc2c load=0 686 exit=0 | per call: 24 19 18 231 556 26 18 19 18 501 | FAIL: 
+r3 bc2c load=0 spf exit=1 |  | FAIL: 
+r3 fix load=0 gate exit=1 | new-window         [28, 26, 30, 958, 62, 94, 14, 662, 14, 63] | split-window -v    [17, 17, 16, 221, 17, 17, 16, 287, 156, 17] | split-window -h    [16, 17, 17, 297, 17, 17, 16, 237, 18, 16] | split -f           [12, 17, 16, 157, 15] | FAIL: new-window p90 662ms exceeds 600ms  [28, 26, 30, 958, 62, 94, 14, 662, 14, 63] ; split-window -v 3 of 10 creations over 150ms, budget 2 - creations are waiting out a shell startup  [17, 17, 16, 221, 17, 17, 16, 287, 156, 17]
+r3 fix load=0 661 exit=0 | [23, 17, 17, 17, 17, 17, 16, 15, 17, 15, 15, 16, 16, 16, 15, 16, 16, 16, 29, 16, 16, 16, 15, 17] | FAIL: 
+r3 fix load=0 686 exit=1 | per call: 20 16 15 212 334 329 133 260 21 22 | FAIL: no four spare spawns ever started together; the surge did not run concurrently at all
+r3 fix load=0 spf exit=1 |  | FAIL: 

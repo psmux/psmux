@@ -1498,6 +1498,18 @@ pub fn await_inflight_spare(
         match rx.recv_timeout(left) {
             Ok(slot) => {
                 land_spare(app, slot);
+                // Spares land in whatever order their spawns finish, not in id
+                // order. Taking the first one to land put every lower id still
+                // in flight below the issued floor, and those spares, started
+                // earlier and the furthest through their boot, were killed on
+                // arrival (creation gate trace: the 4th creation took pane 8,
+                // panes 5 to 7 were refused, and the next creations had to use
+                // spares that had only just started). Wait for the lowest id.
+                let front = app.warm_pane.iter().next().map(|w| w.pane_id);
+                let lowest_pending = crate::warm_pane_sync::inflight::pending().first().copied();
+                if matches!((front, lowest_pending), (Some(f), Some(p)) if p < f) {
+                    continue;
+                }
                 let got = app.warm_pane.claim();
                 if got.0.is_some() {
                     crate::warm_trace!(
@@ -1513,6 +1525,12 @@ pub fn await_inflight_spare(
             }
             Err(_) => break,
         }
+    }
+    // The budget ran out while a lower id was still in flight: a spare that has
+    // landed still beats a cold spawn, which would take an id above the whole
+    // batch and have every one of them killed on arrival.
+    if out.0.is_none() && !app.warm_pane.is_empty() {
+        out = app.warm_pane.claim();
     }
     app.warm_refill_rx = Some(rx);
     out
@@ -1538,8 +1556,16 @@ pub fn await_inflight_spare(
 /// short waves instead of one long queue.
 pub const WARM_SPAWN_CONCURRENCY: usize = 4;
 
-static WARM_SPAWN_SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
-    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+/// Spawns inside `CreateProcessW` now, and the pane ids waiting for a slot.
+struct SpawnSlots {
+    busy: usize,
+    waiting: std::collections::BTreeSet<usize>,
+}
+
+static WARM_SPAWN_SLOTS: (std::sync::Mutex<SpawnSlots>, std::sync::Condvar) = (
+    std::sync::Mutex::new(SpawnSlots { busy: 0, waiting: std::collections::BTreeSet::new() }),
+    std::sync::Condvar::new(),
+);
 
 /// A permit to be inside a ConPTY spawn. Released on drop.
 pub struct WarmSpawnPermit;
@@ -1547,9 +1573,10 @@ pub struct WarmSpawnPermit;
 impl Drop for WarmSpawnPermit {
     fn drop(&mut self) {
         let (m, cv) = &WARM_SPAWN_SLOTS;
-        let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
-        *n = n.saturating_sub(1);
-        cv.notify_one();
+        let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
+        s.busy = s.busy.saturating_sub(1);
+        // Every waiter rechecks: only the lowest waiting id may take the slot.
+        cv.notify_all();
     }
 }
 
@@ -1559,22 +1586,32 @@ impl Drop for WarmSpawnPermit {
 ///
 /// Only the background spare spawner queues here. A cold spawn on the loop
 /// thread is a user waiting on a window, so it never queues behind spares.
-pub fn warm_spawn_permit() -> Option<WarmSpawnPermit> {
+///
+/// Slots go to the LOWEST waiting pane id, not to whichever thread wakes first.
+/// Claims take spares lowest id first, so a surge's extra spawns queued beside
+/// the refill the next claim is about to take must not get the slot before it.
+pub fn warm_spawn_permit(pane_id: usize) -> Option<WarmSpawnPermit> {
     let (m, cv) = &WARM_SPAWN_SLOTS;
-    let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
+    s.waiting.insert(pane_id);
     loop {
         if crate::warm_pane_sync::inflight::is_tearing_down() {
+            s.waiting.remove(&pane_id);
+            cv.notify_all();
             return None;
         }
-        if *n < WARM_SPAWN_CONCURRENCY {
-            *n += 1;
+        if s.busy < WARM_SPAWN_CONCURRENCY && s.waiting.first() == Some(&pane_id) {
+            s.waiting.remove(&pane_id);
+            s.busy += 1;
+            // The next lowest may fit in a slot that is still free.
+            cv.notify_all();
             return Some(WarmSpawnPermit);
         }
         // Timed, so the teardown check above is re-run rather than waited on.
         let (g, _) = cv
-            .wait_timeout(n, std::time::Duration::from_millis(5))
+            .wait_timeout(s, std::time::Duration::from_millis(5))
             .unwrap_or_else(|e| e.into_inner());
-        n = g;
+        s = g;
     }
 }
 
@@ -1638,7 +1675,7 @@ pub fn schedule_warm_refill(app: &mut AppState) {
         let started = std::thread::Builder::new()
             .name("psmux-warm-spawn".into())
             .spawn(move || {
-                let Some(_permit) = warm_spawn_permit() else {
+                let Some(_permit) = warm_spawn_permit(params.pane_id) else {
                     // Teardown began before this spawn started: no process was
                     // ever created, so there is nothing for the reaper to kill.
                     crate::warm_pane_sync::inflight::release(params.pane_id);
