@@ -216,10 +216,12 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
     }
 
     /// Capture a query, unless an unfinished DECRQSS holds it: tmux reads it
-    /// as part of that string and answers nothing for it.
+    /// as part of that string and answers nothing for it. A DECRQM takes the
+    /// mode's value here, so that a mode set and reset again in the same
+    /// output is answered as it stood at the query.
     fn query(&mut self, query: crate::TerminalQuery) {
         if !self.decrqss.open() {
-            self.screen.query(query);
+            self.screen.query(self.screen.decrqm(query));
         }
     }
 
@@ -552,25 +554,32 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                     );
                 }
             },
-            Some(b'?') => match c {
-                'J' => self
-                    .screen
-                    .decsed(canonicalize_params_1(params, 0), unhandled),
-                'K' => self
-                    .screen
-                    .decsel(canonicalize_params_1(params, 0), unhandled),
-                'h' => self.screen.decset(params, unhandled),
-                'l' => self.screen.decrst(params, unhandled),
-                _ => {
-                    self.callbacks.unhandled_csi(
-                        &mut self.screen,
-                        Some(b'?'),
-                        intermediates.get(1).copied(),
-                        &params.iter().collect::<Vec<_>>(),
-                        c,
-                    );
+            Some(b'?') => {
+                // The previous private mode CSI, which this one replaces,
+                // tells the console host's own `CSI ? 1004 h` apart. Only
+                // these look at it, so the CSIs met most, SGR above all,
+                // pay nothing for it.
+                let focus_sequence = self.screen.take_focus_sequence();
+                match c {
+                    'J' => self
+                        .screen
+                        .decsed(canonicalize_params_1(params, 0), unhandled),
+                    'K' => self
+                        .screen
+                        .decsel(canonicalize_params_1(params, 0), unhandled),
+                    'h' => self.screen.decset(params, focus_sequence, unhandled),
+                    'l' => self.screen.decrst(params, unhandled),
+                    _ => {
+                        self.callbacks.unhandled_csi(
+                            &mut self.screen,
+                            Some(b'?'),
+                            intermediates.get(1).copied(),
+                            &params.iter().collect::<Vec<_>>(),
+                            c,
+                        );
+                    }
                 }
-            },
+            }
             // DECSCUSR, see `decscusr`.
             Some(b' ') if c == 'q' && intermediates.len() == 1 => self.decscusr(params),
             // XTMODKEYS (`CSI > 4 ; n m`) and its reset (`CSI > 4 n`): the

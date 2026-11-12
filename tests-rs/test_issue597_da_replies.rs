@@ -29,9 +29,10 @@
 
 use super::*;
 
-/// The state of a freshly started pane: nothing set, cursor visible.
+/// A freshly started pane, outside a synchronized update. The modes come
+/// from the bytes, which a fresh parser reads.
 fn fresh() -> DecrqmState {
-    DecrqmState { cursor_visible: true, ..DecrqmState::default() }
+    DecrqmState::default()
 }
 
 fn reply_for(bytes: &[u8], st: &DecrqmState) -> String {
@@ -70,11 +71,11 @@ fn dsr_five_is_a_query() {
 fn decrqm_private_and_ansi_are_queries() {
     assert_eq!(
         scan_device_queries(b"\x1b[?2026$p"),
-        vec![DeviceQuery::DecrqmPrivate(2026)]
+        vec![DeviceQuery::DecrqmPrivate { mode: 2026, value: None }]
     );
     assert_eq!(
         scan_device_queries(b"\x1b[4$p"),
-        vec![DeviceQuery::DecrqmAnsi(4)]
+        vec![DeviceQuery::DecrqmAnsi { mode: 4, value: 2 }]
     );
 }
 
@@ -186,29 +187,21 @@ fn decrqm_reports_reset_for_a_mode_that_is_off() {
 
 #[test]
 fn decrqm_reports_set_for_a_mode_that_is_on() {
-    let st = DecrqmState {
-        cursor_visible: true,
-        bracketed_paste: true,
-        alternate_screen: true,
-        mouse_sgr: true,
-        mouse_all: true,
-        application_cursor: true,
-        ..DecrqmState::default()
-    };
-    assert_eq!(reply_for(b"\x1b[?2004$p", &st), "\x1b[?2004;1$y");
-    assert_eq!(reply_for(b"\x1b[?1049$p", &st), "\x1b[?1049;1$y");
-    assert_eq!(reply_for(b"\x1b[?47$p", &st), "\x1b[?47;1$y");
-    assert_eq!(reply_for(b"\x1b[?1047$p", &st), "\x1b[?1047;1$y");
-    assert_eq!(reply_for(b"\x1b[?1006$p", &st), "\x1b[?1006;1$y");
-    assert_eq!(reply_for(b"\x1b[?1003$p", &st), "\x1b[?1003;1$y");
-    assert_eq!(reply_for(b"\x1b[?1$p", &st), "\x1b[?1;1$y");
+    let on = b"\x1b[?2004h\x1b[?1049h\x1b[?1006h\x1b[?1003h\x1b[?1h";
+    let ask = |q: &[u8]| reply_for(&[&on[..], q].concat(), &fresh());
+    assert_eq!(ask(b"\x1b[?2004$p"), "\x1b[?2004;1$y");
+    assert_eq!(ask(b"\x1b[?1049$p"), "\x1b[?1049;1$y");
+    assert_eq!(ask(b"\x1b[?47$p"), "\x1b[?47;1$y");
+    assert_eq!(ask(b"\x1b[?1047$p"), "\x1b[?1047;1$y");
+    assert_eq!(ask(b"\x1b[?1006$p"), "\x1b[?1006;1$y");
+    assert_eq!(ask(b"\x1b[?1003$p"), "\x1b[?1003;1$y");
+    assert_eq!(ask(b"\x1b[?1$p"), "\x1b[?1;1$y");
 }
 
 #[test]
 fn decrqm_reports_the_cursor_mode() {
     assert_eq!(reply_for(b"\x1b[?25$p", &fresh()), "\x1b[?25;1$y");
-    let hidden = DecrqmState { cursor_visible: false, ..DecrqmState::default() };
-    assert_eq!(reply_for(b"\x1b[?25$p", &hidden), "\x1b[?25;2$y");
+    assert_eq!(reply_for(b"\x1b[?25l\x1b[?25$p", &fresh()), "\x1b[?25;2$y");
 }
 
 #[test]
@@ -244,22 +237,11 @@ fn decrqm_for_an_unknown_mode_reports_zero() {
 fn decrqm_reports_autowrap_and_insert_mode() {
     assert_eq!(reply_for(b"\x1b[?7$p", &fresh()), "\x1b[?7;1$y");
     assert_eq!(reply_for(b"\x1b[4$p", &fresh()), "\x1b[4;2$y");
-    let st = DecrqmState { autowrap_off: true, insert_mode: true, ..fresh() };
-    assert_eq!(reply_for(b"\x1b[?7$p", &st), "\x1b[?7;2$y");
-    assert_eq!(reply_for(b"\x1b[4$p", &st), "\x1b[4;1$y");
-}
-
-#[test]
-fn decrqm_state_reads_autowrap_and_insert_mode_from_the_screen() {
-    let mut p = vt100::Parser::new(5, 20, 0);
-    let st = DecrqmState::from_screen(p.screen());
-    assert!(!st.autowrap_off && !st.insert_mode);
-    p.process(b"\x1b[?7l\x1b[4h");
-    let st = DecrqmState::from_screen(p.screen());
-    assert!(st.autowrap_off && st.insert_mode);
-    p.process(b"\x1b[?7h\x1b[4l");
-    let st = DecrqmState::from_screen(p.screen());
-    assert!(!st.autowrap_off && !st.insert_mode);
+    assert_eq!(reply_for(b"\x1b[?7l\x1b[4h\x1b[?7$p\x1b[4$p", &fresh()), "\x1b[?7;2$y\x1b[4;1$y");
+    assert_eq!(
+        reply_for(b"\x1b[?7l\x1b[4h\x1b[?7h\x1b[4l\x1b[?7$p\x1b[4$p", &fresh()),
+        "\x1b[?7;1$y\x1b[4;2$y"
+    );
 }
 
 #[test]
@@ -284,7 +266,7 @@ fn a_query_split_across_two_reads_is_still_answered() {
 fn a_decrqm_split_mid_parameter_is_still_answered() {
     let mut s = DeviceQueryScanner::new();
     assert!(s.scan(b"\x1b[?20").is_empty());
-    assert_eq!(s.scan(b"26$p"), vec![DeviceQuery::DecrqmPrivate(2026)]);
+    assert_eq!(s.scan(b"26$p"), vec![DeviceQuery::DecrqmPrivate { mode: 2026, value: None }]);
 }
 
 #[test]
