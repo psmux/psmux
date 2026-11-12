@@ -3177,8 +3177,45 @@ fn control_endpoint(line: &str) -> io::Result<(u16, String, Option<String>)> {
 
 fn send_control_with_response_bounded(line: String, read_timeout: Option<Duration>) -> io::Result<String> {
     let (port, key, target) = control_endpoint(&line)?;
-    let reply = exchange_on_port(port, &key, target.as_deref(), &line, read_timeout)?;
-    if reply.is_empty() && reply_required(&line) {
+    exchange_with_read_only_retry(port, &key, target.as_deref(), &line, read_timeout)
+}
+
+/// One CLI request, and for a read-only command whose reply was lost on the
+/// way, ONE more try on a fresh connection.
+///
+/// Some loopback filters drop a reply or the server's end of it now and then
+/// (one machine lost about one request in four). Asking again is safe only
+/// for a command that changes nothing ([`read_only_retryable`]), and only
+/// after a loss of the transport kind ([`reply_was_lost`]): a refusal, an
+/// unknown session or a command error is an answer, not a loss. The retry
+/// runs only after a failure, so a reply that arrives costs nothing extra.
+pub(crate) fn exchange_with_read_only_retry(
+    port: u16,
+    key: &str,
+    target: Option<&str>,
+    line: &str,
+    read_timeout: Option<Duration>,
+) -> io::Result<String> {
+    let first = exchange_requiring_reply(port, key, target, line, read_timeout);
+    match first {
+        Err(ref e) if reply_was_lost(e) && read_only_retryable(line) => {
+            exchange_requiring_reply(port, key, target, line, read_timeout)
+        }
+        other => other,
+    }
+}
+
+/// [`exchange_on_port`], plus: an empty reply to a command that always
+/// prints on success ([`reply_required`]) is a lost reply.
+fn exchange_requiring_reply(
+    port: u16,
+    key: &str,
+    target: Option<&str>,
+    line: &str,
+    read_timeout: Option<Duration>,
+) -> io::Result<String> {
+    let reply = exchange_on_port(port, key, target, line, read_timeout)?;
+    if reply.is_empty() && reply_required(line) {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("no reply from server for '{}' (the connection closed before the reply arrived)",
@@ -3186,6 +3223,47 @@ fn send_control_with_response_bounded(line: String, read_timeout: Option<Duratio
         ));
     }
     Ok(reply)
+}
+
+/// Whether `e` says the reply was lost in transport (cut off, reset, timed
+/// out, or empty where a reply is required), as opposed to an answer.
+pub(crate) fn reply_was_lost(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::BrokenPipe
+    )
+}
+
+/// Whether `line` is one command that only reads, so running it twice is the
+/// same as running it once: `display-message -p`, `list-*`, `show-*`,
+/// `capture-pane -p` and `has-session`. Without `-p`, display-message shows a
+/// message and capture-pane fills a buffer, so those are not. A `;` list is
+/// never retried, whatever it holds.
+pub(crate) fn read_only_retryable(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let Some(&cmd) = tokens.first() else { return false };
+    if tokens.iter().any(|t| *t == ";" || *t == "\\;" || t.ends_with("\\;")) {
+        return false;
+    }
+    let has_p = tokens[1..]
+        .iter()
+        .take_while(|t| **t != "--")
+        .any(|t| t.len() > 1 && t.starts_with('-') && !t.starts_with("--") && t[1..].contains('p'));
+    match cmd {
+        "display-message" | "display" | "capture-pane" | "capturep" => has_p,
+        "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp"
+        | "list-keys" | "lsk" | "list-buffers" | "lsb" | "list-clients" | "lsc"
+        | "list-commands" | "lscm" => true,
+        "show-options" | "show" | "show-window-options" | "showw" | "show-environment"
+        | "showenv" | "show-hooks" | "show-buffer" | "showb" | "show-messages" | "showmsgs" => true,
+        "has-session" | "has" => true,
+        _ => false,
+    }
 }
 
 /// Whether a successful `line` always prints something, so an empty reply can

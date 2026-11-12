@@ -183,3 +183,87 @@ fn socket_with_zero_linger(s: &std::net::TcpStream) {
 }
 #[cfg(not(windows))]
 fn socket_with_zero_linger(_s: &std::net::TcpStream) {}
+
+#[test]
+fn only_single_read_only_commands_are_retried() {
+    for l in [
+        "display-message -p -- \"#{session_name}\"\n",
+        "list-panes -F \"#{pane_id}\"\n",
+        "list-buffers\n",
+        "show-options -g status\n",
+        "showenv\n",
+        "capture-pane -p -t main\n",
+        "has-session -t main\n",
+    ] {
+        assert!(read_only_retryable(l), "{l:?} only reads");
+    }
+    for l in [
+        "display-message hello\n",
+        "capture-pane -t main\n",
+        "set-option -g status off\n",
+        "send-keys -t main -- -p\n",
+        "new-session -d -P -s x\n",
+        "kill-session -t x\n",
+        "list-panes ; kill-server\n",
+        "display-message -p a \; set -g status off\n",
+    ] {
+        assert!(!read_only_retryable(l), "{l:?} must never run twice");
+    }
+}
+
+/// A server that drops the first `drop_first` connections without a byte and
+/// answers the rest; returns how many requests it saw.
+fn flaky_server(drop_first: usize, reply: &'static str) -> (u16, std::thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _ = listener.set_nonblocking(false);
+    let h = std::thread::spawn(move || {
+        let mut seen = 0usize;
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    s.set_nonblocking(false).unwrap();
+                    seen += 1;
+                    let mut buf = [0u8; 512];
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                    let _ = s.read(&mut buf);
+                    if seen > drop_first {
+                        let _ = s.write_all(reply.as_bytes());
+                        let _ = s.shutdown(std::net::Shutdown::Write);
+                        let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+                        while matches!(s.read(&mut buf), Ok(n) if n > 0) {}
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        seen
+    });
+    (port, h)
+}
+
+#[test]
+fn a_lost_read_only_reply_is_retried_once_on_a_fresh_connection() {
+    let (port, server) = flaky_server(1, "OK\nmain\n");
+    let got = exchange_with_read_only_retry(port, "k", None, "display-message -p x\n", Some(Duration::from_secs(2)));
+    assert_eq!(got.unwrap(), "main\n");
+    assert_eq!(server.join().unwrap(), 2, "exactly one retry");
+}
+
+#[test]
+fn a_mutating_command_is_never_sent_twice() {
+    let (port, server) = flaky_server(1, "OK\n");
+    let got = exchange_with_read_only_retry(port, "k", None, "new-window -d\n", Some(Duration::from_secs(2)));
+    assert!(got.is_err(), "the lost reply is reported");
+    assert_eq!(server.join().unwrap(), 1, "never re-run a command that changes state");
+}
+
+#[test]
+fn a_read_only_command_is_retried_at_most_once() {
+    let (port, server) = flaky_server(5, "OK\nx\n");
+    let got = exchange_with_read_only_retry(port, "k", None, "list-panes\n", Some(Duration::from_secs(2)));
+    assert!(got.is_err());
+    assert_eq!(server.join().unwrap(), 2);
+}
