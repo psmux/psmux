@@ -1,0 +1,17 @@
+
+kbinm test_issue964_kill_pane_all.ps1 exit=1 pass=22 fail=1
+    FAIL: hook kill-pane -a -t  keeps that pane (psmux: no server running on session 't964148404__h2')
+kbinm test_issue964_kill_pane_filter.ps1 exit=0 pass=11 fail=0
+kbinm test_issue686_pool_surge_and_reap.ps1 exit=1 pass=5 fail=1
+    [FAIL] slow round 1: no server
+kbinm test_issue686_reaper_during_shutdown.ps1 exit=0 pass=2 fail=0
+kbinm test_robust_churn.ps1 exit=2 pass=12 fail=2
+    [FAIL] Window churn: one or more new-window/kill-window cycles failed
+    [FAIL] Window churn: residual windows remain (final=-1, base=1)
+kbinf test_issue964_kill_pane_all.ps1 exit=0 pass=23 fail=0
+kbinf test_issue964_kill_pane_filter.ps1 exit=0 pass=11 fail=0
+kbinf test_issue686_pool_surge_and_reap.ps1 exit=1 pass=5 fail=1
+    [FAIL] round 3: no server
+kbinf test_issue686_reaper_during_shutdown.ps1 exit=1 pass=1 fail=1
+    [FAIL] 1 of 3 servers were terminated mid shutdown (exit code not 0): another psmux process reaped a server that was shutting down
+kbinf test_robust_churn.ps1 exit=0 pass=14 fail=0

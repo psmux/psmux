@@ -1,0 +1,19 @@
+
+r1 kbinm test_issue686_reaper_during_shutdown.ps1 exit=0  
+r1 kbinm test_issue686_pool_surge_and_reap.ps1 exit=0  
+r1 kbinm test_kill_pane_loop_stall.ps1 exit=1 display-message with kill-pane: p50=45.9 p90=53.5 max=53.9 ms over 20 FAIL: a display-message sent with kill-pane answers in under 15 ms at p90 (got 53.5)
+r1 kbinf test_issue686_reaper_during_shutdown.ps1 exit=0  
+r1 kbinf test_issue686_pool_surge_and_reap.ps1 exit=0  
+r1 kbinf test_kill_pane_loop_stall.ps1 exit=0 display-message with kill-pane: p50=0.7 p90=0.8 max=1.7 ms over 20 
+r2 kbinm test_issue686_reaper_during_shutdown.ps1 exit=0  
+r2 kbinm test_issue686_pool_surge_and_reap.ps1 exit=1  [FAIL] spawns that started together are a staircase: psmux's own share spreads 154.6ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r2 kbinm test_kill_pane_loop_stall.ps1 exit=1 display-message with kill-pane: p50=44.3 p90=51.9 max=52.5 ms over 20 FAIL: a display-message sent with kill-pane answers in under 15 ms at p90 (got 51.9)
+r2 kbinf test_issue686_reaper_during_shutdown.ps1 exit=0  
+r2 kbinf test_issue686_pool_surge_and_reap.ps1 exit=0  
+r2 kbinf test_kill_pane_loop_stall.ps1 exit=0 display-message with kill-pane: p50=0.7 p90=1.0 max=1.8 ms over 20 
+r3 kbinm test_issue686_reaper_during_shutdown.ps1 exit=0  
+r3 kbinm test_issue686_pool_surge_and_reap.ps1 exit=0  
+r3 kbinm test_kill_pane_loop_stall.ps1 exit=1 display-message with kill-pane: p50=42.8 p90=49.1 max=50.8 ms over 20 FAIL: a display-message sent with kill-pane answers in under 15 ms at p90 (got 49.1)
+r3 kbinf test_issue686_reaper_during_shutdown.ps1 exit=0  
+r3 kbinf test_issue686_pool_surge_and_reap.ps1 exit=0  
+r3 kbinf test_kill_pane_loop_stall.ps1 exit=0 display-message with kill-pane: p50=0.7 p90=1.1 max=1.8 ms over 20 
