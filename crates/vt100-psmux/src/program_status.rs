@@ -362,6 +362,16 @@ pub enum TerminalQuery {
         /// The query ended in BEL, not ST. See [`TerminalQuery::PaletteColour`].
         bel: bool,
     },
+    /// DECRQSS for the cursor style (`DCS $ q SP q ST`).
+    CursorStyle {
+        /// The style the program set with DECSCUSR as the parser met the
+        /// query, 1 to 6, or 0 when it set none or set 0, which the host
+        /// answers with its `cursor-style` option (`input_handle_decrqss`,
+        /// input.c:2571-2602 at tag 3.8).
+        style: u8,
+    },
+    /// Any other DECRQSS (`DCS $ q Pt ST`), a setting tmux does not report.
+    UnknownSetting,
     /// A palette colour (an `index ; ?` pair of an `OSC 4`), any index.
     PaletteColour {
         /// The palette index asked for, 0 to 255.

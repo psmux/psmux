@@ -290,6 +290,9 @@ pub struct Screen {
     /// (colour.c:1227 at tag 3.8); a respawn keeps them.
     default_colours: DefaultColours,
 
+    /// The cursor style the program set. See [`Screen::cursor_style`].
+    cursor_style: CursorStyle,
+
     /// True once the output stream asked its terminal for win32 input mode
     /// (`CSI ?9001h`).  On a psmux pane that request comes from the pane's
     /// console host itself, as the very first bytes it writes (`ESC[?9001h
@@ -447,6 +450,19 @@ impl DefaultColours {
     }
 }
 
+/// The cursor's shape and blink, tmux's `s->cstyle` and the
+/// `MODE_CURSOR_BLINKING` bit of `s->mode` (`screen_set_cursor_style`,
+/// screen.c:221-252 at tag 3.8).
+#[derive(Clone, Copy, Debug, Default)]
+struct CursorStyle {
+    /// 0 is none, tmux's `SCREEN_CURSOR_DEFAULT`, then 1 a block, 2 an
+    /// underline and 3 a bar.
+    shape: u8,
+    /// Set by DECSCUSR 1, 3 and 5 and by `CSI ? 12 h`, cleared by DECSCUSR 2,
+    /// 4 and 6, by `CSI ? 12 l` and by a reset of the modes.
+    blinking: bool,
+}
+
 /// A pane's `pane-colours` default palette and the palette it draws with:
 /// the defaults with the OSC 4 entries laid over them, kept up to date as
 /// either changes so that drawing reads one table, as it did before #980.
@@ -532,6 +548,7 @@ impl Screen {
             scroll_on_clear: true,
             cursor_colour: CursorColour::new(),
             default_colours: DefaultColours::new(),
+            cursor_style: CursorStyle::default(),
             win32_input_requested: false,
             extended_keys_mode: initial_extended_keys_mode(),
         }
@@ -634,11 +651,15 @@ impl Screen {
         let scroll_on_clear = self.scroll_on_clear;
         let cursor_colour = self.cursor_colour;
         let default_colours = self.default_colours;
+        let cursor_shape = self.cursor_style.shape;
         let mut program_status = std::mem::take(&mut self.program_status);
         program_status.clear();
         let program_status_enabled = self.program_status_enabled;
         *self = Self::new(size, scrollback_len);
         self.default_colours = default_colours;
+        // The modes go, the cursor's blink with them, but not its shape
+        // (screen.c:117 at tag 3.8).
+        self.cursor_style.shape = cursor_shape;
         self.program_status = program_status;
         self.program_status_enabled = program_status_enabled;
         self.grid.put_scrollback(history);
@@ -749,6 +770,38 @@ impl Screen {
     pub(crate) fn set_program_background(&mut self, colour: Option<(u8, u8, u8)>) {
         if self.default_colours.program_enabled {
             self.default_colours.bg.program = colour;
+        }
+    }
+
+    /// The cursor style the program set with DECSCUSR, numbered as DECSCUSR
+    /// numbers it: 1 to 6, or 0 when it set no shape, or set 0. The blink
+    /// that `CSI ? 12 h` and `CSI ? 12 l` set counts only with a shape, as in
+    /// tmux's `input_handle_decrqss` (input.c:2571-2590 at tag 3.8).
+    #[must_use]
+    pub fn cursor_style(&self) -> u8 {
+        match self.cursor_style.shape {
+            0 => 0,
+            shape => shape * 2 - u8::from(self.cursor_style.blinking),
+        }
+    }
+
+    /// Take the cursor style a program set from the screen this one
+    /// replaces. psmux's `clear-history` starts the screen again, where tmux
+    /// clears only the history and keeps it (cmd-capture-pane.c:424 at tag
+    /// 3.8).
+    pub fn keep_cursor_style(&mut self, from: &Self) {
+        self.cursor_style = from.cursor_style;
+    }
+
+    /// DECSCUSR, `CSI Ps SP q`, as tmux's `screen_set_cursor_style`
+    /// (screen.c:221-252 at tag 3.8): 0 drops the shape and leaves the blink,
+    /// and a style past 6 changes nothing.
+    pub(crate) fn decscusr(&mut self, style: u16) {
+        if let Ok(style @ 1..=6) = u8::try_from(style) {
+            self.cursor_style.shape = (style + 1) / 2;
+            self.cursor_style.blinking = style % 2 == 1;
+        } else if style == 0 {
+            self.cursor_style.shape = 0;
         }
     }
 
@@ -2792,6 +2845,9 @@ impl Screen {
         // The program's default colours go, as tmux's RIS clears the palette
         // they live in (input.c:1408); the styles' stay.
         let default_colours = self.default_colours.without_program();
+        // The cursor keeps its shape and loses its blink, which is a mode
+        // (`screen_write_reset`, screen-write.c:430 at tag 3.8).
+        let cursor_shape = self.cursor_style.shape;
         if scroll_on_clear {
             self.grid
                 .erase_all_into_history(crate::attrs::Attrs::default());
@@ -2808,6 +2864,7 @@ impl Screen {
         self.scroll_on_clear = scroll_on_clear;
         self.cursor_colour = cursor_colour;
         self.default_colours = default_colours;
+        self.cursor_style.shape = cursor_shape;
         if let Some(defaults) = pane_colours {
             self.pane_colours = Some(Box::new(PaneColours::new(defaults, None)));
         }
@@ -3063,6 +3120,8 @@ impl Screen {
                 // DECAWM (input.c:2043 at tag 3.8).
                 [7] => self.clear_mode(MODE_NO_AUTOWRAP),
                 [9] => self.set_mouse_mode(MouseProtocolMode::Press),
+                // The cursor blinks (input.c:2046-2048 at tag 3.8).
+                [12] => self.cursor_style.blinking = true,
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
                 // tmux clears the alternate screen for 47 as for 1049
                 // (screen_alternate_on), and keeps the cursor for both.
@@ -3116,6 +3175,8 @@ impl Screen {
                 // DECAWM (input.c:1946 at tag 3.8).
                 [7] => self.set_mode(MODE_NO_AUTOWRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
+                // input.c:1949-1951 at tag 3.8.
+                [12] => self.cursor_style.blinking = false,
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
                 // 47 saves no cursor, so the cursor stays where the
                 // alternate screen left it (screen_alternate_off with cursor

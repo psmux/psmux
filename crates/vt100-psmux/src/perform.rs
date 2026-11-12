@@ -17,7 +17,7 @@ static INPUT_BUFFER_SIZE: std::sync::atomic::AtomicUsize =
 /// Record the `input-buffer-size` server option for every pane parser in this
 /// process, as tmux's `input_set_buffer_size` (input.c) does.
 ///
-/// Sixel and collected tmux passthrough bodies honor it.
+/// Sixel, collected tmux passthrough bodies and a DECRQSS honor it.
 pub fn set_input_buffer_size(bytes: usize) {
     INPUT_BUFFER_SIZE.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }
@@ -154,6 +154,8 @@ pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     /// How much of a `tmux;` the inbox conhost painted from a DCS it could
     /// not parse has been skipped, or `None`; see `arm_conhost_dcs_body`.
     conhost_dcs_body: Option<u8>,
+    /// A DECRQSS being read, or ended and waiting for its ST.
+    decrqss: crate::queries::Decrqss,
 }
 
 /// What the Windows 10 inbox conhost prints of `ESC P tmux; ESC ...`.
@@ -185,6 +187,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             last_printed: None,
             tmux_prefix: 0,
             conhost_dcs_body: None,
+            decrqss: crate::queries::Decrqss::default(),
         }
     }
 
@@ -201,6 +204,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             last_printed: None,
             tmux_prefix: 0,
             conhost_dcs_body: None,
+            decrqss: crate::queries::Decrqss::default(),
         }
     }
 }
@@ -209,6 +213,37 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
     /// A DCS ended in `t` and may still be matching `mux;`.
     pub(crate) fn tmux_prefix_pending(&self) -> bool {
         (1..5).contains(&self.tmux_prefix)
+    }
+
+    /// Capture a query, unless an unfinished DECRQSS holds it: tmux reads it
+    /// as part of that string and answers nothing for it.
+    fn query(&mut self, query: crate::TerminalQuery) {
+        if !self.decrqss.open() {
+            self.screen.query(query);
+        }
+    }
+
+    /// DECSCUSR, `CSI Ps SP q` (input.c:1875-1884 at tag 3.8): a missing
+    /// style is 0, and one holding a colon is ignored, as `input_get` gives
+    /// -1. The callback still runs, as it did before for every `SP`
+    /// sequence. Kept out of `csi_dispatch`, whose size the cursor moves,
+    /// erases and SGR feel: inlined there it cost about 7% on a stream of
+    /// cursor moves and erases.
+    #[cold]
+    #[inline(never)]
+    fn decscusr(&mut self, params: &vte::Params) {
+        match params.iter().next() {
+            None => self.screen.decscusr(0),
+            Some([style]) => self.screen.decscusr(*style),
+            Some(_) => {}
+        }
+        self.callbacks.unhandled_csi(
+            &mut self.screen,
+            Some(b' '),
+            None,
+            &params.iter().collect::<Vec<_>>(),
+            'q',
+        );
     }
 
     /// True once, right after a DCS turned out to be `ESC P tmux;`.
@@ -331,6 +366,17 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, b: u8) {
         self.last_printed = None;
+        // The ST that ends a DECRQSS, which tmux answers as it meets it.
+        if let Some(cursor) = (intermediates.is_empty() && b == b'\\')
+            .then(|| self.decrqss.st())
+            .flatten()
+        {
+            self.screen.query(if cursor {
+                crate::TerminalQuery::CursorStyle { style: self.screen.cursor_style() }
+            } else {
+                crate::TerminalQuery::UnknownSetting
+            });
+        }
         // `ESC ( 0` and `ESC ) 0` put the line drawing set into G0 or G1,
         // `ESC ( B` and `ESC ) B` ASCII (input.c:241-249, :1442-1453 at tag
         // 3.8). Any other set (`ESC ( A`, the UK one) stays unhandled, as in
@@ -385,7 +431,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         // Only REP reads it, and every CSI, REP included, ends it.
         let last_printed = self.last_printed.take();
         if let Some(query) = crate::queries::csi_query(params, intermediates, _ignore, c) {
-            self.screen.query(query);
+            self.query(query);
         }
         let unhandled = |screen: &mut crate::screen::Screen| {
             self.callbacks.unhandled_csi(
@@ -525,6 +571,8 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                     );
                 }
             },
+            // DECSCUSR, see `decscusr`.
+            Some(b' ') if c == 'q' && intermediates.len() == 1 => self.decscusr(params),
             // XTMODKEYS (`CSI > 4 ; n m`) and its reset (`CSI > 4 n`): the
             // extended key mode tmux keeps per pane (issue #860).  The
             // callback still runs, as it did before for every `>` sequence.
@@ -579,6 +627,11 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 },
                 other => other,
             };
+            // Inside an unfinished DECRQSS tmux reads the OSC as part of that
+            // string, so the clipboard is not read for it either.
+            if self.decrqss.open() {
+                return;
+            }
             if let (crate::TerminalQuery::Clipboard { .. }, [_, ty, _]) = (query, params) {
                 self.callbacks.paste_from_clipboard(&mut self.screen, ty);
             }
@@ -620,7 +673,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // order with the other queries (#473).
             [b"4", rest @ ..] if !rest.is_empty() => {
                 for (idx, spec) in crate::queries::palette_pairs(rest) {
-                    if spec == b"?" {
+                    if spec == b"?" && !self.decrqss.open() {
                         self.screen.query(crate::TerminalQuery::PaletteColour {
                             index: idx,
                             own: self.screen.palette_entry(idx),
@@ -860,8 +913,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     // the parsed params/intermediates/final byte), then put per payload byte,
     // then unhook at the terminator.  Historically WrappedScreen left all three
     // as trait defaults, so sixel graphics (DCS `q`) were parsed and silently
-    // discarded (issue #431).  We now capture ONLY sixel and leave every other
-    // DCS (e.g. DECRQSS `ESC P $ q ... ST`) a no-op exactly as before.
+    // discarded (issue #431).  We now capture sixel, read a DECRQSS
+    // (`ESC P $ q ... ST`, see `queries::Decrqss`) as far as its query, and
+    // leave every other DCS a no-op.
 
     fn hook(
         &mut self,
@@ -875,9 +929,11 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         // (input_dcs_dispatch, input.c:2675). Every mode skips the body;
         // on/all additionally collect it for raw host delivery.
         self.tmux_prefix = u8::from(action == 't');
+        self.decrqss.hook(intermediates, action);
         // Sixel is DCS with final byte 'q' and NO intermediates.  DECRQSS also
         // ends in 'q' but carries the '$' (0x24) intermediate, so gating on an
-        // empty intermediates slice keeps DECRQSS (and all other DCS) untouched.
+        // empty intermediates slice keeps DECRQSS (and all other DCS) out of
+        // the image.
         if action == 'q' && intermediates.is_empty() {
             self.dcs_buf.clear();
             // Reconstruct the exact introducer: ESC P + params + intermediates
@@ -916,6 +972,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 0
             };
         }
+        self.decrqss.put(byte);
         if self.dcs_active {
             if self.dcs_buf.len() >= input_buffer_size() {
                 self.dcs_active = false;
@@ -929,6 +986,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     fn unhook(&mut self) {
         self.last_printed = None;
         self.tmux_prefix = 0;
+        self.decrqss.unhook();
         if !self.dcs_active {
             return;
         }
