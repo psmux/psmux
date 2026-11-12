@@ -146,8 +146,20 @@ if (-not (Wait-Prompt -Target $SESSION)) {
             $altShown = ((& $PSMUX -L $NS capture-pane -p -t $SESSION 2>&1) -join "`n") -match 'TUI_VISIBLE_TEXT'
             if (-not ($inAlt -and $altShown)) { Start-Sleep -Milliseconds 100 }
         }
-        if ($inAlt -and $altShown) { Write-Pass "T2: the pane is in the alt screen (alternate_on 1) and shows its text" }
-        else { Write-Fail "T2: the alt screen was never seen (alternate_on 1: $inAlt, text shown: $altShown)" }
+        # The Windows 10 inbox conhost (19041 family) runs the alt screen
+        # itself and never forwards ?1049h through ConPTY: psmux is handed
+        # the redrawn screen only, so #{alternate_on} stays 0 there, as in a
+        # plain console window. Windows 11 hosts forward it (measured: 1 for
+        # the whole excursion), and there it must be 1.
+        $hostForwardsAlt = [Environment]::OSVersion.Version.Build -ge 22000
+        if ($altShown) { Write-Pass "T2: the alt screen text is on the pane while the program is in it" }
+        else { Write-Fail "T2: the alt screen text never showed" }
+        if ($hostForwardsAlt) {
+            if ($inAlt) { Write-Pass "T2: the pane is in the alt screen (alternate_on 1)" }
+            else { Write-Fail "T2: alternate_on stayed 0 while the program was in the alt screen" }
+        } else {
+            Write-Info "T2: this console host (build $([Environment]::OSVersion.Version.Build)) runs the alt screen itself and does not forward ?1049h, alternate_on: $([int]$inAlt)"
+        }
         # Wait for the program to leave the alt screen.
         $left = $false
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -155,8 +167,14 @@ if (-not (Wait-Prompt -Target $SESSION)) {
             Start-Sleep -Milliseconds 200
             $left = ((& $PSMUX -L $NS display-message -p -t $SESSION '#{alternate_on}' 2>&1) -join '').Trim() -eq '0'
         }
-        if ($left) { Write-Pass "T2: the pane left the alt screen (alternate_on 0)" }
-        else { Write-Fail "T2: the pane never left the alt screen" }
+        $leftScreen = $false
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt 10000 -and -not $leftScreen) {
+            $leftScreen = ((& $PSMUX -L $NS capture-pane -p -t $SESSION 2>&1) -join "`n") -notmatch 'TUI_VISIBLE_TEXT'
+            if (-not $leftScreen) { Start-Sleep -Milliseconds 200 }
+        }
+        if ($left -and $leftScreen) { Write-Pass "T2: the pane left the alt screen (alternate_on 0, its text gone, the main screen back)" }
+        else { Write-Fail "T2: the pane never left the alt screen (alternate_on 0: $left, text gone: $leftScreen)" }
         Start-Sleep -Milliseconds 500
         # Step 3: emit 50 more lines AFTER exiting alt screen.
         & $PSMUX -L $NS send-keys -t $SESSION '1..50 | ForEach-Object { "post $_" }' Enter 2>&1 | Out-Null
