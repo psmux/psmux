@@ -4600,6 +4600,25 @@ pub fn xtversion_reply() -> String {
     format!("\x1bP>|{} {}\x1b\\", name.trim(), crate::types::VERSION)
 }
 
+/// The DECRQSS reply for the cursor style: the style the program set with
+/// DECSCUSR, else the `cursor-style` option's, 0 to 6, as tmux picks it
+/// (`input_handle_decrqss`, input.c:2571-2602 at tag 3.8).
+///
+/// The form is the VT510's DECRPSS, `DCS 1 $ r Ps SP q ST`: the setting is
+/// "all the characters in the control function, except the CSI", which for
+/// `CSI 2 SP q` is `2 SP q`. tmux writes `DCS 1 $ r SP q Ps SP q ST`
+/// (input.c:2609), the query's own `SP q` before the number, which a reader
+/// of the standard form, psmux's own `parse_decrqss_cursor_style` among them,
+/// takes for an empty number, so for 0.
+pub(crate) fn cursor_style_reply(style: u8) -> String {
+    let ps = if style == 0 { crate::rendering::configured_cursor_code() } else { style };
+    format!("\x1bP1$r{ps} q\x1b\\")
+}
+
+/// The DECRQSS reply for any other setting, which tmux does not report:
+/// `DCS 0 $ r ST` (input.c:2612-2615 at tag 3.8).
+pub(crate) const UNKNOWN_SETTING_REPLY: &str = "\x1bP0$r\x1b\\";
+
 // ─── Issue #597: DA1, DA2, DSR and DECRQM, answered by psmux like tmux ───
 //
 // The inbox Windows console host answers these four itself and never forwards
@@ -4949,6 +4968,18 @@ pub(crate) fn pane_replies(
             DeviceQuery::Xtversion => Some(PaneReply {
                 text: xtversion_reply(),
                 fallback: ReplyFallback::Lost("XTVERSION"),
+                console_host: false,
+            }),
+            // A DCS reply written to the pane's input pipe loses its body
+            // (#597), so a failed injection loses it, as XTVERSION's does.
+            DeviceQuery::CursorStyle { style } => Some(PaneReply {
+                text: cursor_style_reply(style),
+                fallback: ReplyFallback::Lost("DECRQSS"),
+                console_host: false,
+            }),
+            DeviceQuery::UnknownSetting => Some(PaneReply {
+                text: UNKNOWN_SETTING_REPLY.to_string(),
+                fallback: ReplyFallback::Lost("DECRQSS"),
                 console_host: false,
             }),
             DeviceQuery::ColourScheme => colour(Some(scheme_reply(colours)), COLOR_QUERY_SCHEME),
@@ -5533,6 +5564,10 @@ mod tests_issue841_winops_replies;
 #[cfg(test)]
 #[path = "../tests-rs/test_graphics_attribute_replies.rs"]
 mod test_graphics_attribute_replies;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_decrqss_replies.rs"]
+mod test_decrqss_replies;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue399_env_prefix.rs"]

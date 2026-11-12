@@ -4766,6 +4766,9 @@ pub fn clear_active_pane_history(app: &mut AppState) {
             let scroll_on_clear = parser.screen().scroll_on_clear();
             let old = std::mem::replace(&mut *parser, vt100::Parser::new(p.last_rows, p.last_cols, history_limit));
             parser.screen_mut().keep_colours(old.screen());
+            // tmux clears only the history, so the cursor style the program
+            // set stays.
+            parser.screen_mut().keep_cursor_style(old.screen());
             parser.screen_mut().set_pane_colours(pane_colours);
             parser.screen_mut().set_scroll_on_clear(scroll_on_clear);
             // The console host is unchanged, and it asked for win32 input mode

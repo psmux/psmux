@@ -434,6 +434,9 @@ blinking both, rather than resetting the terminal to its own default. It asks
 the terminal at attach what it is drawing (DECRQSS for the shape, DECRQM for
 DEC private mode 12) and writes that back when the session ends. A terminal
 that will not answer gets the plain reset instead, which is where tmux stops.
+A program in a pane can ask psmux the same question, and it answers with the
+shape the program set, else with `cursor-style` (see Cursor Style Query in
+`compatibility.md`).
 
 `cursor-style` is the shape psmux asks for when you do want it to pick:
 
