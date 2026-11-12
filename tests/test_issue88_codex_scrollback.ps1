@@ -19,9 +19,21 @@
 #       must return all 200.  This is the literal repro from the
 #       most recent issue comment.
 
+#
+# The suite runs in its own -L namespace and PSMUX_DATA_DIR and kills only
+# that namespace's server. PSMUX_TEST_BIN picks the binary (default: psmux on
+# PATH).
+
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
+foreach ($v in 'PSMUX_SESSION_NAME', 'PSMUX_SESSION', 'PSMUX_PANE', 'PSMUX_TARGET_SESSION', 'PSMUX_TARGET_FULL', 'TMUX', 'TMUX_PANE') {
+    Remove-Item "Env:$v" -EA SilentlyContinue
+}
+$NS = "iss88" + [guid]::NewGuid().ToString('N').Substring(0, 6)
+$psmuxDir = Join-Path ([System.IO.Path]::GetTempPath()) ("psmux_iss88_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force $psmuxDir | Out-Null
+$env:PSMUX_DATA_DIR = $psmuxDir
+Write-Host "  Binary: $PSMUX  namespace: $NS  data dir: $psmuxDir"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
@@ -34,7 +46,7 @@ function Wait-Prompt {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         try {
-            $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
+            $cap = & $PSMUX -L $NS capture-pane -t $Target -p 2>&1 | Out-String
             if ($cap -match $Pattern) { return $true }
         } catch {}
         Start-Sleep -Milliseconds 200
@@ -46,24 +58,26 @@ function Wait-Output {
     param([string]$Target, [string]$Marker, [int]$TimeoutMs = 60000)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-        $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
+        $cap = & $PSMUX -L $NS capture-pane -t $Target -p 2>&1 | Out-String
         if ($cap -match $Marker) { return $true }
         Start-Sleep -Milliseconds 300
     }
     return $false
 }
 
+# Kill this namespace's server only (kill-server under -L is scoped to it) and
+# clear its registry files, inside this suite's own data dir.
 function Reset-Server {
-    & $PSMUX kill-server 2>&1 | Out-Null
+    & $PSMUX -L $NS kill-server 2>&1 | Out-Null
     Start-Sleep -Seconds 1
-    Remove-Item "$psmuxDir\*.port","$psmuxDir\*.key","$psmuxDir\*.sess" -Force -EA SilentlyContinue
+    Get-ChildItem $psmuxDir -Filter "${NS}__*" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 }
 
 # ── T1: PLAIN STDOUT (200 lines) ───────────────────────────────────
 Write-Host "`n=== T1: plain 200-line stdout, capture-pane -S -1000 ===" -ForegroundColor Cyan
 Reset-Server
 $SESSION = "iss88_plain"
-& $PSMUX new-session -d -s $SESSION 2>&1 | Out-Null
+& $PSMUX -L $NS new-session -d -s $SESSION 2>&1 | Out-Null
 Start-Sleep -Seconds 4
 
 if (-not (Wait-Prompt -Target $SESSION)) {
@@ -71,11 +85,11 @@ if (-not (Wait-Prompt -Target $SESSION)) {
 } else {
     Write-Pass "T1: shell ready"
     # Emit 200 numbered lines through PowerShell.
-    & $PSMUX send-keys -t $SESSION '1..200 | ForEach-Object { "plain $_" }' Enter 2>&1 | Out-Null
+    & $PSMUX -L $NS send-keys -t $SESSION '1..200 | ForEach-Object { "plain $_" }' Enter 2>&1 | Out-Null
     if (Wait-Output -Target $SESSION -Marker "plain 199" -TimeoutMs 30000) {
         Start-Sleep -Seconds 1
         # Capture deep scrollback (-S -1000 = 1000 rows back from top of view).
-        $deep = & $PSMUX capture-pane -t $SESSION -S -1000 -p 2>&1 | Out-String
+        $deep = & $PSMUX -L $NS capture-pane -t $SESSION -S -1000 -p 2>&1 | Out-String
         $matches = [regex]::Matches($deep, '(?m)^plain (\d+)\b')
         $count = $matches.Count
         $nums = $matches | ForEach-Object { [int]$_.Groups[1].Value }
@@ -95,37 +109,62 @@ if (-not (Wait-Prompt -Target $SESSION)) {
         Write-Fail "T1: 200 lines did not appear in pane"
     }
 }
-& $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
+& $PSMUX -L $NS kill-session -t $SESSION 2>&1 | Out-Null
 Reset-Server
 
 # ── T2: TUI APP (alt screen) ────────────────────────────────────────
-# Use `more` (built-in pager): it does NOT switch to alt-screen so
-# its output should land in scrollback normally.  Then use `vim`
-# style: the alt-screen behaviour of TUI apps is well-known and
-# we want a predictable test.  Skip if vim not available.
+# The shell PRINTS ESC[?1049h, a line, then ESC[?1049l after a pause, as a
+# TUI app does. (This test used to send the sequences with send-keys, which
+# TYPES them into PSReadLine: no alt screen ever happened in the pane, and it
+# passed only when the ESC arrived more than PSReadLine's 100 ms escape
+# timeout before the `[` that follows it.) While the program is in the alt
+# screen the pane must report #{alternate_on} 1 and show its text; after it
+# leaves, the lines printed before and after must all be in scrollback and
+# the alt screen text must not.
 Write-Host "`n=== T2: pre/post-TUI scrollback survives alt-screen excursion ===" -ForegroundColor Cyan
 Reset-Server
 $SESSION = "iss88_tui"
-& $PSMUX new-session -d -s $SESSION 2>&1 | Out-Null
+& $PSMUX -L $NS new-session -d -s $SESSION 2>&1 | Out-Null
 Start-Sleep -Seconds 4
 if (-not (Wait-Prompt -Target $SESSION)) {
     Write-Fail "T2: shell not ready"
 } else {
     Write-Pass "T2: shell ready"
     # Step 1: emit 50 lines BEFORE any alt-screen excursion.
-    & $PSMUX send-keys -t $SESSION '1..50 | ForEach-Object { "pre $_" }' Enter 2>&1 | Out-Null
-    if (Wait-Output -Target $SESSION -Marker "pre 49" -TimeoutMs 30000) {
+    & $PSMUX -L $NS send-keys -t $SESSION '1..50 | ForEach-Object { "pre $_" }' Enter 2>&1 | Out-Null
+    if (-not (Wait-Output -Target $SESSION -Marker "pre 49" -TimeoutMs 30000)) {
+        Write-Fail "T2: the 50 pre lines never appeared"
+    } else {
         Start-Sleep -Seconds 1
-        # Step 2: emit raw alt-screen enter+exit via printf-style escape.
-        # ESC[?1049h enter alt screen, ESC[?1049l exit.  This simulates
-        # what a TUI app does without needing one installed.
-        & $PSMUX send-keys -t $SESSION ([char]27 + "[?1049h" + "TUI_VISIBLE_TEXT" + [char]27 + "[?1049l") 2>&1 | Out-Null
-        Start-Sleep -Seconds 1
+        # Step 2: a program enters the alt screen, draws, waits, and leaves.
+        # The text is split in the command so the typed line never matches it.
+        & $PSMUX -L $NS send-keys -t $SESSION '[Console]::Write([char]27 + ''[?1049h'' + ''TUI_'' + ''VISIBLE_TEXT''); Start-Sleep 3; [Console]::Write([char]27 + ''[?1049l'')' Enter 2>&1 | Out-Null
+        $inAlt = $false; $altShown = $false
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt 2500 -and -not ($inAlt -and $altShown)) {
+            $inAlt = ((& $PSMUX -L $NS display-message -p -t $SESSION '#{alternate_on}' 2>&1) -join '').Trim() -eq '1'
+            $altShown = ((& $PSMUX -L $NS capture-pane -p -t $SESSION 2>&1) -join "`n") -match 'TUI_VISIBLE_TEXT'
+            if (-not ($inAlt -and $altShown)) { Start-Sleep -Milliseconds 100 }
+        }
+        if ($inAlt -and $altShown) { Write-Pass "T2: the pane is in the alt screen (alternate_on 1) and shows its text" }
+        else { Write-Fail "T2: the alt screen was never seen (alternate_on 1: $inAlt, text shown: $altShown)" }
+        # Wait for the program to leave the alt screen.
+        $left = $false
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt 10000 -and -not $left) {
+            Start-Sleep -Milliseconds 200
+            $left = ((& $PSMUX -L $NS display-message -p -t $SESSION '#{alternate_on}' 2>&1) -join '').Trim() -eq '0'
+        }
+        if ($left) { Write-Pass "T2: the pane left the alt screen (alternate_on 0)" }
+        else { Write-Fail "T2: the pane never left the alt screen" }
+        Start-Sleep -Milliseconds 500
         # Step 3: emit 50 more lines AFTER exiting alt screen.
-        & $PSMUX send-keys -t $SESSION '1..50 | ForEach-Object { "post $_" }' Enter 2>&1 | Out-Null
-        if (Wait-Output -Target $SESSION -Marker "post 49" -TimeoutMs 30000) {
+        & $PSMUX -L $NS send-keys -t $SESSION '1..50 | ForEach-Object { "post $_" }' Enter 2>&1 | Out-Null
+        if (-not (Wait-Output -Target $SESSION -Marker "post 49" -TimeoutMs 30000)) {
+            Write-Fail "T2: the 50 post lines never appeared"
+        } else {
             Start-Sleep -Seconds 1
-            $deep = & $PSMUX capture-pane -t $SESSION -S -2000 -p 2>&1 | Out-String
+            $deep = & $PSMUX -L $NS capture-pane -t $SESSION -S -2000 -p 2>&1 | Out-String
             $preCount = ([regex]::Matches($deep, '(?m)^pre (\d+)\b')).Count
             $postCount = ([regex]::Matches($deep, '(?m)^post (\d+)\b')).Count
             Write-Info "T2: pre-alt lines retained: $preCount of 50, post-alt: $postCount of 50"
@@ -134,10 +173,12 @@ if (-not (Wait-Prompt -Target $SESSION)) {
             } else {
                 Write-Fail "T2: scrollback corrupted by alt-screen excursion (pre=$preCount post=$postCount)"
             }
+            if ($deep -notmatch 'TUI_VISIBLE_TEXT') { Write-Pass "T2: the alt screen text stays out of the main scrollback" }
+            else { Write-Fail "T2: the alt screen text leaked into the main scrollback" }
         }
     }
 }
-& $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
+& $PSMUX -L $NS kill-session -t $SESSION 2>&1 | Out-Null
 Reset-Server
 
 # ── T3: CODEX EXEC — exact CXwudi scenario ──────────────────────────
@@ -148,7 +189,7 @@ if (-not $codexExe) {
 } else {
     Reset-Server
     $SESSION = "iss88_codex"
-    & $PSMUX new-session -d -s $SESSION 2>&1 | Out-Null
+    & $PSMUX -L $NS new-session -d -s $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 4
     if (-not (Wait-Prompt -Target $SESSION)) {
         Write-Fail "T3: shell not ready"
@@ -162,21 +203,21 @@ if (-not $codexExe) {
         Write-Info "T3: launching codex exec inside pane (this may take 30-60s)..."
         # Use single quotes around the prompt; PowerShell will not
         # interpolate, and the prompt is sent verbatim to send-keys.
-        & $PSMUX send-keys -t $SESSION "Set-Location 'c:\cctest'" Enter 2>&1 | Out-Null
+        & $PSMUX -L $NS send-keys -t $SESSION "Set-Location 'c:\cctest'" Enter 2>&1 | Out-Null
         Start-Sleep -Milliseconds 500
-        & $PSMUX send-keys -t $SESSION ("codex exec --skip-git-repo-check `"$prompt`"") Enter 2>&1 | Out-Null
+        & $PSMUX -L $NS send-keys -t $SESSION ("codex exec --skip-git-repo-check `"$prompt`"") Enter 2>&1 | Out-Null
 
         # Wait for codex to finish (look for the last marker), or for codex to
         # report an error (usage limit, no login, network): then nothing more
         # comes and the count cannot be measured. The wait stays under the
         # runner's 240 s suite limit so a slow model skips instead of timing out.
         $codexDone = Wait-Output -Target $SESSION -Marker "codex line 199|(?m)^ERROR:" -TimeoutMs 180000
-        $codexCap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        $codexCap = & $PSMUX -L $NS capture-pane -t $SESSION -p 2>&1 | Out-String
         if ($codexDone -and $codexCap -notmatch "codex line 199" -and $codexCap -match "(?m)^ERROR:.*") {
             Write-Info "T3: codex reported an error, skipping the count assertion: $($Matches[0].Trim())"
         } elseif ($codexDone) {
             Start-Sleep -Seconds 3
-            $deep = & $PSMUX capture-pane -t $SESSION -S -2000 -p 2>&1 | Out-String
+            $deep = & $PSMUX -L $NS capture-pane -t $SESSION -S -2000 -p 2>&1 | Out-String
             $matches = [regex]::Matches($deep, '(?m)^codex line (\d+)\b')
             $count = $matches.Count
             if ($count -gt 0) {
@@ -192,14 +233,19 @@ if (-not $codexExe) {
             }
         } else {
             Write-Info "T3: codex did not finish within 3 minutes (skipping count assertion)"
-            $cap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+            $cap = & $PSMUX -L $NS capture-pane -t $SESSION -p 2>&1 | Out-String
             $tail = $cap.Substring([Math]::Max(0, $cap.Length - 500))
             Write-Info "T3: pane tail:`n$tail"
         }
     }
-    & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
+    & $PSMUX -L $NS kill-session -t $SESSION 2>&1 | Out-Null
     Reset-Server
 }
+
+& $PSMUX -L $NS kill-server 2>&1 | Out-Null
+Start-Sleep -Milliseconds 500
+Remove-Item Env:PSMUX_DATA_DIR -EA SilentlyContinue
+Remove-Item $psmuxDir -Recurse -Force -EA SilentlyContinue
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
