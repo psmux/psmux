@@ -185,6 +185,15 @@ if (Test-Path $gitBinBash) {
         if ((& $PSMUX capture-pane -t $S -p 2>&1 | Out-String) -match '\$\s*$') { break }
         Start-Sleep -Milliseconds 500
     }
+    # The split resizes the claimed pane, and Git bash (MSYS readline) acts on
+    # that SIGWINCH only when the next key arrives, then drops that key: the
+    # first typed character was lost in 8 of 20 runs on every build back to
+    # 32aa803b (bash printed "cho: command not found"). The pty trace shows
+    # it: when readline redraws the prompt right after the resize, nothing is
+    # lost; when it does not, the first key goes. A space then BSpace is net
+    # nothing whether or not that first key is eaten (20 of 20 with it).
+    & $PSMUX send-keys -t $S " " BSpace
+    Start-Sleep -Milliseconds 500
     $marker = "M474T_" + (Get-Random -Maximum 99999)
     & $PSMUX send-keys -t $S "echo $marker" Enter
     $cap = ""
