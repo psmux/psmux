@@ -2039,6 +2039,11 @@ function Wait-Frame {
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         $f = Get-Frame $c
         if ($null -eq $f) {
+            # After a match the confirming dump-state may be answered NC: the
+            # server has nothing newer than the frame that matched, so the
+            # state held. The server pushes an unchanged frame only once (#232),
+            # so waiting for a second identical frame would wait forever.
+            if ($hit -ge 0 -and (Get-Reply $c) -eq 'NC') { return $hit }
             if (($sw.Elapsed.TotalMilliseconds - $lastNudge) -gt 50) {
                 $lastNudge = $sw.Elapsed.TotalMilliseconds
                 try { $c.W.WriteLine("dump-state") }
@@ -2055,6 +2060,7 @@ function Wait-Frame {
         if (& $Test $f) {
             if ($hit -ge 0) { return $hit }
             $hit = ([Diagnostics.Stopwatch]::GetTimestamp() - $T0) * 1000.0 / $Freq
+            $null = Get-Reply $c   # an NC from before the match confirms nothing
             try { $c.W.WriteLine("dump-state") }
             catch {
                 $script:WaitInfo = [ordered]@{ frames = $frames; last_len = $lastLen; reason = "connection closed after a match"; ms = [math]::Round($sw.Elapsed.TotalMilliseconds) }

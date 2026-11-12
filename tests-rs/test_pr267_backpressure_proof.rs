@@ -2,7 +2,7 @@ use super::*;
 
 /// Serialize backpressure tests: push_frame broadcasts to ALL registered
 /// slots globally, so concurrent tests cross-contaminate each other.
-static BP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static BP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Burst large enough that any naive "first wins" or unbounded-buffer
 /// implementation would be observable. The swap-chain slot has effective

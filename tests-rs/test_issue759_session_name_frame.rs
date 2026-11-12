@@ -40,6 +40,7 @@ fn both_frame_builders_append_the_session_name() {
     let src = include_str!("../src/server/mod.rs");
     let calls = src.matches("helpers::append_session_name_json(&app.session_name, &mut combined_buf)").count();
     assert_eq!(calls, 2, "the dump-state reply and the push frame each append session_name");
-    let pushes = src.matches("crate::types::push_frame(&combined_buf)").count();
+    let pushes = src.matches("crate::types::push_frame(&combined_buf)").count()
+        + src.matches("crate::types::push_frame_answered(&combined_buf,").count();
     assert_eq!(pushes, 2, "a new frame builder must append session_name too; update this test with it");
 }

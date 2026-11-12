@@ -3527,7 +3527,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                         continue;
                     };
-                    let mutates_state = !matches!(&req,
+                    let mutates_state = !req.is_read_only_query() && !matches!(&req,
                         CtrlReq::DumpState(..)
                         | CtrlReq::SendText(_)
                         | CtrlReq::SendKey(_)
@@ -4151,6 +4151,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(text);
                 }
                 CtrlReq::ClientAttach(cid, pid, features) => {
+                    crate::types::invalidate_delivered_frames();
                     // Registration and the attached counter are one idempotent
                     // operation. A duplicate attach for the same connection
                     // must not leave the session permanently ghost-attached.
@@ -4498,7 +4499,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // fields like bell and clipboard reach all clients.
                     // The cached copy omits them for NC dedup safety.
                     crate::pty_trace::mark_plain("s", combined_buf.len());
-                    crate::types::push_frame(&combined_buf);
+                    crate::types::push_frame_answered(&combined_buf, Some(dump_client_id));
                     let _ = resp.send(combined_buf.clone());
                     dump_state_seen_full.insert(dump_client_id);
                 }
@@ -4644,6 +4645,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::copy_mode::toggle_rectangle(&mut app);
                 }
                 CtrlReq::ClientSize(cid, w, h) => { 
+                    crate::types::invalidate_delivered_frames();
                     app.client_sizes.insert(cid, (w, h));
                     app.latest_client_id = Some(cid);
                     app.latest_size_client_id = Some(cid);
@@ -4764,9 +4766,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let name = crate::util::clean_name(&name);
                     let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window");
                 }
-                CtrlReq::ListWindows(resp) => { helpers::propagate_osc_titles(&mut app); let json = list_windows_json(&app)?; let _ = resp.send(json); }
-                CtrlReq::ListWindowsTmux(resp) => { helpers::propagate_osc_titles(&mut app); let text = list_windows_tmux(&app); let _ = resp.send(text); }
-                CtrlReq::ListWindowsFormat(resp, fmt) => { helpers::propagate_osc_titles(&mut app); let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
+                CtrlReq::ListWindows(resp) => { if helpers::propagate_osc_titles(&mut app) { state_dirty = true; } let json = list_windows_json(&app)?; let _ = resp.send(json); }
+                CtrlReq::ListWindowsTmux(resp) => { if helpers::propagate_osc_titles(&mut app) { state_dirty = true; } let text = list_windows_tmux(&app); let _ = resp.send(text); }
+                CtrlReq::ListWindowsFormat(resp, fmt) => { if helpers::propagate_osc_titles(&mut app) { state_dirty = true; } let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
                 CtrlReq::ListTree(resp) => { let json = list_tree_json(&app)?; let _ = resp.send(json); }
                 CtrlReq::WindowLayout(wid, resp) => {
                     let json = crate::util::window_layout_json(&app, wid)
@@ -5400,7 +5402,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-select-window");
                 }
                 CtrlReq::ListPanes(resp) => {
-                    helpers::propagate_osc_titles(&mut app);
+                    if helpers::propagate_osc_titles(&mut app) { state_dirty = true; }
                     let mut output = String::new();
                     let win = &app.windows[app.active_idx];
                     fn collect_panes(node: &Node, panes: &mut Vec<(usize, u16, u16, vt100::MouseProtocolMode, vt100::MouseProtocolEncoding, bool, usize, usize)>) {
@@ -5464,7 +5466,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::ListPanesFormat(resp, fmt) => {
-                    helpers::propagate_osc_titles(&mut app);
+                    if helpers::propagate_osc_titles(&mut app) { state_dirty = true; }
                     let text = format_list_panes(&app, &fmt, app.active_idx);
                     let _ = resp.send(text);
                 }
@@ -6195,7 +6197,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms, client_sel, flags) => {
                     // Propagate OSC titles so #{pane_title} reflects latest state
-                    helpers::propagate_osc_titles(&mut app);
+                    if helpers::propagate_osc_titles(&mut app) { state_dirty = true; }
                     // `-c` picks the client the client_* variables describe. A
                     // client tmux cannot find is not an error for this command
                     // (CMD_CLIENT_CANFAIL): the best client answers instead.
@@ -6227,7 +6229,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Bare %N pane targeting (#332) — resolve the pane ID
                     // globally across all windows and expand the format with
                     // PANE_POS_OVERRIDE pointing at it.
-                    helpers::propagate_osc_titles(&mut app);
+                    if helpers::propagate_osc_titles(&mut app) { state_dirty = true; }
                     let client = client_sel.as_ref().and_then(|s| crate::format::resolve_client_sel(&app, s));
                     let result = if flags.literal {
                         fmt.clone()
@@ -8023,6 +8025,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // client repaints from scratch, discarding any painted sixel,
                     // so re-ship every visible blob on the next frame.
                     app.shipped_image_ids.clear();
+                    crate::types::invalidate_delivered_frames();
                     state_dirty = true;
                     meta_dirty = true;
                 }
@@ -8979,6 +8982,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 let _pre_hook_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
+                // A hook can change anything, even after a read only request.
+                if !cmds.is_empty() { state_dirty = true; }
                 crate::commands::run_hook_commands(&mut app, &cmds);
                 // Emit control mode notifications for hook events
                 if !app.control_clients.is_empty() {
