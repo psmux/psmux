@@ -173,6 +173,10 @@ path = "tests/alt_screen_cursor.rs"
 name = "scroll_region"
 path = "tests/scroll_region.rs"
 
+[[test]]
+name = "decrqss"
+path = "tests/decrqss.rs"
+
 [dependencies.itoa]
 version = "1.0.19"
 
