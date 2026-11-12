@@ -2333,6 +2333,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
                 app.copy_anchor = Some(p);
                 app.copy_anchor_scroll_offset = app.copy_scroll_offset;
                 app.copy_pos = Some(a);
+                app.copy_needs_redraw = true;
             }
         }
         "clear-selection" => { crate::copy_mode::clear_selection(app); }
@@ -4513,7 +4514,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // whenever a prompt was open before the key or is open
                     // after it, which also covers the one that opens or
                     // closes it.
-                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
+                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some(); let copy_before = app.mode.in_copy();
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_text(&mut app);
                     // Typing into a direct-scrolled pane shows its live screen
@@ -4528,7 +4529,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         send_text_to_active(&mut app, &s)?;
                     }
-                    if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
+                    // A key in copy mode has no pane echo to bring its frame, and not every copy key asks for one (other-end did not); an unchanged frame is not pushed (#232), so asking costs nothing.
+                    if prompt_before || copy_before || app.mode.in_copy() || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
                     echo_pending_until = Some(Instant::now());
@@ -4553,7 +4555,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SendKey(k) => {
                     // Same as SendText above: a prompt edit owes a frame even
                     // though no cell changed.
-                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
+                    let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some(); let copy_before = app.mode.in_copy();
                     crate::pty_trace::mark("g", 0, k.as_bytes());
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_key(&mut app, &k);
@@ -4567,7 +4569,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         send_key_to_active(&mut app, &k)?;
                     }
-                    if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
+                    // A key in copy mode has no pane echo to bring its frame, and not every copy key asks for one (other-end did not); an unchanged frame is not pushed (#232), so asking costs nothing.
+                    if prompt_before || copy_before || app.mode.in_copy() || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
                     echo_pending_until = Some(Instant::now());

@@ -1132,11 +1132,14 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 }
                 KeyCode::Char('V') => { crate::copy_mode::select_line(app); }
                 KeyCode::Char('o') => {
-                    // Swap cursor and anchor
+                    // Swap cursor and anchor. Only the drawn cursor moves, so
+                    // the frame has to be asked for (tmux redraws in
+                    // window_copy_other_end).
                     if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                         app.copy_anchor = Some(p);
                         app.copy_anchor_scroll_offset = app.copy_scroll_offset;
                         app.copy_pos = Some(a);
+                        app.copy_needs_redraw = true;
                     }
                 }
                 KeyCode::Char('A') => {

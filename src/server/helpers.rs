@@ -840,12 +840,16 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     // movement and scrolling in copy mode always invalidate the cached
     // frame.  Without this, keyboard navigation in copy mode produces
     // no visible change because the server returns NC (no change).
+    // The cursor and the anchor weigh every coordinate differently: with the
+    // columns added plain, `o` (other-end) swapping the two ends of a one row
+    // selection left the sum unchanged, the poll was answered NC and the
+    // cursor stayed drawn on the old end (disc694 section 7).
     if let Some((r, c)) = app.copy_pos {
-        v = v.wrapping_add((r as u64).wrapping_mul(0x10001).wrapping_add(c as u64));
+        v = v.wrapping_add((r as u64).wrapping_mul(0x10001).wrapping_add((c as u64).wrapping_mul(0x7F4A_7C15)));
     }
     v = v.wrapping_add((app.copy_scroll_offset as u64).wrapping_mul(0x20003));
     if let Some((ar, ac)) = app.copy_anchor {
-        v = v.wrapping_add((ar as u64).wrapping_mul(0x30007).wrapping_add(ac as u64));
+        v = v.wrapping_add((ar as u64).wrapping_mul(0x30007).wrapping_add((ac as u64).wrapping_mul(0x2545_F491_4F6C_DD1D)));
     }
     // Include status_message content so the search prompt refreshes per
     // keystroke while the user is typing in copy-mode search (#335).
@@ -1915,3 +1919,7 @@ mod test_cli_command_prompt_client;
 #[cfg(test)]
 #[path = "../../tests-rs/test_stale_confirm.rs"]
 mod test_stale_confirm;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_disc694_other_end_frame.rs"]
+mod test_disc694_other_end_frame;
