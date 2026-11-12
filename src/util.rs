@@ -406,15 +406,6 @@ pub struct ClaimArgs {
     pub priority: Option<String>,
     /// `-e`: file holding the claiming client's environment block (#659).
     pub env_file: Option<String>,
-    /// `-n`: the name `new-session -n NAME` asked for, applied to the
-    /// standby's initial window by the claim itself (#674).
-    ///
-    /// The name used to travel separately, as a `rename-window` the client
-    /// fired after the claim answered and whose result it discarded, so a
-    /// session was only named correctly when that second round trip happened
-    /// to succeed. Carrying it here is what makes `-n` part of the claim, the
-    /// way it is part of a cold spawn's argv.
-    pub window_name: Option<String>,
 }
 
 /// Split a `claim-session` line into its positionals and its flags.
@@ -436,11 +427,6 @@ pub fn parse_claim_args_full(args: &[&str]) -> ClaimArgs {
         }
         if a == "-e" {
             parsed.env_file = args.get(i + 1).map(|s| (*s).to_string());
-            i += 2;
-            continue;
-        }
-        if a == "-n" {
-            parsed.window_name = args.get(i + 1).map(|s| (*s).to_string());
             i += 2;
             continue;
         }

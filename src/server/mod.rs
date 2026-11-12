@@ -3861,14 +3861,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
                 }
-                CtrlReq::ClaimSession(req, resp) => {
-                    let crate::types::ClaimSessionReq {
-                        name,
-                        client_cwd,
-                        priority: client_priority,
-                        env_file: client_env_file,
-                        window_name: claim_window_name,
-                    } = req;
+                CtrlReq::ClaimSession(name, client_cwd, client_priority, client_env_file, resp) => {
                     // Guard against clobbering an already-claimed session. Under
                     // rapid `new-session`, a stale __warm__.port (or OS ephemeral
                     // port reuse) can route a claim to a server that has ALREADY
@@ -3883,28 +3876,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = resp.send("ERR: not a warm server (already claimed)\n".to_string());
                     } else {
                     warm_debug(&format!("CLAIM ACCEPT: __warm__ (port={:?}) -> '{}'", app.control_port, name));
-                    // Apply `new-session -n NAME` FIRST, before the .port file
-                    // below publishes this server under its new name (#674).
-                    //
-                    // This is the same two lines the cold path runs before its
-                    // loop starts, for the same reason: tmux's cmd-new-session
-                    // sets the initial window's name and turns automatic-rename
-                    // off for it as part of creating the session, so no observer
-                    // ever sees the window under another name. The warm path used
-                    // to leave the name to a separate `rename-window` the client
-                    // fired after this handler answered OK and whose result it
-                    // threw away, so `new-session -n main` kept the standby's pool
-                    // name and `manual_rename` false whenever that one request did
-                    // not land, and the automatic rename walk then named the window
-                    // after the shell running in it. A claim that answers OK now
-                    // means the name is applied, full stop.
-                    //
-                    // A claim without `-n` (an older client, or a `new-session`
-                    // with no name) leaves the window exactly as before.
-                    if let Some(ref n) = claim_window_name {
-                        let n = crate::util::clean_name(n);
-                        app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; });
-                    }
                     // Same as RenameSession but with a synchronous response
                     // so the CLI knows the rename completed before attaching.
                     let old_path = crate::paths::port_file(&app.port_file_base());

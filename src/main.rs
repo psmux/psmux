@@ -85,6 +85,17 @@ pub(crate) const SHOW_OPTIONS_CLI_FLAGS: &str = "Agpqsvw";
 use crate::ssh_input::{send_mouse_enable, InputSource};
 
 /// Convert a ratatui Color to an ANSI SGR escape sequence.
+// TEMPORARY DIAGNOSTIC for issue #674 - not for commit.
+fn claim_trace(msg: &str) {
+    if std::env::var("PSMUX_CLAIM_TRACE").is_err() { return; }
+    let path = std::env::var("PSMUX_CLAIM_TRACE_FILE")
+        .unwrap_or_else(|_| format!("{}\\psmux-claim-trace.log", std::env::var("TEMP").unwrap_or_else(|_| ".".into())));
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} pid={} {}", chrono::Local::now().format("%H:%M:%S%.3f"), std::process::id(), msg);
+    }
+}
+
 fn color_to_ansi(c: ratatui::style::Color, fg: bool) -> String {
     use ratatui::style::Color;
     let base = if fg { 30 } else { 40 };
@@ -1802,29 +1813,47 @@ fn run_main() -> io::Result<()> {
                                         Some(ref p) => format!(" -e {}", crate::util::quote_arg(p)),
                                         None => String::new(),
                                     };
-                                    // -n carries `new-session -n NAME` into the claim
-                                    // itself, so the standby's initial window is named
-                                    // before the claim is answered, exactly as a cold
-                                    // spawn names it from its argv (#674). It goes last
-                                    // because the positionals in front of it are what a
-                                    // server reads by position.
-                                    let name_flag = match window_name {
-                                        Some(ref wn) => format!(" -n {}", crate::util::quote_arg(wn)),
-                                        None => String::new(),
-                                    };
                                     let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                        format!("claim-session {} {} -p {}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag, name_flag)
+                                        format!("claim-session {} {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag)
                                     } else {
-                                        format!("claim-session {} -p {}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag, name_flag)
+                                        format!("claim-session {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag)
                                     };
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,
                                         claim_cmd.as_bytes(),
                                     ) {
                                         Ok(resp) if resp.contains("OK") => {
-                                            // The window name is not sent from here any
-                                            // more: it rode in on the claim above and is
-                                            // already applied (#674).
+                                            claim_trace(&format!("claim OK resp={:?} name={}", resp.trim(), name));
+                                            if let Some(ref wn) = window_name {
+                                                let t0 = std::time::Instant::now();
+                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                claim_trace(&format!("step1 key base={} len={} ({:?})", port_file_base, new_key.len(), t0.elapsed()));
+                                                // Inline copy of send_auth_cmd so every step it
+                                                // swallows becomes visible: it returns Ok(())
+                                                // whether the connect succeeded or timed out.
+                                                let sa: std::net::SocketAddr = warm_addr.parse().unwrap();
+                                                let t1 = std::time::Instant::now();
+                                                match std::net::TcpStream::connect_timeout(&sa, Duration::from_millis(50)) {
+                                                    Ok(mut st) => {
+                                                        claim_trace(&format!("step2 connect OK in {:?}", t1.elapsed()));
+                                                        let _ = st.set_nodelay(true);
+                                                        let w1 = write!(st, "AUTH {}\n", new_key.trim());
+                                                        let w2 = std::io::Write::write_all(&mut st, format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes());
+                                                        let w3 = st.flush();
+                                                        claim_trace(&format!("step3 write auth={:?} cmd={:?} flush={:?}", w1.is_ok(), w2.is_ok(), w3.is_ok()));
+                                                    }
+                                                    Err(e) => {
+                                                        claim_trace(&format!("step2 connect FAILED after {:?}: {} -- send_auth_cmd returns Ok here and the NAME IS LOST", t1.elapsed(), e));
+                                                    }
+                                                }
+                                                std::thread::sleep(Duration::from_millis(400));
+                                                let vk = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                let got = crate::session::send_auth_cmd_response(
+                                                    &warm_addr, &vk,
+                                                    b"list-windows -F #{window_name}\n",
+                                                ).unwrap_or_else(|e| format!("<err {}>", e));
+                                                claim_trace(&format!("step4 verify window name = {:?}", got.trim()));
+                                            }
                                             // Apply -e environment variables to the claimed warm session
                                             if !env_vars.is_empty() {
                                                 let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
