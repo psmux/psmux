@@ -1,0 +1,21 @@
+
+r1 before 686 exit=0 [INFO] per call: 20 17 16 200 279 17 160 508 19 19 | [INFO] burst p50 20ms whole; 10 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 330.9ms | 
+r1 before pool5 settled=True after 1220 ms shells=6 new-window@5: [38, 32, 31, 33, 34]
+r1 now 686 exit=0 [INFO] per call: 21 16 16 205 157 16 306 19 18 18 | [INFO] burst p50 19ms whole; 8 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 296.8ms | 
+r1 now pool5 settled=True after 3092 ms shells=8 new-window@5: [35, 35, 31, 28, 27]
+r2 before 686 exit=0 [INFO] per call: 22 20 18 198 395 19 147 429 66 23 | [INFO] burst p50 66ms whole; 10 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 301.1ms | 
+r2 before pool5 settled=True after 1205 ms shells=6 new-window@5: [44, 32, 31, 31, 30]
+r2 now 686 exit=0 [INFO] per call: 20 16 17 244 329 409 116 19 370 25 | [INFO] burst p50 116ms whole; 8 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 284.1ms | 
+r2 now pool5 settled=True after 2245 ms shells=8 new-window@5: [34, 27, 27, 28, 136]
+r3 before 686 exit=0 [INFO] per call: 21 18 15 202 443 21 18 23 19 433 | [INFO] burst p50 21ms whole; 10 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 428.6ms | 
+r3 before pool5 settled=True after 1273 ms shells=6 new-window@5: [35, 31, 30, 29, 142]
+r3 now 686 exit=0 [INFO] per call: 21 16 16 207 168 15 318 18 16 16 | [INFO] burst p50 18ms whole; 8 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 309.6ms | 
+r3 now pool5 settled=True after 2103 ms shells=8 new-window@5: [37, 29, 29, 28, 29]
+r4 before 686 exit=0 [INFO] per call: 23 18 17 198 440 446 28 20 19 18 | [INFO] burst p50 23ms whole; 10 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 435.2ms | 
+r4 before pool5 settled=True after 1205 ms shells=6 new-window@5: [38, 34, 32, 31, 32]
+r4 now 686 exit=0 [INFO] per call: 21 17 16 204 164 16 373 171 23 307 | [INFO] burst p50 164ms whole; 8 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 287.9ms | 
+r4 now pool5 settled=True after 2105 ms shells=8 new-window@5: [34, 30, 30, 28, 26]
+r5 before 686 exit=0 [INFO] per call: 20 18 17 203 311 17 160 267 20 263 | [INFO] burst p50 160ms whole; 10 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 474.6ms | 
+r5 before pool5 settled=True after 1216 ms shells=6 new-window@5: [36, 34, 32, 35, 32]
+r5 now 686 exit=0 [INFO] per call: 19 15 16 226 342 337 351 283 115 116 | [INFO] burst p50 226ms whole; 8 of 10 calls found no ready spare, 0 cold spawned; median CreateProcessW of this run's spawns 275.7ms | 
+r5 now pool5 settled=True after 3169 ms shells=8 new-window@5: [34, 29, 28, 131, 33]

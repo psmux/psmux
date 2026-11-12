@@ -1,0 +1,17 @@
+
+r1 cap=4 686 exit=1 per call: 36 31 29 261 384 31 453 153 29 566 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r1 cap=4 661 exit=2 slow=4 [FAIL] 12 claim(s) past the leading edge found no ready spare ; [FAIL] 4 of 24 splits over 150ms, budget 2
+r1 cap=5 686 exit=1 per call: 40 34 37 264 44 34 32 581 349 348 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r1 cap=5 661 exit=2 slow=3 [FAIL] 5 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r2 cap=4 686 exit=1 per call: 38 36 38 261 37 29 32 536 75 50 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r2 cap=4 661 exit=2 slow=8 [FAIL] 16 claim(s) past the leading edge found no ready spare ; [FAIL] 8 of 24 splits over 150ms, budget 2
+r2 cap=5 686 exit=1 per call: 39 33 188 45 36 366 255 41 415 45 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r2 cap=5 661 exit=2 slow=3 [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r3 cap=4 686 exit=1 per call: 37 34 33 263 35 36 34 608 306 382 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r3 cap=4 661 exit=2 slow=3 [FAIL] 18 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r3 cap=5 686 exit=1 per call: 38 39 37 263 44 34 30 519 78 43 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r3 cap=5 661 exit=2 slow=3 [FAIL] 4 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r4 cap=4 686 exit=1 per call: 40 31 29 279 382 36 414 309 377 46 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r4 cap=4 661 exit=2 slow=5 [FAIL] 18 claim(s) past the leading edge found no ready spare ; [FAIL] 5 of 24 splits over 150ms, budget 2
+r4 cap=5 686 exit=1 per call: 41 34 34 257 242 49 387 218 44 403 |  | [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r4 cap=5 661 exit=2 slow=3 [FAIL] 8 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2

@@ -1,0 +1,9 @@
+
+r1 cap=99 686 exit=0 per call: 38 32 32 282 613 771 700 89 314 363 | worst group by psmux's own share (4 spawns): pane=9:626.3ms(os 611.6) pane=10:626.6ms(os 605.6) pane=11:621.9ms(os 604.9) pane=12:611.1ms(os 600.2) | 
+r1 cap=99 661 exit=2 slow=3 [FAIL] 2 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r2 cap=99 686 exit=0 per call: 38 30 32 301 32 34 30 490 40 38 | worst group by psmux's own share (4 spawns): pane=9:609.1ms(os 596.5) pane=11:610.4ms(os 599) pane=12:597.7ms(os 587.5) pane=13:579.7ms(os 561.9) | 
+r2 cap=99 661 exit=2 slow=3 [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r3 cap=99 686 exit=0 per call: 42 38 45 294 391 36 191 33 34 32 | worst group by psmux's own share (4 spawns): pane=9:628.3ms(os 609) pane=10:628.4ms(os 614.1) pane=11:639ms(os 626.2) pane=12:628.5ms(os 615.3) | 
+r3 cap=99 661 exit=2 slow=3 [FAIL] 2 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r4 cap=99 686 exit=0 per call: 47 35 30 261 34 32 28 265 260 598 | worst group by psmux's own share (4 spawns): pane=9:432.6ms(os 417.8) pane=10:836ms(os 822.7) pane=11:363.5ms(os 351.9) pane=12:635.5ms(os 621.5) | 
+r4 cap=99 661 exit=2 slow=3 [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2

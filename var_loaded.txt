@@ -1,0 +1,28 @@
+
+r1 v=99:1 load=16 661 exit=1 slow=2 p50=19.1 p90=123.6 p99=911.8 max=911.8 ms  [24, 23, 20, 912, 394, 124, 20, 20, 18, 18, 19, 20, 19, 19, 18, 18, 19, 18, 19, 17, 19, 17, 23, 17] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r1 v=99:1 load=16 686 exit=0 per call: 42 34 31 264 48 46 29 590 392 60 
+r1 v=4:1 load=16 661 exit=2 slow=3 p50=21.2 p90=235.9 p99=469.4 max=469.4 ms  [24, 21, 36, 364, 469, 21, 19, 18, 24, 112, 17, 18, 17, 20, 79, 18, 20, 82, 112, 110, 19, 236, 92, 17] [FAIL] 13 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r1 v=4:1 load=16 686 exit=1 per call: 46 35 28 285 35 39 31 500 421 60 [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r1 v=99:0 load=16 661 exit=2 slow=3 p50=20.0 p90=459.5 p99=907.1 max=907.1 ms  [25, 18, 21, 554, 460, 907, 20, 21, 20, 18, 20, 20, 20, 18, 20, 20, 20, 22, 20, 19, 19, 18, 18, 21] [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r1 v=99:0 load=16 686 exit=0 per call: 41 37 32 279 611 39 36 35 571 71 
+r2 v=99:1 load=16 661 exit=1 slow=2 p50=19.6 p90=27.2 p99=1,112.9 max=1,112.9 ms  [27, 25, 21, 1113, 561, 19, 20, 20, 21, 20, 19, 19, 20, 18, 21, 20, 18, 20, 19, 18, 19, 20, 19, 18] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r2 v=99:1 load=16 686 exit=0 per call: 39 36 36 269 165 40 35 524 48 43 
+r2 v=4:1 load=16 661 exit=2 slow=3 p50=21.6 p90=266.5 p99=627.9 max=627.9 ms  [23, 22, 17, 266, 628, 20, 19, 19, 18, 50, 346, 22, 16, 18, 19, 21, 23, 81, 19, 80, 95, 111, 20, 80] [FAIL] 12 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r2 v=4:1 load=16 686 exit=0 per call: 41 36 35 273 419 473 405 339 59 46 
+r2 v=99:0 load=16 661 exit=2 slow=3 p50=19.8 p90=361.3 p99=988.5 max=988.5 ms  [26, 24, 23, 361, 584, 988, 20, 19, 22, 19, 20, 19, 20, 20, 21, 20, 20, 22, 21, 18, 20, 19, 19, 19] [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r2 v=99:0 load=16 686 exit=1 per call: 40 33 31 279 600 40 31 40 33 528 [FAIL] spawns that started together are a staircase: psmux's own share spreads 149.1ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r3 v=99:1 load=16 661 exit=1 slow=2 p50=19.7 p90=26.0 p99=930.7 max=930.7 ms  [26, 23, 19, 931, 627, 22, 21, 20, 20, 20, 21, 22, 19, 20, 22, 17, 20, 20, 19, 20, 18, 20, 19, 22] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r3 v=99:1 load=16 686 exit=0 per call: 40 37 32 277 35 34 35 598 200 43 
+r3 v=4:1 load=16 661 exit=2 slow=5 p50=64.5 p90=265.5 p99=454.1 max=454.1 ms  [28, 22, 18, 394, 454, 22, 18, 17, 20, 252, 21, 19, 253, 266, 108, 78, 81, 95, 66, 18, 66, 18, 64, 80] [FAIL] 13 claim(s) past the leading edge found no ready spare ; [FAIL] 5 of 24 splits over 150ms, budget 2
+r3 v=4:1 load=16 686 exit=1 per call: 40 40 35 240 371 445 378 429 428 41 [FAIL] spawns that started together are a staircase: psmux's own share spreads 216.4ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r3 v=99:0 load=16 661 exit=2 slow=3 p50=19.5 p90=283.1 p99=960.2 max=960.2 ms  [28, 20, 27, 283, 960, 586, 21, 20, 20, 19, 20, 19, 20, 18, 21, 19, 19, 18, 19, 19, 18, 19, 19, 20] [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r3 v=99:0 load=16 686 exit=0 per call: 41 37 37 252 419 205 570 102 38 37 
+r4 v=99:1 load=16 661 exit=1 slow=2 p50=19.3 p90=28.6 p99=1,050.3 max=1,050.3 ms  [28, 29, 18, 1050, 554, 21, 18, 20, 20, 19, 19, 19, 20, 19, 17, 20, 19, 18, 19, 19, 20, 21, 17, 19] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r4 v=99:1 load=16 686 exit=0 per call: 47 168 38 32 287 41 30 36 560 350 
+r4 v=4:1 load=16 661 exit=2 slow=6 p50=109.6 p90=385.6 p99=568.8 max=568.8 ms  [40, 25, 37, 569, 386, 22, 18, 18, 286, 405, 264, 19, 21, 20, 80, 111, 20, 110, 127, 128, 112, 112, 160, 147] [FAIL] 16 claim(s) past the leading edge found no ready spare ; [FAIL] 6 of 24 splits over 150ms, budget 2
+r4 v=4:1 load=16 686 exit=1 per call: 40 35 39 231 496 431 158 34 36 363 [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r4 v=99:0 load=16 661 exit=2 slow=3 p50=19.7 p90=422.1 p99=1,336.0 max=1,336.0 ms  [29, 21, 23, 1336, 752, 422, 20, 19, 19, 18, 18, 19, 20, 20, 111, 32, 19, 18, 23, 19, 18, 19, 18, 20] [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 3 of 24 splits over 150ms, budget 2
+r4 v=99:0 load=16 686 exit=1 per call: 47 61 225 139 42 343 129 1071 422 112 [FAIL] 4 orphan pane shell(s) over 1 rounds with every create held 1500 ms: teardown gave up on a spawn still inside CreateProcessW
+    LEFTOVER pid=153740
+    LEFTOVER pid=79056
+    LEFTOVER pid=99744

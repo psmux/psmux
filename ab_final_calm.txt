@@ -1,0 +1,37 @@
+
+r1 now load=0 661 exit=0 slow=0 [30, 17, 17, 16, 16, 32, 16, 14, 16, 16, 14, 15, 15, 14, 14, 14, 15, 14, 13, 15, 16, 15, 13, 14] 
+r1 now load=0 686 exit=0 per call: 21 18 16 237 290 228 23 20 18 459 
+r1 now load=0 pool5 shells=7 new-window@5: [38, 35, 34, 34, 148] cli=[21, 19, 17, 17, 131]
+r1 fix load=0 661 exit=0 slow=2 [30, 18, 16, 330, 565, 17, 15, 26, 14, 16, 15, 16, 16, 14, 15, 15, 16, 16, 14, 15, 16, 15, 14, 15] 
+r1 fix load=0 686 exit=0 per call: 22 17 16 257 526 584 23 20 247 346 
+r1 fix load=0 pool5 shells=8 new-window@5: [37, 35, 35, 33, 32] cli=[20, 18, 17, 16, 16]
+r2 now load=0 661 exit=0 slow=0 [19, 16, 17, 15, 16, 14, 15, 15, 15, 14, 15, 15, 15, 14, 14, 15, 16, 14, 14, 14, 16, 13, 13, 14] 
+r2 now load=0 686 exit=1 per call: 21 110 17 219 18 17 17 467 19 19 [FAIL] no four spare spawns ever started together; the surge did not run concurrently at all
+r2 now load=0 pool5 shells=8 new-window@5: [133, 128, 219, 30, 33] cli=[21, 15, 203, 15, 16]
+r2 fix load=0 661 exit=0 slow=2 [31, 17, 15, 269, 610, 16, 16, 15, 15, 16, 26, 14, 14, 14, 14, 14, 14, 16, 15, 15, 15, 14, 14, 15] 
+r2 fix load=0 686 exit=1 per call: 32 18 16 212 116 17 17 373 20 17 [FAIL] spawns that started together are a staircase: psmux's own share spreads 102.2ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r2 fix load=0 pool5 shells=8 new-window@5: [36, 31, 132, 32, 33] cli=[21, 15, 16, 16, 16]
+r3 now load=0 661 exit=0 slow=0 [19, 15, 17, 14, 16, 63, 15, 14, 14, 15, 14, 14, 13, 16, 14, 14, 16, 14, 25, 14, 14, 15, 13, 13] 
+r3 now load=0 686 exit=1 per call: 20 17 15 250 234 291 20 21 19 525 [FAIL] spawns that started together are a staircase: psmux's own share spreads 101.8ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r3 now load=0 pool5 shells=8 new-window@5: [37, 129, 30, 30, 32] cli=[21, 15, 15, 14, 16]
+r3 fix load=0 661 exit=0 slow=2 [22, 16, 16, 550, 201, 16, 16, 15, 15, 15, 15, 25, 15, 14, 15, 15, 14, 16, 15, 15, 15, 14, 15, 15] 
+r3 fix load=0 686 exit=1 per call: 22 19 17 265 342 175 453 25 103 18 [FAIL] spawns that started together are a staircase: psmux's own share spreads 104.4ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r3 fix load=0 pool5 shells=7 new-window@5: [140, 35, 34, 33, 33] cli=[21, 17, 17, 16, 16]
+r4 now load=0 661 exit=0 slow=0 [30, 15, 16, 15, 15, 15, 15, 15, 16, 15, 16, 16, 14, 14, 14, 16, 16, 14, 15, 15, 15, 14, 14, 16] 
+r4 now load=0 686 exit=0 per call: 21 17 16 233 351 21 398 427 122 184 
+r4 now load=0 pool5 shells=8 new-window@5: [36, 32, 37, 32, 143] cli=[21, 16, 16, 16, 125]
+r4 fix load=0 661 exit=0 slow=1 [22, 16, 16, 32, 612, 16, 27, 15, 14, 15, 15, 15, 15, 15, 15, 14, 15, 15, 15, 14, 15, 15, 14, 14] 
+r4 fix load=0 686 exit=0 per call: 31 19 18 209 516 26 18 116 18 353 
+r4 fix load=0 pool5 shells=8 new-window@5: [35, 32, 32, 30, 29] cli=[19, 17, 16, 15, 14]
+r5 now load=0 661 exit=0 slow=0 [22, 16, 17, 15, 15, 16, 15, 15, 14, 14, 15, 15, 15, 14, 16, 14, 14, 14, 13, 14, 15, 16, 14, 14] 
+r5 now load=0 686 exit=0 per call: 23 19 18 214 349 116 246 24 22 21 
+r5 now load=0 pool5 shells=8 new-window@5: [38, 32, 28, 29, 141] cli=[22, 18, 14, 14, 14]
+r5 fix load=0 661 exit=0 slow=2 [33, 16, 16, 442, 417, 15, 14, 16, 16, 15, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 14, 15, 16, 15] 
+r5 fix load=0 686 exit=1 per call: 22 17 18 226 337 17 166 308 21 224 [FAIL] spawns that started together are a staircase: psmux's own share spreads 110.7ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r5 fix load=0 pool5 shells=8 new-window@5: [38, 136, 134, 238, 227] cli=[21, 118, 118, 120, 211]
+r6 now load=0 661 exit=0 slow=0 [33, 16, 17, 16, 16, 15, 14, 14, 15, 15, 14, 14, 15, 13, 16, 16, 16, 16, 14, 13, 13, 15, 13, 16] 
+r6 now load=0 686 exit=0 per call: 22 18 17 227 20 19 17 461 350 128 
+r6 now load=0 pool5 shells=8 new-window@5: [36, 31, 30, 31, 29] cli=[21, 15, 15, 15, 14]
+r6 fix load=0 661 exit=0 slow=1 [23, 16, 15, 15, 659, 16, 15, 16, 15, 15, 15, 15, 15, 15, 16, 14, 14, 16, 14, 15, 15, 15, 14, 15] 
+r6 fix load=0 686 exit=1 per call: 21 19 117 15 332 336 17 455 172 31 [FAIL] spawns that started together are a staircase: psmux's own share spreads 101.5ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r6 fix load=0 pool5 shells=8 new-window@5: [35, 132, 30, 29, 35] cli=[21, 115, 15, 14, 16]

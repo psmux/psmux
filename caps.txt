@@ -1,0 +1,55 @@
+
+r1 cap=4 661 exit=0 slow=0 p50=14.7 p90=17.5 p99=31.9 max=31.9 ms  [32, 14, 17, 15, 18, 15, 15, 14, 14, 14, 15, 15, 16, 15, 14, 15, 16, 13, 14, 26, 16, 14, 14, 13] 
+r1 cap=4 686 exit=0 per call: 21 17 16 207 111 17 425 186 332 172 
+r1 cap=4 pool5 settled=True after 3060 ms shells=8 new-window@5: [35, 32, 30, 28, 28]
+r1 cap=6 661 exit=1 slow=1 p50=15.5 p90=26.8 p99=298.6 max=298.6 ms  [30, 17, 20, 16, 17, 299, 16, 16, 15, 17, 16, 15, 13, 27, 16, 14, 15, 15, 14, 13, 15, 15, 16, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r1 cap=6 686 exit=0 per call: 26 17 17 212 328 17 157 391 118 21 
+r1 cap=6 pool5 settled=True after 2211 ms shells=8 new-window@5: [33, 29, 28, 28, 137]
+r1 cap=99 661 exit=0 slow=1 p50=15.1 p90=22.9 p99=575.8 max=575.8 ms  [23, 15, 17, 15, 14, 576, 16, 15, 16, 14, 16, 15, 14, 26, 15, 14, 14, 15, 15, 15, 15, 14, 15, 17] 
+r1 cap=99 686 exit=1 per call: 21 16 18 208 500 435 66 455 461 262 [FAIL] spawns that started together are a staircase: psmux's own share spreads 100.2ms over 4 of them (limit 90ms) -- each is queued behind the previous one's CreateProcessW
+r1 cap=99 pool5 settled=True after 2179 ms shells=8 new-window@5: [34, 29, 30, 28, 28]
+r2 cap=4 661 exit=0 slow=0 p50=14.9 p90=16.0 p99=29.4 max=29.4 ms  [29, 17, 16, 16, 16, 15, 16, 14, 15, 14, 14, 16, 14, 14, 15, 14, 15, 15, 15, 15, 14, 14, 16, 15] 
+r2 cap=4 686 exit=0 per call: 22 17 20 199 18 18 17 442 167 22 
+r2 cap=4 pool5 settled=True after 2205 ms shells=8 new-window@5: [36, 30, 29, 28, 138]
+r2 cap=6 661 exit=1 slow=1 p50=15.3 p90=18.1 p99=358.0 max=358.0 ms  [34, 15, 18, 14, 14, 358, 15, 14, 16, 16, 16, 15, 15, 14, 14, 15, 16, 15, 15, 16, 14, 16, 16, 14] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r2 cap=6 686 exit=0 per call: 21 16 17 210 272 17 211 516 283 121 
+r2 cap=6 pool5 settled=True after 3071 ms shells=8 new-window@5: [35, 30, 28, 29, 27]
+r2 cap=99 661 exit=1 slow=1 p50=15.9 p90=35.7 p99=626.8 max=626.8 ms  [36, 17, 19, 16, 78, 627, 18, 26, 16, 16, 15, 15, 16, 14, 15, 14, 14, 16, 14, 15, 16, 14, 15, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r2 cap=99 686 exit=0 per call: 21 17 18 206 500 27 20 17 19 493 
+r2 cap=99 pool5 settled=True after 3097 ms shells=8 new-window@5: [39, 31, 31, 34, 33]
+r3 cap=4 661 exit=0 slow=0 p50=14.8 p90=16.5 p99=30.7 max=30.7 ms  [31, 15, 16, 16, 15, 17, 14, 15, 15, 16, 14, 14, 16, 15, 14, 13, 14, 14, 14, 15, 16, 15, 15, 14] 
+r3 cap=4 686 exit=0 per call: 79 17 16 246 17 18 16 507 23 22 
+r3 cap=4 pool5 settled=True after 2144 ms shells=8 new-window@5: [35, 29, 29, 28, 29]
+r3 cap=6 661 exit=1 slow=1 p50=15.2 p90=18.8 p99=357.6 max=357.6 ms  [32, 16, 19, 14, 15, 358, 16, 15, 15, 16, 17, 15, 14, 17, 16, 15, 14, 16, 16, 16, 14, 14, 15, 14] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r3 cap=6 686 exit=0 per call: 20 16 16 207 439 26 18 19 399 35 
+r3 cap=6 pool5 settled=True after 3089 ms shells=8 new-window@5: [34, 31, 29, 29, 28]
+r3 cap=99 661 exit=1 slow=2 p50=15.2 p90=29.7 p99=498.4 max=498.4 ms  [30, 15, 17, 15, 379, 498, 16, 15, 16, 15, 16, 14, 16, 16, 14, 15, 14, 14, 15, 15, 16, 14, 16, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r3 cap=99 686 exit=0 per call: 20 16 17 239 323 16 163 269 20 225 
+r3 cap=99 pool5 settled=True after 2214 ms shells=8 new-window@5: [33, 29, 27, 28, 137]
+r4 cap=4 661 exit=0 slow=0 p50=15.3 p90=16.4 p99=22.8 max=22.8 ms  [23, 15, 16, 15, 16, 15, 15, 15, 16, 15, 15, 14, 15, 15, 16, 15, 16, 15, 16, 16, 14, 14, 14, 14] 
+r4 cap=4 686 exit=0 per call: 22 19 17 199 281 21 273 122 16 364 
+r4 cap=4 pool5 settled=True after 2236 ms shells=8 new-window@5: [38, 28, 28, 28, 138]
+r4 cap=6 661 exit=1 slow=1 p50=15.2 p90=17.2 p99=250.2 max=250.2 ms  [30, 16, 17, 16, 17, 250, 17, 13, 15, 16, 17, 16, 14, 15, 15, 14, 14, 14, 14, 14, 16, 14, 15, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r4 cap=6 686 exit=0 per call: 23 17 16 211 448 25 19 18 405 289 
+r4 cap=6 pool5 settled=True after 3053 ms shells=8 new-window@5: [35, 31, 30, 29, 31]
+r4 cap=99 661 exit=1 slow=1 p50=15.4 p90=19.2 p99=674.4 max=674.4 ms  [19, 16, 17, 16, 141, 674, 16, 16, 15, 15, 15, 15, 15, 15, 15, 15, 16, 16, 13, 14, 16, 15, 15, 16] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r4 cap=99 686 exit=0 per call: 21 15 17 229 19 17 18 452 503 44 
+r4 cap=99 pool5 settled=True after 2221 ms shells=8 new-window@5: [34, 30, 32, 29, 134]
+r5 cap=4 661 exit=0 slow=0 p50=14.8 p90=16.2 p99=23.7 max=23.7 ms  [24, 16, 16, 16, 15, 15, 15, 15, 16, 14, 15, 14, 14, 14, 13, 14, 15, 15, 13, 15, 15, 15, 16, 14] 
+r5 cap=4 686 exit=0 per call: 21 17 17 227 18 18 17 513 233 341 
+r5 cap=4 pool5 settled=True after 2132 ms shells=8 new-window@5: [35, 29, 29, 29, 28]
+r5 cap=6 661 exit=1 slow=2 p50=15.5 p90=30.5 p99=234.4 max=234.4 ms  [30, 16, 17, 15, 205, 234, 17, 15, 16, 16, 16, 27, 15, 14, 14, 15, 14, 15, 16, 14, 15, 16, 16, 16] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r5 cap=6 686 exit=0 per call: 21 17 16 209 278 116 114 20 18 17 
+r5 cap=6 pool5 settled=True after 2250 ms shells=8 new-window@5: [34, 28, 31, 29, 141]
+r5 cap=99 661 exit=1 slow=1 p50=15.1 p90=18.8 p99=595.5 max=595.5 ms  [33, 16, 19, 15, 15, 596, 15, 15, 14, 16, 15, 15, 15, 15, 16, 15, 15, 15, 14, 15, 14, 15, 14, 14] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r5 cap=99 686 exit=0 per call: 21 17 17 218 506 632 25 119 18 225 
+r5 cap=99 pool5 settled=True after 2306 ms shells=8 new-window@5: [35, 28, 30, 29, 136]
+r6 cap=4 661 exit=0 slow=0 p50=14.6 p90=16.4 p99=22.4 max=22.4 ms  [22, 16, 17, 16, 14, 16, 16, 15, 15, 15, 14, 16, 15, 13, 15, 14, 14, 15, 14, 14, 14, 14, 15, 14] 
+r6 cap=4 686 exit=0 per call: 20 15 15 211 337 21 333 175 277 62 
+r6 cap=4 pool5 settled=True after 2142 ms shells=8 new-window@5: [33, 31, 32, 29, 31]
+r6 cap=6 661 exit=1 slow=1 p50=15.6 p90=19.4 p99=296.6 max=296.6 ms  [33, 16, 19, 16, 16, 297, 17, 15, 15, 16, 16, 16, 16, 15, 15, 15, 16, 15, 15, 15, 15, 14, 15, 16] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r6 cap=6 686 exit=0 per call: 22 18 18 204 445 22 18 18 395 134 
+r6 cap=6 pool5 settled=True after 2249 ms shells=8 new-window@5: [35, 33, 30, 29, 143]
+r6 cap=99 661 exit=1 slow=1 p50=15.2 p90=30.5 p99=662.2 max=662.2 ms  [30, 16, 18, 15, 16, 662, 32, 16, 16, 15, 15, 16, 15, 15, 15, 16, 16, 15, 14, 14, 14, 16, 15, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r6 cap=99 686 exit=0 per call: 21 16 17 217 510 19 20 20 453 467 
+r6 cap=99 pool5 settled=True after 2234 ms shells=8 new-window@5: [34, 28, 32, 31, 138]

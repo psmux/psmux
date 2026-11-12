@@ -1,0 +1,40 @@
+
+r1 v=99:1 load=0 661 exit=2 slow=4 p50=20.2 p90=590.7 p99=1,053.6 max=1,053.6 ms  [28, 23, 20, 1054, 855, 22, 20, 20, 20, 20, 20, 19, 19, 20, 40, 20, 19, 591, 333, 19, 33, 49, 19, 19] [FAIL] 1 claim(s) past the leading edge found no ready spare ; [FAIL] 4 of 24 splits over 150ms, budget 2
+r1 v=99:1 load=0 686 exit=0 per call: 46 45 38 257 76 149 780 749 319 778 
+r1 v=99:1 load=0 pool5 shells=8 new-window@5: [72, 71, 65, 72, 65]
+    LEFTOVER pid=94344
+    LEFTOVER pid=108684
+    LEFTOVER pid=151840
+r1 v=4:0 load=0 661 exit=2 slow= p50=27.0 p90=331.1 p99=331.1 max=331.1 ms  [27, 21, 20, 331, 298] [FAIL] only 5 of 24 splits produced a pane ; [FAIL] only 5 depth samples during the run; the trace should carry four a second
+r1 v=4:0 load=0 686 exit=0 per call: 21 16 17 222 18 20 17 440 122 25 
+r1 v=4:0 load=0 pool5 shells=8 new-window@5: [38, 35, 30, 30, 30]
+r2 v=99:1 load=0 661 exit=0 slow=1 p50=15.4 p90=18.6 p99=626.2 max=626.2 ms  [19, 15, 16, 79, 626, 15, 16, 16, 16, 16, 16, 16, 15, 15, 16, 15, 14, 15, 14, 16, 15, 14, 14, 15] 
+r2 v=99:1 load=0 686 exit=0 per call: 22 18 17 210 20 18 18 458 29 24 
+r2 v=99:1 load=0 pool5 shells=8 new-window@5: [38, 33, 34, 33, 30]
+r2 v=4:0 load=0 661 exit=0 slow=0 p50=14.6 p90=16.6 p99=33.4 max=33.4 ms  [33, 16, 16, 16, 17, 16, 16, 16, 15, 14, 14, 13, 14, 14, 14, 14, 15, 14, 14, 28, 14, 15, 14, 15] 
+r2 v=4:0 load=0 686 exit=0 per call: 22 17 17 212 406 279 287 221 175 27 
+r2 v=4:0 load=0 pool5 shells=8 new-window@5: [36, 31, 130, 35, 36]
+r3 v=99:1 load=0 661 exit=1 slow=2 p50=15.2 p90=20.0 p99=610.6 max=610.6 ms  [20, 17, 17, 251, 611, 16, 16, 15, 16, 14, 15, 15, 14, 15, 16, 15, 15, 15, 15, 15, 15, 15, 15, 16] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r3 v=99:1 load=0 686 exit=0 per call: 22 18 18 209 19 21 20 456 450 66 
+r3 v=99:1 load=0 pool5 shells=8 new-window@5: [34, 32, 35, 33, 26]
+r3 v=4:0 load=0 661 exit=0 slow=0 p50=14.8 p90=16.3 p99=25.4 max=25.4 ms  [25, 16, 17, 16, 16, 15, 16, 15, 15, 14, 14, 16, 14, 13, 14, 15, 15, 14, 14, 15, 15, 14, 15, 15] 
+r3 v=4:0 load=0 686 exit=0 per call: 23 18 16 238 173 286 174 23 300 22 
+r3 v=4:0 load=0 pool5 shells=8 new-window@5: [36, 33, 35, 35, 149]
+r4 v=99:1 load=0 661 exit=1 slow=2 p50=15.3 p90=33.1 p99=630.1 max=630.1 ms  [33, 17, 16, 174, 630, 16, 15, 16, 15, 15, 16, 16, 15, 14, 15, 15, 16, 14, 15, 15, 15, 14, 15, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r4 v=99:1 load=0 686 exit=0 per call: 22 18 17 278 500 25 19 19 18 515 
+r4 v=99:1 load=0 pool5 shells=8 new-window@5: [35, 31, 36, 35, 29]
+r4 v=4:0 load=0 661 exit=0 slow=0 p50=15.1 p90=16.8 p99=24.4 max=24.4 ms  [24, 16, 18, 15, 15, 17, 15, 15, 15, 15, 14, 15, 13, 14, 13, 15, 16, 15, 13, 14, 16, 14, 15, 13] 
+r4 v=4:0 load=0 686 exit=0 per call: 23 18 17 262 19 19 19 459 21 21 
+r4 v=4:0 load=0 pool5 shells=7 new-window@5: [35, 30, 30, 30, 31]
+r5 v=99:1 load=0 661 exit=1 slow=1 p50=14.9 p90=27.7 p99=642.3 max=642.3 ms  [33, 18, 15, 16, 642, 16, 28, 14, 15, 16, 14, 15, 15, 14, 16, 14, 15, 16, 15, 14, 14, 15, 14, 15] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r5 v=99:1 load=0 686 exit=0 per call: 22 19 17 218 507 582 466 463 288 22 
+r5 v=99:1 load=0 pool5 shells=8 new-window@5: [35, 33, 36, 33, 30]
+r5 v=4:0 load=0 661 exit=1 slow=0 p50=14.8 p90=16.1 p99=24.5 max=24.5 ms  [24, 15, 16, 15, 17, 16, 16, 14, 14, 16, 14, 14, 16, 13, 14, 14, 16, 16, 15, 15, 13, 13, 13, 13] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r5 v=4:0 load=0 686 exit=0 per call: 24 18 18 243 172 18 262 286 22 335 
+r5 v=4:0 load=0 pool5 shells=8 new-window@5: [36, 31, 32, 32, 148]
+r6 v=99:1 load=0 661 exit=1 slow=1 p50=15.1 p90=24.1 p99=599.9 max=599.9 ms  [24, 17, 16, 15, 600, 18, 16, 30, 16, 15, 15, 15, 15, 14, 14, 14, 15, 15, 16, 14, 15, 14, 14, 16] [FAIL] 1 claim(s) past the leading edge found no ready spare
+r6 v=99:1 load=0 686 exit=0 per call: 22 19 19 208 19 19 17 465 525 462 
+r6 v=99:1 load=0 pool5 shells=8 new-window@5: [34, 31, 31, 134, 38]
+r6 v=4:0 load=0 661 exit=0 slow=0 p50=14.8 p90=16.5 p99=31.3 max=31.3 ms  [31, 16, 17, 15, 15, 16, 14, 16, 15, 15, 14, 15, 14, 14, 14, 15, 15, 14, 14, 16, 14, 14, 14, 16] 
+r6 v=4:0 load=0 686 exit=0 per call: 20 18 18 224 120 18 376 20 20 18 
+r6 v=4:0 load=0 pool5 shells=8 new-window@5: [36, 33, 30, 31, 144]
