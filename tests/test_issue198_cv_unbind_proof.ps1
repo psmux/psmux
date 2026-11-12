@@ -127,9 +127,11 @@ if ($captured -match "BASELINE_OK") {
 # If psmux DOES intercept C-v (the bug), nothing appears or whitespace appears.
 Write-Host "`n[TUI 4] CRITICAL: Ctrl+V injection after all unbinds" -ForegroundColor Yellow
 
-# Set clipboard to a known marker string
+# Set clipboard to a known marker string. pwsh's Set-Clipboard is a silent
+# no-op while another window has the clipboard open, so verify the seed.
+. (Join-Path $PSScriptRoot "clipboard_test_helpers.ps1")
 $marker = "CVTEST_$(Get-Random -Maximum 99999)"
-Set-Clipboard -Value $marker
+$cvSeeded = Set-ClipboardVerified $marker
 Start-Sleep -Milliseconds 200
 
 # Clear the pane
@@ -145,7 +147,9 @@ Start-Sleep -Seconds 2
 $capturedAfterCv = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
 
 # Check for the marker text
-if ($capturedAfterCv -match $marker) {
+if (-not $cvSeeded) {
+    Write-Host "  [SKIP] could not seed the clipboard (held by another process); Ctrl+V passthrough not judged" -ForegroundColor DarkYellow
+} elseif ($capturedAfterCv -match $marker) {
     Write-Pass "Ctrl+V PASSED THROUGH: clipboard content '$marker' appeared in pane"
     Write-Host "    This means unbind-key DID take effect for Ctrl+V passthrough." -ForegroundColor DarkYellow
 } else {
@@ -164,7 +168,7 @@ if ($capturedAfterCv -match $marker) {
 # [TUI Test 5] Prove send-keys C-v DOES work (bypass proof)
 Write-Host "`n[TUI 5] send-keys C-v bypasses the hardcoded suppression" -ForegroundColor Yellow
 $marker2 = "SENDKEY_$(Get-Random -Maximum 99999)"
-Set-Clipboard -Value $marker2
+[void](Set-ClipboardVerified $marker2)
 Start-Sleep -Milliseconds 200
 
 & $PSMUX send-keys -t $SESSION "clear" Enter 2>&1 | Out-Null

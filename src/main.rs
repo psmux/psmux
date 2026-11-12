@@ -4440,7 +4440,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     set.target = target_position.and_then(|position| args.get(position + 1)).cloned();
                 }
                 if set.clipboard && set.new_name.is_none() {
-                    crate::clipboard::copy_to_system_clipboard(&set.content);
+                    crate::clipboard::copy_to_system_clipboard_for_command(&set.content);
                 }
                 // A rename can fail ("unknown buffer: X", "no buffer"), and
                 // tmux reports it with exit 1.
@@ -5833,7 +5833,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         std::fs::read_to_string(&path)?
                     };
                     if propagate_to_clipboard {
-                        crate::clipboard::copy_to_system_clipboard(&content);
+                        crate::clipboard::copy_to_system_clipboard_for_command(&content);
                     }
                     let mut cmd = "set-buffer".to_string();
                     if let Some(b) = buffer_name {

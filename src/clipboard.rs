@@ -45,9 +45,10 @@ pub(crate) static TEST_CLIPBOARD_CONTENTS: std::sync::Mutex<()> = std::sync::Mut
 
 /// Write `text` to the Windows system clipboard as CF_UNICODETEXT.
 ///
-/// Other processes may briefly hold the clipboard open, so this retries a
-/// few times before giving up. Failure semantics, matching real tmux's
-/// permissive behavior for `load-buffer -w` / `set-buffer -w`:
+/// Other processes may briefly hold the clipboard open, so this retries for
+/// about 10 ms before giving up silently. That suits the server main loop and
+/// the client input loop, which must not stall; a command the user ran to
+/// write the clipboard uses [`copy_to_system_clipboard_for_command`] instead.
 ///
 /// * If `GlobalAlloc` / `GlobalLock` / `OpenClipboard` / `EmptyClipboard`
 ///   fails, the user's existing clipboard contents are left untouched.
@@ -56,8 +57,15 @@ pub(crate) static TEST_CLIPBOARD_CONTENTS: std::sync::Mutex<()> = std::sync::Mut
 ///   has already succeeded, the clipboard is left empty. The Win32
 ///   clipboard API offers no atomic "replace" primitive, so this window
 ///   cannot be closed entirely.
-#[cfg(windows)]
 pub fn copy_to_system_clipboard(text: &str) {
+    let _ = try_copy_to_system_clipboard(text);
+}
+
+/// [`copy_to_system_clipboard`], telling a clipboard another window held open
+/// through every retry (`Err`) apart from one that was opened (`Ok(true)` when
+/// the text was stored, `Ok(false)` when Windows refused the data itself).
+#[cfg(windows)]
+pub fn try_copy_to_system_clipboard(text: &str) -> Result<bool, ClipboardBusy> {
     const CF_UNICODETEXT: u32 = 13;
 
     // Prepare the HGLOBAL BEFORE touching the clipboard. If allocation or
@@ -69,14 +77,14 @@ pub fn copy_to_system_clipboard(text: &str) {
 
     let hmem = unsafe { GlobalAlloc(GMEM_MOVEABLE, size_bytes) };
     if hmem.is_null() {
-        return;
+        return Ok(false);
     }
 
     unsafe {
         let dst = GlobalLock(hmem) as *mut u16;
         if dst.is_null() {
             let _ = GlobalFree(hmem);
-            return;
+            return Ok(false);
         }
         std::ptr::copy_nonoverlapping(utf16.as_ptr(), dst, utf16.len());
         GlobalUnlock(hmem);
@@ -84,7 +92,7 @@ pub fn copy_to_system_clipboard(text: &str) {
 
     // Buffer is ready. Open the clipboard only for the minimal Win32 dance.
     // Other processes can briefly hold the clipboard open; retry a few times.
-    let mut transferred = false;
+    let mut result = Err(ClipboardBusy);
     for _ in 0..5 {
         let _section = clipboard_section();
         let opened = unsafe { OpenClipboard(std::ptr::null_mut()) };
@@ -97,26 +105,75 @@ pub fn copy_to_system_clipboard(text: &str) {
             // EmptyClipboard immediately followed by SetClipboardData is the
             // documented Win32 pattern for replacing contents. The window
             // between these calls is the unavoidable race described above.
-            if EmptyClipboard() != 0
-                && !SetClipboardData(CF_UNICODETEXT, hmem).is_null()
-            {
-                // Ownership of hmem transferred to the OS; do NOT free.
-                transferred = true;
-            }
+            // Ownership of hmem passes to the OS only when SetClipboardData
+            // succeeds; otherwise it is freed below.
+            let stored = EmptyClipboard() != 0
+                && !SetClipboardData(CF_UNICODETEXT, hmem).is_null();
             let _ = CloseClipboard();
+            result = Ok(stored);
         }
         break;
     }
 
-    if !transferred {
+    if result != Ok(true) {
         unsafe {
             let _ = GlobalFree(hmem);
         }
     }
+    result
 }
 
 #[cfg(not(windows))]
-pub fn copy_to_system_clipboard(_text: &str) {}
+pub fn try_copy_to_system_clipboard(_text: &str) -> Result<bool, ClipboardBusy> { Ok(true) }
+
+/// How long `set-buffer -w` and `load-buffer -w`, run from the command line,
+/// wait for a clipboard another window holds open before they give up.
+///
+/// tmux hands the text to the terminal as OSC 52 and never waits.  On Windows
+/// psmux writes the clipboard itself, and a clipboard history listener, a VNC
+/// or RDP clipboard bridge or a phone link app opens it for a few to a few
+/// hundred milliseconds after every change.  The ~10 ms of retries inside
+/// [`try_copy_to_system_clipboard`] lost to such a holder and silently left
+/// the old clipboard in place.  One second covers those holders and costs
+/// nothing when the clipboard is free.
+pub const CLIPBOARD_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// [`copy_to_system_clipboard`] for a command line process that asked to
+/// write the clipboard and can wait: it keeps trying while another window
+/// holds the clipboard open, up to `timeout`, and returns as soon as the
+/// clipboard was opened.  `Err` means it was held open the whole time.
+///
+/// Never call this from the server main loop or the client input loop.
+pub fn copy_to_system_clipboard_waiting(text: &str, timeout: Duration) -> Result<bool, ClipboardBusy> {
+    retry_while_busy(timeout, || try_copy_to_system_clipboard(text), || {
+        std::thread::sleep(Duration::from_millis(10))
+    })
+}
+
+/// The warning a command line `-w` prints when the clipboard could not be
+/// written, or `None` when it was.  tmux cannot know whether the terminal took
+/// its OSC 52, so the command still succeeds; this only stops the failure
+/// from being silent.
+pub fn clipboard_write_warning(result: Result<bool, ClipboardBusy>, timeout: Duration) -> Option<String> {
+    match result {
+        Ok(true) => None,
+        Ok(false) => Some("psmux: could not write the system clipboard: Windows refused the text".to_string()),
+        Err(ClipboardBusy) => Some(format!(
+            "psmux: could not write the system clipboard: another program held it open for {} ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
+/// The command line side of `set-buffer -w` and `load-buffer -w`: write the
+/// clipboard, waiting for a busy one, and warn on stderr if it could not be
+/// written.
+pub fn copy_to_system_clipboard_for_command(text: &str) {
+    let result = copy_to_system_clipboard_waiting(text, CLIPBOARD_WRITE_TIMEOUT);
+    if let Some(warning) = clipboard_write_warning(result, CLIPBOARD_WRITE_TIMEOUT) {
+        eprintln!("{}", warning);
+    }
+}
 
 /// Read text from the Windows system clipboard.
 ///
@@ -224,15 +281,25 @@ pub fn read_from_system_clipboard_waiting(timeout: Duration) -> Option<String> {
 /// pause passed in so the timing rules can be tested without a desktop.
 fn wait_for_clipboard(
     timeout: Duration,
-    mut read: impl FnMut() -> Result<Option<String>, ClipboardBusy>,
-    mut pause: impl FnMut(),
+    read: impl FnMut() -> Result<Option<String>, ClipboardBusy>,
+    pause: impl FnMut(),
 ) -> Option<String> {
+    retry_while_busy(timeout, read, pause).ok().flatten()
+}
+
+/// Run `op` until it gets the clipboard or `timeout` passes, pausing between
+/// busy attempts.  Shared by the waiting read and the waiting write.
+fn retry_while_busy<T>(
+    timeout: Duration,
+    mut op: impl FnMut() -> Result<T, ClipboardBusy>,
+    mut pause: impl FnMut(),
+) -> Result<T, ClipboardBusy> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        match read() {
-            Ok(text) => return text,
+        match op() {
+            Ok(v) => return Ok(v),
             Err(ClipboardBusy) if std::time::Instant::now() < deadline => pause(),
-            Err(ClipboardBusy) => return None,
+            Err(ClipboardBusy) => return Err(ClipboardBusy),
         }
     }
 }
@@ -255,6 +322,10 @@ pub fn clipboard_sequence_number() -> u32 { 0 }
 #[cfg(test)]
 #[path = "../tests-rs/test_refresh_client_l_busy_clipboard.rs"]
 mod tests_refresh_client_l_busy_clipboard;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_clipboard_write_busy.rs"]
+mod tests_clipboard_write_busy;
 
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_clipboard_thread_lock.rs"]

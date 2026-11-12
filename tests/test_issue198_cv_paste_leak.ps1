@@ -87,11 +87,12 @@ function Inject-CtrlV([int]$procPid) {
 }
 
 # ── Put known marker on clipboard ─────────────────────────────────────────────
-Set-Clipboard -Value $MARKER
-$clipCheck = Get-Clipboard -Raw
-if ($clipCheck.Trim() -ne $MARKER) {
-    Write-Host "[ABORT] Could not set clipboard to marker '$MARKER' (got: $clipCheck)" -ForegroundColor Red
-    exit 1
+# pwsh's Set-Clipboard is a silent no-op while another window has the
+# clipboard open, so the seed is verified with retries (clipboard_test_helpers).
+. (Join-Path $PSScriptRoot "clipboard_test_helpers.ps1")
+if (-not (Set-ClipboardVerified $MARKER)) {
+    Write-Host "[SKIP] Could not set clipboard to marker '$MARKER': another process kept the clipboard (got: $(Get-ClipboardSettled))" -ForegroundColor DarkYellow
+    exit 0
 }
 Write-Info "Clipboard set to: $MARKER"
 
@@ -254,7 +255,7 @@ if ($procD -eq $null) {
     Write-Info "paste-detection = '$pdValD' (expect 'on')"
 
     # Re-set clipboard (may have been overwritten)
-    Set-Clipboard -Value $MARKER
+    [void](Set-ClipboardVerified $MARKER)
 
     & $PSMUX send-keys -t $sessD "clear" Enter 2>&1 | Out-Null
     Start-Sleep -Seconds 1
