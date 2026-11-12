@@ -175,16 +175,27 @@ Write-Host "`n=== Test 2b: ack then no reply (clean close, reset) ===" -Foregrou
 foreach ($mode in 'ackonly', 'ackreset') {
     $fs = Start-FakeServer $mode ''
     Register-FakeSession 'ack' $fs.Port
-    foreach ($cmd in @(
-            @('display-message', '-p', '-t', 'ack', '#{session_name}'),
-            @('list-panes', '-t', 'ack', '-F', '#{pane_id}'),
-            @('capture-pane', '-p', '-t', 'ack'))) {
+    $cmds = @(
+        @('display-message', '-p', '-t', 'ack', '#{session_name}'),
+        @('list-panes', '-t', 'ack', '-F', '#{pane_id}'))
+    # A reset is never how a reply ends, so it is an error for every command.
+    if ($mode -eq 'ackreset') { $cmds += , @('capture-pane', '-p', '-t', 'ack') }
+    foreach ($cmd in $cmds) {
         $r = Invoke-Psmux (@('-L', $NS) + $cmd)
         Write-Info ("{0} {1}: rc={2} out=[{3}] err=[{4}]" -f $mode, $cmd[0], $r.Rc, $r.Out, $r.Err)
         if ($r.Rc -ne 0 -and $r.Err -match 'no re') { Write-Pass "$mode $($cmd[0]): lost reply is an error" }
         else { Write-Fail "$mode $($cmd[0]): lost reply passed as empty (rc=$($r.Rc))" }
     }
     if ($mode -eq 'ackonly') {
+        # capture-pane -p of a blank pane answers the ack and nothing more:
+        # a clean close after the ack is a correct empty capture (#1034
+        # sweep), so it stays rc 0 with no output.
+        foreach ($cmd in @(, @('capture-pane', '-p', '-t', 'ack'))) {
+            $r = Invoke-Psmux (@('-L', $NS) + $cmd)
+            Write-Info ("ackonly {0}: rc={1} out=[{2}] err=[{3}]" -f $cmd[0], $r.Rc, $r.Out, $r.Err)
+            if ($r.Rc -eq 0 -and -not $r.Out -and -not $r.Err) { Write-Pass "an empty $($cmd[0]) answer stays empty at exit 0" }
+            else { Write-Fail "an empty $($cmd[0]) answer: rc=$($r.Rc) err=[$($r.Err)]" }
+        }
         # A command that succeeds silently must stay silent at exit 0.
         $r = Invoke-Psmux @('-L', $NS, 'set-option', '-t', 'ack', 'status', 'off')
         Write-Info ("ackonly set-option: rc={0} out=[{1}] err=[{2}]" -f $r.Rc, $r.Out, $r.Err)
@@ -256,6 +267,28 @@ else { Write-Fail "cmd.exe session probe: new-session rc=$($r.Rc), no pane pid i
 $r = Invoke-Psmux @('-L', $NS, 'new-session', '-d', '-P', '-F', '#{session_name}:#{window_index}', '-s', 'job', '-x', '80', '-y', '10', '--', 'cmd.exe', '/d', '/k')
 if ($r.Rc -eq 0 -and $r.Out -eq 'job:0') { Write-Pass "new-session -P -F prints the window it made ($($r.Out))" }
 else { Write-Fail "new-session -P -F rc=$($r.Rc) out=[$($r.Out)] err=[$($r.Err)]" }
+
+# Correct empty answers stay empty at exit 0 (#1034 sweep): a blank pane's
+# capture, a format that expands to nothing (tmux prints an empty line), and
+# a -P whose -F expands to nothing.
+$r = Invoke-Psmux @('-L', $NS, 'new-session', '-d', '-s', 'blank', '-x', '40', '-y', '5', '--', 'powershell.exe', '-NoLogo', '-NoProfile', '-Command', 'Start-Sleep 60')
+Start-Sleep -Milliseconds 1500
+$r = Invoke-Psmux @('-L', $NS, 'capture-pane', '-p', '-t', 'blank')
+Write-Info ("blank capture-pane -p: rc={0} out=[{1}] err=[{2}]" -f $r.Rc, $r.Out, $r.Err)
+if ($r.Rc -eq 0 -and -not $r.Out.Trim() -and -not $r.Err) { Write-Pass "capture-pane -p of a blank pane: rc 0, no output, no error" }
+else { Write-Fail "capture-pane -p of a blank pane: rc=$($r.Rc) err=[$($r.Err)]" }
+$r = Invoke-Psmux @('-L', $NS, 'display-message', '-p', '-t', 'real', '#{@nope}')
+Write-Info ("display-message -p #{{@nope}}: rc={0} out=[{1}] err=[{2}]" -f $r.Rc, $r.Out, $r.Err)
+if ($r.Rc -eq 0 -and -not $r.Out -and -not $r.Err) { Write-Pass "display-message -p of an unset option: rc 0, empty" }
+else { Write-Fail "display-message -p of an unset option: rc=$($r.Rc) out=[$($r.Out)] err=[$($r.Err)]" }
+$r = Invoke-Psmux @('-L', $NS, 'new-session', '-d', '-P', '-F', '#{@nope}', '-s', 'emptyp', '-x', '40', '-y', '5')
+Write-Info ("new-session -P -F #{{@nope}}: rc={0} out=[{1}] err=[{2}]" -f $r.Rc, $r.Out, $r.Err)
+if ($r.Rc -eq 0 -and -not $r.Err) { Write-Pass "new-session -P with an empty -F: rc 0, no error" }
+else { Write-Fail "new-session -P with an empty -F: rc=$($r.Rc) err=[$($r.Err)]" }
+$r = Invoke-Psmux @('-L', $NS, 'new-window', '-d', '-P', '-F', '#{@nope}', '-t', 'real')
+Write-Info ("new-window -P -F #{{@nope}}: rc={0} out=[{1}] err=[{2}]" -f $r.Rc, $r.Out, $r.Err)
+if ($r.Rc -eq 0 -and -not $r.Err) { Write-Pass "new-window -P with an empty -F: rc 0, no error" }
+else { Write-Fail "new-window -P with an empty -F: rc=$($r.Rc) err=[$($r.Err)]" }
 
 # Latency: one-shot replies must not wait on a timer for their EOF.
 $times = foreach ($i in 1..15) {
