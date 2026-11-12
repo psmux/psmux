@@ -1,0 +1,47 @@
+
+=== Issue #897: shared server rare cases ===
+  Binary: C:\Users\godwin\Documents\workspace\psmux\.claude\worktrees\agent-a09ff7bfd0fbafcdc\bins_review\pr909\psmux.exe
+
+--- A: a stale namespace marker is replaced by the next server ---
+  [PASS] four CLIs starting the namespace at once over a stale marker all succeed
+  [PASS] one shared server holds the namespace
+  [PASS] the marker names that live server
+  [PASS] a later new-session joins it (84 ms)
+  [PASS] every session is listed
+  [PASS] still one shared server
+
+--- B: every command line of a connection is checked ---
+  [PASS] A has two panes, not zoomed
+  [PASS] control: resize-pane -Z alone is refused
+  [PASS] a. resize-pane -Z on the second line does not run
+  [PASS] a. it gets the unknown command reply, and the line after it never runs
+  [PASS] b. behind a first line over 16 KiB it is refused
+  [PASS] c. sent 2.5 s after AUTH it does not run, as per session
+  [PASS] d. an alias list-tree=resize-pane -Z is set
+  [PASS] d. the alias does not carry resize-pane in
+  [PASS] an ordinary batch with the session-info barrier still runs
+  [PASS] a supported command on a later line still runs
+  [PASS] display-message -p ends the batch as a per session server does
+  [PASS] CLI send-keys still works
+  [PASS] CLI resize-pane is still refused
+  [PASS] the shared server is still up
+
+--- B2: an attach is not held at the gate ---
+  [PASS] a client attaches to a shared session in well under the old 2 s (best 154 ms of 213, 154, 159)
+
+--- C: the namespace lock never collides with a per session lock ---
+  [PASS] per session: session x@shared-server in -L s897ceec701
+  [PASS] shared: -L s897ceec701__x starts next to it (125 ms)
+  [PASS] with its own shared server
+  [PASS] and the per session session is untouched
+
+--- D: a new-session too big for the shared process is refused ---
+  [PASS] session A at 80x24
+  [PASS] 2049x2048 (4196352 cells, just over 2^22) is refused
+  [PASS] no session big exists
+  [PASS] the same shared server still runs
+  [PASS] session A keeps its ids ($0 @1 %1)
+  [PASS] a session after it is created as usual
+  [PASS] the default namespace was never touched
+
+=== Results: 32 passed, 0 failed ===

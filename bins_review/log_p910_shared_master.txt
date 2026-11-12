@@ -1,0 +1,210 @@
+
+=== Issue #798 step 2: the shared server ===
+  Binary: C:\Users\godwin\Documents\workspace\psmux\.claude\worktrees\agent-a09ff7bfd0fbafcdc\bins_review\master\psmux.exe
+  Root:   C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62
+
+--- Part 0: the default path is untouched (owner ruling) ---
+  [PASS] found the shared server commits since 0145958f (10)
+  [PASS] none of them changes a file under src/ outside src/server/shared
+      src/ outside src/server/shared changed since 0145958f (all commits): src/choose_tree.rs, src/cli.rs, src/client.rs, src/client_env.rs, src/client_frame_queue.rs, src/commands.rs, src/config.rs, src/console_tap.rs, src/extended_keys.rs, src/format.rs, src/frame_oneshot.rs, src/input.rs, src/main.rs, src/pane.rs, src/passthrough.rs, src/platform.rs, src/server/connection.rs, src/server/helpers.rs, src/server/mod.rs, src/server/option_catalog.rs, src/server/options.rs, src/server/source_job.rs, src/server/temp_target.rs, src/session.rs, src/ssh_input.rs, src/startup_trace.rs, src/terminal_features.rs, src/types.rs, src/util.rs, src/warm_pane_sync.rs, src/window_ops.rs
+
+--- Part 1: three sessions, one server process ---
+  [PASS] new-session A under shared exits 0
+  [PASS] one shared server after the first session
+  [PASS] new-session B joins it
+  [PASS] new-session C joins it
+  [PASS] exactly ONE server process holds A, B and C
+  [PASS] every session's .pid names that process (78040)
+  [PASS] today's four registry files per session
+  [PASS] each session has its own listener port
+  [PASS] the namespace marker is shared\L-<ns>.server
+  [PASS] a second B is a duplicate session
+  [PASS] still one process after the refused duplicate
+
+--- Part 2: list-sessions, has-session, ids unique across the server ---
+  [PASS] ls lists A, B, C
+  [PASS] plain ls lines
+  [PASS] has-session -t A exits 0
+  [PASS] has-session -t B exits 0
+  [PASS] has-session -t C exits 0
+  [PASS] has-session -t Z exits 1
+      A @1 %1 | B @2 %2 | C @3 %3
+  [PASS] window and pane ids are unique across the server
+  [PASS] show -sv server-mode answers shared
+
+--- Part 3: windows, panes, keys and captures per session ---
+  [PASS] new-window -t A
+  [PASS] split-window -t A
+  [PASS] new-window -t B
+  [PASS] split-window -t B
+  [PASS] new-window -t C
+  [PASS] split-window -t C
+  [PASS] A has its own two windows, the second split
+  [PASS] B has its own two windows, the second split
+  [PASS] C has its own two windows, the second split
+  [PASS] nine panes, nine distinct %ids
+  [PASS] send-keys reached A:1 and capture-pane shows it
+  [PASS] A:1 shows none of the other sessions' output
+  [PASS] a pane of A gets ITS PSMUX_TARGET_SESSION
+  [PASS] PSMUX_SERVER_MODE in a pane is the launching shell's value (shared)
+  [PASS] a window made over TCP without -c starts in A's own directory
+  [PASS] send-keys reached B:1 and capture-pane shows it
+  [PASS] B:1 shows none of the other sessions' output
+  [PASS] a pane of B gets ITS PSMUX_TARGET_SESSION
+  [PASS] PSMUX_SERVER_MODE in a pane is the launching shell's value (shared)
+  [PASS] a window made over TCP without -c starts in B's own directory
+  [PASS] send-keys reached C:1 and capture-pane shows it
+  [PASS] C:1 shows none of the other sessions' output
+  [PASS] a pane of C gets ITS PSMUX_TARGET_SESSION
+  [PASS] PSMUX_SERVER_MODE in a pane is the launching shell's value (shared)
+  [PASS] a window made over TCP without -c starts in C's own directory
+
+--- Part 4: server wide and session scoped options ---
+  [PASS] set -g -t A @g1 fromA
+  [PASS] set -g reaches every session (tmux global table)
+  [PASS] set -g status-left is server wide
+  [PASS] a session option is set on B
+  [PASS] and stays out of A
+  [PASS] setenv -g reaches every session
+  [PASS] a session created later sees the earlier set -g
+  [PASS] D joined the same process
+
+--- Part 5: unknown and unsupported commands, per session shape ---
+  [PASS] a per session server for comparison
+      per-session: OK\nERROR: unknown command: bogus\n   shared: OK\nERROR: unknown command: bogus\n
+  [PASS] per session reply to an unknown command in a list
+  [PASS] shared reply is byte for byte the same
+  [PASS] a command step 2 does not run gets the same shape
+  [PASS] also behind a TARGET line
+  [PASS] CLI: an unknown command exits the same in both modes (1)
+  [PASS] CLI: a list naming an unknown command exits the same in both modes (1 / 1)
+  [PASS] the server still answers after the refusals
+
+--- Part 5b: save-buffer and show-buffer answer as a per session server does (#896) ---
+  [PASS] no buffer, save-buffer plain: the same exit, file bytes and output (0)
+  [PASS] no buffer, save-buffer nosuch: the same exit, file bytes and output (1)
+  [PASS] no buffer, save-buffer append: the same exit, file bytes and output (0)
+  [PASS] shared: a missing -b name keeps the file and exits 1
+  [PASS] P shows its marker
+  [PASS] capture-pane -t P fills a buffer
+  [PASS] P save-buffer writes the buffer (exit 0)
+  [PASS] P save-buffer -b buffer0 writes the same bytes
+  [PASS] P save-buffer -a appends the buffer to KEEP
+  [PASS] P save-buffer -b nosuch still keeps the file and exits 1
+  [PASS] P show-buffer prints the buffer
+  [PASS] D shows its marker
+  [PASS] capture-pane -t D fills a buffer
+  [PASS] D save-buffer writes the buffer (exit 0)
+  [PASS] D save-buffer -b buffer0 writes the same bytes
+  [PASS] D save-buffer -a appends the buffer to KEEP
+  [PASS] D save-buffer -b nosuch still keeps the file and exits 1
+  [PASS] D show-buffer prints the buffer
+  [PASS] shared: C does not see D's buffer (an empty file, as a per session server writes)
+
+--- Part 6: a real attached client on each session ---
+  [PASS] a visible client attached to A (pid 39684)
+  [PASS] and not to C
+  [PASS] keys still reach A while attached
+  [PASS] closing the client detaches it from A
+  [PASS] a visible client attached to C (pid 71652)
+  [PASS] and not to A
+  [PASS] keys still reach C while attached
+  [PASS] closing the client detaches it from C
+  [PASS] a persistent client of A gets its first frame
+  [PASS] A's client receives the pushed frame with A's output (no dump-state asked)
+  [PASS] C's client never receives A's frames
+  [PASS] switch-client -t C sends A's client to C
+  [PASS] switch-client -n moves it to the next session
+  [PASS] the server answers at once afterwards (no wait on itself)
+
+--- Part 7: kill-session leaves the others; the last one ends the server ---
+  [PASS] kill-session -t B exits 0
+  [PASS] A, C and D remain
+  [PASS] B's registry files are gone
+  [PASS] the same one process still runs
+  [PASS] C still works after B was killed
+  [PASS] D alone keeps the server up
+  [PASS] the server exits with its last session
+  [PASS] and removes its namespace marker
+  [PASS] no .port file is left
+  [PASS] ls: no server running
+
+--- Part 8: two namespaces side by side, one through the config ---
+  [PASS] config shared: new-session Y1
+  [PASS] config shared: new-session Y2
+  [PASS] config shared: new-session Y3
+  [PASS] each namespace has its own single shared server
+  [PASS] namespace 1 lists only X1, X2
+  [PASS] namespace 2 lists only Y1, Y2, Y3
+  [PASS] a mode chosen by the config is not planted in the panes' environment
+  [PASS] kill-server ends namespace 2's shared server
+  [PASS] and namespace 1's keeps running
+
+--- Part 9: the per session warm standby never serves a shared request ---
+  [PASS] a per session session in a namespace
+  [PASS] its warm standby is up (pid 87164)
+  [PASS] a shared new-session in the same namespace
+  [PASS] the standby is the same process, unclaimed
+  [PASS] SH lives in the shared server, not in the standby
+  [PASS] ls sees both kinds in a mixed namespace
+
+--- Part 10: master's fixes since 0145958f, in shared mode ---
+  [PASS] H and J in one shared server
+  [PASS] set -ga from an after-new-window hook appends once (cc32087b)
+  [PASS] select-window -T on the current window goes to the last window (8c3708bb)
+  [PASS] select-window -T on another window selects it
+  [PASS] select-window -T with no last window is tmux's error
+  [PASS] set -w pane-base-index renumbers that window only (7cd8dc4e)
+  [PASS] and H:0.0 still names a pane
+  [PASS] an OSC 52 write in H reaches H's attached client as clipboard_osc52 (063ca702)
+  [PASS] and never J's client
+  [PASS] the recorder pane is in extended key mode 2
+  [PASS] send-keys C-Space reaches it as CSI 27;5;32~ (e3a0498c)
+  [PASS] kill-server ends that shared server
+
+--- Part 11: job-environ answers with the session's own identity (#895) ---
+  [PASS] A and B in one shared server
+  [PASS] raw job-environ to B ends at EOF, not a read timeout
+  [PASS] the reply to B is OK and one base64 line
+  [PASS] its TMUX is there once and names B's port 52354
+  [PASS] its PSMUX_TARGET_SESSION is there once and names B
+  [PASS] its MSYS2_ENV_CONV_EXCL is there once
+  [PASS] it has no PSMUX_SOCKET_PATH
+  [PASS] raw job-environ to A ends at EOF, not a read timeout
+  [PASS] the reply to A is OK and one base64 line
+  [PASS] its TMUX is there once and names A's port 52351
+  [PASS] its PSMUX_TARGET_SESSION is there once and names A
+  [PASS] its MSYS2_ENV_CONV_EXCL is there once
+  [PASS] it has no PSMUX_SOCKET_PATH
+  [PASS] the jobs started from a pane of A finished
+  [PASS] run-shell -t B from A: the job's untargeted new-window is made in B
+  [PASS] and not in A
+  [PASS] run-shell without -t from A still makes it in A
+  [PASS] the job saw B's TMUX
+  [PASS] the job saw B's PSMUX_TARGET_SESSION
+  [PASS] if-shell -t B: the condition saw B's TMUX
+  [PASS] and its branch ran
+  [PASS] kill-server ends that shared server
+
+--- Part 12: a status line #() job runs with its own session's context (#895) ---
+  [PASS] the #() job is set on A only, in one shared server
+      job log (11 lines): C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\job12.log
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+        T=s798q42bee1__A|X=/tmp/psmux-70092/s798q42bee1,52487,0|D=C:\Users\godwin\AppData\Local\Temp\psmux_798s_96786f62\dir12 B
+  [PASS] the job ran at least 10 times within 15 s of the last request
+  [PASS] every job line names A as its target session
+  [PASS] every job line has A's TMUX (port 52487)
+  [FAIL] every job line ran in A's directory 
+  [PASS] kill-server ends that shared server
+  [PASS] the default namespace is untouched ()
+
+=== Results: 160 passed, 1 failed ===

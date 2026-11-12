@@ -1,0 +1,97 @@
+
+=== Issue #798 step 1: PSMUX_SERVER_MODE / server-mode switch ===
+  Binary:   C:\Users\godwin\Documents\workspace\psmux\.claude\worktrees\agent-a09ff7bfd0fbafcdc\bins_review\pr910\psmux.exe
+  Baseline: C:\Users\godwin\Documents\workspace\psmux\.claude\worktrees\agent-a09ff7bfd0fbafcdc\bins_review\master\psmux.exe
+  Root:     C:\Users\godwin\AppData\Local\Temp\psmux_798_2cc1a32d
+
+--- Part 1: the default path is the same with the switch unset, per-session and empty ---
+      newA=0:
+      warm=True
+      procs1=__warm__=1,A=1
+      newB=0:
+      warm2=True
+      neww=0:
+      ls=0:A:2 B:1
+      lsw=0:0:1 1:1
+      disp=0:A
+      procs2=__warm__=1,A=1,B=1
+      reg2=.registry_sweep,next_session_id,<ns>____warm__.key,<ns>____warm__.pid,<ns>____warm__.port,<ns>____warm__.sid,<ns>__A.key,<ns>__A.pid,<ns>__A.port,<ns>__A.sid,<ns>__B.key,<ns>__B.pid,<ns>__B.port,<ns>__B.sid
+      kill=0:
+      ls2=0:A
+      procs3=__warm__=1,A=1
+      reg3=.registry_sweep,next_session_id,<ns>____warm__.key,<ns>____warm__.pid,<ns>____warm__.port,<ns>____warm__.sid,<ns>__A.key,<ns>__A.pid,<ns>__A.port,<ns>__A.sid
+      procs4=
+
+  [PASS] unset: sessions A and B made, A has 2 windows
+  [PASS] unset: one server process per session
+  [PASS] unset: four registry files per session
+  [PASS] PSMUX_SERVER_MODE=per-session gives the identical signature
+  [PASS] PSMUX_SERVER_MODE= (empty) gives the identical signature
+  [PASS] the signature equals the baseline binary's
+  [PASS] job sample mode '<unset>': the job ran and its server ended
+  [PASS] job sample mode 'per-session': the job ran and its server ended
+  [PASS] job sample mode '': the job ran and its server ended
+  [PASS] job sample baseline: the job ran and its server ended
+      payload bytes: 563D66697865643839353B443D433A5C55736572735C676F6477696E5C417070446174615C4C6F63616C5C54656D705C70736D75785F3739385F32636331613332645C6A6F622D6469720D0A
+  [PASS] job sample: the job kept the CLI's environment and ran in the session directory
+  [PASS] job sample mode 'per-session': every raw byte item equals mode '<unset>'s (13 items)
+  [PASS] job sample mode '': every raw byte item equals mode '<unset>'s (13 items)
+  [PASS] job sample baseline: every raw byte item equals mode '<unset>'s (13 items)
+  [PASS] job sample mode '<unset>': the job saw its own session's target and TMUX
+  [PASS] job sample mode 'per-session': the job saw its own session's target and TMUX
+  [PASS] job sample mode '': the job saw its own session's target and TMUX
+  [PASS] job sample baseline: the job saw its own session's target and TMUX
+  [PASS] job samples: the normalised identity lines are the same
+
+--- Part 2: shared never runs the per session server (step 2: it runs the shared one) ---
+  [PASS] new-session under shared exits 0 (step 2)
+  [PASS] case and spaces are ignored (' SHARED ')
+  [PASS] the new alias is gated too
+  [PASS] start-server under shared finds the shared server
+  [PASS] bare -CC (control mode start) under shared exits 1
+  [PASS] the internal per session server process refuses shared
+  [PASS] the namespace has exactly one server, the shared one, and no standby
+  [PASS] no registry file for the refused X or a standby
+  [PASS] ls lists the shared server's sessions
+
+--- Part 3: an unknown value is an error, never a fallback ---
+  [PASS] PSMUX_SERVER_MODE=bogus: exact error at exit 1
+  [PASS] PSMUX_SERVER_MODE=per_session: exact error at exit 1
+  [PASS] PSMUX_SERVER_MODE=on: exact error at exit 1
+  [PASS] start-server with a bad value exits 1
+  [PASS] no server process after the bad values
+
+--- Part 4: the config switch (set -s server-mode) ---
+  [PASS] config server-mode shared: new-session starts the shared server
+  [PASS] PSMUX_SERVER_MODE=per-session outranks the config
+  [PASS] a bad config value names itself and the file
+  [PASS] config server-mode per-session starts quietly
+  [PASS] no config warning about server-mode
+  [PASS] re-sourcing that config is silent
+
+--- Part 5: show and set on a running per session server (CLI, TCP) ---
+  [PASS] per session server up
+  [PASS] show -s server-mode
+  [PASS] show -sv server-mode
+  [PASS] #{server-mode} format
+  [PASS] a shell with shared still sees this server's real mode
+  [PASS] bare show -s listing does not gain a line
+  [PASS] show -g listing does not gain a line
+  [PASS] set -s server-mode per-session is a silent no-op
+  [PASS] set -s server-mode shared on a running server is refused
+  [PASS] set -s server-mode bogus is refused
+  [PASS] mode unchanged after the refused sets
+  [PASS] TCP show-options -sv server-mode answers per-session
+  [PASS] shared new-session leaves the warm standby and the per session servers alone (warm=True)
+  [PASS] A is still per session; C was made by the shared server
+  [PASS] commands that start no server still work under shared (kill-session)
+
+--- Part 6: starts a running server makes for the user honour the switch ---
+  [PASS] per session server up
+  [PASS] hook new-session (execute_command_string) starts nothing under shared (warm=True)
+  [PASS] TCP new-session (server spawn route) answers the error
+  [PASS] TCP new-session -d (CLI route) makes T2 in the shared server
+  [PASS] no per session server was made by the TCP routes (A, and T2 in the shared server)
+  [PASS] with the config back to per session the same hook makes K
+
+=== Results: 60 passed, 0 failed ===

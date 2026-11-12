@@ -87,3 +87,6 @@ release/
 # OMC / Claude tooling state (not part of the project)
 .omc/
 .claude/
+
+# Local review build dirs (cargo --target-dir), never commit
+target_review/
