@@ -514,11 +514,7 @@ pub fn prefer_app_execution_alias(resolved: String) -> String {
 /// probe process.
 pub fn cached_shell() -> Option<&'static str> {
     CACHED_SHELL_PATH.get_or_init(|| {
-        let store_unusable = || {
-            std::env::var_os("SSH_CONNECTION").is_some()
-                || std::env::var_os("SSH_CLIENT").is_some()
-                || in_session_zero()
-        };
+        let store_unusable = store_shell_unusable;
         let which_path = |name: &str| {
             which::which(name).ok().map(|p| p.to_string_lossy().into_owned())
         };
@@ -534,6 +530,16 @@ pub fn cached_shell() -> Option<&'static str> {
             || which_path("cmd"),
         )
     }).as_deref()
+}
+
+/// Can this process NOT start a Store (MSIX) packaged program? True under an
+/// SSH command or in session 0, where MSIX activation fails with
+/// ACCESS_DENIED (see [`cached_shell`]). Shared by everything that picks a
+/// shell, so a pane and a `run-shell` never disagree about it.
+pub fn store_shell_unusable() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some()
+        || std::env::var_os("SSH_CLIENT").is_some()
+        || in_session_zero()
 }
 
 /// Is this path an MSIX/Store packaged executable (app execution alias or
