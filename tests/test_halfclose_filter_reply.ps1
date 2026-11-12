@@ -44,9 +44,12 @@ Write-Info "Namespace $NS, data dir $DATA"
 #   mode 'silent'  : read the request, then close with zero bytes sent.
 #   mode 'ackonly' : the AUTH ack, then a clean close with no reply.
 #   mode 'ackreset': the AUTH ack, then a reset.
+#   mode 'dropfirst': the first connection closes with zero bytes sent, every
+#                    later one is answered like 'filter' without a FIN.
 # ---------------------------------------------------------------------------
 $serverScript = {
     param($listener, $mode, $marker, $log)
+    $count = 0
     while ($true) {
         try { $c = $listener.AcceptTcpClient() } catch { return }
         try {
@@ -68,8 +71,9 @@ $serverScript = {
                     break
                 }
             }
-            [void]$log.Add("mode=$mode fin=$sawFin req=" + ($req -replace "`n", '\n'))
-            if ($mode -eq 'filter' -and -not $sawFin) {
+            $count++
+            [void]$log.Add("mode=$mode n=$count fin=$sawFin req=" + ($req -replace "`n", '\n'))
+            if (($mode -eq 'filter' -and -not $sawFin) -or ($mode -eq 'dropfirst' -and $count -gt 1)) {
                 $out = [Text.Encoding]::UTF8.GetBytes("OK`n$marker`n")
                 [void]$s.Send($out)
                 $s.Shutdown([Net.Sockets.SocketShutdown]::Send)
@@ -190,6 +194,27 @@ foreach ($mode in 'ackonly', 'ackreset') {
     Stop-FakeServer $fs
     Unregister-FakeSession 'ack'
 }
+
+# === Test 2c: a read-only command is asked again once, a mutating one never =
+Write-Host "`n=== Test 2c: one retry on a fresh connection, read-only commands only ===" -ForegroundColor Cyan
+$marker = "hcf-retry-" + (Get-Random)
+$fs = Start-FakeServer 'dropfirst' $marker
+Register-FakeSession 'flaky' $fs.Port
+$r = Invoke-Psmux @('-L', $NS, 'display-message', '-p', '-t', 'flaky', '#{session_name}')
+Write-Info ("display-message: rc={0} out=[{1}] err=[{2}] connections={3}" -f $r.Rc, $r.Out, $r.Err, $fs.Log.Count)
+if ($r.Rc -eq 0 -and $r.Out -eq $marker -and $fs.Log.Count -eq 2) { Write-Pass "a lost display-message -p reply is recovered by one retry" }
+else { Write-Fail "display-message retry: rc=$($r.Rc) out=[$($r.Out)] connections=$($fs.Log.Count)" }
+Stop-FakeServer $fs
+Unregister-FakeSession 'flaky'
+$fs = Start-FakeServer 'dropfirst' $marker
+Register-FakeSession 'flaky' $fs.Port
+$r = Invoke-Psmux @('-L', $NS, 'rename-window', '-t', 'flaky', 'renamed')
+$sends = @($fs.Log | Where-Object { $_ -match 'rename-window' }).Count
+Write-Info ("rename-window: rc={0} err=[{1}] requests carrying it={2}" -f $r.Rc, $r.Err, $sends)
+if ($sends -eq 1) { Write-Pass "a command that changes state is never sent twice" }
+else { Write-Fail "rename-window reached the server $sends times" }
+Stop-FakeServer $fs
+Unregister-FakeSession 'flaky'
 
 # === Test 3: a real server, end to end ======================================
 Write-Host "`n=== Test 3: real server in a private namespace ===" -ForegroundColor Cyan
