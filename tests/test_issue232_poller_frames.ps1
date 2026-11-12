@@ -73,7 +73,7 @@ Write-Host "    frames=$($m.Count) duplicates=$($m.Duplicates)" -ForegroundColor
 if ($m.Duplicates -eq 0) { Pass "no frame repeats the one before it" } else { Fail "$($m.Duplicates) duplicate frames with nobody polling" }
 if ($m.Count -le 4) { Pass "$($m.Count) frames (reply plus status ticks)" } else { Fail "$($m.Count) frames in 7 s at status-interval 5" }
 
-foreach ($cmd in @("list-sessions", "show-options -g", "has-session -t $S")) {
+foreach ($cmd in @("list-sessions", "show-options -g", "has-session -t $S", "list-panes -a -F #{session_name}:#{pane_id}:#{pane_current_command}", "display-message -p -t $S #{cursor_x},#{cursor_y}", "capture-pane -p -e -t $S")) {
     Write-Host "`n[2] '$cmd' once a second, status-interval 5, 7 s" -ForegroundColor Yellow
     $m = Measure-Frames -PollCommand $cmd
     Write-Host "    frames=$($m.Count) duplicates=$($m.Duplicates)" -ForegroundColor DarkGray
@@ -97,6 +97,28 @@ while (-not $seen -and ([DateTime]::Now - $t0).TotalSeconds -lt 4) {
 }
 $tcp.Close()
 if ($seen) { Pass "rename-window pushed a frame with the new name" } else { Fail "rename-window never reached the attached client" }
+
+Write-Host "`n[4] pane output and the status clock still reach the client while a poller runs" -ForegroundColor Yellow
+& $PSMUX -L $NS set -g status-interval 1
+$tcp = [System.Net.Sockets.TcpClient]::new("127.0.0.1", [int]$port)
+$st = $tcp.GetStream(); $w = [System.IO.StreamWriter]::new($st); $r = [System.IO.StreamReader]::new($st)
+$w.Write("AUTH $key`n"); $w.Flush(); $null = $r.ReadLine()
+$w.Write("PERSISTENT`n"); $w.Flush(); $w.Write("dump-state`n"); $w.Flush()
+$tcp.ReceiveTimeout = 1500
+$job = Start-Job -ScriptBlock { param($e, $n, $d, $s) $env:PSMUX_DATA_DIR = $d; $end = (Get-Date).AddSeconds(8); while ((Get-Date) -lt $end) { & $e -L $n list-panes -a 2>&1 | Out-Null; Start-Sleep -Milliseconds 300 } } -ArgumentList $PSMUX, $NS, $DATA, $S
+Start-Sleep -Milliseconds 500
+& $PSMUX -L $NS send-keys -t $S "echo marker232_$NS" Enter
+$clocks = @{}; $echo = $false; $t0 = [DateTime]::Now
+while (([DateTime]::Now - $t0).TotalSeconds -lt 5) {
+    try {
+        $line = $r.ReadLine()
+        if ($line -match "marker232_$NS") { $echo = $true }
+        if ($line -match '"status_right"\s*:\s*"([^"]*)"') { $clocks[$matches[1]] = 1 }
+    } catch {}
+}
+$tcp.Close(); Stop-Job $job; Remove-Job $job -Force
+if ($echo) { Pass "pane output reached the client" } else { Fail "pane output never reached the client" }
+if ($clocks.Count -ge 4) { Pass "status clock ticked: $($clocks.Count) distinct values in 5 s" } else { Fail "status clock gave only $($clocks.Count) distinct values in 5 s at status-interval 1" }
 
 & $PSMUX -L $NS kill-server 2>&1 | Out-Null
 Write-Host "`nPassed: $script:Passed  Failed: $script:Failed"

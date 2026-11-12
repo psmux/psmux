@@ -5555,12 +5555,30 @@ pub(crate) fn frame_owed(last_key: Option<u64>, key: Option<u64>, slot_pending: 
 impl CtrlReq {
     /// A request that only reads state and answers on its channel: it
     /// changes nothing an attached client draws, so it owes no frame (tmux
-    /// redraws nothing for a `list-sessions` or a `show-options`). Requests
-    /// that look like queries but write as they read (list-panes and
-    /// display-message copy pane titles over first) are not listed.
+    /// redraws nothing for a `list-sessions`, a `show-options` or a
+    /// `display-message -p`). list-windows, list-panes and display-message
+    /// copy the panes' OSC titles over before they read; their arms mark the
+    /// frame dirty themselves when that changed a title. A display-message
+    /// that shows its text on the status line is not a query.
     pub(crate) fn is_read_only_query(&self) -> bool {
         matches!(self,
-            CtrlReq::SessionInfo(_)
+            CtrlReq::DisplayMessage(_, _, _, false, ..)
+            | CtrlReq::DisplayMessageById(_, _, _, false, ..)
+            | CtrlReq::ListWindows(_)
+            | CtrlReq::ListWindowsTmux(_)
+            | CtrlReq::ListWindowsFormat(..)
+            | CtrlReq::ListPanes(_)
+            | CtrlReq::ListPanesFormat(..)
+            | CtrlReq::ListAllPanes(_)
+            | CtrlReq::ListAllPanesFormat(..)
+            | CtrlReq::CapturePane(..)
+            | CtrlReq::CapturePaneStyled(..)
+            | CtrlReq::CapturePaneRange(..)
+            // A -t lookup; a failed one marks the frame dirty itself for
+            // the status line error.
+            | CtrlReq::ValidateTarget { .. }
+            | CtrlReq::ResolveTarget { .. }
+            | CtrlReq::SessionInfo(_)
             | CtrlReq::SessionInfoFormat(..)
             | CtrlReq::HasSession(_)
             | CtrlReq::ListTree(_)

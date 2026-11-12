@@ -91,6 +91,30 @@ fn the_dump_state_requester_is_not_pushed_its_own_reply() {
     assert!(!repeated, "and it is still the client's current screen");
 }
 
+/// A frame overwritten in the slot before the writer took it was never
+/// delivered. Going back to that content must send it again, and the key
+/// that counts is always the frame the writer will actually write.
+#[test]
+fn content_overwritten_before_delivery_is_sent_again() {
+    let _guard = super::tests_pr267_backpressure::BP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (poke, _wake) = std::sync::mpsc::channel();
+    let id = u64::MAX - 0x0232_0004;
+    let slot = register_frame_channel(id, poke);
+    let a = frame("issue232-overwrite-a");
+    let b = frame("issue232-overwrite-b");
+    push_frame(&a);
+    slot.lock().unwrap().take(); // client has A
+    push_frame(&b); // B waits, unread
+    push_frame(&a); // back to A before the writer ran
+    let after_revert = holds(&slot, &a);
+    slot.lock().unwrap().take(); // writer sends A
+    push_frame(&b); // B was never delivered: it must go now
+    let b_sent = holds(&slot, &b);
+    deregister_frame_channel(id);
+    assert!(after_revert, "the unread B must be replaced by A, not left on the wire last");
+    assert!(b_sent, "B was overwritten before delivery, so it is owed again");
+}
+
 #[test]
 fn refresh_client_gets_the_same_frame_again() {
     let _guard = super::tests_pr267_backpressure::BP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -115,6 +139,15 @@ fn read_only_queries_owe_no_frame() {
     assert!(CtrlReq::ListKeys(tx.clone()).is_read_only_query());
     let (btx, _brx) = std::sync::mpsc::channel::<bool>();
     assert!(CtrlReq::HasSession(btx).is_read_only_query());
+    // What amesh polls with: list-panes -a -F, display-message -p, capture-pane.
+    assert!(CtrlReq::ListAllPanesFormat(tx.clone(), "#{pane_id}".into()).is_read_only_query());
+    assert!(CtrlReq::DisplayMessage(tx.clone(), "#{cursor_x}".into(), None, false, None, None, DisplayFlags::default())
+        .is_read_only_query());
+    let (vtx, _vrx) = std::sync::mpsc::channel();
+    assert!(CtrlReq::ValidateTarget { target: TempTarget::default(), resp: vtx }.is_read_only_query());
+    // display-message without -p puts its text on the status line.
+    assert!(!CtrlReq::DisplayMessage(tx.clone(), "hi".into(), None, true, None, None, DisplayFlags::default())
+        .is_read_only_query());
     // These change what a client draws.
     assert!(!CtrlReq::RenameWindow("x".into()).is_read_only_query());
     assert!(!CtrlReq::NextWindow.is_read_only_query());
