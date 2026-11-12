@@ -42,6 +42,8 @@ Write-Info "Namespace $NS, data dir $DATA"
 #                    request, the reply is lost: close with zero bytes sent.
 #                    Otherwise answer "OK\n<marker>\n" and close gracefully.
 #   mode 'silent'  : read the request, then close with zero bytes sent.
+#   mode 'ackonly' : the AUTH ack, then a clean close with no reply.
+#   mode 'ackreset': the AUTH ack, then a reset.
 # ---------------------------------------------------------------------------
 $serverScript = {
     param($listener, $mode, $marker, $log)
@@ -74,6 +76,17 @@ $serverScript = {
                 # Drain what is left of the client's input, then close.
                 $s.ReceiveTimeout = 200
                 try { while ($s.Receive($buf) -gt 0) { } } catch { }
+            } elseif ($mode -eq 'ackonly') {
+                # The ack arrives, the reply does not, the close is clean.
+                [void]$s.Send([Text.Encoding]::UTF8.GetBytes("OK`n"))
+                $s.Shutdown([Net.Sockets.SocketShutdown]::Send)
+                $s.ReceiveTimeout = 200
+                try { while ($s.Receive($buf) -gt 0) { } } catch { }
+            } elseif ($mode -eq 'ackreset') {
+                # The ack arrives, then the connection is reset.
+                [void]$s.Send([Text.Encoding]::UTF8.GetBytes("OK`n"))
+                Start-Sleep -Milliseconds 50
+                $s.LingerState = New-Object Net.Sockets.LingerOption($true, 0)
             }
             $c.Close()
         } catch { try { $c.Close() } catch { } }
@@ -153,6 +166,31 @@ foreach ($cmd in @(
 Stop-FakeServer $fs
 Unregister-FakeSession 'mute'
 
+# === Test 2b: the ack arrives but the reply does not ========================
+Write-Host "`n=== Test 2b: ack then no reply (clean close, reset) ===" -ForegroundColor Cyan
+foreach ($mode in 'ackonly', 'ackreset') {
+    $fs = Start-FakeServer $mode ''
+    Register-FakeSession 'ack' $fs.Port
+    foreach ($cmd in @(
+            @('display-message', '-p', '-t', 'ack', '#{session_name}'),
+            @('list-panes', '-t', 'ack', '-F', '#{pane_id}'),
+            @('capture-pane', '-p', '-t', 'ack'))) {
+        $r = Invoke-Psmux (@('-L', $NS) + $cmd)
+        Write-Info ("{0} {1}: rc={2} out=[{3}] err=[{4}]" -f $mode, $cmd[0], $r.Rc, $r.Out, $r.Err)
+        if ($r.Rc -ne 0 -and $r.Err -match 'no re') { Write-Pass "$mode $($cmd[0]): lost reply is an error" }
+        else { Write-Fail "$mode $($cmd[0]): lost reply passed as empty (rc=$($r.Rc))" }
+    }
+    if ($mode -eq 'ackonly') {
+        # A command that succeeds silently must stay silent at exit 0.
+        $r = Invoke-Psmux @('-L', $NS, 'set-option', '-t', 'ack', 'status', 'off')
+        Write-Info ("ackonly set-option: rc={0} out=[{1}] err=[{2}]" -f $r.Rc, $r.Out, $r.Err)
+        if ($r.Rc -eq 0 -and -not $r.Out -and -not $r.Err) { Write-Pass "set-option with an empty reply stays silent at exit 0" }
+        else { Write-Fail "set-option with an empty reply: rc=$($r.Rc) err=[$($r.Err)]" }
+    }
+    Stop-FakeServer $fs
+    Unregister-FakeSession 'ack'
+}
+
 # === Test 3: a real server, end to end ======================================
 Write-Host "`n=== Test 3: real server in a private namespace ===" -ForegroundColor Cyan
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -179,6 +217,20 @@ for ($i = 0; $i -lt 40 -and -not $seen; $i++) {
     if ($r.Out -match $tok) { $seen = $true }
 }
 if ($seen) { Write-Pass "capture-pane shows what send-keys typed" } else { Write-Fail "capture-pane never showed $tok" }
+
+# A launcher's readiness probe: a cmd.exe session, then its pane pid polled.
+$r = Invoke-Psmux @('-L', $NS, 'new-session', '-d', '-s', 'p', '-x', '80', '-y', '10', '--', 'cmd.exe', '/d', '/k')
+$panePid = $null
+$sw = [Diagnostics.Stopwatch]::StartNew()
+while (-not $panePid -and $sw.ElapsedMilliseconds -lt 8000) {
+    $d = Invoke-Psmux @('-L', $NS, 'display-message', '-p', '-t', 'p:', '#{pane_pid}')
+    if ($d.Rc -eq 0 -and $d.Out -match '^\d+$') { $panePid = $d.Out } else { Start-Sleep -Milliseconds 200 }
+}
+if ($r.Rc -eq 0 -and $panePid) { Write-Pass "cmd.exe session answers #{pane_pid} ($panePid) after $($sw.ElapsedMilliseconds) ms" }
+else { Write-Fail "cmd.exe session probe: new-session rc=$($r.Rc), no pane pid in 8 s" }
+$r = Invoke-Psmux @('-L', $NS, 'new-session', '-d', '-P', '-F', '#{session_name}:#{window_index}', '-s', 'job', '-x', '80', '-y', '10', '--', 'cmd.exe', '/d', '/k')
+if ($r.Rc -eq 0 -and $r.Out -eq 'job:0') { Write-Pass "new-session -P -F prints the window it made ($($r.Out))" }
+else { Write-Fail "new-session -P -F rc=$($r.Rc) out=[$($r.Out)] err=[$($r.Err)]" }
 
 # Latency: one-shot replies must not wait on a timer for their EOF.
 $times = foreach ($i in 1..15) {
