@@ -8,6 +8,10 @@ $pass=0; $fail=0
 function P($m){Write-Host "  [PASS] $m" -ForegroundColor Green; $script:pass++}
 function F($m){Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:fail++}
 function I($m){Write-Host "  [INFO] $m" -ForegroundColor Cyan}
+# pwsh Set-Clipboard is a silent no-op while another window holds the clipboard;
+# every seed is verified (clipboard_test_helpers.ps1).
+. (Join-Path $PSScriptRoot "clipboard_test_helpers.ps1")
+function Seed($v){ if(-not (Set-ClipboardVerified $v)){ I "could not seed the clipboard with $v (held by another process)" } }
 
 & $PSMUX kill-session -t $S 2>&1 | Out-Null
 Start-Sleep -Milliseconds 400
@@ -26,7 +30,7 @@ Write-Host "`n=== REGRESSION: internal buffer still wins ===" -ForegroundColor Y
 
 # R1: set-buffer non-empty + paste-buffer -> internal, NOT clipboard
 Clear-Buffers
-Set-Clipboard -Value "CLIP_SHOULD_NOT_APPEAR_R1"
+Seed "CLIP_SHOULD_NOT_APPEAR_R1"
 Start-Sleep -Milliseconds 200
 & $PSMUX set-buffer "INTERNAL_WINS_R1" 2>&1 | Out-Null
 Start-Sleep -Milliseconds 200
@@ -39,7 +43,7 @@ else { F "R1: regression - internal buffer did not win" ; I ("tail: "+(($c -spli
 
 # R2: named buffer paste ignores clipboard
 Clear-Buffers
-Set-Clipboard -Value "CLIP_SHOULD_NOT_APPEAR_R2"
+Seed "CLIP_SHOULD_NOT_APPEAR_R2"
 Start-Sleep -Milliseconds 200
 & $PSMUX set-buffer -b mybuf "NAMED_WINS_R2" 2>&1 | Out-Null
 Start-Sleep -Milliseconds 200
@@ -54,7 +58,7 @@ Write-Host "`n=== FIX: empty buffer -> OS clipboard ===" -ForegroundColor Yellow
 
 # F1: empty buffer + CLI paste-buffer -> clipboard
 Clear-Buffers
-Set-Clipboard -Value "OSCLIP_FIX_F1"
+Seed "OSCLIP_FIX_F1"
 Start-Sleep -Milliseconds 200
 Reset-Pane
 & $PSMUX paste-buffer -t $S 2>&1 | Out-Null
@@ -65,7 +69,7 @@ else { F "F1: clipboard not pasted"; I ("tail: "+(($c -split "`n"|?{$_ -match '\
 
 # F2: empty buffer + prefix+] -> clipboard
 Clear-Buffers
-Set-Clipboard -Value "OSCLIP_FIX_F2"
+Seed "OSCLIP_FIX_F2"
 Start-Sleep -Milliseconds 200
 Reset-Pane
 & "$env:TEMP\psmux_injector.exe" $proc.Id "^b{SLEEP:400}]"
@@ -76,7 +80,7 @@ else { F "F2: prefix+] did not paste clipboard"; I ("tail: "+(($c -split "`n"|?{
 
 # F3: -b naming a non-existent buffer should NOT fall back to clipboard (explicit request)
 Clear-Buffers
-Set-Clipboard -Value "CLIP_SHOULD_NOT_APPEAR_F3"
+Seed "CLIP_SHOULD_NOT_APPEAR_F3"
 Start-Sleep -Milliseconds 200
 Reset-Pane
 & $PSMUX paste-buffer -b nonexistent_buf -t $S 2>&1 | Out-Null
