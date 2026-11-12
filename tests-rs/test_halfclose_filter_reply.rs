@@ -120,9 +120,6 @@ fn reply_required_only_for_commands_that_always_print() {
         "list-sessions\n",
         "list-windows -a -F \"#{window_id}\"\n",
         "list-panes -F \"#{pane_id}\"\n",
-        "list-keys\n",
-        "capture-pane -p\n",
-        "new-session -d -P -F \"#{session_name}\" -s x\n",
         "split-window -dP\n",
     ] {
         assert!(reply_required(l), "{l:?} always prints on success");
@@ -133,6 +130,15 @@ fn reply_required_only_for_commands_that_always_print() {
         "list-windows -f \"#{==:#{window_name},x}\"\n",
         "list-keys -T copy-mode\n",
         "capture-pane\n",
+        // A correct answer can be zero bytes for these (#1034 sweep):
+        // a blank pane's capture, every binding unbound, an empty -F.
+        "capture-pane -p\n",
+        "capture-pane -p -t %1\n",
+        "list-keys\n",
+        "list-commands\n",
+        "new-session -d -P -F \"#{session_name}\" -s x\n",
+        "new-window -dP -F \"#{@nope}\"\n",
+        "break-pane -dP\n",
         "new-session -d -s x\n",
         "send-keys -t main -- -p\n",
         "display-message -p a ; set -g status off\n",
@@ -266,4 +272,23 @@ fn a_read_only_command_is_retried_at_most_once() {
     let got = exchange_with_read_only_retry(port, "k", None, "list-panes\n", Some(Duration::from_secs(2)));
     assert!(got.is_err());
     assert_eq!(server.join().unwrap(), 2);
+}
+
+#[test]
+fn an_empty_but_correct_reply_stays_empty_at_success() {
+    // The server acknowledges, then closes cleanly with nothing more: what a
+    // blank pane's `capture-pane -p` answers. That is a correct empty
+    // result, not a lost reply, and must not become an error (#1034 sweep).
+    for line in ["capture-pane -p -t main\n", "list-keys\n", "new-window -dP -F \"#{@nope}\"\n"] {
+        let (port, server) = serve_once(Peer::DropReplyOnClientFin, "OK\n");
+        let got = exchange_with_read_only_retry(port, "k", None, line, Some(Duration::from_secs(3)));
+        server.join().unwrap();
+        assert_eq!(got.unwrap(), "", "{line:?}: an empty answer is an answer");
+    }
+    // display-message -p of a format that expands to nothing answers "\n"
+    // (tmux prints an empty line), which is not an empty reply either.
+    let (port, server) = serve_once(Peer::DropReplyOnClientFin, "OK\n\n");
+    let got = exchange_with_read_only_retry(port, "k", None, "display-message -p \"#{@nope}\"\n", Some(Duration::from_secs(3)));
+    server.join().unwrap();
+    assert_eq!(got.unwrap(), "\n");
 }

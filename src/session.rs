@@ -3269,14 +3269,10 @@ pub(crate) fn read_only_retryable(line: &str) -> bool {
 /// Whether a successful `line` always prints something, so an empty reply can
 /// only mean the reply was lost on the way (a loopback filter that drops it).
 ///
-/// Deliberately narrow: one command (no `;` list), and only commands whose
-/// success output is never empty in tmux: `display-message -p` (at least a
-/// newline), the unfiltered `list-sessions`, `list-windows`, `list-panes`
-/// (there is always a session, window and pane to list), `list-keys` of all
-/// tables,
-/// `list-commands`, `capture-pane -p` (one line per pane row) and any `-P`
-/// print of what a command created. Everything else, `set-option` above all,
-/// may succeed silently and keeps exiting 0 with no output.
+/// Deliberately narrow: one command (no `;` list), and only commands for
+/// which the server's success reply provably holds at least one byte. A
+/// command whose correct answer can be empty (a blank pane's capture, an
+/// empty format) must keep exiting 0 with no output, so it is not here.
 pub(crate) fn reply_required(line: &str) -> bool {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let Some(&cmd) = tokens.first() else { return false };
@@ -3291,15 +3287,22 @@ pub(crate) fn reply_required(line: &str) -> bool {
         .copied()
         .collect();
     let has = |c: char| flags.iter().any(|f| f[1..].contains(c));
+    // Only what the server provably always answers with at least one byte
+    // (server/connection.rs): display-message -p ends its line with
+    // `writeln!`, so an empty format is "\n" (tmux prints an empty line too);
+    // the three lists go through `write_listing`, which always ends in a
+    // newline; split-window -P through `write_split_reply`, which does too.
+    // NOT here, because a correct answer can be zero bytes: capture-pane -p
+    // (trailing blank rows are trimmed, so a blank pane prints nothing),
+    // list-keys (a key filter, or every binding unbound), list-commands (an
+    // empty -F expansion writes nothing), and new-window, break-pane and
+    // new-session -P (a -F that expands to nothing writes nothing). For those
+    // a lost reply still reads as empty: that is the honest limit, the
+    // transport errors and the read-only retry still apply.
     match cmd {
         "display-message" | "display" => has('p'),
         "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp" => !has('f'),
-        // One table (`-T`) may hold no bindings at all.
-        "list-keys" | "lsk" => !has('T'),
-        "list-commands" | "lscm" => true,
-        "capture-pane" | "capturep" => has('p'),
-        "new-session" | "new" | "new-window" | "neww" | "split-window" | "splitw"
-        | "break-pane" | "breakp" => has('P'),
+        "split-window" | "splitw" => has('P'),
         _ => false,
     }
 }
