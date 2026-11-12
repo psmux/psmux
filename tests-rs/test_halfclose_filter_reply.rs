@@ -205,7 +205,7 @@ fn only_single_read_only_commands_are_retried() {
         "new-session -d -P -s x\n",
         "kill-session -t x\n",
         "list-panes ; kill-server\n",
-        "display-message -p a \; set -g status off\n",
+        "display-message -p a \\; set -g status off\n",
     ] {
         assert!(!read_only_retryable(l), "{l:?} must never run twice");
     }

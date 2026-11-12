@@ -1895,14 +1895,14 @@ fn prune_stale_server_markers_with(
             let _ = std::fs::remove_file(servers.join(pid.to_string()));
         }
     }
+    // A marker is named by its pid, so one whose name is among the pids just
+    // parsed is a good one: only the rest are looked at, by name and age, with
+    // no second read of any file (this runs at every CLI start).
     let Ok(entries) = std::fs::read_dir(&servers) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        let parses = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|body| parse_pid_file_contents(&body))
-            .is_some();
-        if parses {
+        let named_pid = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok());
+        if named_pid.map_or(false, |pid| owned_pids.contains_key(&pid)) {
             continue;
         }
         let old_enough = entry
