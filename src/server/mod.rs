@@ -1000,7 +1000,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // A pane's Ctrl+C belongs to the pane, not to whatever launched psmux: drop
     // an inherited "ignore Ctrl+C" bit before a single pane shell, warm spare or
     // child server is spawned from this process (issue #668).
-    crate::platform::clear_inherited_ctrl_c_ignore();
+    // TEMP AB REVERT
     // Install console control handler to prevent termination on client detach
     install_console_ctrl_handler();
 
