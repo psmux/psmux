@@ -2333,6 +2333,7 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
                 app.copy_anchor = Some(p);
                 app.copy_anchor_scroll_offset = app.copy_scroll_offset;
                 app.copy_pos = Some(a);
+                app.copy_needs_redraw = true;
             }
         }
         "clear-selection" => { crate::copy_mode::clear_selection(app); }
@@ -4514,6 +4515,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // after it, which also covers the one that opens or
                     // closes it.
                     let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
+                    let mode_before = !matches!(app.mode, Mode::Passthrough);
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_text(&mut app);
                     // Typing into a direct-scrolled pane shows its live screen
@@ -4528,7 +4530,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         send_text_to_active(&mut app, &s)?;
                     }
-                    if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
+                    // A key taken by a mode (copy mode, a prompt, a chooser, the prefix) has no pane echo to bring its frame, and not every such key asks for one (other-end did not); an unchanged frame is not pushed (#232), so asking costs nothing.
+                    if prompt_before || mode_before || !matches!(app.mode, Mode::Passthrough) || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
                     echo_pending_until = Some(Instant::now());
@@ -4554,6 +4557,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Same as SendText above: a prompt edit owes a frame even
                     // though no cell changed.
                     let prompt_before = crate::copy_mode::copy_prompt_text(&app.mode).is_some();
+                    let mode_before = !matches!(app.mode, Mode::Passthrough);
                     crate::pty_trace::mark("g", 0, k.as_bytes());
                     crate::server::helpers::clear_status_message_on_key(&mut app);
                     crate::input::stamp_interactive_key(&mut app, &k);
@@ -4567,16 +4571,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         send_key_to_active(&mut app, &k)?;
                     }
-                    if prompt_before || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
+                    // A key taken by a mode (copy mode, a prompt, a chooser, the prefix) has no pane echo to bring its frame, and not every such key asks for one (other-end did not); an unchanged frame is not pushed (#232), so asking costs nothing.
+                    if prompt_before || mode_before || !matches!(app.mode, Mode::Passthrough) || crate::copy_mode::copy_prompt_text(&app.mode).is_some() {
                         state_dirty = true;
                     }
                     echo_pending_until = Some(Instant::now());
                 }
                 CtrlReq::SendPaste(s) => {
+                    let mode_before = !matches!(app.mode, Mode::Passthrough);
                     if crate::input::snap_interactive_to_live(&mut app) {
                         state_dirty = true;
                     }
                     send_paste_to_active(&mut app, &s)?;
+                    // A paste a mode takes (a prompt, copy mode) has no pane
+                    // echo to bring its frame, like a key (see SendKey).
+                    if mode_before || !matches!(app.mode, Mode::Passthrough) {
+                        state_dirty = true;
+                    }
                     echo_pending_until = Some(Instant::now());
                 }
                 CtrlReq::PasteBuffer(pb, resp) => {

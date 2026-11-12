@@ -840,12 +840,27 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     // movement and scrolling in copy mode always invalidate the cached
     // frame.  Without this, keyboard navigation in copy mode produces
     // no visible change because the server returns NC (no change).
+    // The cursor and the anchor weigh every coordinate differently: with the
+    // columns added plain, `o` (other-end) swapping the two ends of a one row
+    // selection left the sum unchanged, the poll was answered NC and the
+    // cursor stayed drawn on the old end (disc694 section 7).
     if let Some((r, c)) = app.copy_pos {
-        v = v.wrapping_add((r as u64).wrapping_mul(0x10001).wrapping_add(c as u64));
+        v = v.wrapping_add((r as u64).wrapping_mul(0x10001).wrapping_add((c as u64).wrapping_mul(0x7F4A_7C15)));
     }
     v = v.wrapping_add((app.copy_scroll_offset as u64).wrapping_mul(0x20003));
+    // The selection's shape and the position indicator are drawn too: a
+    // V or a rectangle toggle that keeps both ends must not read as NC.
+    let shape: u64 = match app.copy_selection_mode {
+        crate::types::SelectionMode::Char => 0,
+        crate::types::SelectionMode::Line => 1,
+        crate::types::SelectionMode::Rect => 2,
+    };
+    v = v.wrapping_add(shape.wrapping_mul(0x6A09_E667_F3BC_C909));
+    if app.copy_hide_position {
+        v = v.wrapping_add(0xBB67_AE85_84CA_A73B);
+    }
     if let Some((ar, ac)) = app.copy_anchor {
-        v = v.wrapping_add((ar as u64).wrapping_mul(0x30007).wrapping_add(ac as u64));
+        v = v.wrapping_add((ar as u64).wrapping_mul(0x30007).wrapping_add((ac as u64).wrapping_mul(0x2545_F491_4F6C_DD1D)));
     }
     // Include status_message content so the search prompt refreshes per
     // keystroke while the user is typing in copy-mode search (#335).
@@ -1915,3 +1930,7 @@ mod test_cli_command_prompt_client;
 #[cfg(test)]
 #[path = "../../tests-rs/test_stale_confirm.rs"]
 mod test_stale_confirm;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_disc694_other_end_frame.rs"]
+mod test_disc694_other_end_frame;
