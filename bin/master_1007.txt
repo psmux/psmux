@@ -1,0 +1,34 @@
+
+=== palette queries and colour reply endings ===
+  Binary: C:\Users\godwin\Documents\workspace\psmux-pr1008\bin\pmmaster1007.exe
+  tmux 3.4.0 psmux 3.4.0 (338ecf92 2026-11-07)
+
+[1] the inbox conhost
+  [FAIL] inbox conhost: index 1 asked with BEL expected '\e]4;1;rgb:c5c5/0f0f/1f1f\a', got '\e]4;1;rgb:c5c5/0f0f/1f1f\e\'
+  [PASS] inbox conhost: index 1 asked with ST = '\e]4;1;rgb:c5c5/0f0f/1f1f\e\'
+  [FAIL] inbox conhost: index 20, no entry expected '', got '(no reply file)'
+  [PASS] inbox conhost: index 255, no entry = ''
+  [FAIL] inbox conhost: index 20 set by OSC 4 expected '\e]4;20;rgb:1111/2222/3333\a', got '(no reply file)'
+  [FAIL] inbox conhost: index 255 set by OSC 4 expected '\e]4;255;rgb:abab/cdcd/efef\e\', got ''
+  [FAIL] inbox conhost: low and high in one OSC 4 expected '\e]4;1;rgb:c5c5/0f0f/1f1f\e\\e]4;20;rgb:1111/2222/3333\e\\e]4;2;rgb:1313/a1a1/0e0e\e\', got '\e]4;1;rgb:c5c5/0f0f/1f1f\e\\e]4;2;rgb:1313/a1a1/0e0e\e\'
+  [PASS] inbox conhost: index 20 reset by OSC 104 = ''
+  [PASS] inbox conhost: foreground asked with BEL = ''
+  [PASS] inbox conhost: background asked with ST = ''
+  [FAIL] inbox conhost: index 20 from set -p pane-colours expected '\e]4;20;rgb:4444/5555/6666\a', got ''
+  [FAIL] inbox conhost: index 200 from set -g pane-colours expected '\e]4;200;rgb:1212/3434/5656\e\', got ''
+
+[2] OpenConsole
+  [FAIL] OpenConsole: index 1 asked with BEL expected '\e]4;1;rgb:c5c5/0f0f/1f1f\a', got '\e]4;1;rgb:c5c5/0f0f/1f1f\e\'
+  [PASS] OpenConsole: index 1 asked with ST = '\e]4;1;rgb:c5c5/0f0f/1f1f\e\'
+  [PASS] OpenConsole: index 20, no entry = ''
+  [PASS] OpenConsole: index 255, no entry = ''
+  [FAIL] OpenConsole: index 20 set by OSC 4 expected '\e]4;20;rgb:1111/2222/3333\a', got ''
+  [FAIL] OpenConsole: index 255 set by OSC 4 expected '\e]4;255;rgb:abab/cdcd/efef\e\', got ''
+  [FAIL] OpenConsole: low and high in one OSC 4 expected '\e]4;1;rgb:c5c5/0f0f/1f1f\e\\e]4;20;rgb:1111/2222/3333\e\\e]4;2;rgb:1313/a1a1/0e0e\e\', got '\e]4;1;rgb:c5c5/0f0f/1f1f\e\\e]4;2;rgb:1313/a1a1/0e0e\e\'
+  [PASS] OpenConsole: index 20 reset by OSC 104 = ''
+  [FAIL] OpenConsole: foreground asked with BEL expected '\e]10;rgb:cccc/cccc/cccc\a', got '\e]10;rgb:cccc/cccc/cccc\e\'
+  [PASS] OpenConsole: background asked with ST = '\e]11;rgb:0c0c/0c0c/0c0c\e\'
+  [FAIL] OpenConsole: index 20 from set -p pane-colours expected '\e]4;20;rgb:4444/5555/6666\a', got ''
+  [FAIL] OpenConsole: index 200 from set -g pane-colours expected '\e]4;200;rgb:1212/3434/5656\e\', got ''
+
+=== Results: 10 passed, 14 failed ===

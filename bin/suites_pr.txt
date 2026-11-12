@@ -1,0 +1,5 @@
+
+test_issue685_pane_palette.ps1 exit=0 :: Passed: 13 | Failed: 0
+test_issue980_pane_colours.ps1 exit=0 :: Results: 30 passed, 0 failed
+test_issue941_pane_reply_queue.ps1 exit=5 :: [FAIL] scheme, palette, window report, XTVERSION, probe 1: SCHEME OSC4:1 AREA XTVERSION  (got: ) | [FAIL] scheme, palette, window report, XTVERSION, probe 2: SCHEME OSC4:1 AREA XTVERSION  (got: ) | === Results: 0 passed, 5 failed ===
+test_issue930_pane_reply_order.ps1 exit=0 :: 

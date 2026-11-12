@@ -1,0 +1,34 @@
+
+=== palette queries and colour reply endings ===
+  Binary: C:\Users\godwin\Documents\workspace\psmux-pr1008\bin\pmpr1008.exe
+  tmux 3.4.0 psmux 3.4.0 (304ce8f7 2026-11-08)
+
+[1] the inbox conhost
+  [PASS] inbox conhost: index 1 asked with BEL = '\e]4;1;rgb:c5c5/0f0f/1f1f\a'
+  [PASS] inbox conhost: index 1 asked with ST = '\e]4;1;rgb:c5c5/0f0f/1f1f\e\'
+  [PASS] inbox conhost: index 20, no entry = ''
+  [PASS] inbox conhost: index 255, no entry = ''
+  [PASS] inbox conhost: index 20 set by OSC 4 = '\e]4;20;rgb:1111/2222/3333\a'
+  [PASS] inbox conhost: index 255 set by OSC 4 = '\e]4;255;rgb:abab/cdcd/efef\e\'
+  [PASS] inbox conhost: low and high in one OSC 4 = '\e]4;1;rgb:c5c5/0f0f/1f1f\e\\e]4;20;rgb:1111/2222/3333\e\\e]4;2;rgb:1313/a1a1/0e0e\e\'
+  [PASS] inbox conhost: index 20 reset by OSC 104 = ''
+  [PASS] inbox conhost: foreground asked with BEL = ''
+  [PASS] inbox conhost: background asked with ST = ''
+  [PASS] inbox conhost: index 20 from set -p pane-colours = '\e]4;20;rgb:4444/5555/6666\a'
+  [PASS] inbox conhost: index 200 from set -g pane-colours = '\e]4;200;rgb:1212/3434/5656\e\'
+
+[2] OpenConsole
+  [PASS] OpenConsole: index 1 asked with BEL = '\e]4;1;rgb:c5c5/0f0f/1f1f\a'
+  [PASS] OpenConsole: index 1 asked with ST = '\e]4;1;rgb:c5c5/0f0f/1f1f\e\'
+  [PASS] OpenConsole: index 20, no entry = ''
+  [PASS] OpenConsole: index 255, no entry = ''
+  [PASS] OpenConsole: index 20 set by OSC 4 = '\e]4;20;rgb:1111/2222/3333\a'
+  [PASS] OpenConsole: index 255 set by OSC 4 = '\e]4;255;rgb:abab/cdcd/efef\e\'
+  [PASS] OpenConsole: low and high in one OSC 4 = '\e]4;1;rgb:c5c5/0f0f/1f1f\e\\e]4;20;rgb:1111/2222/3333\e\\e]4;2;rgb:1313/a1a1/0e0e\e\'
+  [PASS] OpenConsole: index 20 reset by OSC 104 = ''
+  [PASS] OpenConsole: foreground asked with BEL = '\e]10;rgb:cccc/cccc/cccc\a'
+  [PASS] OpenConsole: background asked with ST = '\e]11;rgb:0c0c/0c0c/0c0c\e\'
+  [PASS] OpenConsole: index 20 from set -p pane-colours = '\e]4;20;rgb:4444/5555/6666\a'
+  [PASS] OpenConsole: index 200 from set -g pane-colours = '\e]4;200;rgb:1212/3434/5656\e\'
+
+=== Results: 24 passed, 0 failed ===
