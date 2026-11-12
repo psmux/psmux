@@ -53,7 +53,10 @@ function Measure-Frames {
     $tcp.Close()
     if ($job) { Stop-Job $job; Remove-Job $job -Force }
     $dups = 0
-    for ($i = 1; $i -lt $frames.Count; $i++) { if ($frames[$i] -eq $frames[$i - 1]) { $dups++ } }
+    # Frames 0 and 1 are this connection's own dump-state reply and the pushed
+    # copy that always follows it (readers confirm a state by that copy), so
+    # repeats are counted from the third frame on.
+    for ($i = 2; $i -lt $frames.Count; $i++) { if ($frames[$i] -eq $frames[$i - 1]) { $dups++ } }
     [PSCustomObject]@{ Count = $frames.Count; Duplicates = $dups }
 }
 

@@ -75,20 +75,30 @@ fn the_server_slot_skips_a_repeat_of_the_frame_it_just_delivered() {
     assert!(rang, "a bell rides even on an unchanged screen");
 }
 
+/// The requester of a full dump-state reply still gets the pushed copy that
+/// follows it, even when it had that content already: readers such as the
+/// creation timers in test_perf_vs_terminals confirm a state by it. Another
+/// client that already has the content is not sent it again.
 #[test]
-fn the_dump_state_requester_is_not_pushed_its_own_reply() {
+fn the_dump_state_requester_still_gets_the_pushed_copy() {
     let _guard = super::tests_pr267_backpressure::BP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (poke, _wake) = std::sync::mpsc::channel();
+    let (poke2, _wake2) = std::sync::mpsc::channel();
     let id = u64::MAX - 0x0232_0002;
+    let other = u64::MAX - 0x0232_0005;
     let slot = register_frame_channel(id, poke);
+    let slot2 = register_frame_channel(other, poke2);
     let a = frame("issue232-answered-a");
-    push_frame_answered(&a, Some(id));
-    let pushed_back = holds(&slot, &a);
     push_frame(&a);
-    let repeated = holds(&slot, &a);
+    slot.lock().unwrap().take();
+    slot2.lock().unwrap().take();
+    push_frame_answered(&a, Some(id));
+    let requester_got = holds(&slot, &a);
+    let other_got = holds(&slot2, &a);
     deregister_frame_channel(id);
-    assert!(!pushed_back, "the reply already carried this frame");
-    assert!(!repeated, "and it is still the client's current screen");
+    deregister_frame_channel(other);
+    assert!(requester_got, "the requester is pushed the copy of its reply");
+    assert!(!other_got, "a client that already has it is not");
 }
 
 /// A frame overwritten in the slot before the writer took it was never

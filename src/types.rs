@@ -5620,8 +5620,9 @@ pub fn invalidate_delivered_frames() {
     }
 }
 
-/// [`push_frame`] for a frame that was also the dump-state reply to the
-/// client `answered`: that client is not sent it a second time.
+/// [`push_frame`] for a frame that was also the full dump-state reply to the
+/// client `answered`: that client is pushed it regardless of what it had
+/// (see the comment inside), the others only if it is new to them.
 pub fn push_frame_answered(frame: &str, answered: Option<u64>) {
     let key = frame_key(frame);
     if let Ok(mut slots) = FRAME_PUSH_SLOTS.lock() {
@@ -5629,12 +5630,16 @@ pub fn push_frame_answered(frame: &str, answered: Option<u64>) {
             let FrameReceiver { client_id, slot, poke, last_key } = r;
             match slot.lock() {
                 Ok(mut s) => {
-                    if Some(*client_id) == answered && s.is_none() {
-                        // The reply carried this frame (one shots included).
-                        *last_key = key;
-                        return true;
-                    }
-                    if !frame_owed(*last_key, key, s.is_some()) {
+                    // The client whose dump-state this answers is pushed the
+                    // frame as well, always: readers confirm a state by the
+                    // pushed copy that follows the reply (the creation timers
+                    // in test_perf_vs_terminals wait for two matching frames
+                    // and nudge with dump-state in between), as they always
+                    // got it. A full reply is built only when something
+                    // changed or the client has never had one, so this is one
+                    // copy per real change, not one per poll.
+                    let requester = Some(*client_id) == answered;
+                    if !requester && !frame_owed(*last_key, key, s.is_some()) {
                         return true;
                     }
                     *last_key = key;
