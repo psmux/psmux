@@ -376,6 +376,14 @@ class KeyLat
         }
         else { var i0 = Info(); x = i0.dwCursorPosition.X; y = i0.dwCursorPosition.Y; }
 
+        // Start from a genuinely empty line. PSReadLine's Escape clears whatever
+        // is being edited; without this the watcher can match text left over
+        // from the previous run (or, worse, an inline history prediction that
+        // fills the WHOLE line from the first keypress) and report every
+        // character as having appeared before it was typed.
+        InjectVk(0x1B, (char)0x1B);
+        Thread.Sleep(250);
+
         int n = text.Length;
         gAppear = new double[n];
         for (int i = 0; i < n; i++) gAppear[i] = -1;
@@ -384,6 +392,18 @@ class KeyLat
         var inject = new double[n];
         var sw = Stopwatch.StartNew();
         var buf = new char[n + 8];
+
+        // Refuse to measure a line that already reads back as the text we are
+        // about to type: every latency would be negative and the run would look
+        // impossibly fast rather than broken.
+        {
+            string pre = ReadRun(x, y, n, buf);
+            if (pre.Length > 0 && pre[0] == text[0])
+            {
+                Log.Add("PREMATCHED " + label + " row already starts with the target text, aborting");
+                return 6;
+            }
+        }
 
         var watcher = new Thread(() =>
         {

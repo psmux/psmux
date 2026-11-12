@@ -53,6 +53,15 @@ $NS = "keylat$PID"
 $script:Results = @()
 $script:Procs = @()
 
+# PSReadLine's inline history prediction fills the whole line from the first
+# keypress once a sentence has been typed before, which makes every character
+# after the first "appear" at the same instant. Every pwsh in this benchmark,
+# psmux-hosted and bare alike, starts with prediction off so the two sides are
+# measuring the same thing.
+$PwshArgs = @("-NoLogo", "-NoProfile", "-NoExit", "-Command",
+              "Set-PSReadLineOption -PredictionSource None")
+$PwshCmd = "pwsh -NoLogo -NoProfile -NoExit -Command `"Set-PSReadLineOption -PredictionSource None`""
+
 function Stop-Bench {
     & $Psmux -L $NS kill-server 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
@@ -134,12 +143,12 @@ Stop-Bench
 # ---------------------------------------------------------------- core
 if (& $want "core") {
     Section "CORE single keystroke at an idle pwsh prompt"
-    $p = Start-PsmuxClient "core" "pwsh -NoLogo -NoProfile"
+    $p = Start-PsmuxClient "core" $PwshCmd
     Invoke-KeyLat $p.Id "psmux_pwsh" @("--mode","pollcost") | Out-Null
     Invoke-KeyLat $p.Id "psmux_pwsh" @("--mode","single","--n","$N","--warmup","5","--gap","120")
     Stop-Bench
 
-    $b = Start-Bare "pwsh" @("-NoLogo","-NoProfile")
+    $b = Start-Bare "pwsh" $PwshArgs
     Invoke-KeyLat $b.Id "bare_pwsh" @("--mode","single","--n","$N","--warmup","5","--gap","120")
     Stop-Bench
 
@@ -157,7 +166,7 @@ if (& $want "core") {
 if (& $want "typing") {
     $para = "the quick brown fox jumps over the lazy dog while packing"
     Section "SUSTAINED typing, human speed 10 cps"
-    $p = Start-PsmuxClient "type" "pwsh -NoLogo -NoProfile"
+    $p = Start-PsmuxClient "type" $PwshCmd
     Invoke-KeyLat $p.Id "psmux_type_10cps" @("--mode","type","--cps","10","--text",$para)
     Start-Sleep -Milliseconds 800
     Invoke-KeyLat $p.Id "psmux_type_30cps" @("--mode","type","--cps","30","--text",$para)
@@ -165,7 +174,7 @@ if (& $want "typing") {
     Invoke-KeyLat $p.Id "psmux_type_burst100" @("--mode","type","--cps","100","--text",$para)
     Stop-Bench
 
-    $b = Start-Bare "pwsh" @("-NoLogo","-NoProfile")
+    $b = Start-Bare "pwsh" $PwshArgs
     Invoke-KeyLat $b.Id "bare_type_10cps" @("--mode","type","--cps","10","--text",$para)
     Start-Sleep -Milliseconds 800
     Invoke-KeyLat $b.Id "bare_type_30cps" @("--mode","type","--cps","30","--text",$para)
@@ -176,23 +185,54 @@ if (& $want "typing") {
 
 # ---------------------------------------------------------------- load
 if (& $want "load") {
-    Section "UNDER LOAD, same pane producing heavy output"
-    $p = Start-PsmuxClient "load1" "$EchoChild max 70"
-    Invoke-KeyLat $p.Id "psmux_echo_sameload" @("--mode","single","--n","$N","--warmup","5","--gap","120","--oracle","cell:0,0","--noerase")
-    Stop-Bench
+    # 2000 lines/sec of 70 column output is a build log or a big cat: heavy, but
+    # a rate a real program actually produces. "max" is the pathological case,
+    # an unthrottled writer saturating the pipe, kept because that is where
+    # multiplexers usually fall over.
+    foreach ($rate in @("2000", "max")) {
+        Section "UNDER LOAD, same pane producing output at rate=$rate"
+        $p = Start-PsmuxClient "load$rate" "$EchoChild $rate 70"
+        Invoke-KeyLat $p.Id "psmux_echo_load_$rate" @("--mode","single","--n","$N","--warmup","5","--gap","120","--oracle","cell:0,0","--noerase")
+        Stop-Bench
 
-    $b = Start-Bare $EchoChild @("max","70")
-    Invoke-KeyLat $b.Id "bare_echo_sameload" @("--mode","single","--n","$N","--warmup","5","--gap","120","--oracle","cell:0,0","--noerase")
-    Stop-Bench
+        $b = Start-Bare $EchoChild @($rate,"70")
+        Invoke-KeyLat $b.Id "bare_echo_load_$rate" @("--mode","single","--n","$N","--warmup","5","--gap","120","--oracle","cell:0,0","--noerase")
+        Stop-Bench
+    }
 
     Section "UNDER LOAD, sibling pane producing heavy output"
-    $p = Start-PsmuxClient "load2" "pwsh -NoLogo -NoProfile"
-    & $Psmux -L $NS split-window -t "load2" -d "$EchoChild max 70" 2>&1 | Out-Null
+    $p = Start-PsmuxClient "load2" $PwshCmd
+    & $Psmux -L $NS split-window -t "load2" -d "$EchoChild 2000 70" 2>&1 | Out-Null
     Start-Sleep -Seconds 2
     Invoke-KeyLat $p.Id "psmux_pwsh_siblingload" @("--mode","single","--n","$N","--warmup","5","--gap","120")
     $para2 = "typing while the other pane floods"
     Invoke-KeyLat $p.Id "psmux_type10_siblingload" @("--mode","type","--cps","10","--text",$para2)
     Stop-Bench
+}
+
+# ---------------------------------------------------------------- wsl
+# Real tmux, for context. tmux runs inside WSL but draws into a Windows console
+# window, so the same injector and the same oracle work on it unchanged: key
+# record into that console, watch that console's cells for the echo. Paired
+# with a bare WSL bash in the same kind of window, which is tmux's own baseline
+# the way a bare conhost pwsh is psmux's.
+if (& $want "wsl") {
+    Section "BASELINE real tmux inside WSL"
+    $wsl = Get-Command wsl.exe -EA SilentlyContinue
+    if (-not $wsl) { Write-Host "  wsl.exe not found, skipping" -ForegroundColor Yellow }
+    else {
+        $hasTmux = (& wsl.exe -e sh -c "command -v tmux >/dev/null && echo yes" 2>$null) -match "yes"
+        $b = Start-Bare $wsl.Source @("-e","bash","--norc","-i")
+        Start-Sleep -Seconds 2
+        Invoke-KeyLat $b.Id "wsl_bare_bash" @("--mode","single","--n","$N","--warmup","5","--gap","120","--noerase")
+        Stop-Bench
+        if ($hasTmux) {
+            $b = Start-Bare $wsl.Source @("-e","tmux","-f","/dev/null","new-session","bash --norc -i")
+            Start-Sleep -Seconds 3
+            Invoke-KeyLat $b.Id "wsl_tmux_bash" @("--mode","single","--n","$N","--warmup","5","--gap","120","--noerase")
+            Stop-Bench
+        } else { Write-Host "  tmux not installed in WSL, skipping" -ForegroundColor Yellow }
+    }
 }
 
 # ---------------------------------------------------------------- baselines
@@ -201,7 +241,7 @@ if (& $want "baselines") {
     $before = @(Get-Process pwsh -EA SilentlyContinue | Select-Object -ExpandProperty Id)
     $wt = Get-Command wt.exe -EA SilentlyContinue
     if ($wt) {
-        Start-Process -FilePath $wt.Source -ArgumentList @("new-tab","--","pwsh","-NoLogo","-NoProfile") | Out-Null
+        Start-Process -FilePath $wt.Source -ArgumentList (@("new-tab","--","pwsh") + $PwshArgs) | Out-Null
         Start-Sleep -Seconds 6
         $after = @(Get-Process pwsh -EA SilentlyContinue | Select-Object -ExpandProperty Id)
         $new = $after | Where-Object { $before -notcontains $_ }
@@ -230,8 +270,10 @@ if (& $want "tui") {
 
         $b = Start-Bare "nvim" @("-u","NONE","-n")
         Start-Sleep -Seconds 1
-        $ins = Join-Path $OutDir "ins.txt"
-        Invoke-KeyLat $b.Id "bare_nvim_insert" @("--mode","single","--n","3","--warmup","0","--gap","200","--noerase") | Out-Null
+        # 'i' first: keylat only types letters, and outside insert mode they are
+        # nvim commands rather than text.
+        & $KeyLat --pid $b.Id --mode single --n 1 --warmup 0 --gap 200 --noerase --label ins --out (Join-Path $OutDir "ins.txt") | Out-Null
+        Start-Sleep -Milliseconds 400
         Invoke-KeyLat $b.Id "bare_nvim_insert" @("--mode","single","--n","$N","--warmup","5","--gap","120","--noerase")
         Stop-Bench
     } else { Write-Host "  nvim not found, skipping" -ForegroundColor Yellow }

@@ -66,6 +66,11 @@ class EchoLoadChild
 
         Out = Console.OpenStandardOutput();
         Emit("\x1b[2J\x1b[H");
+        // Freeze row 1 by putting the scrolling region BELOW it. Without this
+        // the filler scrolls the echo cell off the top faster than any oracle
+        // can read it, and the "typing while the pane floods" scenario measures
+        // nothing at all.
+        Emit("\x1b[2;200r\x1b[2;1H");
         Emit("ECHOCHILD READY rate=" + (maxRate ? "max" : rate.ToString()) + "\r\n");
 
         if (maxRate || rate > 0)
@@ -105,8 +110,9 @@ class EchoLoadChild
                 byte b = buf[i];
                 if (b == 3 || b == 4) return 0;
                 if (b < 32) continue;
-                // Save cursor, park the echo at row 1 col 1, restore. The oracle
-                // watches that one cell, so a scrolling pane cannot move it.
+                // Save cursor, park the echo at row 1 col 1, restore. Row 1 is
+                // outside the scrolling region set at startup, so the oracle's
+                // cell survives however fast the rest of the pane scrolls.
                 sb.Append("\x1b7\x1b[1;1H").Append((char)b).Append("\x1b8");
             }
             if (sb.Length > 0) Emit(sb.ToString());
