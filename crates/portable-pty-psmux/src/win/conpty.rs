@@ -129,6 +129,20 @@ struct Inner {
 /// an escape sequence that is still being written.
 pub const CYGWIN_RESIZE_PRIME: &[u8] = b"\x1b[16;42;0;1;16;1_\x1b[16;42;0;0;16;1_";
 
+/// Whether the prime does its job on this Windows: build 22000 (Windows 11)
+/// or later.
+///
+/// Measured on Windows 10 19045 (desktop-87gbu41), bare ConPTY, Git bash on
+/// MSYS 3.6.3 and on MSYS 3.6.7: the first key after a resize is lost there
+/// too (6/15), and the Shift press does not prevent it (6/20, 7/20 with
+/// psmux's ConPTY flags; psmux with OpenConsole as the host: 5/20 against
+/// 6/20 without the prime).  It is harmless there (no stray text in 80 runs
+/// and 20 prompt line checks) but useless, so it is not sent.  On Windows 11
+/// 26300 it takes the loss from 8/20 to 0/20.
+fn resize_prime_helps() -> bool {
+    super::psuedocon::os_build_number().map(|b| b >= 22000).unwrap_or(false)
+}
+
 /// Whether `program` runs on the Cygwin console runtime: its directory holds
 /// msys-2.0.dll or cygwin1.dll, or it is one of Git for Windows' `bin\`
 /// launchers whose real program sits in `..\usr\bin` beside msys-2.0.dll.
@@ -239,7 +253,7 @@ impl SlavePty for ConPtySlavePty {
             .map(|p| is_cygwin_runtime_program(p))
             .unwrap_or(false);
         let spawned = spawn_in(&mut inner, cmd);
-        inner.cygwin_child = cygwin && spawned.is_ok();
+        inner.cygwin_child = cygwin && spawned.is_ok() && resize_prime_helps();
         spawned
     }
 }

@@ -34,6 +34,13 @@ if (-not (Test-Path $gitBash)) {
     exit 0
 }
 
+# Before Windows 11 the console host gives no record psmux can send that
+# absorbs the loss, so psmux sends nothing there and the loss remains.
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    Write-Host "  [SKIP] Windows build $([Environment]::OSVersion.Version.Build): the first key after a resize is still lost by the Cygwin runtime here (known; no record psmux can send prevents it on this build)" -ForegroundColor DarkYellow
+    exit 0
+}
+
 function Wait-Prompt($ns, $target) {
     for ($i = 0; $i -lt 150; $i++) {
         if ((& $PSMUX -L $ns capture-pane -t $target -p 2>&1 | Out-String) -match '\$\s*$') { return $true }
