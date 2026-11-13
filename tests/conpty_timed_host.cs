@@ -38,6 +38,7 @@ class ConptyTimedHost
     static double Now() { long ft; GetSystemTimePreciseAsFileTime(out ft); return (ft - 116444736000000000L) / 10000.0; }
     static byte[] Hex(string h) { var b = new byte[h.Length / 2]; for (int i = 0; i < b.Length; i++) b[i] = Convert.ToByte(h.Substring(i * 2, 2), 16); return b; }
 
+    [DllImport("kernel32.dll")] static extern bool SetStdHandle(int n, IntPtr h);
     static void Main(string[] args)
     {
         timeBeginPeriod(1);
@@ -53,6 +54,10 @@ class ConptyTimedHost
         IntPtr al = Marshal.AllocHGlobal(ls); InitializeProcThreadAttributeList(al, 1, 0, ref ls);
         UpdateProcThreadAttribute(al, 0, (IntPtr)0x00020016, pc, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero);
         var si = new STARTUPINFOEX(); si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX)); si.lpAttributeList = al;
+        // Bind fresh standard handles to ConPTY when the runner redirects I/O.
+        SetStdHandle(-10, IntPtr.Zero);
+        SetStdHandle(-11, IntPtr.Zero);
+        SetStdHandle(-12, IntPtr.Zero);
         PROCESS_INFORMATION pi;
         if (!CreateProcess(null, cmdline, IntPtr.Zero, IntPtr.Zero, false, 0x00080000, IntPtr.Zero, null, ref si, out pi))
         { File.WriteAllText(log, "CreateProcess failed " + Marshal.GetLastWin32Error()); Environment.Exit(2); }
