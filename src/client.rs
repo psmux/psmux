@@ -12131,6 +12131,10 @@ pub(crate) fn input_poll_ms(
 mod test_keystroke_echo_window;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_pr1046_clock_overlay_clears_pane.rs"]
+mod test_pr1046_clock_overlay_clears_pane;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_zoom_cursor_rect.rs"]
 mod test_zoom_cursor_rect;
 
