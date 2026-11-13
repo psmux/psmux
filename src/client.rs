@@ -1814,14 +1814,27 @@ pub fn render_clock_overlay(
     let time_str = now.format("%H:%M:%S").to_string();
     let total_w: u16 = time_str.chars().map(|c| if c == ':' { 2 } else { 4 }).sum::<u16>() - 1;
     let total_h: u16 = 5;
-    if area.width < total_w || area.height < total_h { return; }
+    // Clock mode owns the whole pane, as in tmux: `window_clock_draw_screen`
+    // clears the screen before drawing, so none of the pane's own content
+    // (its prompt, its output) shows around the digits.
+    f.render_widget(Clear, area);
+    let fill_style = window_content_fill_style(window_style);
+    f.render_widget(Block::default().style(fill_style), area);
+    let glyph_style = fill_style.fg(colour);
+    if area.width < total_w || area.height < total_h {
+        // Too small for the big digits: tmux falls back to the plain time,
+        // centred, when it fits at all.
+        let w = time_str.len() as u16;
+        if area.width >= w && area.height >= 1 {
+            let x = area.x + (area.width - w) / 2;
+            let y = area.y + area.height / 2;
+            let s = Span::styled(time_str, glyph_style);
+            f.render_widget(Paragraph::new(Line::from(s)), Rect::new(x, y, w, 1));
+        }
+        return;
+    }
     let start_x = area.x + (area.width.saturating_sub(total_w)) / 2;
     let start_y = area.y + (area.height.saturating_sub(total_h)) / 2;
-    let clock_area = Rect::new(start_x.saturating_sub(1), start_y, total_w + 2, total_h);
-    f.render_widget(Clear, clock_area);
-    let fill_style = window_content_fill_style(window_style);
-    f.render_widget(Block::default().style(fill_style), clock_area);
-    let glyph_style = fill_style.fg(colour);
     for row in 0..5u16 {
         let mut x = start_x;
         for ch in time_str.chars() {
@@ -12145,6 +12158,10 @@ pub(crate) fn input_poll_ms(
 #[cfg(test)]
 #[path = "../tests-rs/test_keystroke_echo_window.rs"]
 mod test_keystroke_echo_window;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr1046_clock_overlay_clears_pane.rs"]
+mod test_pr1046_clock_overlay_clears_pane;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_cursor_rect.rs"]
