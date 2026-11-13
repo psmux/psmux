@@ -158,7 +158,7 @@ name = "scroll_region"
 path = "tests/scroll_region.rs"
 
 [dependencies.itoa]
-version = "1.0.18"
+version = "1.0.19"
 
 [dependencies.memchr]
 version = "2.8.3"
