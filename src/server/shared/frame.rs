@@ -264,6 +264,8 @@ pub(crate) fn dump_state(
 
 /// The push at the end of a loop iteration (copied), for one session.
 pub(crate) fn push(app: &mut AppState, lp: &mut SessionLoop) -> io::Result<()> {
+    // Unsolicited frames need the same live titles as explicit state queries.
+    helpers::propagate_osc_titles(app);
     if lp.state_dirty {
         crate::copy_mode::tick_auto_refresh(app);
     }
