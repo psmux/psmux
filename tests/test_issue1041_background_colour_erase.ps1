@@ -259,7 +259,16 @@ Write-Host "  $((& $PSMUX -V) -join ' ')"
 
 try {
     Write-Host "`n[1] the inbox conhost" -ForegroundColor Yellow
-    Run-Cases 'inbox conhost'
+    # The Windows 10 inbox conhost (19045) keeps its own model of these
+    # cells: underline and reverse stay on erased cells, IND and NEL at the
+    # bottom scroll in a default line, and reverse reaches psmux as an
+    # explicit background. Its cells match neither tmux nor the newer host,
+    # so the expectations here hold from Windows 11 (build 22000) on.
+    if ([Environment]::OSVersion.Version.Build -lt 22000) {
+        Write-Info "skipped: the inbox conhost before Windows 11 keeps its own attributes on these cells"
+    } else {
+        Run-Cases 'inbox conhost'
+    }
 
     Write-Host "`n[2] OpenConsole" -ForegroundColor Yellow
     if ($ConptyDir -and (Test-Path (Join-Path $ConptyDir 'conpty.dll'))) {
