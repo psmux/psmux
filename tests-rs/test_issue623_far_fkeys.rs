@@ -93,10 +93,24 @@ fn far_with_its_mouse_off_still_gets_ctrl_digit_as_a_record() {
 }
 
 #[test]
-fn shells_and_vt_readers_keep_the_tmux_byte() {
+fn psreadline_reads_key_records_with_echo_still_enabled() {
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    assert_ne!(PWSH_PROMPT & ENABLE_ECHO_INPUT, 0, "precondition: ECHO is set");
+    for mode in [PWSH_PROMPT, PWSH_PROMPT & !ENABLE_ECHO_INPUT] {
+        assert!(
+            mode_reads_key_records(mode),
+            "PSReadLine 0x{mode:04X} needs the Ctrl+1 record, not a bare '1'"
+        );
+    }
+}
+
+#[test]
+fn line_buffered_shells_and_vt_readers_keep_the_tmux_byte() {
     assert!(!mode_reads_key_records(INHERITED_DEFAULT));
-    assert!(!mode_reads_key_records(PWSH_PROMPT));
     assert!(!mode_reads_key_records(NODE_RAW));
+    // ECHO alone must not exclude a key reader; LINE or VT input still must.
+    assert!(!mode_reads_key_records(PWSH_PROMPT | 0x0002));
+    assert!(!mode_reads_key_records(PWSH_PROMPT | 0x0200));
 }
 
 #[test]

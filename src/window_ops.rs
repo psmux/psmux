@@ -532,10 +532,11 @@ fn detect_vt_bridge(pane: &mut Pane) -> bool {
 
 /// `ENABLE_MOUSE_INPUT` — the console can hand the child MOUSE_EVENT records.
 pub(crate) const ENABLE_MOUSE_INPUT: u32 = 0x0010;
-/// `ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT` — the cooked-input pair.  A console
-/// still carrying either of these is line buffered and echoing, which no
-/// application that reads `INPUT_RECORD`s ever leaves in place.
-pub(crate) const COOKED_INPUT_MODE: u32 = 0x0002 | 0x0004;
+/// `ENABLE_LINE_INPUT` — console byte reads wait for a carriage return.
+const ENABLE_LINE_INPUT: u32 = 0x0002;
+/// `ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT` — the mask for mouse-reader
+/// classification, which requires both bits clear. Key readers may retain ECHO.
+pub(crate) const COOKED_INPUT_MODE: u32 = ENABLE_LINE_INPUT | 0x0004;
 /// `ENABLE_VIRTUAL_TERMINAL_INPUT` — conhost stops parsing the child's input
 /// and passes VT bytes through verbatim, so the child reassembles sequences
 /// itself.  The paste route gate (issue #684) keys on this bit.
@@ -619,10 +620,12 @@ pub(crate) fn detect_record_reader(pane: &mut Pane) -> bool {
 /// Temporary panel whose hotkey that is.  Measured 3 of 3 in psmux against 3
 /// of 3 correct in a native console, where the same Ctrl+1 hid the disk type.
 ///
-/// A child that is neither cooked nor reading VT is reading keys as records,
-/// mouse or not, and a real keyboard would have given it exactly this record.
-/// A cooked shell keeps tmux's `standard_map` byte, and a VT reader (nvim,
-/// node) keeps the VT form.
+/// Treat a child with LINE and VT input clear as a key-record reader, mouse
+/// or not. ECHO may remain set: PSReadLine uses `Console.ReadKey` in `0x01E4`,
+/// and ECHO does not affect the underlying `ReadConsoleInput` calls. Rejecting
+/// that mode loses Ctrl+1's modifier and inserts `1` instead of invoking a binding.
+/// A line-buffered shell keeps tmux's `standard_map` byte, and a VT reader
+/// (nvim, node) keeps the VT form.
 #[cfg(windows)]
 pub(crate) fn detect_key_record_reader(pane: &mut Pane) -> bool {
     console_input_mode(pane).map_or(false, mode_reads_key_records)
@@ -630,7 +633,7 @@ pub(crate) fn detect_key_record_reader(pane: &mut Pane) -> bool {
 
 /// The pure classification behind [`detect_key_record_reader`].
 pub(crate) fn mode_reads_key_records(mode: u32) -> bool {
-    mode & COOKED_INPUT_MODE == 0 && mode & ENABLE_VIRTUAL_TERMINAL_INPUT == 0
+    mode & ENABLE_LINE_INPUT == 0 && mode & ENABLE_VIRTUAL_TERMINAL_INPUT == 0
 }
 
 /// Does this pane's child read its input as a VT byte stream (issue #684)?
