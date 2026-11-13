@@ -191,6 +191,13 @@ if (Test-Path $gitBinBash) {
         if ((& $PSMUX -L $NS capture-pane -t $S -p 2>&1 | Out-String) -match '\$\s*$') { break }
         Start-Sleep -Milliseconds 500
     }
+    # Before Windows 11 psmux cannot stop Git bash losing the first key after
+    # the split's resize (see test_gitbash_split_first_key.ps1), so there a
+    # space then BSpace takes that loss; it is net nothing either way.
+    if ([Environment]::OSVersion.Version.Build -lt 22000) {
+        & $PSMUX -L $NS send-keys -t $S " " BSpace
+        Start-Sleep -Milliseconds 500
+    }
     $marker = "M474T_" + (Get-Random -Maximum 99999)
     & $PSMUX -L $NS send-keys -t $S "echo $marker" Enter
     $cap = ""
