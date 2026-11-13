@@ -1462,13 +1462,15 @@ impl Screen {
 
     /// Ends a sixel the way the pane's console host does: `scroll` line feeds
     /// at the bottom margin to make room, then the text cursor goes to `row`,
-    /// back in the column the image started in.
+    /// back in the column the image started in. The lines scrolled in take
+    /// the current background, as tmux's do (screen-write.c:3120 at tag 3.8).
     pub(crate) fn finish_sixel(&mut self, scroll: u16, row: u16, col: u16) {
         let (_, _, bottom) = self.sixel_text_area();
+        let fill = self.attrs.erased();
         let grid = self.grid_mut();
         if scroll > 0 {
             grid.row_set(bottom);
-            grid.row_inc_scroll(scroll);
+            grid.row_inc_scroll(scroll, fill);
         }
         grid.row_set(row);
         grid.col_set(col);
@@ -2326,7 +2328,8 @@ impl Screen {
                 wrap = true;
             }
         }
-        self.grid_mut().col_wrap(width, wrap);
+        let fill = self.attrs.erased();
+        self.grid_mut().col_wrap(width, wrap, fill);
         let pos = self.grid().pos();
         // The hot path for every printed character: skip the image check
         // entirely when the pane holds no image.
@@ -2436,7 +2439,7 @@ impl Screen {
         // wrap is decided, as tmux does (screen-write.c:2701-2704); what
         // moves past the right margin is lost.
         if self.mode(MODE_INSERT) {
-            self.grid_mut().insert_cells(width);
+            self.grid_mut().insert_cells(width, crate::attrs::Attrs::default());
         }
         // No wrap: the character replaces the last one that fits
         // (screen-write.c:2707 wraps only with MODE_WRAP).
@@ -2543,7 +2546,8 @@ impl Screen {
     }
 
     pub(crate) fn lf(&mut self) {
-        self.grid_mut().row_inc_scroll(1);
+        let fill = self.attrs.erased();
+        self.grid_mut().row_inc_scroll(1, fill);
     }
 
     pub(crate) fn vt(&mut self) {
@@ -2598,7 +2602,8 @@ impl Screen {
 
     // ESC M
     pub(crate) fn ri(&mut self) {
-        self.grid_mut().row_dec_scroll(1);
+        let fill = self.attrs.erased();
+        self.grid_mut().row_dec_scroll(1, fill);
     }
 
     // ESC c
@@ -2666,7 +2671,8 @@ impl Screen {
 
     // CSI @
     pub(crate) fn ich(&mut self, count: u16) {
-        self.grid_mut().insert_cells(count);
+        let fill = self.attrs.erased();
+        self.grid_mut().insert_cells(count, fill);
     }
 
     // CSI A
@@ -2736,7 +2742,7 @@ impl Screen {
         into_history: bool,
         mut unhandled: impl FnMut(&mut Self),
     ) {
-        let attrs = self.attrs;
+        let attrs = self.attrs.erased();
         let pos = self.grid().pos();
         let size = self.grid().size();
         let line = self.grid().absolute_line_of_cursor();
@@ -2794,7 +2800,7 @@ impl Screen {
         mode: u16,
         mut unhandled: impl FnMut(&mut Self),
     ) {
-        let attrs = self.attrs;
+        let attrs = self.attrs.erased();
         let pos = self.grid().pos();
         let cols = self.grid().size().cols;
         let line = self.grid().absolute_line_of_cursor();
@@ -2826,32 +2832,37 @@ impl Screen {
 
     // CSI L
     pub(crate) fn il(&mut self, count: u16) {
-        self.grid_mut().insert_lines(count);
+        let fill = self.attrs.erased();
+        self.grid_mut().insert_lines(count, fill);
     }
 
     // CSI M
     pub(crate) fn dl(&mut self, count: u16) {
-        self.grid_mut().delete_lines(count);
+        let fill = self.attrs.erased();
+        self.grid_mut().delete_lines(count, fill);
     }
 
     // CSI P
     pub(crate) fn dch(&mut self, count: u16) {
-        self.grid_mut().delete_cells(count);
+        let fill = self.attrs.erased();
+        self.grid_mut().delete_cells(count, fill);
     }
 
     // CSI S
     pub(crate) fn su(&mut self, count: u16) {
-        self.grid_mut().scroll_up(count);
+        let fill = self.attrs.erased();
+        self.grid_mut().scroll_up(count, fill);
     }
 
     // CSI T
     pub(crate) fn sd(&mut self, count: u16) {
-        self.grid_mut().scroll_down(count);
+        let fill = self.attrs.erased();
+        self.grid_mut().scroll_down(count, fill);
     }
 
     // CSI X
     pub(crate) fn ech(&mut self, count: u16) {
-        let attrs = self.attrs;
+        let attrs = self.attrs.erased();
         let pos = self.grid().pos();
         let line = self.grid().absolute_line_of_cursor();
         self.grid_mut().erase_cells(count, attrs);
