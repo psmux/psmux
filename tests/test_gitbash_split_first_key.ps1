@@ -17,7 +17,9 @@
 # Usage: pwsh tests\test_gitbash_split_first_key.ps1 [-Rounds 10]
 #        PSMUX_TEST_BIN picks the binary.
 
-param([int]$Rounds = 10)
+#        -CheckPrompt also checks the prompt line is clean after each resize
+#        (it adds 300 ms per check, which hides part of the race it measures).
+param([int]$Rounds = 10, [switch]$CheckPrompt)
 
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
@@ -38,6 +40,17 @@ function Wait-Prompt($ns, $target) {
         Start-Sleep -Milliseconds 100
     }
     return $false
+}
+
+# The prompt line must hold nothing but the prompt: the Shift press psmux
+# writes after a resize must never show up as text (a console host that does
+# not parse win32-input-mode would otherwise echo it).
+function Test-CleanPrompt($ns, $target, $label) {
+    Start-Sleep -Milliseconds 300
+    $lines = @((& $PSMUX -L $ns capture-pane -t $target -p 2>&1 | Out-String) -split "`r?`n" | Where-Object { $_.Trim() })
+    $last = if ($lines.Count) { $lines[-1] } else { "" }
+    if ($last.Trim() -eq '$') { Write-Pass "$label : prompt line clean" }
+    else { Write-Fail "$label : stray text on the prompt line: '$last'" }
 }
 
 # Types "echo <marker>" into $target at once and waits for the output line.
@@ -73,6 +86,7 @@ for ($r = 0; $r -lt $Rounds; $r++) {
         $dir = if ($r % 2 -eq 0) { "-h" } else { "-v" }
         & $PSMUX -L $ns split-window $dir -t t 2>&1 | Out-Null
         if (-not (Wait-Prompt $ns "t")) { Write-Fail "round $r ($dir): split pane never showed a prompt"; continue }
+        if ($CheckPrompt) { Test-CleanPrompt $ns "t" "round $r split $dir" }
         $res = Test-FirstKey $ns "t"
         if ($res.ok) { Write-Pass "round $r split $dir : first key arrived" }
         else {
@@ -82,6 +96,7 @@ for ($r = 0; $r -lt $Rounds; $r++) {
         # The pane that was split is now settled; resize it and type at once.
         & $PSMUX -L $ns resize-pane -t t:0.0 -x 30 2>&1 | Out-Null
         & $PSMUX -L $ns resize-pane -t t:0.0 -y 8 2>&1 | Out-Null
+        if ($CheckPrompt) { Test-CleanPrompt $ns "t:0.0" "round $r resize-pane" }
         $res = Test-FirstKey $ns "t:0.0"
         if ($res.ok) { Write-Pass "round $r resize-pane: first key arrived" }
         else {
