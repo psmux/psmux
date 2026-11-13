@@ -295,6 +295,17 @@ pub(crate) fn cursor_colour_restore() -> bool {
     CURSOR_COLOUR_ASSERTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The cursor colour an attach starts from, as the last one written. The
+/// same client process attaches again after `switch-client` (one server per
+/// session), and its terminal still draws the colour the session it left
+/// set, where tmux's `tty->ccolour` simply outlives the switch. `None` is the
+/// terminal's own; an empty string stands for a colour this client set and
+/// matches no colour a frame carries, so the first frame writes the new
+/// session's colour, or `OSC 112` when it has none.
+pub(crate) fn cursor_colour_at_attach() -> Option<String> {
+    cursor_colour_restore().then(String::new)
+}
+
 /// Record a DECSCUSR code this client just wrote to the terminal.
 pub(crate) fn note_cursor_code(code: u8) {
     LAST_CURSOR_CODE.store(code, std::sync::atomic::Ordering::Relaxed);

@@ -154,6 +154,24 @@ function Run-Cases($route) {
     Check "${route}: and nothing is kept" "$(P show -gv cursor-colour)" ''
     Check "${route}: an empty value is taken" "$(P set -g cursor-colour '')" ''
 
+    Write-Host "  -- switch-client" -ForegroundColor DarkCyan
+    # The client attaches again for another session; tmux's tty->ccolour
+    # outlives the switch, so a session with no colour gets Cr.
+    P new-session -d -s t -x 120 -y 30 | Out-Null
+    Start-Sleep -Milliseconds 2500
+    P set -w -t s cursor-colour '#405060' | Out-Null
+    Start-Sleep -Milliseconds 1200
+    Check "${route}: the colour before switching" (Told) (Tell '40/50/60')
+    P switch-client -t t | Out-Null
+    Start-Sleep -Milliseconds 2500
+    Check "${route}: a session with no colour after switch-client" (Told) $Reset
+    P switch-client -t s | Out-Null
+    Start-Sleep -Milliseconds 2500
+    Check "${route}: the colour again after switching back" (Told) (Tell '40/50/60')
+    P set -wu -t s cursor-colour | Out-Null
+    P kill-session -t t | Out-Null
+    Start-Sleep -Milliseconds 1200
+
     Write-Host "  -- detach" -ForegroundColor DarkCyan
     P set -g cursor-colour '#102030' | Out-Null
     Start-Sleep -Milliseconds 1200

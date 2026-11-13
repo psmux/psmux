@@ -71,3 +71,17 @@ fn the_terminal_is_told_as_tmux_tells_it() {
     assert_eq!(crate::rendering::cursor_colour_set("blue"), None);
     assert_eq!(crate::rendering::CURSOR_COLOUR_RESET, "\x1b]112\x07");
 }
+
+#[test]
+fn a_switch_starts_from_the_colour_the_session_left() {
+    // The client attaches again after switch-client. With a colour of its own
+    // on the terminal, the next session's first frame must write its colour
+    // or the reset, so the start differs from both; with none it is the
+    // terminal's own, and a session with no colour writes nothing.
+    crate::rendering::note_cursor_colour(true);
+    let start = crate::rendering::cursor_colour_at_attach();
+    assert!(start.is_some());
+    assert_ne!(start.as_deref(), Some("#ff0000"));
+    crate::rendering::note_cursor_colour(false);
+    assert_eq!(crate::rendering::cursor_colour_at_attach(), None);
+}

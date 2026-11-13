@@ -4554,7 +4554,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut last_cursor_style: u8 = 0;
     // The cursor colour last written, `None` for the terminal's own, which is
     // where it starts, as tmux's `tty->ccolour` starts at -1 (tty.c:114).
-    let mut last_cursor_colour: Option<String> = None;
+    // After `switch-client` it is the colour the session left behind.
+    let mut last_cursor_colour: Option<String> = crate::rendering::cursor_colour_at_attach();
     // The blink this client last asserted on its own, through DEC private mode
     // 12, for a `cursor-style` that names no shape. `None` is "said nothing",
     // which is where every client starts and what an unset `cursor-blink`
