@@ -82,6 +82,8 @@ impl PtySystem for ConPtySystem {
                 readable: stdout_read,
                 writable: Some(stdin_write),
                 size,
+                cygwin_child: false,
+                resize_hook: None,
             })),
         };
 
@@ -101,6 +103,66 @@ struct Inner {
     readable: FileDescriptor,
     writable: Option<FileDescriptor>,
     size: PtySize,
+    /// The spawned child runs on the Cygwin console runtime (see
+    /// [`CYGWIN_RESIZE_PRIME`]).
+    cygwin_child: bool,
+    /// Called after a resize that changed the size; only ever installed
+    /// for a Cygwin runtime child ([`MasterPty::set_resize_hook`]).
+    resize_hook: Option<Box<dyn FnMut() + Send>>,
+}
+
+/// One Shift key press and release, in the win32-input-mode form conhost
+/// parses on a pseudoconsole's input pipe.  It produces no character.
+///
+/// The Cygwin console runtime (Git for Windows bash, MSYS2, Cygwin) loses the
+/// first input record that wakes its read after the console was resized.
+/// Measured on a bare ConPTY with no psmux in the loop, Git bash on MSYS
+/// 3.6.7: after ResizePseudoConsole the next typed key went missing in 4/15,
+/// 8/20 and 7/15 runs (0/15 without the resize), at any delay from 0 to
+/// 1000 ms, because nothing looks at the new size until input arrives.  With
+/// this Shift press written right after the resize, the Shift is the record
+/// that goes and the typed key survives: 0/20 and 0/20.  A tty delivers
+/// SIGWINCH outside the input queue, so tmux never meets this.
+///
+/// The owner sends it through [`MasterPty::set_resize_hook`], on the same
+/// queue as the pane's other input, so it can never land inside a paste or
+/// an escape sequence that is still being written.
+pub const CYGWIN_RESIZE_PRIME: &[u8] = b"\x1b[16;42;0;1;16;1_\x1b[16;42;0;0;16;1_";
+
+/// Whether the prime does its job on this Windows: build 22000 (Windows 11)
+/// or later.
+///
+/// Measured on Windows 10 19045 (desktop-87gbu41), bare ConPTY, Git bash on
+/// MSYS 3.6.3 and on MSYS 3.6.7: the first key after a resize is lost there
+/// too (6/15), and the Shift press does not prevent it (6/20, 7/20 with
+/// psmux's ConPTY flags; psmux with OpenConsole as the host: 5/20 against
+/// 6/20 without the prime).  It is harmless there (no stray text in 80 runs
+/// and 20 prompt line checks) but useless, so it is not sent.  On Windows 11
+/// 26300 it takes the loss from 8/20 to 0/20.
+fn resize_prime_helps() -> bool {
+    super::psuedocon::os_build_number().map(|b| b >= 22000).unwrap_or(false)
+}
+
+/// Whether `program` runs on the Cygwin console runtime: its directory holds
+/// msys-2.0.dll or cygwin1.dll, or it is one of Git for Windows' `bin\`
+/// launchers whose real program sits in `..\usr\bin` beside msys-2.0.dll.
+/// PowerShell and cmd are answered without touching the disk.
+pub(crate) fn is_cygwin_runtime_program(program: &std::ffi::OsStr) -> bool {
+    let path = std::path::Path::new(program);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(stem.as_str(), "pwsh" | "powershell" | "cmd" | "") {
+        return false;
+    }
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return false;
+    };
+    dir.join("msys-2.0.dll").is_file()
+        || dir.join("cygwin1.dll").is_file()
+        || dir.join("..").join("usr").join("bin").join("msys-2.0.dll").is_file()
 }
 
 impl Inner {
@@ -115,6 +177,11 @@ impl Inner {
             X: num_cols as i16,
             Y: num_rows as i16,
         })?;
+        if self.size.rows != num_rows || self.size.cols != num_cols {
+            if let Some(hook) = self.resize_hook.as_mut() {
+                hook();
+            }
+        }
         self.size = PtySize {
             rows: num_rows,
             cols: num_cols,
@@ -163,6 +230,15 @@ impl MasterPty for ConPtyMasterPty {
     fn conpty_passthrough_mode(&self) -> Option<bool> {
         Some(self.inner.lock().unwrap().con.used_passthrough)
     }
+
+    fn set_resize_hook(&self, hook: Box<dyn FnMut() + Send>) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.cygwin_child {
+            return false;
+        }
+        inner.resize_hook = Some(hook);
+        true
+    }
 }
 
 impl SlavePty for ConPtySlavePty {
@@ -171,6 +247,19 @@ impl SlavePty for ConPtySlavePty {
         let t_lock = super::spawn_trace::now_us();
         let mut inner = self.inner.lock().unwrap();
         super::spawn_trace::step(t_lock, || "spawn.inner_mutex_wait");
+        let cygwin = cmd
+            .get_argv()
+            .first()
+            .map(|p| is_cygwin_runtime_program(p))
+            .unwrap_or(false);
+        let spawned = spawn_in(&mut inner, cmd);
+        inner.cygwin_child = cygwin && spawned.is_ok() && resize_prime_helps();
+        spawned
+    }
+}
+
+fn spawn_in(inner: &mut Inner, cmd: CommandBuilder) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
+    {
         match inner.con.spawn_command(cmd.clone()) {
             Ok(child) => Ok(Box::new(child)),
             Err(e) if inner.con.used_passthrough && is_invalid_parameter(&e) => {
@@ -229,6 +318,87 @@ mod tests {
     use std::process::Command;
 
     const CHILD_ENV: &str = "PORTABLE_PTY_CONPTY_PASSTHROUGH_TEST_CHILD";
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pp_cyg_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn cygwin_runtime_program_is_found_by_its_runtime_dll() {
+        let msys = scratch("msys");
+        std::fs::write(msys.join("msys-2.0.dll"), b"").unwrap();
+        assert!(is_cygwin_runtime_program(msys.join("bash.exe").as_os_str()));
+        assert!(is_cygwin_runtime_program(msys.join("zsh.exe").as_os_str()));
+
+        let cyg = scratch("cyg");
+        std::fs::write(cyg.join("cygwin1.dll"), b"").unwrap();
+        assert!(is_cygwin_runtime_program(cyg.join("fish.exe").as_os_str()));
+
+        // Git for Windows: bin\bash.exe is a launcher, the runtime is in usr\bin.
+        let git = scratch("git");
+        std::fs::create_dir_all(git.join("bin")).unwrap();
+        std::fs::create_dir_all(git.join("usr").join("bin")).unwrap();
+        std::fs::write(git.join("usr").join("bin").join("msys-2.0.dll"), b"").unwrap();
+        assert!(is_cygwin_runtime_program(git.join("bin").join("bash.exe").as_os_str()));
+
+        // PowerShell and cmd never qualify, even beside the runtime dll.
+        assert!(!is_cygwin_runtime_program(msys.join("pwsh.exe").as_os_str()));
+        assert!(!is_cygwin_runtime_program(msys.join("powershell.exe").as_os_str()));
+        assert!(!is_cygwin_runtime_program(msys.join("cmd.exe").as_os_str()));
+        // A program with no runtime dll (WSL's bash.exe), or a bare name.
+        let plain = scratch("plain");
+        assert!(!is_cygwin_runtime_program(plain.join("bash.exe").as_os_str()));
+        assert!(!is_cygwin_runtime_program(std::ffi::OsStr::new("bash")));
+
+        for d in [msys, cyg, git, plain] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    fn master_for_test(cygwin_child: bool) -> ConPtyMasterPty {
+        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let (stdin_read, stdin_write) = create_pipe_with_buffer(4096).unwrap();
+        let (stdout_read, stdout_write) = create_pipe_with_buffer(4096).unwrap();
+        let con = PsuedoCon::new(COORD { X: 80, Y: 24 }, stdin_read, stdout_write).unwrap();
+        ConPtyMasterPty {
+            inner: Arc::new(Mutex::new(Inner {
+                con,
+                readable: stdout_read,
+                writable: Some(stdin_write),
+                size,
+                cygwin_child,
+                resize_hook: None,
+            })),
+        }
+    }
+
+    /// The resize hook is kept only for a Cygwin runtime child, and runs once
+    /// per resize that changes the size; an unchanged size runs nothing.
+    #[test]
+    fn resize_hook_runs_only_for_cygwin_child_and_only_on_a_size_change() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sz = |rows, cols| PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let other = master_for_test(false);
+        assert!(!other.set_resize_hook(Box::new(move || { c.fetch_add(1, Ordering::SeqCst); })));
+        other.resize(sz(24, 40)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a non Cygwin child is never primed");
+
+        let c = calls.clone();
+        let cyg = master_for_test(true);
+        assert!(cyg.set_resize_hook(Box::new(move || { c.fetch_add(1, Ordering::SeqCst); })));
+        cyg.resize(sz(24, 80)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "same size: no prime");
+        cyg.resize(sz(24, 40)).unwrap();
+        cyg.resize(sz(24, 40)).unwrap();
+        cyg.resize(sz(12, 40)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "one prime per size change");
+    }
 
     #[test]
     fn reports_when_passthrough_is_disabled_by_environment() {

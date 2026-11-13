@@ -334,7 +334,15 @@ fn supports_passthrough_mode() -> bool {
         log::info!("ConPTY passthrough mode disabled via PSMUX_NO_PASSTHROUGH");
         return false;
     }
-    let ver = unsafe {
+    // Windows 11 22H2 = build 22621
+    os_build_number().map(|b| b >= 22621).unwrap_or(false)
+}
+
+/// The Windows build number, read with RtlGetVersion (GetVersionEx lies on
+/// Windows 10+ without a compatibility manifest).  Read once per process.
+pub(crate) fn os_build_number() -> Option<u32> {
+    static BUILD: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *BUILD.get_or_init(|| unsafe {
         let mut info: winapi::um::winnt::OSVERSIONINFOW = mem::zeroed();
         info.dwOSVersionInfoSize = mem::size_of::<winapi::um::winnt::OSVERSIONINFOW>() as u32;
         // RtlGetVersion is used because GetVersionEx lies on Windows 10+
@@ -345,21 +353,19 @@ fn supports_passthrough_mode() -> bool {
              'd' as u16, 'l' as u16, 'l' as u16, 0].as_ptr()
         );
         if ntdll.is_null() {
-            return false;
+            return None;
         }
         let func = winapi::um::libloaderapi::GetProcAddress(
             ntdll,
             b"RtlGetVersion\0".as_ptr() as *const i8,
         );
         if func.is_null() {
-            return false;
+            return None;
         }
         let rtl_get_version: RtlGetVersionFn = mem::transmute(func);
         rtl_get_version(&mut info);
-        info
-    };
-    // Windows 11 22H2 = build 22621
-    ver.dwBuildNumber >= 22621
+        Some(info.dwBuildNumber)
+    })
 }
 
 /// The flag set passed to every CreatePseudoConsole call (passthrough is

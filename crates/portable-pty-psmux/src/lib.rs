@@ -111,6 +111,16 @@ pub trait MasterPty: Downcast + Send {
         None
     }
 
+    /// Install `hook`, called right after every resize that changes the
+    /// size, when the spawned child needs input to follow a resize (a ConPTY
+    /// child on the Cygwin console runtime; see `win::conpty`).  Returns
+    /// whether the hook was kept.  The hook should queue the input behind
+    /// whatever the pane already has queued, never write it out of order.
+    /// Call it after spawning.
+    fn set_resize_hook(&self, _hook: Box<dyn FnMut() + Send>) -> bool {
+        false
+    }
+
     /// If applicable to the type of the tty, return the local process id
     /// of the process group or session leader
     #[cfg(unix)]
