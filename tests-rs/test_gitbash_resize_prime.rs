@@ -76,7 +76,14 @@ fn resize_prime_lands_after_a_paste_queued_before_the_resize() {
     hook();
     w.write_all(b"echo after\r").unwrap();
 
-    open.store(true, Ordering::SeqCst);
+    // Open the gate under the writer's lock: the writer checks `open` and
+    // starts waiting while holding it, so a store and notify made without
+    // the lock can fall between its check and its wait and be lost, leaving
+    // it blocked for good (49 of 200 runs before this).
+    {
+        let _writes = state.0.lock();
+        open.store(true, Ordering::SeqCst);
+    }
     state.1.notify_all();
     let mut expect = Vec::new();
     expect.extend_from_slice(b"\x1b[200~");
