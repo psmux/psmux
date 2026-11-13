@@ -8,6 +8,8 @@ pub struct Parser<CB: crate::callbacks::Callbacks = ()> {
     /// reached its final byte (`ESC`, `ESC P`, `ESC P 1;2`), which may still
     /// turn out to be `ESC P tmux;`.
     dcs_may_continue: bool,
+    /// The last call's bytes ended in ESC; see [`Parser::process`].
+    conhost_prev_esc: bool,
 }
 
 impl Parser {
@@ -24,6 +26,7 @@ impl Parser {
             ),
             passthrough: crate::passthrough::Passthrough::default(),
             dcs_may_continue: false,
+            conhost_prev_esc: false,
         }
     }
 }
@@ -49,6 +52,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
             ),
             passthrough: crate::passthrough::Passthrough::default(),
             dcs_may_continue: false,
+            conhost_prev_esc: false,
         }
     }
 
@@ -72,6 +76,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
             screen: crate::perform::WrappedScreen::from_screen(screen, CB::default()),
             passthrough: crate::passthrough::Passthrough::default(),
             dcs_may_continue: false,
+            conhost_prev_esc: false,
         }
     }
 
@@ -94,6 +99,39 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     /// Processes the contents of the given byte string, and updates the
     /// in-memory terminal state.
     pub fn process(&mut self, bytes: &[u8]) {
+        if !self.screen.conhost_c0_cells {
+            self.process_vt(bytes);
+            return;
+        }
+        // The inbox conhost of Windows 10 has no DCS parser: for an
+        // application's `ESC P tmux; ESC ESC ] ... ESC \` it prints `tmux;`
+        // into its buffer and forwards the inner OSC as it cached it, both
+        // escapes included. Two escapes in a row arrive from no other source,
+        // so at the second one the screen learns that the next text conhost
+        // paints may be that body (issue #972, see `arm_conhost_dcs_body`).
+        let mut rest = bytes;
+        let mut prev_esc = self.conhost_prev_esc;
+        loop {
+            let second = if prev_esc && rest.first() == Some(&0x1b) {
+                Some(0)
+            } else {
+                memchr::memmem::find(rest, b"\x1b\x1b").map(|i| i + 1)
+            };
+            let Some(i) = second else { break };
+            if i > 0 {
+                self.process_vt(&rest[..i]);
+            }
+            if !self.passthrough.active() {
+                self.screen.arm_conhost_dcs_body();
+            }
+            rest = &rest[i..];
+            prev_esc = false;
+        }
+        self.process_vt(rest);
+        self.conhost_prev_esc = bytes.last() == Some(&0x1b);
+    }
+
+    fn process_vt(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
         let mut dcs_may_continue =
             std::mem::replace(&mut self.dcs_may_continue, dcs_introducer_open(bytes));
