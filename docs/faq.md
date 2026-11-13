@@ -180,8 +180,8 @@ A: Under `%USERPROFILE%\.psmux\`. Three files are written without you doing anyt
 **Q: `display-message -p`, `list-panes` or `capture-pane -p` print nothing, or fail with "no response from server" or "no reply from server", and `new-session` reports "failed to create session" although `psmux ls` shows the session. Why?**
 A: Something on the machine is filtering psmux's local connections. psmux's commands talk to their server over a TCP connection to `127.0.0.1`, and some ad blockers and security suites can inspect local traffic too. AdGuard for Windows does this when the **Filter localhost** option in its advanced settings is on. Its 8.x network driver then drops some of psmux's replies, while commands that only send something, like `send-keys`, keep working. Fix it in the filtering product with either of these:
 
-- Turn off its localhost filtering (in AdGuard: untick **Filter localhost** in the advanced settings).
-- Exclude `psmux.exe` (and `tmux.exe` and `pmux.exe` if you use those names) from filtering.
+- Exclude `psmux.exe` (and `tmux.exe` and `pmux.exe` if you use those names) from filtering. This keeps localhost filtering on for every other app. In AdGuard 8: Settings, App settings, Advanced, Filtering, turn on **Exclude apps from filtering by their full path** and add the full paths, for example `C:\Users\you\.cargo\bin\psmux.exe`. Measured on AdGuard 8.0.4 with Filter localhost still on: every command, including a `source-file` that waits for a 3 second `run-shell`, then gets its reply.
+- Or turn off its localhost filtering (in AdGuard: untick **Filter localhost** in the advanced settings).
 
 To confirm the cause, pause the product's protection for a minute and run `psmux display-message -p '#{session_name}'` inside a session: it answers at once. psmux itself never prints an empty result for a lost reply. It reports the loss on stderr and exits 1, and it asks again once on a fresh connection for commands that only read (`display-message -p`, `list-*`, `show-*`, `capture-pane -p`, `has-session`).
 
