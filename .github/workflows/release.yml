@@ -92,7 +92,7 @@ jobs:
           echo "Preflight OK: ref $REF_TYPE/$REF_NAME, tag $TAG, Cargo.toml $crate_version, dry_run $DRY_RUN"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
 
       # Same check publish-crates runs, here so a sub crate that needs a
       # version bump is caught before anything is built, signed or released.
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
         with:
           targets: ${{ matrix.target }}
 
@@ -421,7 +421,7 @@ jobs:
         run: find . -type f \( -name "*.zip" -o -name "*-setup.exe" \)
 
       - name: Create Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4, reviewed 2026-11-14
         with:
           tag_name: ${{ inputs.tag }}
           name: ${{ inputs.tag }}
@@ -447,7 +447,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
 
       # A sub crate edited under a version that is already on crates.io makes
       # its publish say "already exists" and the main crate then fails to
