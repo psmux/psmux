@@ -127,7 +127,13 @@ pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     /// `mux;` followed, which stops vte (`terminated`) so the parser can skip
     /// the passthrough body (see `passthrough`). 0 otherwise.
     tmux_prefix: u8,
+    /// How much of a `tmux;` the inbox conhost painted from a DCS it could
+    /// not parse has been skipped, or `None`; see `arm_conhost_dcs_body`.
+    conhost_dcs_body: Option<u8>,
 }
+
+/// What the Windows 10 inbox conhost prints of `ESC P tmux; ESC ...`.
+const CONHOST_DCS_BODY: &[u8] = b"tmux;";
 
 impl WrappedScreen<()> {
     pub fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
@@ -153,6 +159,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             dcs_buf: Vec::new(),
             last_printed: None,
             tmux_prefix: 0,
+            conhost_dcs_body: None,
         }
     }
 
@@ -167,6 +174,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             dcs_buf: Vec::new(),
             last_printed: None,
             tmux_prefix: 0,
+            conhost_dcs_body: None,
         }
     }
 }
@@ -185,10 +193,55 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
         }
         matched
     }
+
+    /// The inbox conhost just forwarded a sequence that began with two
+    /// escapes, which only a tmux passthrough it could not parse produces.
+    ///
+    /// The conhost of Windows 10 (19045) has no DCS parser. For an
+    /// application's `ESC P tmux; ESC ESC ] 11;? BEL ESC \` (Claude Code
+    /// wraps its queries so under TMUX) it ignores `ESC P`, prints `tmux;`
+    /// into its buffer at the cursor, and forwards the inner OSC with both
+    /// escapes. Its next frame then paints the five cells (issue #972).
+    ///
+    /// The application never wrote that text, and tmux drops the whole DCS
+    /// while allow-passthrough is off (input_dcs_dispatch), so when the next
+    /// text is exactly `tmux;` psmux keeps the cells the application drew and
+    /// only moves the cursor past them, the way conhost counted them. Any
+    /// other text spends the mark and is drawn as usual.
+    pub(crate) fn arm_conhost_dcs_body(&mut self) {
+        self.conhost_dcs_body = Some(0);
+    }
+
+    /// Skip `c` if it continues the `tmux;` conhost painted; see
+    /// [`arm_conhost_dcs_body`](Self::arm_conhost_dcs_body).
+    fn skip_conhost_dcs_body(&mut self, c: char) -> bool {
+        let Some(done) = self.conhost_dcs_body.take() else {
+            return false;
+        };
+        let done = usize::from(done);
+        if u32::from(c) == u32::from(CONHOST_DCS_BODY[done]) {
+            self.screen.cuf(1);
+            if done + 1 < CONHOST_DCS_BODY.len() {
+                self.conhost_dcs_body = Some((done + 1) as u8);
+            }
+            return true;
+        }
+        // Not that body after all: draw what was skipped.
+        if done > 0 {
+            self.screen.cub(done as u16);
+            for &b in &CONHOST_DCS_BODY[..done] {
+                self.screen.text(char::from(b));
+            }
+        }
+        false
+    }
 }
 
 impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     fn print(&mut self, c: char) {
+        if self.conhost_dcs_body.is_some() && self.skip_conhost_dcs_body(c) {
+            return;
+        }
         // U+FFFD is a character of one cell, as in tmux, which writes it for
         // a byte that is no UTF-8 (input.c:783-793 at tag 3.8,
         // input_stop_utf8). The console hosts hand psmux the same: a lone
@@ -1403,3 +1456,7 @@ mod test_issue431_sixel_parse;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue972_conhost_c0_cells.rs"]
 mod test_issue972_conhost_c0_cells;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue972_conhost_dcs_body.rs"]
+mod test_issue972_conhost_dcs_body;
