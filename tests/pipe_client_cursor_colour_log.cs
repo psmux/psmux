@@ -5,7 +5,8 @@
 // CSI 18 t with 30 rows by 120 columns, and appends each OSC 12 and OSC 112
 // the client writes to <log> as soon as it is seen, one a line, ESC as \e and
 // BEL as \a. Once the client has exited the log gets a last line, `exit`, so
-// what it wrote on the way out comes before that line.
+// what it wrote on the way out comes before that line. With
+// PSMUX_LOG_CURSOR_STYLE set it also logs each DECSCUSR and ESC [ ? 12 h or l.
 //
 // Compile: csc /nologo /optimize /out:pipe_client_cursor_colour_log.exe pipe_client_cursor_colour_log.cs
 using System;
@@ -29,6 +30,11 @@ class PipeClientCursorColourLog
         var stdout = p.StandardOutput.BaseStream;
         var buf = new byte[65536];
         var pending = "";
+        string pattern = "\x1b\\[18t|\x1b\\](12|112)(;[^\x07\x1b]*)?(\x07|\x1b\\\\)";
+        // With PSMUX_LOG_CURSOR_STYLE set, DECSCUSR (ESC [ n SP q) and the
+        // blink mode (ESC [ ? 12 h or l) are logged too.
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PSMUX_LOG_CURSOR_STYLE")))
+            pattern += "|\x1b\\[[0-6] q|\x1b\\[\\?12[hl]";
         File.WriteAllText(log, "");
         while (true)
         {
@@ -37,7 +43,7 @@ class PipeClientCursorColourLog
             if (n <= 0) break;
             string s = pending + Encoding.UTF8.GetString(buf, 0, n);
             int done = 0;
-            foreach (Match m in Regex.Matches(s, "\x1b\\[18t|\x1b\\](12|112)(;[^\x07\x1b]*)?(\x07|\x1b\\\\)"))
+            foreach (Match m in Regex.Matches(s, pattern))
             {
                 done = m.Index + m.Length;
                 if (m.Value == "\x1b[18t")

@@ -306,6 +306,43 @@ pub(crate) fn cursor_colour_at_attach() -> Option<String> {
     cursor_colour_restore().then(String::new)
 }
 
+/// The DECSCUSR code this client last wrote, 0 when none or the reset.
+///
+/// A run of the client's frame loop starts from it rather than from 0: the
+/// same client process attaches again after `switch-client` (one server per
+/// session), and its terminal still draws the shape the session it left asked
+/// for, where tmux's `tty->cstyle` simply outlives the switch. A session with
+/// no shape then gets the reset, as tmux sends `Se` (`tty_update_cursor`).
+pub(crate) fn last_cursor_code() -> u8 {
+    LAST_CURSOR_CODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The blink this client holds the terminal at through DEC private mode 12,
+/// `None` when it holds none. Like [`last_cursor_code`], it outlives a
+/// `switch-client`.
+pub(crate) fn blink_asserted() -> Option<bool> {
+    match BLINK_ASSERTED.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Let go of a blink this client asserted through mode 12, now that nothing
+/// asks for one: the mode 12 write that puts the terminal back where this
+/// client found it (as DECRQM said at attach, or else the opposite of what was
+/// asserted), `None` when it holds none. tmux likewise takes the blinking off
+/// again when the pane drawn next does not ask for it (`tty_update_cursor`).
+pub(crate) fn blink_release() -> Option<bool> {
+    let asserted = blink_asserted()?;
+    BLINK_ASSERTED.store(0, std::sync::atomic::Ordering::Relaxed);
+    Some(match HOST_BLINK_BEFORE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => !asserted,
+    })
+}
+
 /// Record a DECSCUSR code this client just wrote to the terminal.
 pub(crate) fn note_cursor_code(code: u8) {
     LAST_CURSOR_CODE.store(code, std::sync::atomic::Ordering::Relaxed);

@@ -4551,7 +4551,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // sent. tmux keeps the same latch and the same rule in
     // `tty_update_cursor` (tty.c): for `SCREEN_CURSOR_DEFAULT` it sends `Se`,
     // or `Ss 0`, only `if (tty->cstyle != SCREEN_CURSOR_DEFAULT)`.
-    let mut last_cursor_style: u8 = 0;
+    //
+    // After `switch-client` it is what the session left behind, the shape
+    // the terminal is still drawing, so a session with none gets the reset.
+    let mut last_cursor_style: u8 = crate::rendering::last_cursor_code();
     // The cursor colour last written, `None` for the terminal's own, which is
     // where it starts, as tmux's `tty->ccolour` starts at -1 (tty.c:114).
     // After `switch-client` it is the colour the session left behind.
@@ -4559,8 +4562,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // The blink this client last asserted on its own, through DEC private mode
     // 12, for a `cursor-style` that names no shape. `None` is "said nothing",
     // which is where every client starts and what an unset `cursor-blink`
-    // leaves it at.
-    let mut last_blink_mode: Option<bool> = None;
+    // leaves it at. After `switch-client` it is the blink the session left.
+    let mut last_blink_mode: Option<bool> = crate::rendering::blink_asserted();
     // Open prefix+w's tree chooser and prefix+s's session list. A key
     // binding opens them, and so does the server's CHOOSE-TREE or
     // CHOOSE-SESSION directive, sent when choose-tree runs on the server (the
@@ -10936,6 +10939,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 crate::rendering::note_blink_asserted(want_blink == Some(true));
                 let _ = terminal.backend_mut().queue_raw(
                     if want_blink == Some(true) { b"\x1b[?12h" } else { b"\x1b[?12l" });
+            } else if want_blink.is_none() && effective == 0 && last_blink_mode.is_some() {
+                // Nothing asks for a blink any more (another session after
+                // switch-client, or `cursor-blink` unset): put back the one
+                // the terminal had.
+                last_blink_mode = None;
+                if let Some(on) = crate::rendering::blink_release() {
+                    let _ = terminal.backend_mut().queue_raw(if on { b"\x1b[?12h" } else { b"\x1b[?12l" });
+                }
             }
             let _ = terminal.backend_mut().end_frame();
 

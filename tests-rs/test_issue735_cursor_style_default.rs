@@ -555,3 +555,41 @@ fn the_help_overlay_prints_the_catalog_defaults_for_the_cursor_options() {
         );
     }
 }
+
+/// switch-client: the same client process attaches again for the session it
+/// switches to, and its terminal still draws what the session it left asked
+/// for. The frame loop starts from that, so a session with no shape gets the
+/// reset and one with no blink gets the blink put back, as tmux's tty keeps
+/// `cstyle` and its cursor mode across the switch (`tty_update_cursor`).
+#[test]
+fn a_switch_starts_from_the_shape_and_blink_the_session_left() {
+    let _env = CursorEnv::take();
+
+    crate::rendering::forget_cursor_state_for_test();
+    assert_eq!(crate::rendering::last_cursor_code(), 0, "nothing written, nothing to undo");
+    assert_eq!(crate::rendering::blink_asserted(), None);
+    assert_eq!(crate::rendering::blink_release(), None, "no blink held, nothing written");
+
+    // A block cursor from the session left: a session with no shape (0)
+    // differs from it, so the reset goes out.
+    crate::rendering::note_cursor_code(2);
+    assert_eq!(crate::rendering::last_cursor_code(), 2);
+    crate::rendering::note_cursor_code(0);
+    assert_eq!(crate::rendering::last_cursor_code(), 0);
+
+    // A blink the session left on: released to what the terminal had, once.
+    crate::rendering::forget_cursor_state_for_test();
+    crate::rendering::note_host_blink_before(Some(false));
+    crate::rendering::note_blink_asserted(true);
+    assert_eq!(crate::rendering::blink_asserted(), Some(true));
+    assert_eq!(crate::rendering::blink_release(), Some(false), "back to off, as DECRQM said");
+    assert_eq!(crate::rendering::blink_asserted(), None, "and no longer held");
+    assert_eq!(crate::rendering::blink_release(), None);
+
+    // A terminal that did not answer DECRQM: the opposite of what was set.
+    crate::rendering::forget_cursor_state_for_test();
+    crate::rendering::note_blink_asserted(true);
+    assert_eq!(crate::rendering::blink_release(), Some(false));
+
+    crate::rendering::forget_cursor_state_for_test();
+}
