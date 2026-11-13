@@ -41,6 +41,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: Build x64 release binary

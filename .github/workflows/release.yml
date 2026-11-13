@@ -93,6 +93,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
+        with:
+          toolchain: stable
 
       # Same check publish-crates runs, here so a sub crate that needs a
       # version bump is caught before anything is built, signed or released.
@@ -137,6 +139,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Build
@@ -448,6 +451,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
+        with:
+          toolchain: stable
 
       # A sub crate edited under a version that is already on crates.io makes
       # its publish say "already exists" and the main crate then fails to
