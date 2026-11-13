@@ -69,6 +69,10 @@ function Test-FirstKey($ns, $target) {
 Write-Host "`n=== Git bash first key after split / resize ===" -ForegroundColor Cyan
 Write-Host "  binary: $PSMUX" -ForegroundColor DarkGray
 
+# Run from inside a psmux pane, the session this suite starts must not look
+# nested to psmux.
+foreach ($v in 'TMUX', 'TMUX_PANE', 'PSMUX_SESSION') { Remove-Item "env:$v" -EA SilentlyContinue }
+
 $splitLost = 0; $resizeLost = 0
 for ($r = 0; $r -lt $Rounds; $r++) {
     $ns = "gbkey_${PID}_$r"
