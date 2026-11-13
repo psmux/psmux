@@ -18,8 +18,8 @@ Select the per-session or shared server implementation.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string] $PsmuxExe,
-    [Parameter(Mandatory)][string] $OutputDir,
+    [string] $PsmuxExe = $(if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } elseif ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { Join-Path $PSScriptRoot '..\target\release\psmux.exe' }),
+    [string] $OutputDir = (Join-Path ([IO.Path]::GetTempPath()) ('psmux_live_title_' + [Guid]::NewGuid().ToString('N').Substring(0, 8))),
     [ValidateSet('Osc', 'Console')][string] $Mode = 'Osc',
     [ValidateSet('per-session', 'shared')][string] $ServerMode = 'per-session'
 )
