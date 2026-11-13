@@ -150,11 +150,64 @@ fn the_ported_commands_run_as_one_shot_commands_too() {
         "rotate-window", "rotatew", "swap-pane", "swapp", "respawn-pane", "respawnp",
         "clear-history", "clearhist", "set-buffer", "setb", "paste-buffer", "pasteb",
         "list-buffers", "lsb", "delete-buffer", "deleteb", "save-buffer", "saveb",
-        "load-buffer", "loadb"] {
+        "load-buffer", "loadb", "show-messages", "showmsgs"] {
         assert!(router::is_supported(ok), "{ok}");
     }
     for no in ["rename-session", "break-pane", "join-pane", "display-menu", "display-popup",
         "move-window", "swap-window", "choose-buffer", "lock-client"] {
         assert!(!router::is_supported(no), "{no}");
     }
+}
+
+#[test]
+fn server_info_and_info_reach_show_messages_through_the_default_aliases() {
+    let a = session("A");
+    let alias = |name: &str| alias_of(&a.app.command_aliases, name);
+    assert_eq!(alias("server-info").as_deref(), Some("show-messages -JT"));
+    assert_eq!(alias("info").as_deref(), Some("show-messages -JT"));
+    for line in [
+        "server-info",
+        "info",
+        "show-messages -JT",
+        "show-messages -t /dev/pts/0",
+        "showmsgs",
+    ] {
+        assert_eq!(
+            router::first_unsupported_aliased(line, alias),
+            None,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn show_messages_answers_with_the_summary_of_its_own_session() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("tdrops".to_string());
+    let mut ids = ServerIds::new();
+    let mut a = session("A");
+    let mut b = session("B");
+    let (tx, rx) = mpsc::channel();
+    send(&mut a, &mut ids, &ns, CtrlReq::ServerInfo(tx));
+    let from_a = rx
+        .try_recv()
+        .expect("BUG: show-messages got no reply from A");
+    let (tx, rx) = mpsc::channel();
+    send(&mut b, &mut ids, &ns, CtrlReq::ServerInfo(tx));
+    let from_b = rx
+        .try_recv()
+        .expect("BUG: show-messages got no reply from B");
+    let lines_a: Vec<&str> = from_a.lines().collect();
+    let lines_b: Vec<&str> = from_b.lines().collect();
+    assert_eq!(lines_a.len(), 6, "{from_a}");
+    assert_eq!(lines_b.len(), 6, "{from_b}");
+    assert_eq!(lines_a[2], "session: A", "{from_a}");
+    assert_eq!(lines_b[2], "session: B", "{from_b}");
+    assert!(lines_a[5].ends_with("\\tdrops__A.port"), "{from_a}");
+    assert!(lines_b[5].ends_with("\\tdrops__B.port"), "{from_b}");
+    assert_eq!(
+        lines_a[1], lines_b[1],
+        "one shared server answers for both sessions"
+    );
 }

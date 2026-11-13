@@ -60,6 +60,7 @@ pub const SUPPORTED: &[&str] = &[
     "window-dump",
     "dump-layout",
     "dump-state", "dump",
+    "show-messages", "showmsgs",
     // sessions and the server
     "session-info",
     "list-sessions", "ls",
