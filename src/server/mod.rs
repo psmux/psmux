@@ -9203,6 +9203,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let owe_push = (state_dirty || meta_dirty) && crate::types::has_frame_receivers();
         push_deferred = owe_push && pty_batch_pending;
         if owe_push && !pty_batch_pending {
+            // PTY output can change only an OSC title. Refresh pane.title before
+            // expanding host/status formats, just as an explicit DumpState does.
+            helpers::propagate_osc_titles(&mut app);
             // Check bell/activity state for the pushed frame
             let push_alerts = helpers::check_window_activity(&mut app);
             if push_alerts.flags_changed {

@@ -2008,6 +2008,10 @@ mod tests_issue798_shared_server_requests;
 mod tests_issue894_897_shared_guards;
 
 #[cfg(test)]
+#[path = "../../../tests-rs/test_pr1047_push_live_title.rs"]
+mod test_pr1047_push_live_title;
+
+#[cfg(test)]
 #[path = "../../../tests-rs/test_issue897_shared_new_session_size.rs"]
 mod tests_issue897_shared_new_session_size;
 

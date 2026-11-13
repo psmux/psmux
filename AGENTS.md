@@ -21,3 +21,10 @@
   which is the deliberate every-namespace sweep.
 - Run the full test suite only in CI or another disposable Windows environment
   where user sessions cannot be affected.
+
+## Live Title Regression Tests
+
+- Capture the attached client output without querying pane state during the
+  measurement. `display-message` and `list-panes` synchronize OSC titles and can
+  mask a missing refresh in the unsolicited server-push path. Query only after
+  capture ends; compare parser/pane state with the host OSC output separately.
