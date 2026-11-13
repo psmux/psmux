@@ -82,7 +82,8 @@ impl PtySystem for ConPtySystem {
                 readable: stdout_read,
                 writable: Some(stdin_write),
                 size,
-                resize_prime: None,
+                cygwin_child: false,
+                resize_hook: None,
             })),
         };
 
@@ -102,9 +103,12 @@ struct Inner {
     readable: FileDescriptor,
     writable: Option<FileDescriptor>,
     size: PtySize,
-    /// A second handle on the input pipe, held only when the child runs on
-    /// the Cygwin console runtime (see [`CYGWIN_RESIZE_PRIME`]).
-    resize_prime: Option<FileDescriptor>,
+    /// The spawned child runs on the Cygwin console runtime (see
+    /// [`CYGWIN_RESIZE_PRIME`]).
+    cygwin_child: bool,
+    /// Called after a resize that changed the size; only ever installed
+    /// for a Cygwin runtime child ([`MasterPty::set_resize_hook`]).
+    resize_hook: Option<Box<dyn FnMut() + Send>>,
 }
 
 /// One Shift key press and release, in the win32-input-mode form conhost
@@ -119,7 +123,11 @@ struct Inner {
 /// this Shift press written right after the resize, the Shift is the record
 /// that goes and the typed key survives: 0/20 and 0/20.  A tty delivers
 /// SIGWINCH outside the input queue, so tmux never meets this.
-const CYGWIN_RESIZE_PRIME: &[u8] = b"\x1b[16;42;0;1;16;1_\x1b[16;42;0;0;16;1_";
+///
+/// The owner sends it through [`MasterPty::set_resize_hook`], on the same
+/// queue as the pane's other input, so it can never land inside a paste or
+/// an escape sequence that is still being written.
+pub const CYGWIN_RESIZE_PRIME: &[u8] = b"\x1b[16;42;0;1;16;1_\x1b[16;42;0;0;16;1_";
 
 /// Whether `program` runs on the Cygwin console runtime: its directory holds
 /// msys-2.0.dll or cygwin1.dll, or it is one of Git for Windows' `bin\`
@@ -156,9 +164,8 @@ impl Inner {
             Y: num_rows as i16,
         })?;
         if self.size.rows != num_rows || self.size.cols != num_cols {
-            if let Some(w) = self.resize_prime.as_mut() {
-                use std::io::Write;
-                let _ = w.write_all(CYGWIN_RESIZE_PRIME);
+            if let Some(hook) = self.resize_hook.as_mut() {
+                hook();
             }
         }
         self.size = PtySize {
@@ -209,6 +216,15 @@ impl MasterPty for ConPtyMasterPty {
     fn conpty_passthrough_mode(&self) -> Option<bool> {
         Some(self.inner.lock().unwrap().con.used_passthrough)
     }
+
+    fn set_resize_hook(&self, hook: Box<dyn FnMut() + Send>) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.cygwin_child {
+            return false;
+        }
+        inner.resize_hook = Some(hook);
+        true
+    }
 }
 
 impl SlavePty for ConPtySlavePty {
@@ -223,9 +239,7 @@ impl SlavePty for ConPtySlavePty {
             .map(|p| is_cygwin_runtime_program(p))
             .unwrap_or(false);
         let spawned = spawn_in(&mut inner, cmd);
-        if cygwin && spawned.is_ok() {
-            inner.resize_prime = inner.writable.as_ref().and_then(|w| w.try_clone().ok());
-        }
+        inner.cygwin_child = cygwin && spawned.is_ok();
         spawned
     }
 }
@@ -330,40 +344,46 @@ mod tests {
         }
     }
 
-    /// A resize that changes the size writes the Shift press to the input pipe
-    /// of a Cygwin runtime pane, once per change; an unchanged size writes
-    /// nothing, and a pane without the prime handle never gets one.
-    #[test]
-    fn resize_primes_the_input_pipe_only_on_a_size_change() {
-        use std::io::Read;
+    fn master_for_test(cygwin_child: bool) -> ConPtyMasterPty {
         let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
         let (stdin_read, stdin_write) = create_pipe_with_buffer(4096).unwrap();
-        let (_stdout_read, stdout_write) = create_pipe_with_buffer(4096).unwrap();
+        let (stdout_read, stdout_write) = create_pipe_with_buffer(4096).unwrap();
         let con = PsuedoCon::new(COORD { X: 80, Y: 24 }, stdin_read, stdout_write).unwrap();
-        // Read what reaches the input pipe through a second pipe standing in
-        // for it: the prime handle writes there.
-        let (mut probe_read, probe_write) = create_pipe_with_buffer(4096).unwrap();
-        let mut inner = Inner {
-            con,
-            readable: _stdout_read,
-            writable: Some(stdin_write),
-            size,
-            resize_prime: Some(probe_write),
-        };
-        inner.resize(24, 80, 0, 0).unwrap();
-        inner.resize(24, 40, 0, 0).unwrap();
-        inner.resize(24, 40, 0, 0).unwrap();
-        inner.resize(12, 40, 0, 0).unwrap();
-        inner.resize_prime = None;
-        inner.resize(24, 80, 0, 0).unwrap();
-        let mut got = vec![0u8; CYGWIN_RESIZE_PRIME.len() * 2];
-        probe_read.read_exact(&mut got).unwrap();
-        assert_eq!(&got[..CYGWIN_RESIZE_PRIME.len()], CYGWIN_RESIZE_PRIME);
-        assert_eq!(&got[CYGWIN_RESIZE_PRIME.len()..], CYGWIN_RESIZE_PRIME);
-        // Nothing more: the handle is gone, so the read end now sees EOF.
-        let mut rest = Vec::new();
-        probe_read.read_to_end(&mut rest).unwrap();
-        assert!(rest.is_empty(), "unexpected extra input: {:?}", rest);
+        ConPtyMasterPty {
+            inner: Arc::new(Mutex::new(Inner {
+                con,
+                readable: stdout_read,
+                writable: Some(stdin_write),
+                size,
+                cygwin_child,
+                resize_hook: None,
+            })),
+        }
+    }
+
+    /// The resize hook is kept only for a Cygwin runtime child, and runs once
+    /// per resize that changes the size; an unchanged size runs nothing.
+    #[test]
+    fn resize_hook_runs_only_for_cygwin_child_and_only_on_a_size_change() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sz = |rows, cols| PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let other = master_for_test(false);
+        assert!(!other.set_resize_hook(Box::new(move || { c.fetch_add(1, Ordering::SeqCst); })));
+        other.resize(sz(24, 40)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a non Cygwin child is never primed");
+
+        let c = calls.clone();
+        let cyg = master_for_test(true);
+        assert!(cyg.set_resize_hook(Box::new(move || { c.fetch_add(1, Ordering::SeqCst); })));
+        cyg.resize(sz(24, 80)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "same size: no prime");
+        cyg.resize(sz(24, 40)).unwrap();
+        cyg.resize(sz(24, 40)).unwrap();
+        cyg.resize(sz(12, 40)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "one prime per size change");
     }
 
     #[test]

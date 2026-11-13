@@ -4676,6 +4676,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
 
     let mut pty_writer = crate::pane::spawn_pane_write_queue(pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
+    crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
 
     pane.master = pair.master;
     pane.writer = pty_writer;
@@ -4803,6 +4804,7 @@ pub fn heal_respawn_pane(
 
     let mut pty_writer = crate::pane::spawn_pane_write_queue(pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
+    crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
 
     // Re-acquire the pane and swap in the fresh shell.
     let Some(win) = app.windows.get_mut(win_idx) else { return Ok(()); };

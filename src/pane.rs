@@ -75,6 +75,16 @@ impl std::io::Write for QueuedPaneWriter {
 }
 
 impl PaneInputSink for QueuedPaneWriter {
+    fn resize_prime_hook(&self) -> Option<Box<dyn FnMut() + Send>> {
+        let tx = self.tx.clone();
+        let closed = self.closed.clone();
+        Some(Box::new(move || {
+            if !closed.load(Ordering::Acquire) {
+                let _ = tx.send(PaneInput::Bytes(portable_pty::win::conpty::CYGWIN_RESIZE_PRIME.to_vec()));
+            }
+        }))
+    }
+
     fn queue_inject_paste(&mut self, job: InjectPaste) -> Result<(), InjectPaste> {
         self.tx.send(PaneInput::InjectPaste(job)).map_err(|e| match e.0 {
             PaneInput::InjectPaste(job) => job,
@@ -164,6 +174,31 @@ pub trait PaneInputSink: std::io::Write + Send {
     /// writer cannot carry it (or its thread is gone).
     fn queue_inject_paste(&mut self, job: InjectPaste) -> Result<(), InjectPaste> {
         Err(job)
+    }
+
+    /// A hook that queues the Cygwin resize prime behind everything already
+    /// queued for this pane (see [`wire_resize_prime`]).  `None` when this
+    /// writer has no queue to keep it in order.
+    fn resize_prime_hook(&self) -> Option<Box<dyn FnMut() + Send>> {
+        None
+    }
+}
+
+/// Hand `master` a hook that queues
+/// [`portable_pty::win::conpty::CYGWIN_RESIZE_PRIME`] on `writer`'s queue
+/// after every resize that changes the size.  The master keeps it only when
+/// the pane child runs on the Cygwin console runtime (Git bash, MSYS2,
+/// Cygwin), which loses the first input record after a resize; other panes
+/// never see the prime.
+///
+/// The prime rides the pane's own input queue, not a second handle on the
+/// pipe: resizes and every write that queues pane input run on the server
+/// thread, and the pane writer thread delivers queued items whole and in
+/// order, so the prime lands after whatever was queued before the resize (a
+/// whole paste, a whole key sequence) and never inside it.
+pub(crate) fn wire_resize_prime(master: &dyn portable_pty::MasterPty, writer: &dyn PaneInputSink) {
+    if let Some(hook) = writer.resize_prime_hook() {
+        let _ = master.set_resize_hook(hook);
     }
 }
 
@@ -1349,6 +1384,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None };
@@ -1940,6 +1976,7 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
     let now = std::time::Instant::now();
     // The phase breakdown is what showed the surge was serialised: `pty` stayed
     // flat while `proc` and its `wait` component climbed by one whole
@@ -2015,6 +2052,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let raw_pane_id = app.next_pane_id;
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw_argv(raw_args), cwd_hint: None };
@@ -2389,6 +2427,7 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let split_pane_id = app.next_pane_id;
     let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None });
@@ -5202,6 +5241,10 @@ mod tests_issue495_direct_spawn_cwd_hook;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_writer_queue.rs"]
 mod tests_pane_writer_queue;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_gitbash_resize_prime.rs"]
+mod tests_gitbash_resize_prime;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_psrl_history_redirect.rs"]
