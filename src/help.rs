@@ -623,6 +623,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("remain-on-exit",             "off"),
     ("remain-on-exit-format",      "Pane is dead (...)"),
     ("scroll-on-clear",            "on"),
+    ("cursor-colour",              "(none)"),
     ("renumber-windows",           "off"),
     ("aggressive-resize",          "off"),
     ("automatic-rename",           "on"),

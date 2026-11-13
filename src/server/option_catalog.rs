@@ -206,6 +206,10 @@ pub enum OptionType {
     /// with `bad colour` when it is none (options.c:1332-1336 at 3.8). See
     /// [`crate::style::option_colour_name`] for the names taken.
     Colour,
+    /// A tmux OPTIONS_TABLE_STRING with OPTIONS_TABLE_IS_COLOUR
+    /// (cursor-colour): empty or a colour, refused with `invalid colour`
+    /// (options.c:1205-1208 at 3.8), kept as written.
+    ColourString,
 }
 
 impl OptionType {
@@ -219,6 +223,7 @@ impl OptionType {
             Self::Colour => crate::style::option_colour_name(value)
                 .map(|_| ())
                 .ok_or_else(|| format!("bad colour: {}", value)),
+            Self::ColourString => crate::cursor_colour::validate(value),
             Self::String | Self::Boolean => Ok(()),
         }
     }
@@ -228,14 +233,14 @@ impl OptionType {
     const fn allows_append(self) -> bool {
         match self {
             Self::Choice(kind) => kind.allows_append(),
-            Self::String | Self::Boolean | Self::Number(_) | Self::Key | Self::Colour => true,
+            Self::String | Self::Boolean | Self::Number(_) | Self::Key | Self::Colour | Self::ColourString => true,
         }
     }
 
     const fn allows_local_window_override(self) -> bool {
         match self {
             Self::Choice(kind) => kind.allows_local_window_override(),
-            Self::String | Self::Boolean | Self::Number(_) | Self::Key | Self::Colour => true,
+            Self::String | Self::Boolean | Self::Number(_) | Self::Key | Self::Colour | Self::ColourString => true,
         }
     }
 }
@@ -413,6 +418,9 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "remain-on-exit-format", scope: Window, option_type: OptionType::String, default: REMAIN_ON_EXIT_FORMAT_DEFAULT, description: "Text written on the bottom line of a pane remain-on-exit kept" },
     // tmux options-table.c:1723, window and pane scope.
     OptionDef { name: "scroll-on-clear", scope: Window, option_type: Boolean, default: "on", description: "Whether clearing the whole screen sends what it showed to history first" },
+    // tmux options-table.c:354, window and pane scope, a string that has to
+    // be a colour (OPTIONS_TABLE_IS_COLOUR).
+    OptionDef { name: "cursor-colour", scope: Window, option_type: OptionType::ColourString, default: "", description: "Colour of the cursor, under the one a program sets with OSC 12; empty for the terminal's own" },
     OptionDef { name: "aggressive-resize", scope: Window, option_type: Boolean, default: "off", description: "Resize window to smallest attached client" },
     // tmux types both of these OPTIONS_TABLE_STRING (options-table.c:1474) and
     // documents a percentage form ("10%"), so they cannot be validated as a
@@ -650,6 +658,7 @@ pub static WINDOW_OPTION_NAMES: &[&str] = &[
     // keeps it on that window, and `show -w` lists it there.
     "remain-on-exit-format",
     "scroll-on-clear",
+    "cursor-colour",
     "window-status-format",
     "window-status-current-format",
     "window-status-separator",

@@ -4373,6 +4373,29 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     }
 }
 
+/// Whether the pane's console host passes on both a program's `OSC 12` and
+/// its `OSC 112`, so the program's cursor colour can be taken. See the reader
+/// thread.
+fn program_cursor_colour_reaches_psmux() -> bool {
+    #[cfg(windows)]
+    {
+        crate::input::pane_host_is_supplied()
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+/// The reply to `OSC 12 ; ?`, in the form tmux's `input_osc_colour_reply`
+/// writes (input.c:2898 at tag 3.8), ended the way the query was.
+pub(crate) fn cursor_colour_reply((r, g, b): (u8, u8, u8), bel: bool) -> String {
+    format!(
+        "\x1b]12;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{}",
+        if bel { "\x07" } else { "\x1b\\" }
+    )
+}
+
 /// The colour registers an XTSMGRAPHICS reports, tmux's
 /// `SIXEL_COLOUR_REGISTERS` (tmux.h:4254 in tmux 3.8).
 const SIXEL_COLOUR_REGISTERS: u32 = 1024;
@@ -4542,6 +4565,15 @@ pub(crate) fn pane_replies(
                     text.map(|text| PaneReply { text, fallback: ReplyFallback::Lost("OSC 4"), console_host: false })
                 }
             }
+            // The program's colour, then the `cursor-colour` default, as the
+            // parser met the query; with neither there is no reply, as in
+            // tmux (input.c:3168-3176 at tag 3.8). It is psmux's own answer,
+            // so only a failed injection loses it.
+            DeviceQuery::CursorColour { colour, bel } => colour.map(|rgb| PaneReply {
+                text: cursor_colour_reply(rgb, bel),
+                fallback: ReplyFallback::Lost("OSC 12"),
+                console_host: false,
+            }),
             DeviceQuery::GraphicsAttribute { item, action, value } => Some(PaneReply {
                 text: graphics_reply(item, action, value, !*console_host_da1_open),
                 fallback: ReplyFallback::Pipe,
@@ -4850,6 +4882,11 @@ pub fn spawn_reader_thread(
         // The first DA1 of a pane is the console host's own, answered down
         // the PTY (`pane_replies`).
         let mut console_host_da1_open = true;
+        // The inbox console host passes on the cursor colour a program sets
+        // (`OSC 12`) but drops `OSC 112` and the query (pipe-pane -o on
+        // 26200), so a colour taken from it would outlive the program. Only
+        // a host that passes all three, OpenConsole, has them taken.
+        let program_cursor_colour = program_cursor_colour_reaches_psmux();
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -4969,6 +5006,7 @@ pub fn spawn_reader_thread(
             if let Ok(mut parser) = term_reader.lock() {
                 parser.screen_mut().capture_queries(true);
                 parser.screen_mut().set_program_status_enabled(program_status);
+                parser.screen_mut().set_program_cursor_colour_enabled(program_cursor_colour);
                 parser.process(&bytes);
                 device_queries = parser.screen_mut().take_queries();
                 if !device_queries.is_empty() {

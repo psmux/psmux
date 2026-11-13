@@ -3110,6 +3110,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         // scroll-on-clear: the same, and nothing to redraw.
         crate::scroll_on_clear::reconcile(&mut app);
+        // cursor-colour: the same; a new colour to draw goes out with a frame.
+        if crate::cursor_colour::reconcile(&mut app) {
+            state_dirty = true;
+        }
         // Set when this iteration marked the state dirty only because a pty
         // batch is still PENDING in `PTY_DATA_READY`. See the request arm and
         // the end of iteration push.
