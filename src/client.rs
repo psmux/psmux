@@ -5058,7 +5058,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 } else if !paste_stage2 && elapsed > Duration::from_millis(20) {
                     // 20ms window expired
                     let has_non_ascii = paste_pend.chars().any(|c| !c.is_ascii());
-                    if paste_pend.len() >= 3 && !has_non_ascii {
+                    // One key repeated is a held key whose repeats arrived
+                    // together, not a paste (issue #1049), unless a Ctrl+V or
+                    // the clipboard says otherwise. The clipboard is read
+                    // only for a burst of that shape.
+                    let held_key = paste_pend.len() >= 3
+                        && !has_non_ascii
+                        && is_one_key_repeated(&paste_pend)
+                        && !repeated_key_is_a_paste(&paste_pend, paste_gesture.is_open(), paste_clip_head.get());
+                    if paste_pend.len() >= 3 && !has_non_ascii && !held_key {
                         // ≥3 ASCII chars in 20ms → likely paste, enter stage 2.
                         // Non-ASCII chars (IME composition, CJK input) are excluded
                         // because IME routinely generates 3+ chars in <20ms and would
@@ -5103,9 +5111,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         paste_pend.clear();
                         paste_pend_start = None;
                     } else {
-                        // <3 chars → normal typing, flush as send-text
+                        // <3 chars, or a held key → normal typing, flush as send-text
                         if input_log_enabled() {
-                            input_log("paste", &format!("flush {} chars as normal (< 3 in 20ms)", paste_pend.len()));
+                            if held_key {
+                                input_log("paste", &format!("flush {} chars as normal (one key repeated, a held key)", paste_pend.len()));
+                            } else {
+                                input_log("paste", &format!("flush {} chars as normal (< 3 in 20ms)", paste_pend.len()));
+                            }
                         }
                         // Even a 1-2 character burst can be a clipboard paste
                         // ("ab" pasted twice is the same bug as a CJK word), so
@@ -11148,7 +11160,11 @@ fn flush_paste_pend_as_text(
     // avoid the 300ms delay (fixes #91).
     gesture.record(paste_pend);
     let has_non_ascii = paste_pend.chars().any(|c| !c.is_ascii());
-    if (*paste_stage2 || paste_pend.len() >= 3) && !has_non_ascii {
+    // A burst that never reached stage 2 and is one key repeated is a held
+    // key (issue #1049), so it goes out as the keys it is. With a Ctrl+V
+    // press in flight it is that paste, as in the 20 ms rule.
+    let held_key = is_one_key_repeated(paste_pend) && !gesture.is_open();
+    if (*paste_stage2 || (paste_pend.len() >= 3 && !held_key)) && !has_non_ascii {
         let encoded = crate::util::base64_encode(paste_pend);
         cmd_batch.push(format!("send-paste {}\n", encoded));
     } else {
@@ -11171,6 +11187,40 @@ fn flush_paste_pend_as_text(
     paste_pend.clear();
     *paste_pend_start = None;
     *paste_stage2 = false;
+}
+
+/// True when `pend` is one character repeated, the shape a held key makes.
+///
+/// Key repeat is paced by the keyboard, 30 ms or so apart, but a network
+/// between the keyboard and the client (ssh) delivers several repeats in one
+/// packet whenever it stalls for a moment. Those arrive inside the 20 ms
+/// window and looked like a paste: holding `j` in Neovim's normal mode typed
+/// `jjjj` into the buffer in place of moving the cursor (issue #1049).
+#[cfg(windows)]
+fn is_one_key_repeated(pend: &str) -> bool {
+    let mut chars = pend.chars();
+    match chars.next() {
+        Some(first) => chars.all(|c| c == first),
+        None => false,
+    }
+}
+
+/// A burst of one repeated character is still a paste when something other
+/// than its timing says so: a Ctrl+V press in flight, or a clipboard that
+/// holds the same run (a pasted `----------`). Behind ssh neither is there,
+/// and a pasted run then reaches the pane as the same characters, typed.
+///
+/// The clipboard head is cut at [`ClipboardHeadCache::HEAD_CHARS`], so a run
+/// longer than the head agrees with it when it continues it.
+#[cfg(windows)]
+fn repeated_key_is_a_paste(pend: &str, gesture_open: bool, clip_head: Option<&str>) -> bool {
+    if gesture_open {
+        return true;
+    }
+    match clip_head {
+        Some(head) => head.chars().count() >= 3 && (head.starts_with(pend) || pend.starts_with(head)),
+        None => false,
+    }
 }
 
 #[cfg(windows)]

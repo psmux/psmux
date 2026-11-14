@@ -69,6 +69,11 @@
 //                                    PSMUX_INJECT_GAP_MS (default 120), press
 //                                    and release 40 ms apart, no Ctrl anywhere.
 //                                    The control case for the paste head hold.
+//   paste_host_injector.exe <pid> clumps <delay_ms> <text>  no paste either: a
+//                                    held key behind ssh. The text is split on
+//                                    spaces and every piece is written in one
+//                                    call, delay_ms apart, no Ctrl anywhere
+//                                    (issue #1049).
 //
 // Exit codes: 0 delivered, 2 AttachConsole failed (treat as SKIP), 3 write failed.
 // Log: %TEMP%\psmux_paste_host_inject.log
@@ -290,6 +295,29 @@ class PasteHostInjector
                 KeyS(false, 0x12, 0x38, '\0', LEFT_CTRL_PRESSED),
                 KeyS(false, 0x11, 0x1D, '\0', 0),
             }, log, "ctrl+alt+i chord");
+            File.WriteAllText(logFile, string.Join("\n", log));
+            return ok ? 0 : 3;
+        }
+
+        if (mode == "clumps")
+        {
+            // A held key seen through ssh (issue #1049): the keyboard repeats
+            // it evenly, the network hands several repeats over at once. The
+            // text is split on spaces, every piece is one WriteConsoleInputW,
+            // delay_ms apart, and there is no Ctrl anywhere.
+            foreach (string clump in text.Split(' '))
+            {
+                var recs = new List<INPUT_RECORD>();
+                foreach (char c in clump)
+                {
+                    short scan = VkKeyScanW(c);
+                    ushort vk = scan == -1 ? (ushort)0 : (ushort)(scan & 0xFF);
+                    recs.Add(Key(true, vk, c, 0));
+                    recs.Add(Key(false, vk, c, 0));
+                }
+                ok &= Write(h, recs, log, "clump");
+                Thread.Sleep(delay);
+            }
             File.WriteAllText(logFile, string.Join("\n", log));
             return ok ? 0 : 3;
         }
