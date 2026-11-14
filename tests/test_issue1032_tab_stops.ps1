@@ -13,6 +13,9 @@
 # Every expectation is what tmux 3.8 showed for the same bytes (#{cursor_x}
 # and #{pane_tabs}), and psmux's cursor has to be where the console host's is,
 # except past the last column, where tmux and psmux say 40 and the hosts 39.
+# The inbox conhost of Windows 10 (19045) moves the cursor its own way: it
+# ignores HPA and wraps an HT from the last column. There psmux's cursor has to
+# be that host's, past the margin too, in place of tmux's.
 #
 # [1] the inbox conhost; [2] OpenConsole, when PSMUX_TEST_CONPTY_DIR or
 # PSMUX_CONPTY_DIR_FOR_TEST names a folder holding conpty.dll, skipped
@@ -51,6 +54,8 @@ $env:PSMUX_NO_WARM = "1"
 $env:PSMUX_CONFIG_FILE = Join-Path $TempHome "psmux.conf"
 Set-Content -Path $env:PSMUX_CONFIG_FILE -Value ""
 
+# The inbox conhost before Windows 11 (measured on 19045).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 $E = [string][char]27
 $Forty = '0123456789012345678901234567890123456789'
 $Default = '8,16,24,32'
@@ -125,8 +130,12 @@ function Run-Cases($route, $tablesSeen) {
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x}')"
         $tabs = "$(P display -p -t "s:$name" '#{pane_tabs}')"
         $hostCol = "$((Get-Content "$TempHome\p\$name.bin.host" -EA SilentlyContinue) -join '')"
-        Check "${route}: $name cursor_x" $cursor $c[2]
-        if ($c[4]) { Check "${route}: $name cursor_x is the console host's" $cursor $hostCol }
+        if ($route -eq 'inbox conhost' -and $Win10) {
+            Check "${route}: $name cursor_x is the console host's" $cursor $hostCol
+        } else {
+            Check "${route}: $name cursor_x" $cursor $c[2]
+            if ($c[4]) { Check "${route}: $name cursor_x is the console host's" $cursor $hostCol }
+        }
         # The inbox conhost keeps the table to itself: psmux sees the default.
         $wantTabs = if ($tablesSeen) { $c[3] } else { $Default }
         Check "${route}: $name pane_tabs" $tabs $wantTabs
