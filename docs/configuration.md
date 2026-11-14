@@ -530,7 +530,7 @@ layers on top of it one attribute at a time, matching tmux `tty.c`
 only when that option actually names an `fg`, and the same holds separately for
 `bg`. Anything it leaves unnamed comes from `window-style`.
 
-Three consequences worth knowing:
+Four consequences worth knowing:
 
 * `set -g window-style "bg=colour52"` on its own tints **every** pane, the
   active one included. You do not need to repeat the colour in
@@ -541,6 +541,10 @@ Three consequences worth knowing:
 * `bg=default` (tmux colour 8) names no colour, so
   `window-active-style "bg=default"` reads as "inherit `window-style`", not as
   "use the terminal background".
+* A program's own default colours (`OSC 10` and `OSC 11`) sit between the
+  two in the active pane, over `window-style` and under
+  `window-active-style`, and under `window-style` in the other panes. See
+  [Default Colours](compatibility.md#default-colours-osc-10-and-osc-11).
 
 Both options also accept a `dim=N` percentage, where `N` runs from 0 to 100, as
 newer tmux does. It scales the pane's colours toward black by that percentage

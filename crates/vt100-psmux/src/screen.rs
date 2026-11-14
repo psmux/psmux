@@ -274,6 +274,13 @@ pub struct Screen {
     /// a respawn, since `screen_reinit` touches neither.
     cursor_colour: CursorColour,
 
+    /// The default foreground and background: the program's (`OSC 10` and
+    /// `OSC 11`, tmux's `wp->palette.fg` and `.bg`), and the colours the
+    /// pane's styles put over and under them. RIS, a bare `OSC 104` and
+    /// `send-keys -R` drop the program's, as `colour_palette_clear` does
+    /// (colour.c:1227 at tag 3.8); a respawn keeps them.
+    default_colours: DefaultColours,
+
     /// True once the output stream asked its terminal for win32 input mode
     /// (`CSI ?9001h`).  On a psmux pane that request comes from the pane's
     /// console host itself, as the very first bytes it writes (`ESC[?9001h
@@ -379,6 +386,58 @@ impl CursorColour {
     }
 }
 
+/// What a pane's styles give one of its default colours, over and under the
+/// colour the program set.
+///
+/// tmux's `tty_default_colours` (tty.c:3164 at tag
+/// 3.8) draws the active pane with `window-active-style`, then the program's
+/// colour, then `window-style`, and any other pane with `window-style`, then
+/// the program's colour; the query is answered the same way
+/// (`window_pane_get_bg`, window.c:2699).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StyleColour {
+    /// Wins over the program's colour.
+    pub over: Option<(u8, u8, u8)>,
+    /// Used when neither `over` nor the program gives one.
+    pub under: Option<(u8, u8, u8)>,
+}
+
+/// One default colour. See [`Screen::default_foreground`].
+#[derive(Clone, Copy, Debug, Default)]
+struct DefaultColour {
+    program: Option<(u8, u8, u8)>,
+    style: StyleColour,
+}
+
+impl DefaultColour {
+    fn get(self) -> Option<(u8, u8, u8)> {
+        self.style.over.or(self.program).or(self.style.under)
+    }
+}
+
+/// See [`Screen::default_foreground`].
+#[derive(Clone, Copy, Debug)]
+struct DefaultColours {
+    fg: DefaultColour,
+    bg: DefaultColour,
+    /// See [`Screen::set_program_default_colours_enabled`].
+    program_enabled: bool,
+}
+
+impl DefaultColours {
+    const fn new() -> Self {
+        let none = DefaultColour { program: None, style: StyleColour { over: None, under: None } };
+        Self { fg: none, bg: none, program_enabled: true }
+    }
+
+    /// These with the program's colours dropped.
+    fn without_program(mut self) -> Self {
+        self.fg.program = None;
+        self.bg.program = None;
+        self
+    }
+}
+
 /// A pane's `pane-colours` default palette and the palette it draws with:
 /// the defaults with the OSC 4 entries laid over them, kept up to date as
 /// either changes so that drawing reads one table, as it did before #980.
@@ -461,6 +520,7 @@ impl Screen {
             allow_alternate_screen: true,
             scroll_on_clear: true,
             cursor_colour: CursorColour::new(),
+            default_colours: DefaultColours::new(),
             win32_input_requested: false,
             extended_keys_mode: initial_extended_keys_mode(),
         }
@@ -562,10 +622,12 @@ impl Screen {
         let allow_alternate_screen = self.allow_alternate_screen;
         let scroll_on_clear = self.scroll_on_clear;
         let cursor_colour = self.cursor_colour;
+        let default_colours = self.default_colours;
         let mut program_status = std::mem::take(&mut self.program_status);
         program_status.clear();
         let program_status_enabled = self.program_status_enabled;
         *self = Self::new(size, scrollback_len);
+        self.default_colours = default_colours;
         self.program_status = program_status;
         self.program_status_enabled = program_status_enabled;
         self.grid.put_scrollback(history);
@@ -612,17 +674,70 @@ impl Screen {
     }
 
     /// Take the colours a program and the pane's options set, the two cursor
-    /// colours, from the screen this one replaces. psmux's `clear-history`
-    /// starts the screen again, where tmux clears only the history and keeps
-    /// them (cmd-capture-pane.c:424 at tag 3.8).
+    /// colours and the default colours, from the screen this one replaces.
+    /// psmux's `clear-history` starts the screen again, where tmux clears
+    /// only the history and keeps them (cmd-capture-pane.c:424 at tag 3.8).
     pub fn keep_colours(&mut self, from: &Self) {
         self.cursor_colour = from.cursor_colour;
+        self.default_colours = from.default_colours;
     }
 
     /// Set or reset the program's cursor colour, unless that is turned off.
     pub(crate) fn set_program_cursor_colour(&mut self, colour: Option<(u8, u8, u8)>) {
         if self.cursor_colour.program_enabled {
             self.cursor_colour.program = colour;
+        }
+    }
+
+    /// The pane's default foreground as tmux answers `OSC 10 ; ?` with it:
+    /// the styles' colour over the program's, the program's, then the
+    /// styles' colour under it (see [`StyleColour`]). `None` leaves it to the
+    /// outer terminal's.
+    #[must_use]
+    pub fn default_foreground(&self) -> Option<(u8, u8, u8)> {
+        self.default_colours.fg.get()
+    }
+
+    /// The pane's default background, as [`Screen::default_foreground`].
+    #[must_use]
+    pub fn default_background(&self) -> Option<(u8, u8, u8)> {
+        self.default_colours.bg.get()
+    }
+
+    /// The foreground and background the program set with `OSC 10` and
+    /// `OSC 11`, `None` for one it set none of or reset.
+    #[must_use]
+    pub fn program_default_colours(&self) -> (Option<(u8, u8, u8)>, Option<(u8, u8, u8)>) {
+        (self.default_colours.fg.program, self.default_colours.bg.program)
+    }
+
+    /// Set what the pane's styles give its foreground and background.
+    pub fn set_style_colours(&mut self, fg: StyleColour, bg: StyleColour) {
+        self.default_colours.fg.style = fg;
+        self.default_colours.bg.style = bg;
+    }
+
+    /// Whether `OSC 10`, `OSC 11`, `OSC 110` and `OSC 111` from the program
+    /// are taken, as [`Screen::set_program_cursor_colour_enabled`] is for the
+    /// cursor colour.
+    pub fn set_program_default_colours_enabled(&mut self, enabled: bool) {
+        self.default_colours.program_enabled = enabled;
+        if !enabled {
+            self.default_colours = self.default_colours.without_program();
+        }
+    }
+
+    /// Set or reset the program's foreground, unless that is turned off.
+    pub(crate) fn set_program_foreground(&mut self, colour: Option<(u8, u8, u8)>) {
+        if self.default_colours.program_enabled {
+            self.default_colours.fg.program = colour;
+        }
+    }
+
+    /// Set or reset the program's background, unless that is turned off.
+    pub(crate) fn set_program_background(&mut self, colour: Option<(u8, u8, u8)>) {
+        if self.default_colours.program_enabled {
+            self.default_colours.bg.program = colour;
         }
     }
 
@@ -1713,9 +1828,11 @@ impl Screen {
         }
     }
 
-    /// Drop the whole palette (`colour_palette_clear`, `colour.c:1227`).
-    /// Returns `true` when something was dropped.
+    /// Drop the whole palette (`colour_palette_clear`, `colour.c:1227`),
+    /// which holds the program's default colours too. Returns `true` when an
+    /// entry was dropped.
     pub fn clear_palette(&mut self) -> bool {
+        self.default_colours = self.default_colours.without_program();
         let dropped = self.palette.take().is_some_and(|p| !p.is_empty());
         if dropped {
             self.palette_generation = self.palette_generation.wrapping_add(1);
@@ -2638,6 +2755,9 @@ impl Screen {
         // table stays because history cells point into it.
         let scroll_on_clear = self.scroll_on_clear;
         let cursor_colour = self.cursor_colour;
+        // The program's default colours go, as tmux's RIS clears the palette
+        // they live in (input.c:1408); the styles' stay.
+        let default_colours = self.default_colours.without_program();
         if scroll_on_clear {
             self.grid
                 .erase_all_into_history(crate::attrs::Attrs::default());
@@ -2653,6 +2773,7 @@ impl Screen {
         self.hyperlinks = hyperlinks;
         self.scroll_on_clear = scroll_on_clear;
         self.cursor_colour = cursor_colour;
+        self.default_colours = default_colours;
         if let Some(defaults) = pane_colours {
             self.pane_colours = Some(Box::new(PaneColours::new(defaults, None)));
         }

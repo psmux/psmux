@@ -46,6 +46,8 @@ pub(crate) struct FloatJson {
     #[serde(default)] pub astyle: String,
     /// new-pane -R: its pane-border-style.
     #[serde(default)] pub bstyle: String,
+    /// The program's default colours, as a tiled pane's leaf carries them.
+    #[serde(default)] pub default_colours: Option<[Option<String>; 2]>,
 }
 
 fn layout_default_status_line(
@@ -1895,11 +1897,14 @@ pub(crate) fn render_float_overlays(
             complete_pane_border_colors(pane_border_style.patch(crate::style::parse_tmux_style(own_border)))
         };
         let window_style = window_styles.for_pane(fl.focused);
-        let window_style = if fl.style.is_empty() {
-            window_style
-        } else {
-            Some(window_style.unwrap_or_default().patch(crate::style::parse_tmux_style(&fl.style)))
+        let float_style = (!fl.style.is_empty()).then(|| crate::style::parse_tmux_style(&fl.style));
+        let window_style = match float_style {
+            None => window_style,
+            Some(own) => Some(window_style.unwrap_or_default().patch(own)),
         };
+        let window_style = window_styles.with_program_colours(
+            window_style, fl.focused, float_style, fl.default_colours.as_ref(),
+        );
         let window_dim = window_styles.dim_for_pane(fl.focused);
         // Paths that paint straight from the window style take it pre dimmed;
         // `apply_window_content_style` dims the cell colours itself.
@@ -2090,6 +2095,43 @@ impl WindowContentStyles {
         } else {
             self.inactive
         }
+    }
+
+    /// A pane's content style (`style`, from [`Self::for_pane`] and a float's
+    /// own `-s` style, `float_style`) with the default colours the program
+    /// set (`OSC 10` and `OSC 11`) put in. tmux's `tty_default_colours`
+    /// (tty.c:3164 at tag 3.8) starts the cached styles from them
+    /// (`tty_window_default_style`, tty.c:3132), so the active pane is drawn
+    /// with `window-active-style`, then the program's colour, then
+    /// `window-style`, and any other pane with `window-style`, then the
+    /// program's colour.
+    pub(crate) fn with_program_colours(
+        self,
+        style: Option<Style>,
+        active: bool,
+        float_style: Option<Style>,
+        program: Option<&[Option<String>; 2]>,
+    ) -> Option<Style> {
+        let Some([fg, bg]) = program else { return style };
+        let layer = if active { self.active } else { self.inactive };
+        let names = |c: &Color| *c != Color::Reset;
+        let over = |pick: fn(&Style) -> Option<Color>| {
+            float_style.as_ref().and_then(pick).filter(names)
+                .or_else(|| layer.as_ref().and_then(pick).filter(names))
+        };
+        let colour = |c: &Option<String>| c.as_deref().map(crate::style::map_color);
+        let mut out = style.unwrap_or_default();
+        if let Some(c) = colour(fg) {
+            if over(|s| s.fg).is_none() {
+                out.fg = Some(c);
+            }
+        }
+        if let Some(c) = colour(bg) {
+            if over(|s| s.bg).is_none() {
+                out.bg = Some(c);
+            }
+        }
+        Some(out)
     }
 
     /// The `dim` percentage for a pane.
@@ -2432,6 +2474,7 @@ pub fn render_layout_json(
             hide_cursor: _,
             cursor_shape: _,
             cursor_colour: _,
+            default_colours,
             active,
             copy_mode,
             scroll_offset,
@@ -2451,7 +2494,9 @@ pub fn render_layout_json(
             images,
             copy_hl,
         } => {
-            let window_style = window_styles.for_pane(*active);
+            let window_style = window_styles.with_program_colours(
+                window_styles.for_pane(*active), *active, None, default_colours.as_ref(),
+            );
             let hl_styles = copy_ln.map(|cfg| cfg.hl).unwrap_or_default();
             let window_dim = window_styles.dim_for_pane(*active);
             // Paths that paint straight from the window style take it pre

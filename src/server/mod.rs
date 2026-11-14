@@ -3114,6 +3114,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         if crate::cursor_colour::reconcile(&mut app) {
             state_dirty = true;
         }
+        // window-style and window-active-style, for the OSC 10 and OSC 11
+        // replies: two compares and a look at the floats until a style names
+        // a colour.
+        crate::style_colours::reconcile(&mut app);
         // Set when this iteration marked the state dirty only because a pty
         // batch is still PENDING in `PTY_DATA_READY`. See the request arm and
         // the end of iteration push.

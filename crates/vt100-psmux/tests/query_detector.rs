@@ -37,9 +37,9 @@ fn detector_and_live_parser_share_queries_at_every_split() {
         (&b"\x1b[?S"[..], TerminalQuery::GraphicsAttribute { item: 0, action: 0, value: 0 }),
         (&b"\x1b[?;1S"[..], TerminalQuery::GraphicsAttribute { item: 0, action: 1, value: 0 }),
         (&b"\x1b[?1:2;1:3;0:4S"[..], TerminalQuery::GraphicsAttribute { item: -1, action: -1, value: -1 }),
-        (&b"\x1b]10;?\x07"[..], TerminalQuery::ForegroundColour { bel: true }),
-        (&b"\x1b]10;?\x1b\\"[..], TerminalQuery::ForegroundColour { bel: false }),
-        (&b"\x1b]11;?\x1b\\"[..], TerminalQuery::BackgroundColour { bel: false }),
+        (&b"\x1b]10;?\x07"[..], TerminalQuery::ForegroundColour { colour: None, bel: true }),
+        (&b"\x1b]10;?\x1b\\"[..], TerminalQuery::ForegroundColour { colour: None, bel: false }),
+        (&b"\x1b]11;?\x1b\\"[..], TerminalQuery::BackgroundColour { colour: None, bel: false }),
         (&b"\x1b]4;0;?\x1b\\"[..], TerminalQuery::PaletteColour { index: 0, own: None, bel: false }),
         (&b"\x1b]4;15;?\x07"[..], TerminalQuery::PaletteColour { index: 15, own: None, bel: true }),
     ] {
@@ -183,12 +183,12 @@ fn colour_and_version_queries_come_in_stream_order_with_the_others() {
         vec![
             TerminalQuery::Da1,
             TerminalQuery::Xtversion,
-            TerminalQuery::BackgroundColour { bel: false },
+            TerminalQuery::BackgroundColour { colour: None, bel: false },
             TerminalQuery::ColourScheme,
             TerminalQuery::PaletteColour { index: 2, own: None, bel: true },
             TerminalQuery::PaletteColour { index: 1, own: None, bel: true },
             TerminalQuery::WindowReport(16),
-            TerminalQuery::ForegroundColour { bel: true },
+            TerminalQuery::ForegroundColour { colour: None, bel: true },
         ]
     );
 }
@@ -265,7 +265,7 @@ fn a_flood_of_queries_is_captured_up_to_the_bound_until_the_next_drain() {
     parser.process(b"\x1b[>q\x1b]11;?\x07");
     assert_eq!(
         parser.screen_mut().take_queries(),
-        vec![TerminalQuery::Xtversion, TerminalQuery::BackgroundColour { bel: true }]
+        vec![TerminalQuery::Xtversion, TerminalQuery::BackgroundColour { colour: None, bel: true }]
     );
 }
 

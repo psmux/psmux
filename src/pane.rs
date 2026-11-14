@@ -4290,6 +4290,10 @@ pub(crate) struct DecrqmState {
     /// The pane's size in cells, for the XTWINOPS size reports (issue #841).
     pub rows: u16,
     pub cols: u16,
+    /// The pane's own default colours (`Screen::default_foreground`), for
+    /// the replies that go in for a query the console host dropped.
+    pub default_fg: Option<(u8, u8, u8)>,
+    pub default_bg: Option<(u8, u8, u8)>,
 }
 
 impl DecrqmState {
@@ -4309,6 +4313,8 @@ impl DecrqmState {
             synchronized_output: false,
             rows: s.size().0,
             cols: s.size().1,
+            default_fg: s.default_foreground(),
+            default_bg: s.default_background(),
         }
     }
 }
@@ -4373,10 +4379,10 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
     }
 }
 
-/// Whether the pane's console host passes on both a program's `OSC 12` and
-/// its `OSC 112`, so the program's cursor colour can be taken. See the reader
-/// thread.
-fn program_cursor_colour_reaches_psmux() -> bool {
+/// Whether the pane's console host passes on both a program's colours
+/// (`OSC 10`, `OSC 11` and `OSC 12`) and their resets, so they can be taken.
+/// See the reader thread.
+fn program_colours_reach_psmux() -> bool {
     #[cfg(windows)]
     {
         crate::input::pane_host_is_supplied()
@@ -4524,13 +4530,27 @@ pub(crate) fn pane_replies(
     colours: &crate::types::HostColors,
     console_host_da1_open: &mut bool,
 ) -> Vec<PaneReply> {
-    use crate::server::helpers::{background_reply, foreground_reply, palette_reply, scheme_reply};
+    use crate::server::helpers::{background_reply, foreground_reply, palette_reply, pane_colour_reply, scheme_reply};
     use crate::types::{COLOR_QUERY_BG, COLOR_QUERY_FG, COLOR_QUERY_SCHEME};
     let colour = |text: Option<String>, bit: u32| {
         text.map(|text| PaneReply { text, fallback: ReplyFallback::Colour(bit), console_host: false })
     };
-    let fg = |bel| colour(foreground_reply(colours, bel), COLOR_QUERY_FG);
-    let bg = |bel| colour(background_reply(colours, bel), COLOR_QUERY_BG);
+    // The pane's own colour, its styles' or its program's, wins over the
+    // outer terminal's. The server loop's colour path knows only the outer
+    // terminal's, so a reply with the pane's has nowhere else to go.
+    let own = |n: u8, rgb, bel, kind| PaneReply {
+        text: pane_colour_reply(n, rgb, bel),
+        fallback: ReplyFallback::Lost(kind),
+        console_host: false,
+    };
+    let fg = |bel, pane: Option<(u8, u8, u8)>| match pane {
+        Some(rgb) => Some(own(10, rgb, bel, "OSC 10")),
+        None => colour(foreground_reply(colours, bel), COLOR_QUERY_FG),
+    };
+    let bg = |bel, pane: Option<(u8, u8, u8)>| match pane {
+        Some(rgb) => Some(own(11, rgb, bel, "OSC 11")),
+        None => colour(background_reply(colours, bel), COLOR_QUERY_BG),
+    };
     let asked_fg = queries.iter().any(|q| matches!(q, DeviceQuery::ForegroundColour { .. }));
     let asked_bg = queries.iter().any(|q| matches!(q, DeviceQuery::BackgroundColour { .. }));
     let mut burst = !asked_fg || !asked_bg;
@@ -4543,16 +4563,17 @@ pub(crate) fn pane_replies(
                 console_host: false,
             }),
             DeviceQuery::ColourScheme => colour(Some(scheme_reply(colours)), COLOR_QUERY_SCHEME),
-            DeviceQuery::ForegroundColour { bel } => fg(bel),
-            DeviceQuery::BackgroundColour { bel } => bg(bel),
+            DeviceQuery::ForegroundColour { colour, bel } => fg(bel, colour),
+            DeviceQuery::BackgroundColour { colour, bel } => bg(bel, colour),
             DeviceQuery::PaletteColour { index, own, bel } => {
                 let i = usize::from(index);
                 if i == 0 && burst {
                     // The burst's own OSC 10 and 11 never arrived, so they
-                    // end the way its palette query did.
+                    // end the way its palette query did, with the pane's
+                    // colours as the batch left them.
                     burst = false;
-                    if !asked_fg { out.extend(fg(bel)); }
-                    if !asked_bg { out.extend(bg(bel)); }
+                    if !asked_fg { out.extend(fg(bel, st.default_fg)); }
+                    if !asked_bg { out.extend(bg(bel, st.default_bg)); }
                 }
                 let text = palette_reply(i, colours, own, bel);
                 if i < 16 {
@@ -4882,11 +4903,12 @@ pub fn spawn_reader_thread(
         // The first DA1 of a pane is the console host's own, answered down
         // the PTY (`pane_replies`).
         let mut console_host_da1_open = true;
-        // The inbox console host passes on the cursor colour a program sets
-        // (`OSC 12`) but drops `OSC 112` and the query (pipe-pane -o on
-        // 26200), so a colour taken from it would outlive the program. Only
-        // a host that passes all three, OpenConsole, has them taken.
-        let program_cursor_colour = program_cursor_colour_reaches_psmux();
+        // The inbox console host passes on the colours a program sets
+        // (`OSC 10`, `OSC 11` and `OSC 12`) but drops their bare resets,
+        // `OSC 110`, `OSC 111` and `OSC 112` (`PSMUX_PANE_RAW` on 26300 and
+        // on 19045), so a colour taken from it would outlive the program.
+        // Only a host that passes them all, OpenConsole, has them taken.
+        let program_colours = program_colours_reach_psmux();
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -5006,7 +5028,8 @@ pub fn spawn_reader_thread(
             if let Ok(mut parser) = term_reader.lock() {
                 parser.screen_mut().capture_queries(true);
                 parser.screen_mut().set_program_status_enabled(program_status);
-                parser.screen_mut().set_program_cursor_colour_enabled(program_cursor_colour);
+                parser.screen_mut().set_program_cursor_colour_enabled(program_colours);
+                parser.screen_mut().set_program_default_colours_enabled(program_colours);
                 parser.process(&bytes);
                 device_queries = parser.screen_mut().take_queries();
                 if !device_queries.is_empty() {

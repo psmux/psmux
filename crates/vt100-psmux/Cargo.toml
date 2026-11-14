@@ -94,6 +94,10 @@ name = "cursor_colour"
 path = "tests/cursor_colour.rs"
 
 [[test]]
+name = "default_colours"
+path = "tests/default_colours.rs"
+
+[[test]]
 name = "issue980_pane_colours"
 path = "tests/issue980_pane_colours.rs"
 
