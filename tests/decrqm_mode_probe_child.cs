@@ -6,7 +6,9 @@
 // read from stdin in VT input mode.
 //
 // Build: csc /nologo /out:decrqm_mode_probe_child.exe decrqm_mode_probe_child.cs
-// Usage: decrqm_mode_probe_child.exe <logfile>
+// Usage: decrqm_mode_probe_child.exe <logfile> [text]
+// The text, if given, is written after each query: the inbox conhost of
+// Windows 10 passes a query on only when it next draws.
 using System;
 using System.IO;
 using System.Text;
@@ -50,7 +52,7 @@ class DecrqmModeProbe {
         for (int i = 0; i < queries.Length; i++) {
             int start;
             lock (gate) start = used;
-            byte[] q = Encoding.ASCII.GetBytes(queries[i]);
+            byte[] q = Encoding.ASCII.GetBytes(queries[i] + (args.Length > 1 ? args[1] : ""));
             uint w;
             WriteFile(hOut, q, (uint)q.Length, out w, IntPtr.Zero);
             string reply = "";
