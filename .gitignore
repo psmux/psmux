@@ -1,5 +1,12 @@
-# Build artifacts
+# Build artifacts: cargo's own target folder and the extra target folders agents
+# and test runs build into (target_review, target-pr, tgt, ...), plus binary drops.
 target/
+/target*/
+/tgt/
+/bins*/
+*.rlib
+*.rmeta
+*.d
 
 # Backup and temp files
 *.rs.bk
