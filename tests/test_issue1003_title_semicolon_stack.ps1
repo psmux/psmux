@@ -24,6 +24,11 @@
 # title. So first_title expects the title of a pane whose program writes
 # nothing (first_base): the host name, or the console host's own title.
 #
+# The inbox conhost of Windows 10 (19045) holds CSI 22 / 23 t, like a title,
+# for its next screen update, so there a piece written apart is followed by
+# a `.` to have it drawn; that host also sends only the last of the titles
+# before an RIS and keeps the RIS to itself (PSMUX_PANE_RAW).
+#
 # [1] the inbox conhost; [2] OpenConsole (PSMUX_CONPTY_DIR), when
 # PSMUX_TEST_CONPTY_DIR names a folder holding conpty.dll, skipped otherwise.
 #
@@ -75,6 +80,10 @@ $cap = (-join (0..10 | ForEach-Object { (Title "t$_") + $push })) + (Title 't11'
 # one go the title on the inbox conhost route, where the order changes (see
 # the top). $SEP splits the text into writes 700 ms apart.
 $SEP = [string][char]1
+# The inbox conhost before Windows 11 (measured on 19045), and the text that
+# makes it pass a piece on.
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
+$Flush = if ($Win10) { '.' } else { '' }
 $cases = @(
     # A4: everything after the first `;` is the title.
     @('osc0_semicolon',  "${E}]0;a;b$BEL", 'a;b'),
@@ -103,7 +112,9 @@ $cases = @(
     # RIS keeps the title and the saved ones (screen_write_reset touches
     # neither, input.c:1407-1411).
     @('ris_keeps',       ((Title 'kept') + "${E}c"), 'kept'),
-    @('ris_then_pop',    ((Title 'outer') + $push + (Title 'inner') + "${E}c" + $pop), 'outer', 'inner'),
+    # The Windows 10 inbox conhost sends `inner` only and keeps the RIS: the
+    # restore gives back the pane's first title.
+    @('ris_then_pop',    ((Title 'outer') + $push + (Title 'inner') + "${E}c" + $pop), 'outer', 'inner', 'FIRST'),
     @('ris_then_push',   ((Title 'a') + "${E}c" + $push + (Title 'b') + $pop), 'a', 'b')
 )
 foreach ($c in $cases) { [IO.File]::WriteAllBytes("$TempHome\p\$($c[0]).bin", [Text.Encoding]::UTF8.GetBytes($c[1])) }
@@ -112,7 +123,8 @@ Set-Content -Path "$TempHome\show.ps1" -Value @(
     '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
     '$o = [Console]::OpenStandardOutput()'
     '$pieces = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Payload)) -split [string][char]1'
-    'foreach ($p in $pieces) { $b = [Text.Encoding]::UTF8.GetBytes($p); $o.Write($b, 0, $b.Length); $o.Flush(); if ($pieces.Count -gt 1) { Start-Sleep -Milliseconds 700 } }'
+    "`$flush = [Text.Encoding]::UTF8.GetBytes('$Flush')"
+    'foreach ($p in $pieces) { $b = [Text.Encoding]::UTF8.GetBytes($p); $o.Write($b, 0, $b.Length); if ($pieces.Count -gt 1) { $o.Write($flush, 0, $flush.Length) }; $o.Flush(); if ($pieces.Count -gt 1) { Start-Sleep -Milliseconds 700 } }'
     'Set-Content -Path ($Payload + ".done") -Value 1'
     'Start-Sleep 600'
 )
@@ -125,10 +137,11 @@ Set-Content -Path "$TempHome\show2.ps1" -Value @(
     'param([string]$Dir)'
     '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
     '$o = [Console]::OpenStandardOutput()'
-    'foreach ($n in "r1", "r2", "r3") { $b = [IO.File]::ReadAllBytes("$Dir/$n.bin"); $o.Write($b, 0, $b.Length); $o.Flush(); Start-Sleep -Milliseconds 700 }'
+    "`$flush = [Text.Encoding]::UTF8.GetBytes('$Flush')"
+    'foreach ($n in "r1", "r2", "r3") { $b = [IO.File]::ReadAllBytes("$Dir/$n.bin"); $o.Write($b, 0, $b.Length); $o.Write($flush, 0, $flush.Length); $o.Flush(); Start-Sleep -Milliseconds 700 }'
     'Set-Content -Path "$Dir/r3.done" -Value 1'
     'while (-not (Test-Path "$Dir/go")) { Start-Sleep -Milliseconds 100 }'
-    '$b = [IO.File]::ReadAllBytes("$Dir/r4.bin"); $o.Write($b, 0, $b.Length); $o.Flush()'
+    '$b = [IO.File]::ReadAllBytes("$Dir/r4.bin"); $o.Write($b, 0, $b.Length); $o.Write($flush, 0, $flush.Length); $o.Flush()'
     'Set-Content -Path "$Dir/r4.done" -Value 1'
     'Start-Sleep 600'
 )
@@ -160,7 +173,8 @@ function Run-Cases($route) {
     $firstTitle = "$(P display -p -t 's:first_base' '#{pane_title}')"
     Check "${route}: the first title is known ('$firstTitle')" ($firstTitle -ne '' -and $firstTitle -cne 'app') $true
     foreach ($c in $cases) {
-        $want = if ($route -eq 'inbox conhost' -and $c.Count -gt 3) { $c[3] } else { $c[2] }
+        $want = if ($route -eq 'inbox conhost' -and $Win10 -and $c.Count -gt 4) { $c[4] }
+                elseif ($route -eq 'inbox conhost' -and $c.Count -gt 3) { $c[3] } else { $c[2] }
         if ($want -ceq 'BASE') { continue }
         if ($want -ceq 'FIRST') { $want = $firstTitle }
         Check "${route}: $($c[0]) pane_title" "$(P display -p -t "s:$($c[0])" '#{pane_title}')" $want
