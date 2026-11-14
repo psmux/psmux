@@ -11161,8 +11161,10 @@ fn flush_paste_pend_as_text(
     gesture.record(paste_pend);
     let has_non_ascii = paste_pend.chars().any(|c| !c.is_ascii());
     // A burst that never reached stage 2 and is one key repeated is a held
-    // key (issue #1049), so it goes out as the keys it is.
-    if (*paste_stage2 || (paste_pend.len() >= 3 && !is_one_key_repeated(paste_pend))) && !has_non_ascii {
+    // key (issue #1049), so it goes out as the keys it is. With a Ctrl+V
+    // press in flight it is that paste, as in the 20 ms rule.
+    let held_key = is_one_key_repeated(paste_pend) && !gesture.is_open();
+    if (*paste_stage2 || (paste_pend.len() >= 3 && !held_key)) && !has_non_ascii {
         let encoded = crate::util::base64_encode(paste_pend);
         cmd_batch.push(format!("send-paste {}\n", encoded));
     } else {
