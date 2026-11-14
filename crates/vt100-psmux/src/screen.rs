@@ -136,6 +136,14 @@ pub struct Screen {
     /// entered, `None` while it is not in use (tmux's `saved_cx`/`saved_cy`,
     /// set by screen_alternate_on and reset by screen_alternate_off).
     alternate_saved_cursor: Option<(u16, u16)>,
+    /// Whether DECSET 1049 has saved the cursor that DECRST 1049 puts back,
+    /// tmux's `saved_cx != UINT_MAX`: set by 1049 on the way in and kept
+    /// after it (`screen_alternate_on` and `screen_alternate_off`, screen.c:707
+    /// and 746 at tag 3.8). 47 saves none. tmux keeps it through RIS too,
+    /// which only `screen_reinit` (screen.c:124) would reset; RIS here starts
+    /// the screen again and forgets it, as it forgets the DECSC slot it
+    /// lives in.
+    cursor_saved_by_1049: bool,
 
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
@@ -434,6 +442,7 @@ impl Screen {
             saved_charsets: crate::charset::Charsets::default(),
             alternate_saved_charsets: crate::charset::Charsets::default(),
             alternate_saved_cursor: None,
+            cursor_saved_by_1049: false,
 
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
@@ -2930,10 +2939,16 @@ impl Screen {
                 [1006] => {
                     self.set_mouse_encoding(MouseProtocolEncoding::Sgr);
                 }
+                // On the alternate screen tmux does nothing for 1049: no
+                // save, no clear (screen_alternate_on, screen.c:700 at tag
+                // 3.8).
                 [1049] => {
-                    self.decsc();
-                    self.alternate_grid.clear();
-                    self.enter_alternate_grid();
+                    if !self.mode(MODE_ALTERNATE_SCREEN) {
+                        self.decsc();
+                        self.cursor_saved_by_1049 = true;
+                        self.alternate_grid.clear();
+                        self.enter_alternate_grid();
+                    }
                 }
                 [2004] => self.set_mode(MODE_BRACKETED_PASTE),
                 [9001] => self.win32_input_requested = true,
@@ -2984,9 +2999,19 @@ impl Screen {
                 [1006] => {
                     self.clear_mouse_encoding(MouseProtocolEncoding::Sgr);
                 }
+                // The cursor comes back only if 1049 saved one
+                // (screen_alternate_off, screen.c:746 at tag 3.8); after 47
+                // it stays where the alternate screen left it, as for 47.
                 [1049] => {
+                    let carried = self
+                        .mode(MODE_ALTERNATE_SCREEN)
+                        .then(|| self.alternate_grid.pos());
                     self.exit_alternate_grid();
-                    self.decrc();
+                    if self.cursor_saved_by_1049 {
+                        self.decrc();
+                    } else if let Some(pos) = carried {
+                        self.grid.set_pos_absolute(pos);
+                    }
                 }
                 [2004] => self.clear_mode(MODE_BRACKETED_PASTE),
                 _ => unhandled(self),
