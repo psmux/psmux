@@ -2996,14 +2996,18 @@ impl Screen {
 
     // CSI h: of the ANSI modes only IRM, insert mode (input.c:2007 at tag
     // 3.8); tmux's other one, 34, is a cursor style psmux does not keep.
+    // `dectcem_25` reads mode 25 as DECTCEM, as the Windows 10 inbox conhost
+    // writes it (perform's `CONHOST_WIN10`).
     pub(crate) fn sm(
         &mut self,
         params: &vte::Params,
+        dectcem_25: bool,
         mut unhandled: impl FnMut(&mut Self),
     ) {
         for param in params {
             match param {
                 [4] => self.set_mode(MODE_INSERT),
+                [25] if dectcem_25 => self.clear_mode(MODE_HIDE_CURSOR),
                 _ => unhandled(self),
             }
         }
@@ -3013,11 +3017,13 @@ impl Screen {
     pub(crate) fn rm(
         &mut self,
         params: &vte::Params,
+        dectcem_25: bool,
         mut unhandled: impl FnMut(&mut Self),
     ) {
         for param in params {
             match param {
                 [4] => self.clear_mode(MODE_INSERT),
+                [25] if dectcem_25 => self.set_mode(MODE_HIDE_CURSOR),
                 _ => unhandled(self),
             }
         }
