@@ -23,6 +23,7 @@
 # PSMUX_TEST_BIN or PSMUX_EXE picks the binary (defaults to
 # target\release\psmux.exe).
 
+. "$PSScriptRoot\helpers\stop_own_tree.ps1"
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { $env:PSMUX_EXE }
 $ConptyDir = $env:PSMUX_CONPTY_DIR_FOR_TEST
@@ -153,7 +154,7 @@ function Run-Cases($route) {
     Write-Host "  -- RIS" -ForegroundColor DarkCyan
     Case $route 'the value survives it' "$Start\ec\e]9;4;3$A" '3;50'
 
-    if ($script:Term -and -not $script:Term.HasExited) { & taskkill /PID $script:Term.Id /T /F 2>&1 | Out-Null }
+    if ($script:Term -and -not $script:Term.HasExited) { Stop-OwnTree -RootPid $script:Term.Id }
     $script:Term = $null
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
@@ -180,7 +181,7 @@ catch {
     Write-Fail "exception: $_"
 }
 finally {
-    if ($script:Term -and -not $script:Term.HasExited) { & taskkill /PID $script:Term.Id /T /F 2>&1 | Out-Null }
+    if ($script:Term -and -not $script:Term.HasExited) { Stop-OwnTree -RootPid $script:Term.Id }
     if ($script:NS) { P kill-server | Out-Null }
     Start-Sleep -Milliseconds 500
     Remove-Item -Recurse -Force $TempHome -EA SilentlyContinue

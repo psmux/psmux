@@ -16,6 +16,7 @@
 param(
     [string]$Exe = $(if ($env:PSMUX_TEST_EXE) { $env:PSMUX_TEST_EXE } else { (Get-Command psmux -EA Stop).Source })
 )
+. "$PSScriptRoot\helpers\stop_own_tree.ps1"
 
 $ErrorActionPreference = "Continue"
 $script:Passed = 0
@@ -63,7 +64,7 @@ function Down {
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 300
     foreach ($p in @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "-L $($script:Ns)(\s|$)" })) {
-        taskkill /PID $p.ProcessId /T /F 2>&1 | Out-Null
+        Stop-OwnTree -RootPid $p.ProcessId
     }
     $script:Ns = $null
 }

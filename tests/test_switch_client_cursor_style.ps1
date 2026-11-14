@@ -17,6 +17,7 @@
 # PSMUX_TEST_BIN or PSMUX_EXE picks the binary (defaults to
 # target\release\psmux.exe).
 
+. "$PSScriptRoot\helpers\stop_own_tree.ps1"
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { $env:PSMUX_EXE }
 foreach ($name in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'PSMUX_*' -or $_.Name -like 'TMUX*' } | ForEach-Object Name)) {
@@ -80,7 +81,7 @@ function Case($c) {
     P switch-client -t s | Out-Null
     Start-Sleep -Milliseconds 3000
     Check "$($c.n): told after switching back to s" ((Lines $log | Select-Object -Skip $mid.Count) -join ' ') $c.back
-    if ($script:Term -and -not $script:Term.HasExited) { & taskkill /PID $script:Term.Id /T /F 2>&1 | Out-Null }
+    if ($script:Term -and -not $script:Term.HasExited) { Stop-OwnTree -RootPid $script:Term.Id }
     $script:Term = $null
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
@@ -106,7 +107,7 @@ catch {
     Write-Fail "exception: $_"
 }
 finally {
-    if ($script:Term -and -not $script:Term.HasExited) { & taskkill /PID $script:Term.Id /T /F 2>&1 | Out-Null }
+    if ($script:Term -and -not $script:Term.HasExited) { Stop-OwnTree -RootPid $script:Term.Id }
     if ($script:NS) { P kill-server | Out-Null }
     Start-Sleep -Milliseconds 500
     Remove-Item -Recurse -Force $TempHome -EA SilentlyContinue

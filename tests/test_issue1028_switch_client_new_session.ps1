@@ -13,6 +13,7 @@
 # namespace per case; cleanup is `-L <ns> kill-server`.
 # PSMUX_TEST_BIN or PSMUX_EXE picks the binary (defaults to target\release\psmux.exe).
 
+. "$PSScriptRoot\helpers\stop_own_tree.ps1"
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { $env:PSMUX_EXE }
 foreach ($name in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'PSMUX_*' -or $_.Name -like 'TMUX*' } | ForEach-Object Name)) {
@@ -53,7 +54,7 @@ function Up($before, $after) {
     Start-Sleep -Milliseconds 1500
 }
 function Down {
-    if ($script:Win -and -not $script:Win.HasExited) { & taskkill /PID $script:Win.Id /T /F 2>&1 | Out-Null }
+    if ($script:Win -and -not $script:Win.HasExited) { Stop-OwnTree -RootPid $script:Win.Id }
     $script:Win = $null
     if ($script:NS) { P kill-server | Out-Null }
     $script:NS = ""
