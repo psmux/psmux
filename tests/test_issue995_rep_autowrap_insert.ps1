@@ -13,6 +13,12 @@
 # same bytes (the first two rows and cursor_x), and psmux's cursor has to be
 # where the console host's is.
 #
+# The inbox conhost of Windows 10 (19045) keeps autowrap on and insert mode
+# off whatever the program asks, and stops REP short, and hands psmux what it
+# drew. There the program also reads the host's own rows
+# (ReadConsoleOutputCharacterW), and psmux's rows and cursor have to be the
+# host's in place of tmux's.
+#
 # [1] the inbox conhost; [2] OpenConsole (PSMUX_CONPTY_DIR), when
 # PSMUX_TEST_CONPTY_DIR names a folder holding conpty.dll, skipped otherwise.
 #
@@ -82,13 +88,27 @@ $cases = @(
     @('irm_full',     "$($Line.Substring(0, 20))`r${E}[4hX${E}[4l", 'X0123456789ABCDEFGHI', '', 1)
 )
 foreach ($c in $cases) { [IO.File]::WriteAllBytes("$TempHome\p\$($c[0]).bin", [Text.Encoding]::UTF8.GetBytes($c[1])) }
+# The program writes the case, then records the host's cursor and its rows 0
+# and 1.
 Set-Content -Path "$TempHome\show.ps1" -Value @(
     'param([string]$Payload)'
     '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
+    'Add-Type -TypeDefinition @"'
+    'using System; using System.Runtime.InteropServices; using System.Text;'
+    'public static class HostRow {'
+    '  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);'
+    '  [StructLayout(LayoutKind.Sequential)] struct COORD { public short X; public short Y; }'
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool ReadConsoleOutputCharacterW(IntPtr h, StringBuilder s, uint n, COORD c, out uint read);'
+    '  public static string Read(short y, uint n) { var sb = new StringBuilder((int)n + 4); var c = new COORD(); c.Y = y; uint r; ReadConsoleOutputCharacterW(GetStdHandle(-11), sb, n, c, out r); return sb.ToString(0, (int)r); }'
+    '}'
+    '"@'
     '$o = [Console]::OpenStandardOutput(); $b = [IO.File]::ReadAllBytes($Payload); $o.Write($b, 0, $b.Length); $o.Flush()'
-    'Set-Content -Path ($Payload + ".host") -Value ([Console]::CursorLeft)'
+    '$x = [Console]::CursorLeft; $r0 = [HostRow]::Read(0, 20).TrimEnd(); $r1 = [HostRow]::Read(1, 20).TrimEnd()'
+    '[IO.File]::WriteAllText($Payload + ".host", "$x`n$r0`n$r1", [Text.Encoding]::UTF8)'
     'Start-Sleep 600'
 )
+# The inbox conhost before Windows 11 draws these itself (measured on 19045).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 $pwsh = (Get-Command pwsh).Source.Replace('\', '/')
 $fwd = $TempHome.Replace('\', '/')
 $script:NS = ""
@@ -114,11 +134,18 @@ function Run-Cases($route) {
         $row1 = "$($rows | Select-Object -Skip 1 -First 1)".TrimEnd()
         $width = "$(P display -p -t "s:$name" '#{pane_width}')"
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x}')"
-        $hostCol = "$((Get-Content "$TempHome\p\$name.bin.host" -EA SilentlyContinue) -join '')"
+        $hostLines = @(([IO.File]::ReadAllText("$TempHome\p\$name.bin.host", [Text.Encoding]::UTF8) -split "`n"))
+        $hostCol = $hostLines[0]
         if ($width -ne '20') { Write-Fail "${route}: $name pane is $width columns, not 20"; continue }
-        Check "${route}: $name row 0" $row0 $c[2]
-        Check "${route}: $name row 1" $row1 $c[3]
-        Check "${route}: $name cursor_x" $cursor $c[4]
+        if ($route -eq 'inbox conhost' -and $Win10) {
+            # The Windows 10 host's own drawing, which psmux shows.
+            Check "${route}: $name row 0 is the console host's" $row0 $hostLines[1]
+            Check "${route}: $name row 1 is the console host's" $row1 $hostLines[2]
+        } else {
+            Check "${route}: $name row 0" $row0 $c[2]
+            Check "${route}: $name row 1" $row1 $c[3]
+            Check "${route}: $name cursor_x" $cursor $c[4]
+        }
         Check "${route}: $name cursor_x is the console host's" $cursor $hostCol
     }
     P kill-server | Out-Null
@@ -128,7 +155,9 @@ function Run-Cases($route) {
 # DECRQM for DECAWM and IRM: 1 set, 2 reset, as tmux answers from MODE_WRAP
 # and MODE_INSERT (input.c:1641-1643 and :1662-1664 at tag 3.8). The inbox
 # conhost answers itself; through OpenConsole psmux answers, and said 0, "not
-# recognised", for both before it kept the modes.
+# recognised", for both before it kept the modes. The Windows 10 inbox conhost
+# passes the queries on to psmux when it next draws, so there the probe writes
+# text after each.
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $probe = "$TempHome\decrqm_probe.exe"
 if (Test-Path $csc) { & $csc /nologo /out:$probe (Join-Path $PSScriptRoot "decrqm_mode_probe_child.cs") 2>&1 | Out-Null }
@@ -141,7 +170,8 @@ function Run-Decrqm($route) {
     $log = "$TempHome\decrqm.txt"
     Remove-Item $log -Force -EA SilentlyContinue
     $script:NS = "rai_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
-    P new-session -d -s q -x 80 -y 20 "$($probe.Replace('\', '/')) $($log.Replace('\', '/'))" | Out-Null
+    $after = if ($Win10) { ' .' } else { '' }
+    P new-session -d -s q -x 80 -y 20 "$($probe.Replace('\', '/')) $($log.Replace('\', '/'))$after" | Out-Null
     $deadline = (Get-Date).AddSeconds(40)
     while ((Get-Date) -lt $deadline -and -not (Test-Path $log)) { Start-Sleep -Milliseconds 250 }
     Start-Sleep -Milliseconds 300

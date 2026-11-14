@@ -13,6 +13,12 @@
 # client draws the overline: its console cell has COMMON_LVB_GRID_HORIZONTAL,
 # read with tests\conread.cs.
 #
+# The inbox conhost of Windows 10 (19045) turns bold into a bright colour and
+# drops dim and the overline before psmux sees them, so there [1] expects what
+# that host hands psmux, and [3] runs on the OpenConsole server of [2], which
+# passes the codes on (skipped without it). [4] is skipped there: the client's
+# own console is that host, which draws no overline.
+#
 # Private USERPROFILE, PSMUX_DATA_DIR and config, a -L namespace per server;
 # cleanup is `-L <ns> kill-server` plus the client PID. PSMUX_EXE picks the
 # binary (defaults to target\release\psmux.exe).
@@ -44,16 +50,20 @@ $env:PSMUX_NO_WARM = "1"
 $env:PSMUX_CONFIG_FILE = Join-Path $TempHome "psmux.conf"
 Set-Content -Path $env:PSMUX_CONFIG_FILE -Value ""
 $E = [char]27
-# name, payload, what capture-pane -e row 0 must hold
+# name, payload, what capture-pane -e row 0 must hold, and what it holds
+# through the inbox conhost of Windows 10, which hands psmux bold as bold and
+# bright white (or bright red) and no dim or overline
 $cases = @(
-    @('bold_dim', "a$E[1;2mX$E[m", "$E[0;1;2mX"),
-    @('bold_then_dim', "a$E[1m$E[2mX$E[m", "$E[0;1;2mX"),
-    @('dim_then_bold', "a$E[2m$E[1mX$E[m", "$E[0;1;2mX"),
-    @('sgr22', "a$E[1;2mA$E[22mB$E[m", "$E[0;1;2mA$E[0mB"),
-    @('overline', "a$E[53mO$E[55mP$E[m", "$E[0;53mO$E[0mP"),
-    @('overline_sgr0', "a$E[53mO$E[0mP$E[m", "$E[0;53mO$E[0mP"),
-    @('overline_mix', "a$E[1;53;31mO$E[m", "$E[0;1;53;31mO")
+    @('bold_dim', "a$E[1;2mX$E[m", "$E[0;1;2mX", "$E[0;1;97mX"),
+    @('bold_then_dim', "a$E[1m$E[2mX$E[m", "$E[0;1;2mX", "$E[0;1;97mX"),
+    @('dim_then_bold', "a$E[2m$E[1mX$E[m", "$E[0;1;2mX", "$E[0;1;97mX"),
+    @('sgr22', "a$E[1;2mA$E[22mB$E[m", "$E[0;1;2mA$E[0mB", "$E[0;1;97mA$E[0mB"),
+    @('overline', "a$E[53mO$E[55mP$E[m", "$E[0;53mO$E[0mP", "$E[0maOP"),
+    @('overline_sgr0', "a$E[53mO$E[0mP$E[m", "$E[0;53mO$E[0mP", "$E[0maOP"),
+    @('overline_mix', "a$E[1;53;31mO$E[m", "$E[0;1;53;31mO", "$E[0;1;91mO")
 )
+# The inbox conhost before Windows 11 (measured on 19045).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 $payloadDir = Join-Path $TempHome "p"
 New-Item -ItemType Directory -Force $payloadDir | Out-Null
 $show = Join-Path $TempHome "show.ps1"
@@ -85,8 +95,9 @@ function Run-Captures($route) {
     foreach ($c in $cases) {
         Show $c[0]
         $row = Row0 $c[0]
-        if ($row -and $row.Contains($c[2])) { Write-Pass "${route}: $($c[0]) has '$(Visible $c[2])'" }
-        else { Write-Fail "${route}: $($c[0]) expected '$(Visible $c[2])' in row 0, got '$(Visible $row)'" }
+        $want = if ($route -eq 'inbox conhost' -and $Win10) { $c[3] } else { $c[2] }
+        if ($row -and $row.Contains($want)) { Write-Pass "${route}: $($c[0]) has '$(Visible $want)'" }
+        else { Write-Fail "${route}: $($c[0]) expected '$(Visible $want)' in row 0, got '$(Visible $row)'" }
     }
 }
 
@@ -94,11 +105,9 @@ Write-Host "`n=== bold with dim, and the overline ===" -ForegroundColor Cyan
 Write-Host "  Binary: $PSMUX"
 Write-Host "  $((& $PSMUX -V) -join ' ')"
 
-$client = $null
-try {
-    Write-Host "`n[1] capture-pane -e on the inbox conhost" -ForegroundColor Yellow
-    Run-Captures 'inbox conhost'
-
+# [3] and [4] on the server that is running, with its windows from
+# Run-Captures.
+function Run-Client {
     Write-Host "`n[3] The frame a client gets carries both flags and the overline" -ForegroundColor Yellow
     $port = [int](Get-Content (Join-Path $TempHome "$($script:NS)__s.port") -Raw).Trim()
     $key = (Get-Content (Join-Path $TempHome "$($script:NS)__s.key") -Raw).Trim()
@@ -120,6 +129,12 @@ try {
     }
 
     Write-Host "`n[4] A real client draws the overline (COMMON_LVB_GRID_HORIZONTAL)" -ForegroundColor Yellow
+    if ($Win10) {
+        # The client's own console, the Windows 10 inbox conhost, keeps no
+        # overline on its cells; [3] has shown what the client is sent.
+        Write-Info "skipped: the Windows 10 inbox conhost draws no overline"
+        return
+    }
     $toolDir = Join-Path $TempHome "tools"
     New-Item -ItemType Directory -Force $toolDir | Out-Null
     $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -130,9 +145,9 @@ try {
         Write-Fail "conread did not compile"
     } else {
         P select-window -t "s:overline" | Out-Null
-        $client = Start-Process -FilePath $PSMUX -ArgumentList "-L", $script:NS, "attach", "-t", "s" -PassThru
+        $script:client = Start-Process -FilePath $PSMUX -ArgumentList "-L", $script:NS, "attach", "-t", "s" -PassThru
         Start-Sleep -Seconds 4
-        $lines = [string[]](& $READ $client.Id -a)
+        $lines = [string[]](& $READ $script:client.Id -a)
         $line = $lines | Where-Object { $_ -match '\] aOP' } | Select-Object -First 1
         if (-not $line) {
             Write-Fail "no 'aOP' row on the client's console: $(($lines | Select-Object -First 3) -join ' / ')"
@@ -146,10 +161,18 @@ try {
             Check "client: 'O' has the overline" (($attrs[1] -band $grid) -ne 0) $true
             Check "client: 'P' has no overline" (($attrs[2] -band $grid) -ne 0) $false
         }
-        Stop-Process -Id $client.Id -Force -EA SilentlyContinue
-        $client = $null
+        Stop-Process -Id $script:client.Id -Force -EA SilentlyContinue
+        $script:client = $null
         Start-Sleep -Milliseconds 700
     }
+}
+
+$script:client = $null
+try {
+    Write-Host "`n[1] capture-pane -e on the inbox conhost" -ForegroundColor Yellow
+    Run-Captures 'inbox conhost'
+    if (-not $Win10) { Run-Client }
+
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
 
@@ -157,14 +180,16 @@ try {
     if ($ConptyDir -and (Test-Path (Join-Path $ConptyDir 'conpty.dll'))) {
         $env:PSMUX_CONPTY_DIR = $ConptyDir
         Run-Captures 'OpenConsole'
+        if ($Win10) { Run-Client }
         P kill-server | Out-Null
         Remove-Item Env:PSMUX_CONPTY_DIR
     } else {
         Write-Info "skipped: no conpty.dll in $ConptyDir (set PSMUX_TEST_CONPTY_DIR)"
+        if ($Win10) { Write-Info "[3] and [4] skipped too: the Windows 10 inbox conhost drops dim and the overline" }
     }
 }
 finally {
-    if ($client -and -not $client.HasExited) { Stop-Process -Id $client.Id -Force -EA SilentlyContinue }
+    if ($script:client -and -not $script:client.HasExited) { Stop-Process -Id $script:client.Id -Force -EA SilentlyContinue }
     if ($script:NS) { P kill-server | Out-Null }
     Start-Sleep -Milliseconds 500
     Remove-Item -Recurse -Force $TempHome -EA SilentlyContinue
