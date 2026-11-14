@@ -14,7 +14,10 @@
 # attached, so the sixteen colours, the foreground and the background are
 # psmux's own defaults (Campbell).
 #   1. the inbox console host, which passes OSC 4 on as written, BEL included,
-#      and drops OSC 10 and 11 (pipe-pane -o).
+#      and drops OSC 10 and 11 (pipe-pane -o). The one of Windows 10 (19045)
+#      passes all three on, when it next draws, so there every case gets
+#      psmux's reply, as through OpenConsole, and each case's bytes end with
+#      text so that the host draws.
 #   2. OpenConsole, with PSMUX_CONPTY_DIR_FOR_TEST (a directory with
 #      conpty.dll and OpenConsole.exe; skipped without it), which passes all of
 #      them on.
@@ -82,6 +85,13 @@ $cases = @(
 
 $script:NS = ""
 function P { & $PSMUX -L $script:NS @args 2>&1 }
+# The inbox conhost before Windows 11 passes OSC 10 and 11 on as well
+# (measured on 19045); the one on 26200 and 26300 drops them.
+$InboxForwardsQueries = [Environment]::OSVersion.Version.Build -lt 22000
+# The inbox conhost of Windows 10 (19045) passes a query on only when it next
+# draws, so there each query is followed by text; Windows 11's needs none.
+$Win10Flush = if ([Environment]::OSVersion.Version.Build -lt 22000) { '.' } else { '' }
+
 function Run-Cases($route) {
     $script:NS = "pal_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
     P new-session -d -s s -x 120 -y 20 | Out-Null
@@ -97,11 +107,11 @@ function Run-Cases($route) {
             Start-Sleep -Milliseconds 300
         }
         $out = Join-Path $TempHome "r_${route}_$i.txt"
-        P send-keys -t "s:w$i" "& '$probe' '$out' '$($c.q)' raw" Enter | Out-Null
+        P send-keys -t "s:w$i" "& '$probe' '$out' '$($c.q)$Win10Flush' raw" Enter | Out-Null
         for ($k = 0; $k -lt 60 -and -not (Test-Path $out); $k++) { Start-Sleep -Milliseconds 200 }
         Start-Sleep -Milliseconds 300
         $got = if (Test-Path $out) { (Get-Content $out -Raw).Trim() } else { '(no reply file)' }
-        $want = if ($route -eq 'inbox conhost' -and $c.ContainsKey('inbox')) { $c.inbox } else { $c.a }
+        $want = if ($route -eq 'inbox conhost' -and $c.ContainsKey('inbox') -and -not $InboxForwardsQueries) { $c.inbox } else { $c.a }
         Check "${route}: $($c.n)" $got $want
         if ($c.ContainsKey('set') -and $c.set[0] -eq '-g') { P set -gu $c.set[1] | Out-Null }
     }
