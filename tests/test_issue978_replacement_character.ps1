@@ -13,6 +13,11 @@
 # U+009B and U+0085 written as UTF-8 are no cell in the console hosts and
 # stay none in psmux (tmux keeps them as zero width characters).
 #
+# The inbox conhost of Windows 10 (19045) is another matter, and there the
+# row and cursor have to be its own: it drops a byte that is no UTF-8 rather
+# than writing U+FFFD, reads U+009B as a CSI (so `b` repeats the `a`), and
+# keeps U+0085 as a cell of one column, which psmux shows as U+FFFD.
+#
 # [1] the inbox conhost; [2] OpenConsole (PSMUX_CONPTY_DIR), when
 # PSMUX_TEST_CONPTY_DIR names a folder holding conpty.dll, skipped otherwise.
 #
@@ -48,18 +53,21 @@ $env:PSMUX_CONFIG_FILE = Join-Path $TempHome "psmux.conf"
 Set-Content -Path $env:PSMUX_CONFIG_FILE -Value ""
 
 $R = [string][char]0xFFFD
-# name, raw bytes, the row tmux 3.8 kept, its cursor_x
+# name, raw bytes, the row tmux 3.8 kept, its cursor_x, and the row and
+# cursor_x of the Windows 10 inbox conhost
 $cases = @(
-    @('fffd',      [byte[]](0x61, 0xEF, 0xBF, 0xBD, 0x62, 0x7C),             "a${R}b|", 4),
-    @('c1_9b',     [byte[]](0x61, 0x9B, 0x62, 0x7C),                         "a${R}b|", 4),
-    @('c1_85',     [byte[]](0x61, 0x85, 0x62, 0x7C),                         "a${R}b|", 4),
-    @('byte_ff',   [byte[]](0x61, 0xFF, 0x62, 0x7C),                         "a${R}b|", 4),
-    @('cut_off',   [byte[]](0x61, 0xE2, 0x82, 0x62, 0x7C),                   "a${R}b|", 4),
-    @('cut_esc',   [byte[]](0x61, 0xE2, 0x82, 0x1B, 0x5B, 0x6D, 0x62, 0x7C), "a${R}b|", 4),
-    @('two',       [byte[]](0x78, 0xFF, 0xFE, 0x79),                         "x${R}${R}y", 4),
-    @('u009b',     [byte[]](0x61, 0xC2, 0x9B, 0x62, 0x7C),                   "ab|", 3),
-    @('u0085',     [byte[]](0x61, 0xC2, 0x85, 0x62, 0x7C),                   "ab|", 3)
+    @('fffd',      [byte[]](0x61, 0xEF, 0xBF, 0xBD, 0x62, 0x7C),             "a${R}b|", 4, "a${R}b|", 4),
+    @('c1_9b',     [byte[]](0x61, 0x9B, 0x62, 0x7C),                         "a${R}b|", 4, 'ab|', 3),
+    @('c1_85',     [byte[]](0x61, 0x85, 0x62, 0x7C),                         "a${R}b|", 4, 'ab|', 3),
+    @('byte_ff',   [byte[]](0x61, 0xFF, 0x62, 0x7C),                         "a${R}b|", 4, 'ab|', 3),
+    @('cut_off',   [byte[]](0x61, 0xE2, 0x82, 0x62, 0x7C),                   "a${R}b|", 4, 'ab|', 3),
+    @('cut_esc',   [byte[]](0x61, 0xE2, 0x82, 0x1B, 0x5B, 0x6D, 0x62, 0x7C), "a${R}b|", 4, 'ab|', 3),
+    @('two',       [byte[]](0x78, 0xFF, 0xFE, 0x79),                         "x${R}${R}y", 4, 'xy', 2),
+    @('u009b',     [byte[]](0x61, 0xC2, 0x9B, 0x62, 0x7C),                   "ab|", 3, 'aa|', 3),
+    @('u0085',     [byte[]](0x61, 0xC2, 0x85, 0x62, 0x7C),                   "ab|", 3, "a${R}b|", 4)
 )
+# The inbox conhost before Windows 11 (measured on 19045).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 foreach ($c in $cases) { [IO.File]::WriteAllBytes("$TempHome\p\$($c[0]).bin", $c[1]) }
 Set-Content -Path "$TempHome\show.ps1" -Value @(
     'param([string]$Payload)'
@@ -91,8 +99,9 @@ function Run-Cases($route) {
         $row = "$((P capture-pane -p -t "s:$name") | Select-Object -First 1)".TrimEnd()
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x}')"
         $hostCol = "$((Get-Content "$TempHome\p\$name.bin.host" -EA SilentlyContinue) -join '')"
-        Check "${route}: $name row" $row $c[2]
-        Check "${route}: $name cursor_x" $cursor $c[3]
+        $w = if ($route -eq 'inbox conhost' -and $Win10) { 4 } else { 2 }
+        Check "${route}: $name row" $row $c[$w]
+        Check "${route}: $name cursor_x" $cursor $c[$w + 1]
         Check "${route}: $name cursor_x is the console host's" $cursor $hostCol
     }
     P kill-server | Out-Null
