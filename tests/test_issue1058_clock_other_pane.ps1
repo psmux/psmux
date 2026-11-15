@@ -43,12 +43,14 @@ $csc = Get-ChildItem "C:\Windows\Microsoft.NET\Framework64\v4*\csc.exe" -EA Sile
 $READ = Join-Path $TMP "screenread.exe"
 $KEYINJ = Join-Path $TMP "keyinject.exe"
 $CLICKINJ = Join-Path $TMP "clickinject.exe"
+$WHEELINJ = Join-Path $TMP "wheelinject.exe"
 if ($csc) {
     & $csc /nologo /optimize "/out:$READ" (Join-Path $PSScriptRoot "console_screen_read.cs") 2>&1 | Out-Null
     & $csc /nologo /optimize "/out:$KEYINJ" (Join-Path $PSScriptRoot "injector.cs") 2>&1 | Out-Null
     & $csc /nologo /optimize "/out:$CLICKINJ" (Join-Path $PSScriptRoot "click_injector.cs") 2>&1 | Out-Null
+    & $csc /nologo /optimize "/out:$WHEELINJ" (Join-Path $PSScriptRoot "mouse_injector.cs") 2>&1 | Out-Null
 }
-foreach ($exe in @($READ, $KEYINJ, $CLICKINJ)) {
+foreach ($exe in @($READ, $KEYINJ, $CLICKINJ, $WHEELINJ)) {
     if (-not (Test-Path $exe)) { Write-Error "could not build $(Split-Path $exe -Leaf)"; exit 1 }
 }
 $POWERSHELL = (Get-Command pwsh -EA SilentlyContinue).Source
@@ -116,12 +118,20 @@ function Keys($keys) {
     if (-not (Invoke-GuardedInjector $KEYINJ $script:client.Id $keys -RequireDelivery)) { throw "INJECTOR_BLOCKED: $($script:InjectorBlocked)" }
     Start-Sleep -Milliseconds 1200
 }
-function Click($pane) {
+# $button is the console button mask: 1 left, 2 right, 4 middle.
+function Click($pane, $button = 1) {
     $l, $t, $w, $h = Geometry $pane
-    & $CLICKINJ $script:client.Id ($l + [math]::Floor($w / 2)) ($t + [math]::Floor($h / 2)) | Out-Null
+    & $CLICKINJ $script:client.Id ($l + [math]::Floor($w / 2)) ($t + [math]::Floor($h / 2)) 80 $button | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "click_injector failed with $LASTEXITCODE" }
     Start-Sleep -Milliseconds 1200
 }
+function WheelUp($pane) {
+    $l, $t, $w, $h = Geometry $pane
+    & $WHEELINJ $script:client.Id up 1 ($l + [math]::Floor($w / 2)) ($t + [math]::Floor($h / 2)) | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "mouse_injector failed with $LASTEXITCODE" }
+    Start-Sleep -Milliseconds 1200
+}
+function Mode($pane) { return (P display-message -p -t $pane '#{pane_mode}').Trim() }
 function Active { return (P display-message -p '#{pane_id}').Trim() }
 function InMode($pane) { return (P display-message -p -t $pane '#{pane_in_mode}').Trim() }
 # Split in two, both full of output, focus on the left pane.
@@ -180,6 +190,36 @@ try {
     if ((Active) -eq $left) { Write-Pass "the focus stays on the left pane" } else { Write-Fail "the focus should stay on $left" }
     if (ShowsClock $right) { Write-Pass "the right pane shows the clock it entered" } else { Write-Fail "the right pane should show its clock:`n$((PaneText $right) -join "`n")" }
     if (ShowsOutput $left) { Write-Pass "the left pane shows its output, no clock" } else { Write-Fail "the left pane should show its output" }
+    # tmux runs `select-pane -t=; send -M` for a middle press on a pane in a
+    # mode and `send -M` for a wheel notch, so both reach window_clock_key and
+    # close the clock; on another pane they only move the focus (or enter
+    # copy mode there) and the clock stays with its own pane.
+    Write-Host "`n[5] a middle press on the clock pane without focus closes it" -ForegroundColor Yellow
+    Click $right 4
+    if ((Active) -eq $right) { Write-Pass "the middle press focused the clock pane" } else { Write-Fail "the middle press should focus $right, focus is on $(Active)" }
+    if ((InMode $right) -eq '0') { Write-Pass "the middle press closed the clock" } else { Write-Fail "the middle press should close the clock, pane_mode is '$(Mode $right)'" }
+    if (ShowsOutput $right) { Write-Pass "the right pane shows its output again" } else { Write-Fail "the right pane should show its output again:`n$((PaneText $right) -join "`n")" }
+
+    Write-Host "`n[6] a middle press on another pane leaves the clock on its own pane" -ForegroundColor Yellow
+    P clock-mode -t $right | Out-Null
+    Start-Sleep -Milliseconds 1500
+    Click $left 4
+    if ((Active) -eq $left) { Write-Pass "the middle press focused the left pane" } else { Write-Fail "the middle press should focus $left, focus is on $(Active)" }
+    if ((Mode $right) -eq 'clock-mode' -and (ShowsClock $right)) { Write-Pass "the right pane keeps its clock" } else { Write-Fail "the right pane should keep its clock, pane_mode is '$(Mode $right)':`n$((PaneText $right) -join "`n")" }
+    if ((InMode $left) -eq '0' -and (ShowsOutput $left)) { Write-Pass "the clock did not move to the left pane" } else { Write-Fail "the left pane should not be in a mode, pane_mode is '$(Mode $left)'" }
+
+    Write-Host "`n[7] a wheel notch on another pane leaves the clock on its own pane" -ForegroundColor Yellow
+    WheelUp $left
+    if ((Mode $left) -eq 'copy-mode') { Write-Pass "the left pane entered copy mode" } else { Write-Fail "the wheel should put the left pane in copy mode, pane_mode is '$(Mode $left)'" }
+    if ((Mode $right) -eq 'clock-mode' -and (ShowsClock $right)) { Write-Pass "the right pane keeps its clock" } else { Write-Fail "the right pane should keep its clock, pane_mode is '$(Mode $right)':`n$((PaneText $right) -join "`n")" }
+    P send-keys -t $left -X cancel | Out-Null
+    Start-Sleep -Milliseconds 800
+
+    Write-Host "`n[8] a wheel notch on the clock pane without focus closes it" -ForegroundColor Yellow
+    WheelUp $right
+    if ((InMode $right) -eq '0') { Write-Pass "the wheel closed the clock" } else { Write-Fail "the wheel should close the clock, pane_mode is '$(Mode $right)'" }
+    if ((Active) -eq $left) { Write-Pass "the focus stays on the left pane" } else { Write-Fail "the focus should stay on $left, it is on $(Active)" }
+    if (ShowsOutput $right) { Write-Pass "the right pane shows its output again" } else { Write-Fail "the right pane should show its output again:`n$((PaneText $right) -join "`n")" }
 }
 catch {
     Write-Fail "exception: $_"
