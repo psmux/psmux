@@ -5023,6 +5023,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
                             ) || key_upper.starts_with("C-") || key_upper.starts_with("M-") || key_upper.starts_with("S-");
 
+                            // Named Enter shares the interactive pane transport. Keep
+                            // overlays on their existing mode-aware path and -l literal.
+                            if matches!(app.mode, Mode::Passthrough)
+                                && crate::input::enter_key_modifiers(key).is_some()
+                            {
+                                send_key_to_active(&mut app, key)?;
+                                continue;
+                            }
+
                             // Issue #860: a pane in an extended key mode gets
                             // tmux's extended form of a modified key
                             // (input-keys.c input_key) instead of the legacy
@@ -5242,7 +5251,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     send_text_to_active(&mut app, key)?;
                                     if i + 1 < parts.len() {
                                         let next_upper = parts[i + 1].to_uppercase();
-                                        let next_is_special = matches!(next_upper.as_str(),
+                                        let next_is_special = (matches!(app.mode, Mode::Passthrough)
+                                            && crate::input::enter_key_modifiers(parts[i + 1]).is_some())
+                                            || matches!(next_upper.as_str(),
                                             "ENTER" | "TAB" | "BTAB" | "BACKTAB" | "ESCAPE" | "ESC" | "SPACE" | "BSPACE" | "BACKSPACE" |
                                             "UP" | "DOWN" | "RIGHT" | "LEFT" | "HOME" | "END" |
                                             "PAGEUP" | "PPAGE" | "PAGEDOWN" | "NPAGE" | "DELETE" | "DC" | "INSERT" | "IC" |
