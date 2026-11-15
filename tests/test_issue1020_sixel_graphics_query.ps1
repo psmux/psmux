@@ -64,13 +64,17 @@ $script:NS = ""
 $script:run = 0
 function P { & $PSMUX -L $script:NS @args 2>&1 }
 
+# The inbox conhost of Windows 10 (19045) passes a query on only when it next
+# draws, so there each query is followed by text; Windows 11's needs none.
+$Win10Flush = if ([Environment]::OSVersion.Version.Build -lt 22000) { '.' } else { '' }
+
 # Run the probe with $queries in a new window; returns the replies as they came.
 function Probe($queries) {
     $script:run++
     P new-window -d -t s -n "w$($script:run)" | Out-Null
     Start-Sleep -Milliseconds 2500
     $out = Join-Path $TempHome "r_$($script:NS)_$($script:run).txt"
-    P send-keys -t "s:w$($script:run)" "& '$probe' '$out' '$queries' raw" Enter | Out-Null
+    P send-keys -t "s:w$($script:run)" "& '$probe' '$out' '$queries$Win10Flush' raw" Enter | Out-Null
     for ($k = 0; $k -lt 60 -and -not (Test-Path $out); $k++) { Start-Sleep -Milliseconds 200 }
     Start-Sleep -Milliseconds 300
     if (Test-Path $out) { (Get-Content $out -Raw).Trim() } else { '(no reply file)' }

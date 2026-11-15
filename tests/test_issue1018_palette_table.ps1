@@ -15,7 +15,8 @@
 # logs every OSC 4 query it is asked and stays silent: the colour comes, the
 # order with XTVERSION is kept, and the outer terminal is never asked.
 # tests/reply_order_probe.cs runs in the pane with `raw`.
-#   1. the inbox conhost
+#   1. the inbox conhost (the one of Windows 10, 19045, passes the queries on
+#      when it next draws, so there each query is followed by text)
 #   2. OpenConsole, with PSMUX_CONPTY_DIR_FOR_TEST (a directory with
 #      conpty.dll and OpenConsole.exe; skipped without it)
 #
@@ -89,13 +90,17 @@ function Stop-Term {
 }
 function Outer { if ($script:Log -and (Test-Path $script:Log)) { @(Get-Content $script:Log | Where-Object { $_ }) } else { @() } }
 
+# The inbox conhost of Windows 10 (19045) passes a query on only when it next
+# draws, so there each query is followed by text; Windows 11's needs none.
+$Win10Flush = if ([Environment]::OSVersion.Version.Build -lt 22000) { '.' } else { '' }
+
 # Run the probe with $queries in a new window; returns the replies as they came.
 function Probe($queries) {
     $script:run++
     P new-window -d -t s -n "w$($script:run)" | Out-Null
     Start-Sleep -Milliseconds 2500
     $out = Join-Path $TempHome "r_$($script:NS)_$($script:run).txt"
-    P send-keys -t "s:w$($script:run)" "& '$probe' '$out' '$queries' raw" Enter | Out-Null
+    P send-keys -t "s:w$($script:run)" "& '$probe' '$out' '$queries$Win10Flush' raw" Enter | Out-Null
     for ($k = 0; $k -lt 60 -and -not (Test-Path $out); $k++) { Start-Sleep -Milliseconds 200 }
     Start-Sleep -Milliseconds 300
     if (Test-Path $out) { (Get-Content $out -Raw).Trim() } else { '(no reply file)' }

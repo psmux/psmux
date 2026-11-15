@@ -14,6 +14,11 @@
 #     history.
 #   - CSI ? 3 h (DECCOLM) clears in tmux. The inbox conhost neither passes it on
 #     nor changes its screen, so psmux leaves the screen too.
+#   - The inbox conhost of Windows 10 (19045) passes no CSI 2 J, CSI 3 J or RIS
+#     on: it hands psmux a redraw that erases every row (PSMUX_PANE_RAW), so
+#     psmux cannot tell a clear there and what was on the screen is lost, as
+#     with scroll-on-clear off; only what scrolled off before stays in history.
+#     The option itself is checked through OpenConsole there.
 #
 # A program in each pane writes what the suite hands it, each piece as its own
 # write, as real programs clear long after they wrote.
@@ -63,25 +68,28 @@ function Want($n, $word = 'line') { (1..$n | ForEach-Object { "$word$_" }) -join
 
 # name, the writes, the history and screen tmux 3.8 showed joined with |, and
 # where the inbox conhost differs, what it gives (see the top).
+# `win10` is what the Windows 10 inbox conhost gives.
 $cases = @(
-    @{ n = 'clear2';      w = @((Lines 5), "$E[2J");                  a = (Want 5) }
-    @{ n = 'one_write';   w = @(((Lines 5) + "$E[2J"));               a = (Want 5) }
-    @{ n = 'history';     w = @((Lines 15), "$E[2J");                 a = (Want 15) }
-    @{ n = 'twice';       w = @((Lines 5), "$E[2J", "$E[2J");         a = (Want 5) }
-    @{ n = 'home_clear2'; w = @((Lines 5), "$E[H$E[2J");              a = (Want 5) }
-    @{ n = 'gap';         w = @("a`r`n`r`n`r`nb`r`n", "$E[2J");       a = 'a|||b' }
+    @{ n = 'clear2';      w = @((Lines 5), "$E[2J");                  a = (Want 5); win10 = '' }
+    @{ n = 'one_write';   w = @(((Lines 5) + "$E[2J"));               a = (Want 5); win10 = '' }
+    @{ n = 'history';     w = @((Lines 15), "$E[2J");                 a = (Want 15); win10 = (Want 6) }
+    @{ n = 'twice';       w = @((Lines 5), "$E[2J", "$E[2J");         a = (Want 5); win10 = '' }
+    @{ n = 'home_clear2'; w = @((Lines 5), "$E[H$E[2J");              a = (Want 5); win10 = '' }
+    @{ n = 'gap';         w = @("a`r`n`r`n`r`nb`r`n", "$E[2J");       a = 'a|||b'; win10 = '' }
     @{ n = 'partial_j';   w = @((Lines 5), "$E[3;1H$E[J");            a = (Want 2) }
     @{ n = 'above_j';     w = @((Lines 5), "$E[1J");                  a = '' }
     @{ n = 'home_j';      w = @((Lines 5), "$E[H$E[J");               a = (Want 5); inbox = '' }
-    @{ n = 'ris';         w = @((Lines 5), "${E}c");                  a = (Want 5) }
-    @{ n = 'ris_history'; w = @((Lines 15), "${E}c");                 a = (Want 15) }
-    @{ n = 'clear3';      w = @((Lines 15), "$E[3J");                 a = ((7..15 | ForEach-Object { "line$_" }) -join '|') }
-    @{ n = 'clear2_3';    w = @((Lines 15), "$E[2J$E[3J");            a = '' }
-    @{ n = 'home_2_3';    w = @((Lines 15), "$E[H$E[2J$E[3J");        a = '' }
+    @{ n = 'ris';         w = @((Lines 5), "${E}c");                  a = (Want 5); win10 = '' }
+    @{ n = 'ris_history'; w = @((Lines 15), "${E}c");                 a = (Want 15); win10 = (Want 6) }
+    @{ n = 'clear3';      w = @((Lines 15), "$E[3J");                 a = ((7..15 | ForEach-Object { "line$_" }) -join '|'); win10 = (Want 15) }
+    @{ n = 'clear2_3';    w = @((Lines 15), "$E[2J$E[3J");            a = ''; win10 = (Want 6) }
+    @{ n = 'home_2_3';    w = @((Lines 15), "$E[H$E[2J$E[3J");        a = ''; win10 = (Want 6) }
     @{ n = 'alt_clear';   w = @((Lines 2), "$E[?1049h", (Lines 5), "$E[2J", "$E[?1049l"); a = (Want 2) }
-    @{ n = 'alt_ris';     w = @((Lines 5), "$E[?1049h", "inalt`r`n", "${E}c"); a = (Want 5) }
+    @{ n = 'alt_ris';     w = @((Lines 5), "$E[?1049h", "inalt`r`n", "${E}c"); a = (Want 5); win10 = '' }
     @{ n = 'deccolm';     w = @((Lines 5), "$E[?3h");                 a = (Want 5) }
 )
+# The inbox conhost before Windows 11 (measured on 19045).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 $SEP = [string][char]1
 foreach ($c in $cases) {
     [IO.File]::WriteAllBytes("$TempHome\p\$($c.n).bin", [Text.Encoding]::UTF8.GetBytes(($c.w -join $SEP)))
@@ -195,12 +203,18 @@ function Run-Cases($route) {
     }
     Start-Sleep -Milliseconds 1500
     foreach ($c in $cases) {
-        $want = if ($route -eq 'inbox conhost' -and $c.ContainsKey('inbox')) { $c.inbox } else { $c.a }
+        $want = if ($route -eq 'inbox conhost' -and $Win10 -and $c.ContainsKey('win10')) { $c.win10 }
+                elseif ($route -eq 'inbox conhost' -and $c.ContainsKey('inbox')) { $c.inbox } else { $c.a }
         Check "${route}: $($c.n)" (All "s:$($c.n)") $want
     }
     Check "${route}: alt_ris left the alternate screen" "$(P display -p -t 's:alt_ris' '#{alternate_on}')" '0'
     foreach ($r in $real) {
-        Check "${route}: $($r.n) leaves nothing" (All "s:$($r.n)") ''
+        if ($route -eq 'inbox conhost' -and $Win10) {
+            # The clear never reaches psmux: what scrolled off stays.
+            Check "${route}: $($r.n) leaves what scrolled off" (All "s:$($r.n)") (Want 6)
+        } else {
+            Check "${route}: $($r.n) leaves nothing" (All "s:$($r.n)") ''
+        }
     }
 
     # The console host's own redraws send nothing to history.
@@ -233,7 +247,10 @@ function Run-Cases($route) {
     Start-Sleep -Milliseconds 1200
     $rows = (All 's:ctrll') -split '\|'
     foreach ($m in 'mark1', 'mark6', 'mark12') {
-        Check "${route}: Ctrl+L keeps $m once" (@($rows | Where-Object { $_ -ceq $m }).Count) 1
+        # On the Windows 10 inbox conhost the clear is a redraw, so the marks
+        # still on the screen are lost; mark1 had scrolled off.
+        $once = if ($route -eq 'inbox conhost' -and $Win10 -and $m -ne 'mark1') { 0 } else { 1 }
+        Check "${route}: Ctrl+L keeps $m once" (@($rows | Where-Object { $_ -ceq $m }).Count) $once
     }
     Check "${route}: Ctrl+L leaves the prompt on the top row" "$(P display -p -t 's:ctrll' '#{cursor_y}')" '0'
 
@@ -379,18 +396,27 @@ Write-Host "  $((& $PSMUX -V) -join ' ')"
 try {
     Write-Host "`n[1] the inbox conhost" -ForegroundColor Yellow
     Run-Cases 'inbox conhost'
-    Run-Options 'inbox conhost'
-    Run-Config 'inbox conhost'
+    # The option needs a clear that reaches psmux, which the Windows 10 inbox
+    # conhost never passes on: there it is checked through OpenConsole.
+    if (-not $Win10) {
+        Run-Options 'inbox conhost'
+        Run-Config 'inbox conhost'
+    }
     Run-Warm 'inbox conhost'
 
     Write-Host "`n[2] OpenConsole" -ForegroundColor Yellow
     if ($ConptyDir -and (Test-Path (Join-Path $ConptyDir 'conpty.dll'))) {
         $env:PSMUX_CONPTY_DIR = $ConptyDir
         Run-Cases 'OpenConsole'
+        if ($Win10) {
+            Run-Options 'OpenConsole'
+            Run-Config 'OpenConsole'
+        }
         Run-Warm 'OpenConsole'
         Remove-Item Env:PSMUX_CONPTY_DIR
     } else {
         Write-Info "skipped: set PSMUX_TEST_CONPTY_DIR to a folder holding conpty.dll and OpenConsole.exe"
+        if ($Win10) { Write-Info "the option is not checked: the Windows 10 inbox conhost passes no clear on" }
     }
 }
 catch {

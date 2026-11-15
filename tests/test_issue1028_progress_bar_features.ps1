@@ -145,6 +145,9 @@ function Emit($target, $queries, $wait = '') {
     Start-Sleep -Milliseconds 700
 }
 function Set-Bar($target, $pair) { Emit $target "\e]9;4;$pair$BEL" }
+# The inbox conhost of Windows 10 (19045) passes an OSC on only when it next
+# draws; a bar checked while its program still runs is followed by text there.
+$Win10Flush = if ([Environment]::OSVersion.Version.Build -lt 22000) { '.' } else { '' }
 function New-Pane($how) { P @how | Out-Null; Start-Sleep -Milliseconds 2200 }
 
 # A config, the client's TERM, what 1;50 from the pane writes, and whether
@@ -260,7 +263,7 @@ function Run-Cases($route) {
 
     Write-Host "  -- copy mode" -ForegroundColor DarkCyan
     Up
-    Emit s "\e]9;4;2;60$BEL" 'Start-Sleep 2; '
+    Emit s "\e]9;4;2;60$BEL$Win10Flush" 'Start-Sleep 2; '
     Start-Sleep -Milliseconds 600
     P copy-mode -t s | Out-Null
     Start-Sleep -Milliseconds 2800

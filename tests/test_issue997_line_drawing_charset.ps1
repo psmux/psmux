@@ -15,6 +15,12 @@
 # 31-68) also turns `+ , - . 0` into arrows and a block and `` ` `` into a
 # different diamond; psmux follows the host (Discussion #937).
 #
+# The inbox conhost of Windows 10 (19045) has G0 only: it keeps SO and SI as
+# cells, which it hands psmux as the bare bytes and psmux shows as their code
+# page 437 pictures (#972), and DECRC gives back no set. There psmux's row and
+# cursor have to be that host's, its C0 cells read as the same pictures, in
+# place of what the newer hosts hold.
+#
 # [1] the inbox conhost; [2] OpenConsole (PSMUX_CONPTY_DIR), when
 # PSMUX_TEST_CONPTY_DIR names a folder holding conpty.dll, skipped otherwise.
 #
@@ -97,6 +103,18 @@ Set-Content -Path "$TempHome\show.ps1" -Value @(
     '[IO.File]::WriteAllText($Payload + ".host", "$x`n$row", [Text.Encoding]::UTF8)'
     'Start-Sleep 600'
 )
+# The inbox conhost before Windows 11 (measured on 19045), and the pictures
+# psmux shows for the C0 cells it sends (vt100's conhost_c0_glyph).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
+$Cp437 = @(0x0000, 0x263a, 0x263b, 0x2665, 0x2666, 0x2663, 0x2660, 0x2022, 0x25d8, 0x25cb, 0x25d9, 0x2642, 0x2640,
+    0x266a, 0x266b, 0x263c, 0x25ba, 0x25c4, 0x2195, 0x203c, 0x00b6, 0x00a7, 0x25ac, 0x21a8, 0x2191, 0x2193, 0x2192,
+    0x2190, 0x221f, 0x2194, 0x25b2, 0x25bc)
+function Pictures([string]$row) {
+    -join ($row.ToCharArray() | ForEach-Object {
+            $n = [int]$_
+            if ($n -ge 1 -and $n -le 31 -and $n -notin 7, 8, 10, 13, 27) { [string][char]$Cp437[$n] } else { [string]$_ }
+        })
+}
 $pwsh = (Get-Command pwsh).Source.Replace('\', '/')
 $fwd = $TempHome.Replace('\', '/')
 $script:NS = ""
@@ -122,9 +140,13 @@ function Run-Cases($route) {
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x}')"
         $hostLines = @(([IO.File]::ReadAllText("$TempHome\p\$name.bin.host", [Text.Encoding]::UTF8) -split "`n"))
         if ($width -ne '40') { Write-Fail "${route}: $name pane is $width columns, not 40"; continue }
-        Check "${route}: $name row" $row $c[2]
-        Check "${route}: $name row is the console host's" $row $hostLines[1]
-        Check "${route}: $name cursor_x" $cursor $c[3]
+        if ($route -eq 'inbox conhost' -and $Win10) {
+            Check "${route}: $name row is the console host's" $row (Pictures $hostLines[1])
+        } else {
+            Check "${route}: $name row" $row $c[2]
+            Check "${route}: $name row is the console host's" $row $hostLines[1]
+            Check "${route}: $name cursor_x" $cursor $c[3]
+        }
         Check "${route}: $name cursor_x is the console host's" $cursor $hostLines[0]
     }
     P kill-server | Out-Null
