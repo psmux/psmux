@@ -73,6 +73,29 @@ pub fn conhost_c0_cells_default() -> bool {
     CONHOST_C0_CELLS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether parsers made from now on read the stream the way the inbox console
+/// host of Windows 10 (before build 22000, measured on 19045) writes it, on
+/// top of [`CONHOST_C0_CELLS`]. That host keeps a C1 control a program wrote
+/// as UTF-8 (`C2 85`, U+0085) as a buffer cell of one column and hands it to
+/// psmux as written, so the cell is kept here as U+FFFD (written as itself,
+/// U+0085 would be a NEL to the outer terminal); the newer hosts keep no cell
+/// and send nothing. It also hides and shows its cursor with `CSI 25 l` and
+/// `CSI 25 h`, the `?` left out, which are read here as DECTCEM. psmux turns
+/// it on in a server whose panes run under that host; off is the default.
+static CONHOST_WIN10: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Set the [`CONHOST_WIN10`] default for parsers created after this call.
+pub fn set_conhost_win10_default(on: bool) {
+    CONHOST_WIN10.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The value last given to [`set_conhost_win10_default`].
+#[must_use]
+pub fn conhost_win10_default() -> bool {
+    CONHOST_WIN10.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The glyph for a C0 control the inbox conhost sent as a cell, or `None` for
 /// the controls it sends as controls.
 ///
@@ -109,6 +132,9 @@ pub struct WrappedScreen<CB: crate::callbacks::Callbacks = ()> {
     pub callbacks: CB,
     /// Read C0 controls as conhost cells; see [`CONHOST_C0_CELLS`].
     pub(crate) conhost_c0_cells: bool,
+    /// Read the Windows 10 inbox conhost's C1 cells and `CSI 25 h` / `l`;
+    /// see [`CONHOST_WIN10`].
+    pub(crate) conhost_win10: bool,
     /// Set by `hook` when a sixel DCS (final `q`, no intermediates) begins, so
     /// `put`/`unhook` know to accumulate and materialise the image.  Any other
     /// DCS leaves this `false`, preserving the pre-existing no-op behaviour.
@@ -155,6 +181,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             ),
             callbacks,
             conhost_c0_cells: conhost_c0_cells_default(),
+            conhost_win10: conhost_win10_default(),
             dcs_active: false,
             dcs_buf: Vec::new(),
             last_printed: None,
@@ -170,6 +197,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
             screen,
             callbacks,
             conhost_c0_cells: conhost_c0_cells_default(),
+            conhost_win10: conhost_win10_default(),
             dcs_active: false,
             dcs_buf: Vec::new(),
             last_printed: None,
@@ -253,8 +281,15 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         // cell at all. vte hands them, encoded or as a lone byte, to
         // `execute`, which ignores them too; only an encoded one split across
         // two reads reaches here (vte's advance_partial_utf8).
+        //
+        // The Windows 10 inbox conhost keeps one as a cell, though; see
+        // [`CONHOST_WIN10`].
         if ('\u{80}'..'\u{a0}').contains(&c) {
-            self.callbacks.unhandled_char(&mut self.screen, c);
+            if self.conhost_win10 {
+                self.print('\u{fffd}');
+            } else {
+                self.callbacks.unhandled_char(&mut self.screen, c);
+            }
         } else {
             // The line drawing set turns `q` into `─` here; REP repeats the
             // letter, so the set in use when it repeats applies, as in tmux
@@ -265,6 +300,12 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 
     fn execute(&mut self, b: u8) {
+        // A C1 control as UTF-8 reaches here as its byte; the Windows 10 inbox
+        // conhost hands one over only for a cell it keeps ([`CONHOST_WIN10`]).
+        if self.conhost_win10 && (0x80..=0x9f).contains(&b) {
+            self.print('\u{fffd}');
+            return;
+        }
         if self.conhost_c0_cells {
             if let Some(glyph) = conhost_c0_glyph(b) {
                 self.print(glyph);
@@ -404,8 +445,8 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                     }
                 }
                 'd' => self.screen.vpa(canonicalize_params_1(params, 1)),
-                'h' => self.screen.sm(params, unhandled),
-                'l' => self.screen.rm(params, unhandled),
+                'h' => self.screen.sm(params, self.conhost_win10, unhandled),
+                'l' => self.screen.rm(params, self.conhost_win10, unhandled),
                 'm' => self.screen.sgr(params, unhandled),
                 'n' => {
                     // DSR (Device Status Report) — in passthrough mode the
@@ -1460,3 +1501,7 @@ mod test_issue972_conhost_c0_cells;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue972_conhost_dcs_body.rs"]
 mod test_issue972_conhost_dcs_body;
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_conhost_win10.rs"]
+mod test_conhost_win10;

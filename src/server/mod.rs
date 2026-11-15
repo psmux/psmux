@@ -2450,6 +2450,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // application's own bytes, where a tab is a tab, so it keeps plain VT.
     #[cfg(windows)]
     vt100::set_conhost_c0_cells_default(!crate::input::pane_host_is_supplied());
+    // The inbox conhost of Windows 10 also keeps a C1 control as a cell and
+    // writes `CSI 25 l` / `h` for its cursor; the newer hosts do neither.
+    #[cfg(windows)]
+    vt100::set_conhost_win10_default(
+        !crate::input::pane_host_is_supplied()
+            && crate::ssh_input::windows_build_number().is_some_and(|b| b < 22000),
+    );
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
     let panic_session_name = session_name.clone();

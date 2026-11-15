@@ -189,6 +189,19 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         self.screen.conhost_c0_cells
     }
 
+    /// Read the Windows 10 inbox conhost's C1 cells and `CSI 25 h` / `l`. New
+    /// parsers take
+    /// [`set_conhost_win10_default`](crate::set_conhost_win10_default).
+    pub fn set_conhost_win10(&mut self, on: bool) {
+        self.screen.conhost_win10 = on;
+    }
+
+    /// Whether this parser reads the Windows 10 inbox conhost's quirks.
+    #[must_use]
+    pub fn conhost_win10(&self) -> bool {
+        self.screen.conhost_win10
+    }
+
     /// Returns a reference to a [`Screen`](crate::Screen) object containing
     /// the terminal state.
     #[must_use]
