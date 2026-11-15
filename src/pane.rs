@@ -3741,9 +3741,49 @@ fn resolve_shell_program(shell_path: &str) -> (String, Vec<String>) {
     if parsed.is_empty() {
         return (shell_path.to_string(), vec![]);
     }
+    if let Some(split) = unquoted_program_with_args(shell_path, &parsed[0]) {
+        return split;
+    }
     let program = parsed[0].clone();
     let extra = parsed[1..].to_vec();
     (program, extra)
+}
+
+/// An unquoted program path with a space in it and arguments after it, such
+/// as `C:\Program Files\PowerShell\7\pwsh.exe -NoLogo`: the word split cut the
+/// path at its first space, and `C:\Program` was spawned. tmux takes
+/// default-shell as one path; psmux also takes arguments after the program,
+/// so the program is the longest run of words from the start that names an
+/// existing file and the rest are its arguments. The longest, not the first,
+/// so a file planted at `C:\Program.exe` is never the one picked (the unquoted
+/// path search CreateProcess does).
+///
+/// Only for an unquoted value whose first word is a path; a bare name
+/// (`pwsh -NoLogo`) or a quoted program keeps the plain split and costs no
+/// file checks. When no prefix names a file the plain split stands.
+fn unquoted_program_with_args(shell_path: &str, first_word: &str) -> Option<(String, Vec<String>)> {
+    let value = shell_path.trim_start();
+    if value.starts_with('"') || value.starts_with('\'') {
+        return None;
+    }
+    // The first word counts as a candidate too: if `C:\Program` exists, the
+    // longer `C:\Program Files\...` still wins.
+    if !(first_word.contains('\\') || first_word.contains('/')) {
+        return None;
+    }
+    let mut program_end = None;
+    let mut prev_space = false;
+    for (i, c) in value.char_indices() {
+        let space = c == ' ' || c == '\t';
+        // The end of a word: Windows ignores trailing spaces in a path, so a
+        // prefix that ends in one would name the same file with the space kept.
+        if space && !prev_space && std::path::Path::new(&value[..i]).is_file() {
+            program_end = Some(i);
+        }
+        prev_space = space;
+    }
+    let end = program_end?;
+    Some((value[..end].to_string(), crate::commands::parse_command_line(&value[end..])))
 }
 
 /// Shell executable stems that are POSIX-style shells. When one of these is
@@ -5286,6 +5326,10 @@ mod tests_warm_pane_start_dir;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue474_unix_shells.rs"]
 mod tests_issue474_unix_shells;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_default_shell_path_with_space_and_args.rs"]
+mod tests_default_shell_path_with_space_and_args;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue492_493_direct_spawn.rs"]
