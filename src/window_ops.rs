@@ -3294,6 +3294,9 @@ mod window_ops_tests {
     #[path = "../../../tests-rs/test_issue1031_drag_replay_click.rs"]
     mod test_issue1031_drag_replay_click;
 
+    #[path = "../../../tests-rs/test_clock_other_pane.rs"]
+    mod test_clock_other_pane;
+
     #[test]
     fn swap_with_path_updates_mru_for_focused_pane_after_swap() {
         let mut app = AppState::new("swap-mru".to_string());
