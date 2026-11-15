@@ -134,7 +134,10 @@ function Run-Cases($route) {
         $row1 = "$($rows | Select-Object -Skip 1 -First 1)".TrimEnd()
         $width = "$(P display -p -t "s:$name" '#{pane_width}')"
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x}')"
-        $hostLines = @(([IO.File]::ReadAllText("$TempHome\p\$name.bin.host", [Text.Encoding]::UTF8) -split "`n"))
+        # A program that never wrote its record leaves the host's values
+        # empty, so the checks below fail rather than the suite stopping.
+        $hostFile = "$TempHome\p\$name.bin.host"
+        $hostLines = if (Test-Path $hostFile) { @(([IO.File]::ReadAllText($hostFile, [Text.Encoding]::UTF8) -split "`n")) } else { @('', '', '') }
         $hostCol = $hostLines[0]
         if ($width -ne '20') { Write-Fail "${route}: $name pane is $width columns, not 20"; continue }
         if ($route -eq 'inbox conhost' -and $Win10) {

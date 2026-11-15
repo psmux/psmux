@@ -15,6 +15,13 @@
 # #{cursor_y} must equal the expectation (tmux 3.8, which the hosts match) and
 # the host's own.
 #
+# The inbox conhost of Windows 10 (19045) keeps 1049 to itself: it starts
+# its own alternate screen with the cursor at the top left, hands psmux only
+# a redraw, and never an `ESC[?1049h`, so psmux stays off the alternate
+# screen. There psmux's cursor and rows have to be that host's own (read with
+# ReadConsoleOutputCharacterW), and alternate_on stays 0 for 1049, in place of
+# tmux's values.
+#
 # [1] the inbox conhost; [2] OpenConsole, when PSMUX_TEST_CONPTY_DIR or
 # PSMUX_CONPTY_DIR_FOR_TEST names a folder holding conpty.dll, skipped
 # otherwise.
@@ -53,25 +60,43 @@ $env:PSMUX_CONFIG_FILE = Join-Path $TempHome "psmux.conf"
 Set-Content -Path $env:PSMUX_CONFIG_FILE -Value ""
 
 $E = [string][char]27
-# name, the bytes written, the expected "cursor_x,cursor_y" and alternate_on.
+# name, the bytes written, the expected "cursor_x,cursor_y" and alternate_on,
+# and alternate_on through the Windows 10 inbox conhost.
 $cases = @(
-    @('h1049',      "${E}[5;4HAB${E}[?1049h",                         '5,4',  '1'),
-    @('h1049_cha',  "${E}[4G${E}[?1049h",                             '3,0',  '1'),
-    @('hl1049',     "${E}[5;4HAB${E}[?1049h${E}[9;20Hx${E}[?1049l",   '5,4',  '0'),
-    @('h1049_move', "${E}[5;4HAB${E}[?1049h${E}[9;20Hx",              '20,8', '1'),
-    @('h47',        "${E}[5;4HAB${E}[?47h",                           '5,4',  '1'),
-    @('h47_cha',    "${E}[4G${E}[?47h",                               '3,0',  '1'),
-    @('hl47',       "${E}[5;4HAB${E}[?47h${E}[9;20Hx${E}[?47l",       '20,8', '0'),
-    @('h1047',      "${E}[5;4HAB${E}[?1047h",                         '5,4',  '0'),
-    @('hl1047',     "${E}[5;4HAB${E}[?1047h${E}[9;20Hx${E}[?1047l",   '20,8', '0'),
-    @('hl1048',     "${E}[5;4HAB${E}[?1048h${E}[9;20Hx${E}[?1048l",   '20,8', '0')
+    @('h1049',      "${E}[5;4HAB${E}[?1049h",                         '5,4',  '1', '0'),
+    @('h1049_cha',  "${E}[4G${E}[?1049h",                             '3,0',  '1', '0'),
+    @('hl1049',     "${E}[5;4HAB${E}[?1049h${E}[9;20Hx${E}[?1049l",   '5,4',  '0', '0'),
+    @('h1049_move', "${E}[5;4HAB${E}[?1049h${E}[9;20Hx",              '20,8', '1', '0'),
+    @('h47',        "${E}[5;4HAB${E}[?47h",                           '5,4',  '1', '1'),
+    @('h47_cha',    "${E}[4G${E}[?47h",                               '3,0',  '1', '1'),
+    @('hl47',       "${E}[5;4HAB${E}[?47h${E}[9;20Hx${E}[?47l",       '20,8', '0', '0'),
+    @('h1047',      "${E}[5;4HAB${E}[?1047h",                         '5,4',  '0', '0'),
+    @('hl1047',     "${E}[5;4HAB${E}[?1047h${E}[9;20Hx${E}[?1047l",   '20,8', '0', '0'),
+    @('hl1048',     "${E}[5;4HAB${E}[?1048h${E}[9;20Hx${E}[?1048l",   '20,8', '0', '0')
 )
+# The inbox conhost before Windows 11 (measured on 19045).
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 foreach ($c in $cases) { [IO.File]::WriteAllBytes("$TempHome\p\$($c[0]).bin", [Text.Encoding]::UTF8.GetBytes($c[1])) }
 Set-Content -Path "$TempHome\show.ps1" -Value @(
     'param([string]$Payload)'
     '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
+    'Add-Type -TypeDefinition @"'
+    'using System; using System.Runtime.InteropServices; using System.Text;'
+    'public static class HostRows {'
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);'
+    '  [StructLayout(LayoutKind.Sequential)] struct COORD { public short X; public short Y; }'
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool ReadConsoleOutputCharacterW(IntPtr h, StringBuilder s, uint n, COORD c, out uint read);'
+    '  public static string Read(short rows, uint cols) {'
+    '    IntPtr h = CreateFileW("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);'
+    '    var all = new StringBuilder();'
+    '    for (short y = 0; y < rows; y++) { var sb = new StringBuilder((int)cols + 4); var c = new COORD(); c.Y = y; uint r; ReadConsoleOutputCharacterW(h, sb, cols, c, out r); if (y > 0) all.Append("|"); all.Append(sb.ToString(0, (int)r).TrimEnd()); }'
+    '    return all.ToString();'
+    '  }'
+    '}'
+    '"@'
     '$o = [Console]::OpenStandardOutput(); $b = [IO.File]::ReadAllBytes($Payload); $o.Write($b, 0, $b.Length); $o.Flush()'
-    'Set-Content -Path ($Payload + ".host") -Value ("{0},{1}" -f [Console]::CursorLeft, [Console]::CursorTop)'
+    '$pos = "{0},{1}" -f [Console]::CursorLeft, [Console]::CursorTop; $rows = [HostRows]::Read(10, 40)'
+    '[IO.File]::WriteAllText($Payload + ".host", "$pos`n$rows", [Text.Encoding]::UTF8)'
     'Start-Sleep 600'
 )
 $pwsh = (Get-Command pwsh).Source.Replace('\', '/')
@@ -98,10 +123,21 @@ function Run-Cases($route) {
         if ($size -ne '40x10') { Write-Fail "${route}: $name pane is $size, not 40x10"; continue }
         $cursor = "$(P display -p -t "s:$name" '#{cursor_x},#{cursor_y}')"
         $alt = "$(P display -p -t "s:$name" '#{alternate_on}')"
-        $hostPos = "$((Get-Content "$TempHome\p\$name.bin.host" -EA SilentlyContinue) -join '')"
-        Check "${route}: $name cursor" $cursor $c[2]
-        Check "${route}: $name cursor is the console host's" $cursor $hostPos
-        Check "${route}: $name alternate_on" $alt $c[3]
+        $hostFile = "$TempHome\p\$name.bin.host"
+        $hostLines = if (Test-Path $hostFile) { @(([IO.File]::ReadAllText($hostFile, [Text.Encoding]::UTF8) -split "`n")) } else { @('', '') }
+        $hostPos = $hostLines[0]
+        if ($route -eq 'inbox conhost' -and $Win10) {
+            # The Windows 10 host's own screen, which psmux shows; capture-pane
+            # leaves out blank rows at the bottom, so neither side keeps them.
+            $rows = ((@(P capture-pane -p -t "s:$name") | Select-Object -First 10 | ForEach-Object { "$_".TrimEnd() }) -join '|') -replace '\|+$', ''
+            Check "${route}: $name rows are the console host's" $rows ("$($hostLines[1])" -replace '\|+$', '')
+            Check "${route}: $name cursor is the console host's" $cursor $hostPos
+            Check "${route}: $name alternate_on" $alt $c[4]
+        } else {
+            Check "${route}: $name cursor" $cursor $c[2]
+            Check "${route}: $name cursor is the console host's" $cursor $hostPos
+            Check "${route}: $name alternate_on" $alt $c[3]
+        }
     }
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
