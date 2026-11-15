@@ -2743,11 +2743,15 @@ fn focus_pane_id(app: &mut AppState, pane_id: usize, mru: bool) {
 /// pane's mode over to the pane under the pointer: a middle press on another
 /// pane moved the clock there, and a wheel notch on it dropped the clock for
 /// copy mode. `mru` records the pane as the last used one, as a click does.
+///
+/// Copy mode keeps its own rule here: a press on another pane carries it
+/// along (#732 pins that), so only a pane outside copy mode goes through the
+/// switch.
 fn focus_mouse_path(app: &mut AppState, path: Vec<usize>, mru: bool) {
     if app.windows[app.active_idx].active_path == path {
         return;
     }
-    crate::copy_mode::switch_with_copy_save(app, |app| {
+    let set = move |app: &mut AppState| {
         let win = &mut app.windows[app.active_idx];
         win.active_path = path;
         if mru {
@@ -2755,7 +2759,12 @@ fn focus_mouse_path(app: &mut AppState, path: Vec<usize>, mru: bool) {
                 crate::tree::touch_mru(&mut win.pane_mru, pid);
             }
         }
-    });
+    };
+    if app.mode.in_copy() {
+        set(app);
+    } else {
+        crate::copy_mode::switch_with_copy_save(app, set);
+    }
 }
 
 /// tmux input_key_mouse for a wheel event: an SGR report with the modifier
