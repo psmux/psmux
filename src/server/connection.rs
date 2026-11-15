@@ -1356,6 +1356,24 @@ fn requote_command_tail(args: &[&str]) -> String {
     crate::pane::requote_argv(args)
 }
 
+/// `args` of new-window or split-window cut where getopt ends the options
+/// (cli::options_and_operand_start), and the pane command the operands make,
+/// as tmux's spawn reads them: one operand is a shell command string, two or
+/// more are an argv run directly (the `-- prog args...` form build_command
+/// execs). With or without `--` the same, so `split-window -d pwsh -NoProfile
+/// -Command x` runs all of its words (it ran a bare `pwsh`, #1051), and a
+/// word of the command such as `-d` or `-h` is never read as a flag.
+fn split_spawn_operands<'a>(cmd: &str, args: &'a [&'a str]) -> (&'a [&'a str], Option<String>) {
+    let (_, start) = crate::cli::options_and_operand_start(cmd, args);
+    let (options, operands) = args.split_at(start);
+    let command = if operands.len() > 1 {
+        Some(format!("-- {}", requote_command_tail(operands)))
+    } else {
+        operands.first().map(|s| s.trim_matches('"').to_string()).filter(|s| !s.is_empty())
+    };
+    (options, command)
+}
+
 /// The positional `shell-command` operand of `respawn-pane` / `respawn-window`
 /// (tmux takes it plain, not behind `--`). Everything that is a flag, or the
 /// value of the one value-taking flag left in `args` (`-c`; `-t` is stripped
@@ -3886,6 +3904,10 @@ let targeted_tx = TargetedSender::new(&tx, command_target).in_file(source_job_fi
 let tx = &targeted_tx;
 match cmd {
     "new-window" | "neww" => {
+        // Flags are read from the options only (#1051); see below for the
+        // command the operands make.
+        let (args, cmd_str) = split_spawn_operands(cmd, &args);
+        let args = args.to_vec();
         let name: Option<String> = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
         let detached = args.iter().any(|a| *a == "-d");
@@ -3900,24 +3922,10 @@ match cmd {
             .filter(|w| w[0] == "-e")
             .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
             .collect();
-        // tmux parity (#582): `-- prog args...` is an explicit argv. A
-        // multi-token argv keeps the `--` marker plus token boundaries so
-        // build_command execs it directly (tmux execvp); a single token
-        // keeps string semantics. Without `--`, the historical single-token
-        // extraction applies (the CLI sends the string form as one quoted
-        // arg).
-        let cmd_str: Option<String> = if let Some(pos) = args.iter().position(|a| *a == "--") {
-            let tail = &args[pos + 1..];
-            if tail.len() > 1 {
-                Some(format!("-- {}", requote_command_tail(tail)))
-            } else {
-                tail.first().map(|s| s.trim_matches('"').to_string()).filter(|s| !s.is_empty())
-            }
-        } else {
-            args.iter()
-                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
-                .map(|s| s.trim_matches('"').to_string())
-        };
+        // tmux parity (#582, #1051): the operands are the command. Several
+        // keep the `--` marker plus token boundaries so build_command execs
+        // them directly (tmux execvp); a single one keeps string semantics
+        // (the CLI sends the string form as one quoted arg).
         // -t (already peeled off into raw_target), -a, -b, -k and -S decide the
         // index; the server resolves them against its window list.
         let placement = crate::types::NewWindowPlacement::from_args(&args, raw_target.as_deref());
@@ -3945,6 +3953,10 @@ match cmd {
         }
     }
     "split-window" | "splitw" => {
+        // Flags are read from the options only, and every operand is the
+        // command (#1051, the same as new-window).
+        let (args, cmd_str) = split_spawn_operands(cmd, &args);
+        let args = args.to_vec();
         let kind = if args.iter().any(|a| *a == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
         let detached = args.iter().any(|a| *a == "-d");
         let zoom_after_split = args.iter().any(|a| *a == "-Z");
@@ -3977,19 +3989,6 @@ match cmd {
             before: crate::cli::has_short_flag(&args, 'b'),
             full: crate::cli::has_short_flag(&args, 'f'),
             keep: split_keep(&args),
-        };
-        // tmux parity (#582): same `--` argv handling as new-window above.
-        let cmd_str: Option<String> = if let Some(pos) = args.iter().position(|a| *a == "--") {
-            let tail = &args[pos + 1..];
-            if tail.len() > 1 {
-                Some(format!("-- {}", requote_command_tail(tail)))
-            } else {
-                tail.first().map(|s| s.trim_matches('"').to_string()).filter(|s| !s.is_empty())
-            }
-        } else {
-            args.iter()
-                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-m" && w[1] == **a)))
-                .map(|s| s.trim_matches('"').to_string())
         };
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
@@ -7658,6 +7657,9 @@ fn dispatch_control_command(
             true
         }
         "new-window" | "neww" => {
+            // Flags from the options only; every operand is the command
+            // (#1051): `new-window pwsh -NoProfile` ran a bare `pwsh`.
+            let (args, cmd_str) = split_spawn_operands(cmd, args);
             let name = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());
             let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
             let detached = crate::cli::has_short_flag(&args, 'd');
@@ -7665,27 +7667,6 @@ fn dispatch_control_command(
             let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
             let title = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
             let empty = args.iter().any(|a| *a == "-E");
-            // Skip arg if it's a flag, the value of a flag, or a flag-cluster
-            // value (e.g. the format string after `-PF`).
-            let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            for (i, a) in args.iter().enumerate() {
-                if a.starts_with('-') && !a.starts_with("--") {
-                    skip.insert(i);
-                    // Two-token forms: next arg is the value
-                    if matches!(*a, "-n" | "-c" | "-F" | "-t" | "-x" | "-y" | "-e" | "-T") {
-                        skip.insert(i + 1);
-                    } else if a.len() > 2
-                        && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
-                        && matches!(a.chars().last(), Some('n') | Some('c') | Some('F') | Some('t') | Some('x') | Some('y') | Some('e') | Some('T'))
-                    {
-                        // Cluster ending in value-taking flag: -PF <value>
-                        skip.insert(i + 1);
-                    }
-                }
-            }
-            let cmd_str: Option<String> = args.iter().enumerate()
-                .find(|(i, _)| !skip.contains(i))
-                .map(|(_, s)| s.trim_matches('"').to_string());
             // -e KEY=VALUE environment for the new pane (tmux parity, #489).
             let env_sets: Vec<(String, String)> = args.windows(2)
                 .filter(|w| w[0] == "-e")
@@ -7714,12 +7695,14 @@ fn dispatch_control_command(
             }
         }
         "split-window" | "splitw" => {
+            // The operands are the command; this route dropped them all and
+            // split with the default shell (#1051).
+            let (args, cmd_str) = split_spawn_operands(cmd, args);
             let kind = if crate::cli::has_short_flag(&args, 'h') {
                 LayoutKind::Horizontal
             } else {
                 LayoutKind::Vertical
             };
-            let cmd_str = args.windows(2).find(|w| w[0] == "-c").map(|_| ()).and(None);
             let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
             let detached = crate::cli::has_short_flag(&args, 'd');
             let zoom_after_split = crate::cli::has_short_flag(&args, 'Z');
@@ -9371,3 +9354,7 @@ mod tests_set_option_forward_line;
 #[cfg(test)]
 #[path = "../../tests-rs/test_list_trailing_newline.rs"]
 mod tests_list_trailing_newline;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue1051_spawn_operands.rs"]
+mod tests_issue1051_spawn_operands;
