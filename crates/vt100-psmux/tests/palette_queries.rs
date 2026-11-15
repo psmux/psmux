@@ -87,10 +87,10 @@ fn a_colour_query_keeps_how_it_ended() {
     assert_eq!(
         queries(&mut p, b"\x1b]10;?\x07\x1b]10;?\x1b\\\x1b]11;?\x07\x1b]11;?\x1b\\\x1b]4;1;?\x07\x1b]4;1;?\x1b\\"),
         vec![
-            TerminalQuery::ForegroundColour { bel: true },
-            TerminalQuery::ForegroundColour { bel: false },
-            TerminalQuery::BackgroundColour { bel: true },
-            TerminalQuery::BackgroundColour { bel: false },
+            TerminalQuery::ForegroundColour { colour: None, bel: true },
+            TerminalQuery::ForegroundColour { colour: None, bel: false },
+            TerminalQuery::BackgroundColour { colour: None, bel: true },
+            TerminalQuery::BackgroundColour { colour: None, bel: false },
             palette(1, None, true),
             palette(1, None, false),
         ]

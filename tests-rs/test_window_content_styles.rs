@@ -50,7 +50,7 @@ fn leaf(
         alternate_screen: false,
         wants_mouse: false,
         hide_cursor: true,
-        cursor_shape: 0, cursor_colour: None,
+        cursor_shape: 0, cursor_colour: None, default_colours: None,
         active,
         copy_mode,
         scroll_offset: 0,
@@ -281,4 +281,54 @@ fn clock_overlay_preserves_the_active_window_background() {
             assert_eq!(buffer[(x, y)].style().bg, Some(Color::Blue));
         }
     }
+}
+
+fn with_program(layout: LayoutJson, fg: Option<&str>, bg: Option<&str>) -> LayoutJson {
+    let mut layout = layout;
+    if let LayoutJson::Leaf { default_colours, .. } = &mut layout {
+        *default_colours = Some([fg.map(str::to_string), bg.map(str::to_string)]);
+    }
+    layout
+}
+
+// tmux 3.8, measured by attaching a client: OSC 11 ; #ff0000 alone draws the
+// pane's default cells red; with window-style bg=green the active pane is
+// still red and another pane green; window-active-style bg=blue makes the
+// active pane blue (tty_default_colours, tty.c:3164).
+#[test]
+fn a_program_background_fills_the_default_cells_only() {
+    let cells = vec![vec![full_cell("A", "", ""), full_cell("B", "", "magenta")]];
+    let layout = with_program(leaf(true, false, 2, cells, Vec::new()), None, Some("#ff0000"));
+    let buffer = render(&layout, 2, WindowContentStyles::default());
+    assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Rgb(0xff, 0, 0)));
+    assert_eq!(buffer[(1, 0)].style().bg, Some(Color::Magenta));
+}
+
+#[test]
+fn the_program_colour_sits_between_the_window_styles() {
+    let green = WindowContentStyles {
+        inactive: Some(Style::default().bg(Color::Green)),
+        ..Default::default()
+    };
+    let cells = || vec![vec![full_cell("A", "", "")]];
+    let active = with_program(leaf(true, false, 1, cells(), Vec::new()), Some("#00ff00"), Some("#ff0000"));
+    let buffer = render(&active, 1, green);
+    assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Rgb(0xff, 0, 0)));
+    assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Rgb(0, 0xff, 0)));
+    let other = with_program(leaf(false, false, 1, cells(), Vec::new()), None, Some("#ff0000"));
+    assert_eq!(render(&other, 1, green)[(0, 0)].style().bg, Some(Color::Green));
+    let blue = WindowContentStyles { active: Some(Style::default().bg(Color::Blue)), ..green };
+    assert_eq!(render(&active, 1, blue)[(0, 0)].style().bg, Some(Color::Blue));
+}
+
+#[test]
+fn a_float_style_goes_over_the_program_colour() {
+    let styles = WindowContentStyles::default();
+    let own = Style::default().bg(Color::Yellow);
+    let program = [None, Some("#ff0000".to_string())];
+    let style = styles.with_program_colours(Some(own), true, Some(own), Some(&program));
+    assert_eq!(style.and_then(|s| s.bg), Some(Color::Yellow));
+    let style = styles.with_program_colours(None, true, None, Some(&program));
+    assert_eq!(style.and_then(|s| s.bg), Some(Color::Rgb(0xff, 0, 0)));
+    assert_eq!(styles.with_program_colours(None, true, None, None), None);
 }
