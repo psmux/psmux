@@ -35,6 +35,15 @@ class RecordKeyChild {
     // Far's measured input mode, from the #623 investigation.
     const uint FAR_MODE = 0x01B8;
 
+    // PSMUX_RECORD_MODE (hex) replaces it, so a test can take another reader's
+    // mode, such as PSReadLine's 0x01E4 (issue #1048).
+    static uint ChosenMode() {
+        string m = Environment.GetEnvironmentVariable("PSMUX_RECORD_MODE");
+        uint v;
+        if (!string.IsNullOrEmpty(m) && uint.TryParse(m, System.Globalization.NumberStyles.HexNumber, null, out v)) return v;
+        return FAR_MODE;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     struct COORD { public short X; public short Y; }
 
@@ -73,7 +82,7 @@ class RecordKeyChild {
         IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
         uint mode;
         if (GetConsoleMode(h, out mode)) {
-            SetConsoleMode(h, FAR_MODE);
+            SetConsoleMode(h, ChosenMode());
             uint after;
             GetConsoleMode(h, out after);
             File.AppendAllText(log, string.Format("mode 0x{0:X4} -> 0x{1:X4}\n", mode, after));
