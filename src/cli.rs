@@ -573,6 +573,39 @@ pub fn first_operand<'a>(command: &str, args: &[&'a str]) -> Option<&'a str> {
     None
 }
 
+/// The option letters of `command` in `args` (the words after the command
+/// name) and the index where its operands start, read the way tmux's getopt
+/// reads them (arguments.c): options end at `--` (the operands start after
+/// it), at a bare `-` or at the first word that does not start with `-`. A
+/// value-taking letter takes the rest of its word or the next word, so its
+/// value is never an option. The words of a shell command, such as
+/// `pwsh -NoProfile -Command ...` in `split-window -d pwsh -NoProfile`, are
+/// operands, never options (#1051).
+pub fn options_and_operand_start<S: AsRef<str>>(command: &str, args: &[S]) -> (String, usize) {
+    let mut letters = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        let word = args[i].as_ref();
+        if word == "--" {
+            return (letters, i + 1);
+        }
+        let Some(rest) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            break;
+        };
+        i += 1;
+        for (at, flag) in rest.char_indices() {
+            letters.push(flag);
+            if flag == 't' || flag_takes_value(command, flag) {
+                if at + flag.len_utf8() == rest.len() {
+                    i += 1; // the value is the next word
+                }
+                break;
+            }
+        }
+    }
+    (letters, i.min(args.len()))
+}
+
 /// Split clustered short flags into one token per flag, as tmux's getopt
 /// reads them: `-dt %1` becomes `-d -t %1`, and `-t%1` becomes `-t %1`.
 ///

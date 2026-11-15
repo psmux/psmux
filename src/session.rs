@@ -3295,17 +3295,10 @@ pub(crate) fn reply_was_lost(e: &io::Error) -> bool {
 /// message and capture-pane fills a buffer, so those are not. A `;` list is
 /// never retried, whatever it holds.
 pub(crate) fn read_only_retryable(line: &str) -> bool {
-    let tokens: Vec<&str> = line.split_whitespace().collect();
-    let Some(&cmd) = tokens.first() else { return false };
-    if tokens.iter().any(|t| *t == ";" || *t == "\\;" || t.ends_with("\\;")) {
-        return false;
-    }
-    let has_p = tokens[1..]
-        .iter()
-        .take_while(|t| **t != "--")
-        .any(|t| t.len() > 1 && t.starts_with('-') && !t.starts_with("--") && t[1..].contains('p'));
-    match cmd {
-        "display-message" | "display" | "capture-pane" | "capturep" => has_p,
+    let Some((cmd, args)) = single_command_words(line) else { return false };
+    let has = |c: char| crate::cli::options_and_operand_start(&cmd, &args).0.contains(c);
+    match cmd.as_str() {
+        "display-message" | "display" | "capture-pane" | "capturep" => has('p'),
         "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp"
         | "list-keys" | "lsk" | "list-buffers" | "lsb" | "list-clients" | "lsc"
         | "list-commands" | "lscm" => true,
@@ -3324,19 +3317,7 @@ pub(crate) fn read_only_retryable(line: &str) -> bool {
 /// command whose correct answer can be empty (a blank pane's capture, an
 /// empty format) must keep exiting 0 with no output, so it is not here.
 pub(crate) fn reply_required(line: &str) -> bool {
-    let tokens: Vec<&str> = line.split_whitespace().collect();
-    let Some(&cmd) = tokens.first() else { return false };
-    if tokens.iter().any(|t| *t == ";" || *t == "\\;" || t.ends_with("\\;")) {
-        return false;
-    }
-    // Flags before `--` only; a clustered `-pt` counts as -p and -t.
-    let flags: Vec<&str> = tokens[1..]
-        .iter()
-        .take_while(|t| **t != "--")
-        .filter(|t| t.len() > 1 && t.starts_with('-') && !t.starts_with("--"))
-        .copied()
-        .collect();
-    let has = |c: char| flags.iter().any(|f| f[1..].contains(c));
+    let Some((cmd, args)) = single_command_words(line) else { return false };
     // Only what the server provably always answers with at least one byte
     // (server/connection.rs): display-message -p ends its line with
     // `writeln!`, so an empty format is "\n" (tmux prints an empty line too);
@@ -3349,12 +3330,35 @@ pub(crate) fn reply_required(line: &str) -> bool {
     // new-session -P (a -F that expands to nothing writes nothing). For those
     // a lost reply still reads as empty: that is the honest limit, the
     // transport errors and the read-only retry still apply.
-    match cmd {
+    // Options as getopt reads them (cli::options_and_operand_start): the
+    // words of a shell command or a message are operands, never options
+    // (#1051: `-NoProfile` in `split-window -d pwsh -NoProfile` was -P).
+    let has = |c: char| crate::cli::options_and_operand_start(&cmd, &args).0.contains(c);
+    match cmd.as_str() {
         "display-message" | "display" => has('p'),
         "list-sessions" | "ls" | "list-windows" | "lsw" | "list-panes" | "lsp" => !has('f'),
         "split-window" | "splitw" => has('P'),
         _ => false,
     }
+}
+
+/// The words of `line` as the server reads them ([`parse_command_line`]),
+/// the command name first, when `line` is one command. A `;` list gives
+/// `None`: the raw text is checked, so a `;` the server would read as a
+/// separator is never missed (a quoted one only makes this answer `None`,
+/// which is the cautious answer for both callers).
+///
+/// [`parse_command_line`]: crate::commands::parse_command_line
+fn single_command_words(line: &str) -> Option<(String, Vec<String>)> {
+    if line.split_whitespace().any(|t| t == ";" || t == "\\;" || t.ends_with("\\;")) {
+        return None;
+    }
+    let mut words = crate::commands::parse_command_line(line);
+    if words.is_empty() {
+        return None;
+    }
+    let cmd = words.remove(0);
+    Some((cmd, words))
 }
 
 /// How the CLI's run-shell went: the server ran it and replied natively, or

@@ -150,6 +150,49 @@ fn reply_required_only_for_commands_that_always_print() {
     }
 }
 
+/// #1051: the words of a shell command are arguments, not options. tmux's
+/// getopt stops at the first word that is not an option, so `-NoProfile` in
+/// `split-window -d pwsh -NoProfile` is never `-P`, and a quoted command word
+/// is one word. A split without -P succeeds with an empty reply.
+#[test]
+fn issue1051_shell_command_words_are_not_options() {
+    for l in [
+        // The CLI line without `--`: the command is one quoted word.
+        "split-window -v -d -c \"C:\\x\" \"pwsh -NoProfile -Command Start-Sleep 30\"\n",
+        // Unquoted, as a script or a binding may send it.
+        "split-window -d -t A pwsh -NoProfile -Command \"Start-Sleep 30\"\n",
+        "split-window -d pwsh -ExecutionPolicy Bypass\n",
+        "split-window -d -- pwsh -NoProfile\n",
+        "splitw -t A -l 10 cmd /c -P\n",
+        // The text of a message, the value of -t or -c.
+        "display-message \"hello -p world\"\n",
+        "display-message -t A hello -p\n",
+        "display-message -c -p\n",
+        "list-panes -t main \"-f\"\n",
+    ] {
+        assert!(!reply_required(l), "{l:?} may succeed silently");
+    }
+    for l in [
+        "split-window -v -d -P -c \"C:\\x\" \"pwsh -NoProfile\"\n",
+        "split-window -dP -F \"#{pane_id}\" -- pwsh -NoProfile\n",
+        "split-window -l 10 -P cmd\n",
+        "split-window -t-x -P cmd\n",
+        "display-message -t A -p \"#{pane_id} -x\"\n",
+        "list-panes -t main -F \"-f\"\n",
+    ] {
+        assert!(reply_required(l), "{l:?} always prints on success");
+    }
+    // A message that holds `-p` shows a message: retrying shows it twice.
+    for l in [
+        "display-message \"hello -p world\"\n",
+        "display-message -t A hello -p\n",
+        "capture-pane -b -p\n",
+    ] {
+        assert!(!read_only_retryable(l), "{l:?} must never run twice");
+    }
+    assert!(read_only_retryable("capture-pane -S -10 -p\n"));
+}
+
 #[test]
 fn ack_then_reset_with_no_reply_is_an_error() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
