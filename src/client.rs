@@ -1254,6 +1254,16 @@ fn client_selection_owns_drag(
     mouse_selection && (mouse_selection_force || !pane_handles_mouse)
 }
 
+/// Whether any pane of the frame shows a clock (#1058), the focused one or a
+/// pane the focus left. The clock is drawn from the local time, so while one
+/// is on screen the client redraws even when the frame has not changed.
+pub fn layout_shows_clock(layout: &LayoutJson) -> bool {
+    match layout {
+        LayoutJson::Leaf { clock, .. } => *clock,
+        LayoutJson::Split { children, .. } => children.iter().any(layout_shows_clock),
+    }
+}
+
 /// Check if the active pane is in server-side copy mode.
 /// When true, the client should NOT start its own text selection —
 /// the server handles cursor positioning and selection in copy mode.
@@ -2450,6 +2460,7 @@ pub fn render_layout_json(
             // into FRAME_SIXELS for the post-draw emit path (M6).
             images,
             copy_hl,
+            clock,
         } => {
             let window_style = window_styles.for_pane(*active);
             let hl_styles = copy_ln.map(|cfg| cfg.hl).unwrap_or_default();
@@ -2767,10 +2778,13 @@ pub fn render_layout_json(
                 }
             }
 
-            if *active && !*copy_mode {
-                if clock_mode {
-                    render_clock_overlay(f, inner, clock_colour, window_fill);
-                }
+            // A pane's own clock (#1058): the server marks every pane in clock
+            // mode, the focused one and the ones the focus has left, as tmux
+            // draws each pane's own mode (window-clock.c keeps a timer per
+            // pane). A server that predates the mark only reports the focused
+            // pane's clock, through `clock_mode`.
+            if !*copy_mode && (*clock || (*active && clock_mode)) {
+                render_clock_overlay(f, inner, clock_colour, window_fill);
             }
 
             if *copy_mode && *active {
@@ -3981,6 +3995,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut srv_pane_base_index: usize = 0;
     #[allow(unused_assignments)]
     let mut clock_active = false;
+    // Some pane shows a clock, the focused one (`clock_active`) or another.
+    let mut clock_shown = false;
     #[allow(unused_assignments)]
     let mut clock_colour_str: Option<String> = None;
 
@@ -8924,7 +8940,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
+        let overlays_active = command_input || renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active || clock_shown;
         // An overlay that closes without the server changing anything (n at
         // `kill-pane? (y/n)`, Escape out of a prompt) leaves no new frame to
         // draw, and the skip checks below used to `continue` on exactly that
@@ -9041,6 +9057,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         client_zoomed = state.zoomed;
         let dim_preds = state.prediction_dimming;
         clock_active = state.clock_mode;
+        clock_shown = layout_shows_clock(&root);
         clock_colour_str = state.clock_colour;
         let state_cursor_style_code = state.cursor_style_code;
         let state_cursor_blink_mode = state.cursor_blink_mode;

@@ -493,7 +493,7 @@ fn make_leaf(id: usize, rows: &[&str]) -> crate::layout::LayoutJson {
             .iter()
             .map(|row| make_row(vec![make_run(row, cols)]))
             .collect(),
-        title: None, copy_hl: Vec::new(),
+        title: None, clock: false, copy_hl: Vec::new(),
         images: vec![],
     }
 }
@@ -597,7 +597,7 @@ fn extract_selection_text_block_mode() {
             make_row(vec![make_run("abcdefghij", 10)]),
             make_row(vec![make_run("ABCDEFGHIJ", 10)]),
         ],
-        title: None, copy_hl: Vec::new(),
+        title: None, clock: false, copy_hl: Vec::new(),
         images: vec![],
     };
 
@@ -674,7 +674,7 @@ fn word_bounds_at_finds_word() {
         rows_v2: vec![
             make_row(vec![make_run("hello world_test   ", 19), make_run(" ", 1)]),
         ],
-        title: None, copy_hl: Vec::new(),
+        title: None, clock: false, copy_hl: Vec::new(),
         images: vec![],
     };
 

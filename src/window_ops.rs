@@ -2547,11 +2547,21 @@ pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press:
 /// drag from the press it already counted and never sees a second button
 /// down, so the replay must not count either: counted, it made the drag a
 /// double click 300 ms in (#1031).
-pub fn handle_client_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool, replay: bool) {
+///
+/// A left press on a pane in clock mode closes the clock and goes no further
+/// (#1058). tmux binds MouseDown1Pane to `select-pane -t=; send -M`
+/// (key-bindings.c), and `send -M` hands the press to the pane's mode, whose
+/// `window_clock_key` resets the mode for any key (window-clock.c). Returns
+/// whether a clock closed, so the caller fires pane-mode-changed.
+pub fn handle_client_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool, replay: bool) -> bool {
+    if button == 0 && press && !replay && crate::copy_mode::close_clock_of(app, pane_id) {
+        return true;
+    }
     handle_pane_mouse(app, pane_id, button, col, row, press);
     if button == 0 && press && !replay {
         note_pane_press(app, pane_id, col, row);
     }
+    false
 }
 
 /// tmux's click timer for a left press in a pane (server-client.c

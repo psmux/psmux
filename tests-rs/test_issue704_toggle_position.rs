@@ -145,7 +145,7 @@ fn indicator_row(hide_position: bool) -> String {
         active: true, copy_mode: true, scroll_offset: 68, view_offset: 68,
         sel_start_row: None, sel_start_col: None, sel_end_row: None, sel_end_col: None,
         sel_mode: None, copy_cursor_row: Some(0), copy_cursor_col: Some(0),
-        content, rows_v2: Vec::new(), title: None, copy_hl: Vec::new(), images: vec![],
+        content, rows_v2: Vec::new(), title: None, clock: false, copy_hl: Vec::new(), images: vec![],
     };
     let copy_ln = Some(CopyLnRender {
         mode: crate::copy_line_numbers::CopyLnMode::Off,

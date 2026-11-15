@@ -330,7 +330,7 @@ fn render_copy_leaf_hl(sel: Option<((u16, u16), (u16, u16))>, cursor: (u16, u16)
         sel_end_row: sel.map(|s| s.1 .0), sel_end_col: sel.map(|s| s.1 .1),
         sel_mode: sel.map(|_| "char".to_string()),
         copy_cursor_row: Some(cursor.0), copy_cursor_col: Some(cursor.1),
-        content, rows_v2: Vec::new(), title: None, copy_hl: hl, images: vec![],
+        content, rows_v2: Vec::new(), title: None, clock: false, copy_hl: hl, images: vec![],
     };
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| {

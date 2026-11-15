@@ -138,7 +138,7 @@ fn ticker_leaf(rows: u16, cols: u16, text: &str) -> LayoutJson {
         active: true, copy_mode: false, scroll_offset: 0, view_offset: 0,
         sel_start_row: None, sel_start_col: None, sel_end_row: None, sel_end_col: None,
         sel_mode: None, copy_cursor_row: None, copy_cursor_col: None,
-        content: Vec::new(), rows_v2, title: None, copy_hl: Vec::new(), images: vec![],
+        content: Vec::new(), rows_v2, title: None, clock: false, copy_hl: Vec::new(), images: vec![],
     }
 }
 

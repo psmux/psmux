@@ -314,7 +314,42 @@ pub enum LayoutJson {
         /// top-level `image_blobs` map keyed by `ImageDescJson::id`.
         #[serde(default)]
         images: Vec<ImageDescJson>,
+        /// The pane is in clock mode (#1058): the focused pane while
+        /// `app.mode` is clock mode, or a pane the focus left with its clock
+        /// on (`AppState::clock_panes`). Absent when false, so an ordinary
+        /// frame does not grow.
+        #[serde(default, skip_serializing_if = "is_false")]
+        clock: bool,
     },
+}
+
+/// Which panes of the window being dumped show a clock (#1058). tmux keeps
+/// clock mode per pane and redraws each one from its own timer
+/// (`window_clock_timer_callback`, window-clock.c), so a pane the focus left
+/// keeps its clock on screen. psmux keeps the focused pane's clock in
+/// `app.mode` and the others in `app.clock_panes`.
+#[derive(Clone, Copy)]
+pub(crate) struct ClockMarks<'a> {
+    /// The focused pane of this window is in clock mode.
+    pub focused: bool,
+    /// Ids of the panes whose clock is parked while another pane has focus.
+    pub parked: &'a [usize],
+}
+
+impl ClockMarks<'_> {
+    /// The marks for window `win_idx`: `app.mode` belongs to the focused pane
+    /// of the active window only.
+    pub(crate) fn of(app: &AppState, win_idx: usize) -> ClockMarks<'_> {
+        ClockMarks {
+            focused: win_idx == app.active_idx && matches!(app.mode, crate::types::Mode::ClockMode),
+            parked: &app.clock_panes,
+        }
+    }
+
+    /// Whether pane `id` shows a clock; `is_active` says it has the focus.
+    pub(crate) fn shows(&self, id: usize, is_active: bool) -> bool {
+        (is_active && self.focused) || self.parked.contains(&id)
+    }
 }
 
 impl LayoutJson {
@@ -497,7 +532,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             sel_end_row: None, sel_end_col: None,
                             sel_mode: None,
                             copy_cursor_row: None, copy_cursor_col: None,
-                            content: vec![], rows_v2: vec![], title: None, copy_hl: Vec::new(), images: vec![],
+                            content: vec![], rows_v2: vec![], title: None, copy_hl: Vec::new(), images: vec![], clock: false,
                         };
                     } else {
                         // Safety timeout expired without sentinel; unsquelch anyway.
@@ -520,7 +555,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                         sel_end_row: None, sel_end_col: None,
                         sel_mode: None,
                         copy_cursor_row: None, copy_cursor_col: None,
-                        content: vec![], rows_v2: vec![], title: None, copy_hl: Vec::new(), images: vec![],
+                        content: vec![], rows_v2: vec![], title: None, copy_hl: Vec::new(), images: vec![], clock: false,
                     };
                 };
                 let screen = parser.screen();
@@ -725,6 +760,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                     title: if p.title.is_empty() { None } else { Some(p.title.clone()) },
                     copy_hl: Vec::new(),
                     images: vec![],
+                    clock: false,
                 }
             }
         }
@@ -844,6 +880,15 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         if win_id_override.is_none() { app.copy_pos_scroll_offset } else { None },
         emacs,
     );
+    fn mark_clocks(node: &mut LayoutJson, marks: ClockMarks<'_>) {
+        match node {
+            LayoutJson::Leaf { id, active, clock, .. } => *clock = marks.shows(*id, *active),
+            LayoutJson::Split { children, .. } => {
+                for child in children { mark_clocks(child, marks); }
+            }
+        }
+    }
+    mark_clocks(&mut root, ClockMarks::of(app, win_idx));
     if in_copy_mode && win_id_override.is_none() {
         let hl = crate::copy_mode::copy_highlights(app);
         if !hl.is_empty() {
@@ -970,6 +1015,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         sel_mode: crate::types::SelectionMode,
         emacs: bool,
         hl: &[[u16; 4]],
+        clocks: ClockMarks<'_>,
         out: &mut String,
     ) {
         match node {
@@ -988,7 +1034,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 for (i, c) in children.iter_mut().enumerate() {
                     if i > 0 { out.push(','); }
                     cur_path.push(i);
-                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, out);
+                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, clocks, out);
                     cur_path.pop();
                 }
                 out.push_str("]}");
@@ -1025,9 +1071,14 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 "\"active\":{},\"copy_mode\":false,",
                                 "\"scroll_offset\":0,",
                                 "\"view_offset\":0,",
-                                "\"rows_v2\":[],\"content\":[],\"images\":[],\"title\":null}}"),
+                                "\"rows_v2\":[],\"content\":[],\"images\":[],\"title\":null"),
                             p.id, p.last_rows, p.last_cols, is_active,
                         ));
+                        // The serde path marks a squelched leaf the same way.
+                        if clocks.shows(p.id, is_active) {
+                            out.push_str(",\"clock\":true");
+                        }
+                        out.push('}');
                         return;
                     } else {
                         p.squelch_until = None;
@@ -1276,6 +1327,10 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 if let Some(rgb) = snap.cursor_colour {
                     let _ = std::fmt::Write::write_fmt(out, format_args!("\"cursor_colour\":\"{}\",", cursor_colour_json(rgb)));
                 }
+                // Only a pane in clock mode carries the mark, as `cursor_colour`.
+                if clocks.shows(p.id, is_active) {
+                    out.push_str("\"clock\":true,");
+                }
 
                 // selection bounds + copy cursor position
                 if is_active && in_copy {
@@ -1471,13 +1526,17 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         }
     }
 
+    let focused_clock = matches!(app.mode, crate::types::Mode::ClockMode);
     let win = &mut app.windows[app.active_idx];
     let active_path = win.active_path.clone();
     let mut path = Vec::new();
     let mut out = String::with_capacity(32768);
+    // `ClockMarks::of` for the active window, spelt out so the borrow of
+    // `app.clock_panes` sits beside the mutable one of `app.windows`.
+    let clocks = ClockMarks { focused: focused_clock, parked: &app.clock_panes };
     write_node(
         &mut win.root, &mut path, &active_path,
-        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, &mut out,
+        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, clocks, &mut out,
     );
     Ok(out)
 }
