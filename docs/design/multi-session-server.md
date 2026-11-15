@@ -532,6 +532,16 @@ exits 1 depends on that command's CLI path, exactly as for any `ERROR` reply
 today. A crash that `catch_unwind` cannot catch (stack overflow, abort, a native
 fault) ends every session of the namespace (section 8).
 
+A line on a connection for one command to the `listener` of session A can name
+session B, for example `server-info -t B:` or `info -t $1`. The `listener` then
+sends the line to B before the alias changes it to `show-messages`, and the
+summary shows B. The same target with `show-messages` or `showmsgs` shows A.
+
+The `uptime` line shows the time since the `created_at` value of the session.
+Each session in the `shared` mode uses the value from its `AppState`. Two
+sessions can show the same `uptime`. All sessions of the `shared` server show
+the same `pid`.
+
 A hook's `new-session` makes its session after the hook, in the same loop cycle
 or in the next cycle. Thus a subsequent command of the same hook cannot find the new session.
 The session is always made as with `-d`, and the client stays in its session.
@@ -919,7 +929,10 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    load-buffer, clear-history and respawn-pane, from an attached client and as
    one shot commands. Buffers are server wide, as in tmux (#925): the server
    keeps one set and lends it to a session for each request, as it lends the
-   id counters (`src/server/shared/buffers.rs`).
+   id counters (`src/server/shared/buffers.rs`). A `show-messages`, `showmsgs`,
+   `server-info` or `info` line on a connection for one command shows the
+   summary of the session. The `dispatch.rs` file had the arm, but `router.rs`
+   stopped the line.
 
    Still refused. A one shot command gets `unknown command`; an attached client's
    binding, prompt or menu puts `not supported in shared server mode yet: <name>`
@@ -929,9 +942,11 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    find-window, rename-session (the registry rename), `new-session -t` (groups),
    choose-buffer, display-menu, display-popup, customize-mode, list-clients,
    detach-client (`-a`, `-s`, another client), lock-client, suspend-client,
-   refresh-client, source-file, show-messages, show-window-options,
+   refresh-client, source-file, show-window-options,
    list-commands, the prompt history commands, run-shell and wait-for. The
-   requests the server sends itself (finished config jobs, cross session
+   `router.rs` file also stops the internal request `__config-warnings`. An
+   attached client sees the name `show-messages` in the status line message for
+   this request. The requests the server sends itself (finished config jobs, cross session
    forwarding, control mode bookkeeping) are dropped silently, as before.
 4. Spare panes inside the shared process, so a new session's first pane is not a
    cold spawn.
