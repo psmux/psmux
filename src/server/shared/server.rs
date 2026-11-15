@@ -2026,3 +2026,7 @@ mod tests_shared_dropped_requests;
 #[cfg(test)]
 #[path = "../../../tests-rs/test_issue798_shared_direct_run.rs"]
 mod tests_issue798_shared_direct_run;
+
+#[cfg(all(test, windows))]
+#[path = "../../../tests-rs/test_enter_send_keys.rs"]
+mod tests_enter_send_keys;
