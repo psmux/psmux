@@ -3964,7 +3964,7 @@ pub fn parse_key_string(key: &str) -> Option<(KeyCode, KeyModifiers)> {
             KeyCode::Char(key_part.chars().next().unwrap())
         }
         "space" => KeyCode::Char(' '),
-        "enter" | "return" => KeyCode::Enter,
+        "enter" | "return" | "cr" => KeyCode::Enter,
         "tab" => KeyCode::Tab,
         "btab" | "backtab" => KeyCode::BackTab,
         "escape" | "esc" => KeyCode::Esc,
