@@ -84,6 +84,25 @@ try {
     Check 'source-file: split-window runs every word' (Find-Mark 'MARK_SRC_SPLIT')
     Check 'source-file: new-window runs every word' (Find-Mark 'MARK_SRC_NEWW')
 
+    # respawn-pane / respawn-window keep every word too (CLI and source-file).
+    function Pane-Has([string]$Pane, [string]$Mark) {
+        for ($i = 0; $i -lt 50; $i++) {
+            if (((& $Bin -L $Ns capture-pane -p -t $Pane) -join ' ') -match $Mark) { return $true }
+            Start-Sleep -Milliseconds 200
+        }
+        $false
+    }
+    $rp = (& $Bin -L $Ns display-message -p -t G '#{pane_id}').Trim()
+    & $Bin -L $Ns respawn-pane -k -t $rp pwsh -NoProfile -Command "Write-Output MARK_CLI_RESPAWN; Start-Sleep 30"
+    Check "CLI respawn-pane: exit 0" ($LASTEXITCODE -eq 0)
+    Check 'CLI respawn-pane runs every word' (Pane-Has $rp 'MARK_CLI_RESPAWN')
+    Set-Content $conf "respawn-pane -k -t $rp pwsh -NoProfile -Command `"Write-Output MARK_SRC_RESPAWN; Start-Sleep 30`""
+    & $Bin -L $Ns source-file -t G $conf
+    Check 'source-file respawn-pane runs every word' (Pane-Has $rp 'MARK_SRC_RESPAWN')
+    Set-Content $conf "respawn-window -k -t $rp cmd /c `"echo MARK_SRC_RESPAWNW & timeout 30`""
+    & $Bin -L $Ns source-file -t G $conf
+    Check 'source-file respawn-window runs every word' (Pane-Has $rp 'MARK_SRC_RESPAWNW')
+
     $psi = [System.Diagnostics.ProcessStartInfo]::new($Bin)
     foreach ($a in @('-L', $Ns, '-C', 'attach', '-t', 'G')) { $psi.ArgumentList.Add($a) }
     $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.UseShellExecute = $false
@@ -96,6 +115,9 @@ try {
         $cc.StandardInput.Flush()
         Check 'control mode: split-window runs its command' (Find-Mark 'MARK_CC_SPLIT')
         Check 'control mode: new-window runs every word' (Find-Mark 'MARK_CC_NEWW')
+        $cc.StandardInput.WriteLine("respawn-pane -k -t $rp pwsh -NoProfile -Command `"Write-Output MARK_CC_RESPAWN; Start-Sleep 30`"")
+        $cc.StandardInput.Flush()
+        Check 'control mode: respawn-pane runs its command' (Pane-Has $rp 'MARK_CC_RESPAWN')
     } finally {
         try { $cc.StandardInput.Close() } catch {}
         if (-not $cc.WaitForExit(3000)) { $cc.Kill() }

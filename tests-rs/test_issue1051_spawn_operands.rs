@@ -71,3 +71,28 @@ fn option_letters_stop_at_the_first_operand() {
     assert_eq!(o("split-window", &["-l"]), ("l".to_string(), 1));
     assert_eq!(o("split-window", &["-", "-P"]), (String::new(), 0));
 }
+
+#[test]
+fn respawn_keeps_every_operand() {
+    let args = ["-k", "pwsh", "-NoProfile", "-Command", "Write-Output hi"];
+    let (opts, cmd) = respawn_operands("respawn-pane", &args);
+    assert_eq!(opts, &["-k"]);
+    assert_eq!(cmd, Some(argv(&["pwsh", "-NoProfile", "-Command", "Write-Output hi"])));
+    let (opts, cmd) = respawn_operands("respawn-window", &["-k", "-c", "C:\\x", "cmd", "/c", "echo x"]);
+    assert_eq!(opts, &["-k", "-c", "C:\\x"]);
+    assert_eq!(cmd, Some(argv(&["cmd", "/c", "echo x"])));
+    // `-k` after the command is the command's.
+    let (opts, _) = respawn_operands("respawn-pane", &["pwsh", "-k"]);
+    assert!(opts.is_empty());
+}
+
+#[test]
+fn respawn_one_operand_reads_as_before() {
+    // The Claude Code teammate form: one shell string behind `--`, whole.
+    let (_, cmd) = respawn_operands("respawn-pane", &["-k", "--", "\"C:\\a b\\x.exe\" --flag"]);
+    assert_eq!(cmd.as_deref(), Some("\"C:\\a b\\x.exe\" --flag"));
+    let (_, cmd) = respawn_operands("respawn-pane", &["-k", "\"pwsh -NoProfile\""]);
+    assert_eq!(cmd.as_deref(), Some("pwsh -NoProfile"));
+    let (_, cmd) = respawn_operands("respawn-pane", &["-k", "-e", "A=1"]);
+    assert_eq!(cmd, None);
+}

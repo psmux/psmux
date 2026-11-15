@@ -1374,26 +1374,22 @@ fn split_spawn_operands<'a>(cmd: &str, args: &'a [&'a str]) -> (&'a [&'a str], O
     (options, command)
 }
 
-/// The positional `shell-command` operand of `respawn-pane` / `respawn-window`
-/// (tmux takes it plain, not behind `--`). Everything that is a flag, or the
-/// value of the one value-taking flag left in `args` (`-c`; `-t` is stripped
-/// upstream by `without_outer_target`), is skipped.
-fn respawn_positional_command(args: &[&str]) -> Option<String> {
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i];
-        if a == "-c" || a == "-e" || a == "-t" {
-            i += 2;
-            continue;
-        }
-        if a.starts_with('-') {
-            i += 1;
-            continue;
-        }
-        let s = a.trim_matches('"').trim().to_string();
-        return if s.is_empty() { None } else { Some(s) };
-    }
-    None
+/// `args` of respawn-pane or respawn-window cut where getopt ends the options,
+/// and the command the operands make (tmux takes it plain or behind `--`):
+/// two or more operands are an argv, as [`split_spawn_operands`] reads them,
+/// so none is dropped (#1051). One operand is a shell string, read as before:
+/// whole behind `--` (the `-- "<cmd>"` form Claude Code teammates send,
+/// #399), with stray outer quotes trimmed when plain (#580).
+fn respawn_operands<'a>(cmd: &str, args: &'a [&'a str]) -> (&'a [&'a str], Option<String>) {
+    let (_, start) = crate::cli::options_and_operand_start(cmd, args);
+    let (options, operands) = args.split_at(start);
+    let command = match operands {
+        [] => None,
+        [one] if options.last() == Some(&"--") => Some(one.trim().to_string()),
+        [one] => Some(one.trim_matches('"').trim().to_string()),
+        _ => Some(format!("-- {}", requote_command_tail(operands))),
+    };
+    (options, command.filter(|s| !s.is_empty()))
 }
 
 /// Every `-e KEY=VALUE` of a spawning command, in order. Like tmux's
@@ -5074,36 +5070,18 @@ match cmd {
         }
     }
     "respawn-pane" | "respawnp" => {
+        // tmux: `respawn-pane [-k] [-c dir] [-t target] [shell-command]`.
+        // Every operand, after `--` (#399, #582) or plain (#580), is the
+        // command: one is a shell string (the Claude Code teammate form
+        // `-- "<cmd>"`), several an argv build_command execs directly. Only
+        // the first was kept without `--`, so `respawn-pane -k pwsh
+        // -NoProfile -Command x` ran a bare pwsh (#1051). Flags are read
+        // from the options only.
+        let (args, command) = respawn_operands(cmd, &args);
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
         let empty = args.iter().any(|a| *a == "-E");
         // -E implies replacing the running pane, so it also kills it.
         let kill = args.iter().any(|a| *a == "-k") || empty;
-        // Honor `-- <shell-command>` (issue #399): Claude Code agent-teams
-        // delivers the teammate launch via `respawn-pane -k -t %N -- "<cmd>"`.
-        // Without this the pane is respawned with the default shell and the
-        // teammate never boots (mailbox stays unread, task never runs).
-        // tmux parity (#582): a multi-token argv after `--` keeps the marker
-        // and token boundaries so build_command execs it directly; the
-        // single-quoted-string teammate form keeps shell semantics.
-        let command = args.iter().position(|a| *a == "--")
-            .map(|i| {
-                let tail = &args[i + 1..];
-                if tail.len() > 1 {
-                    format!("-- {}", requote_command_tail(tail))
-                } else {
-                    tail.join(" ")
-                }
-            })
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            // tmux documents the command as a plain positional operand
-            // (`respawn-pane [-k] [-c dir] [-t target] [shell-command]`), not
-            // as a `--` tail. Without this the positional form was silently
-            // dropped and the pane came back as the default shell, which also
-            // left `#{pane_start_command}` unable to follow a respawn (#580).
-            // `-t` is already stripped by `without_outer_target`; `-c` is the
-            // only other flag here that takes a value.
-            .or_else(|| respawn_positional_command(&args));
         // Read the reply: every respawn failure is a routine command error
         // ("pane ... still active" without -k, a bad -c, an unspawnable
         // command). Fire-and-forget here meant the CLI exited 0 with empty
@@ -7307,19 +7285,8 @@ match cmd {
         // tmux: `respawn-window [-k] [-c dir] [-t target] [shell-command]`.
         // The command operand follows the same rule as respawn-pane, so a
         // respawn-window that carries one also replaces the pane's recorded
-        // `#{pane_start_command}` (#580).
-        let command = args.iter().position(|a| *a == "--")
-            .map(|i| {
-                let tail = &args[i + 1..];
-                if tail.len() > 1 {
-                    format!("-- {}", requote_command_tail(tail))
-                } else {
-                    tail.join(" ")
-                }
-            })
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| respawn_positional_command(&args));
+        // `#{pane_start_command}` (#580), and every operand is kept (#1051).
+        let (args, command) = respawn_operands(cmd, &args);
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
         let (resp_s, resp_r) = mpsc::channel();
         let env_sets = env_flag_values(&args);
@@ -8801,14 +8768,12 @@ fn dispatch_control_command(
             true
         }
         "respawn-pane" | "respawnp" => {
+            // Every operand is the command, with or without `--` (#399,
+            // #1051); this route ignored a command without `--`.
+            let (args, command) = respawn_operands(cmd, args);
             let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
             let empty = args.iter().any(|a| *a == "-E");
             let kill = args.iter().any(|a| *a == "-k") || empty;
-            // Honor `-- <shell-command>` (issue #399): teammate launch delivery.
-            let command = args.iter().position(|a| *a == "--")
-                .map(|i| args[i + 1..].join(" "))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
             // Control mode: a refused respawn must come back as %error, not as
             // a successful %end (the refusal used to kill the server outright).
             let (resp_s, resp_r) = mpsc::channel();
