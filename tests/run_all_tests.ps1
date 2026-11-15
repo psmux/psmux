@@ -1537,6 +1537,22 @@ function Run-TestFile {
 
         Write-Log ("{0,-7} {1,-45} {2}P/{3}F  exit={4}  {5}s{6}{7}" -f $status, $baseName, $passCount, $failCount, $exitCode, [math]::Round($sw.Elapsed.TotalSeconds,1), $(if ($leftovers -gt 0) { "  LEFTOVERS=$leftovers" } else { '' }), $uiNote)
 
+        # A failure names its first failing assertions and where the whole
+        # output is, right in progress.log and results.jsonl, so a sweep's
+        # failures can be read without hunting for the suite log.
+        $firstFails = @()
+        if ($status -ne "PASS") {
+            $plain = [regex]::Replace($output, '\x1b\[[0-9;?]*[ -/]*[@-~]', '')
+            $firstFails = @([regex]::Matches($plain, '(?m)^(?:.*(?:\[FAIL\]|\[TIMEOUT\]|=> FAIL$).*|\s*FAIL(?::(?!\s*\d+\s*$)|\s).*)$') |
+                Select-Object -First 3 | ForEach-Object { $t = $_.Value.Trim(); if ($t.Length -gt 300) { $t.Substring(0, 300) + '...' } else { $t } })
+            if ($firstFails.Count -eq 0 -and $plain.Trim()) {
+                # No marked assertion (a crash or a bare non zero exit): the tail says why.
+                $firstFails = @($plain.TrimEnd() -split "`r?`n" | Select-Object -Last 3 | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            }
+            foreach ($f in $firstFails) { Write-Log "  first failure: $f" }
+            Write-Log "  full output: $suiteLog"
+        }
+
         return @{
             Name = $baseName
             Status = $status
@@ -1547,6 +1563,8 @@ function Run-TestFile {
             Leftovers = $leftovers
             Duration = [math]::Round($sw.Elapsed.TotalSeconds, 1)
             Output = $output
+            FirstFailures = $firstFails
+            Log = $suiteLog
         }
     } catch {
         $sw.Stop()
@@ -1675,7 +1693,8 @@ foreach ($testFile in $allTests) {
     # Crash-safe per-suite result record (also powers -Resume)
     $rec = @{ Name=$result.Name; Status=$result.Status; Passed=$result.Passed;
               Failed=$result.Failed; Duration=$result.Duration; ExitCode=$result.ExitCode;
-              Leftovers=$(if ($result.Leftovers) { [int]$result.Leftovers } else { 0 }) } | ConvertTo-Json -Compress
+              Leftovers=$(if ($result.Leftovers) { [int]$result.Leftovers } else { 0 });
+              FirstFailures=@($result.FirstFailures | Where-Object { $_ }); Log=$result.Log } | ConvertTo-Json -Compress
     [System.IO.File]::AppendAllText($script:ResultsJsonl, "$rec`r`n")
 
     # Update live counters
