@@ -546,6 +546,12 @@ fn park_clock(app: &mut AppState, prev: Option<usize>) {
     }
 }
 
+/// Whether pane `id` is in clock mode, as the focused pane or a parked one.
+pub fn has_clock(app: &AppState, id: usize) -> bool {
+    (matches!(app.mode, Mode::ClockMode) && active_pane_id(app) == Some(id))
+        || app.clock_panes.contains(&id)
+}
+
 /// Close pane `id`'s clock, the focused pane's (`app.mode`) or a parked one.
 /// Returns whether the pane had a clock.
 pub fn close_clock_of(app: &mut AppState, id: usize) -> bool {

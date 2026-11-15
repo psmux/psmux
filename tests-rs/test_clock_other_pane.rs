@@ -131,12 +131,89 @@ fn a_press_on_another_pane_leaves_the_clock() {
 }
 
 #[test]
-fn only_a_left_press_closes_the_clock() {
+fn any_button_press_on_the_clock_pane_closes_the_clock() {
+    // tmux's MouseDown1Pane, MouseDown2Pane and MouseDown3Pane all run
+    // `select-pane -t=; send -M` on a pane in clock mode (measured on tmux:
+    // left, middle and right presses each close it).
+    for button in [0u8, 1, 2] {
+        let mut app = app_with_clock_on_left();
+        assert!(crate::window_ops::handle_client_pane_mouse(&mut app, LEFT, button, 2, 1, true, false), "button {button}");
+        assert!(matches!(app.mode, Mode::Passthrough), "button {button}");
+    }
+}
+
+#[test]
+fn a_middle_press_on_a_parked_clock_focuses_its_pane_and_closes_it() {
     let mut app = app_with_clock_on_left();
-    // The right button and a replayed press (#1031) are not MouseDown1Pane.
-    assert!(!crate::window_ops::handle_client_pane_mouse(&mut app, LEFT, 2, 2, 1, true, false));
+    focus(&mut app, 1);
+    assert!(crate::window_ops::handle_client_pane_mouse(&mut app, LEFT, 1, 2, 1, true, false));
+    assert_eq!(crate::copy_mode::active_pane_id(&app), Some(LEFT), "select-pane -t= first");
+    assert!(matches!(app.mode, Mode::Passthrough));
+    assert!(app.clock_panes.is_empty());
+}
+
+#[test]
+fn a_release_a_motion_or_a_replayed_press_leaves_the_clock() {
+    let mut app = app_with_clock_on_left();
+    assert!(!crate::window_ops::handle_client_pane_mouse(&mut app, LEFT, 0, 2, 1, false, false));
+    assert!(!crate::window_ops::handle_client_pane_mouse(&mut app, LEFT, 35, 2, 1, true, false));
+    // A replayed press (#1031) is the copy mode drag's own, not a new press.
     assert!(!crate::window_ops::handle_client_pane_mouse(&mut app, LEFT, 0, 2, 1, true, true));
     assert!(matches!(app.mode, Mode::ClockMode));
+}
+
+#[test]
+fn a_middle_press_on_another_pane_leaves_the_clock_where_it_is() {
+    // The press focuses the other pane (select-pane -t=); the clock stays
+    // with its own pane instead of following the focus there.
+    let mut app = app_with_clock_on_left();
+    assert!(!crate::window_ops::handle_client_pane_mouse(&mut app, RIGHT, 1, 2, 1, true, false));
+    assert_eq!(crate::copy_mode::active_pane_id(&app), Some(RIGHT));
+    assert!(matches!(app.mode, Mode::Passthrough), "the right pane did not get the clock");
+    assert_eq!(app.clock_panes, vec![LEFT], "the left pane keeps its clock");
+}
+
+#[test]
+fn a_wheel_notch_on_the_clock_pane_closes_the_clock() {
+    let mut app = app_with_clock_on_left();
+    assert!(crate::window_ops::handle_pane_wheel(&mut app, LEFT, true, Some((2, 1)), 0));
+    assert!(matches!(app.mode, Mode::Passthrough), "closed, not turned into copy mode");
+    let mut app = app_with_clock_on_left();
+    assert!(crate::window_ops::handle_pane_wheel(&mut app, LEFT, false, Some((2, 1)), 0));
+    assert!(matches!(app.mode, Mode::Passthrough));
+}
+
+#[test]
+fn a_wheel_notch_on_a_parked_clock_closes_it_without_moving_the_focus() {
+    let mut app = app_with_clock_on_left();
+    focus(&mut app, 1);
+    assert!(crate::window_ops::handle_pane_wheel(&mut app, LEFT, true, Some((2, 1)), 0));
+    assert!(app.clock_panes.is_empty());
+    assert_eq!(crate::copy_mode::active_pane_id(&app), Some(RIGHT));
+    assert!(matches!(app.mode, Mode::Passthrough));
+}
+
+#[test]
+fn a_wheel_notch_on_another_pane_leaves_the_clock_where_it_is() {
+    // The other pane enters copy mode, as it does without a clock; the clock
+    // used to be dropped for it.
+    let mut app = app_with_clock_on_left();
+    assert!(!crate::window_ops::handle_pane_wheel(&mut app, RIGHT, true, Some((2, 1)), 0));
+    assert_eq!(crate::copy_mode::active_pane_id(&app), Some(RIGHT));
+    assert!(app.mode.in_copy(), "the right pane entered copy mode");
+    assert_eq!(app.clock_panes, vec![LEFT], "the left pane keeps its clock");
+}
+
+#[test]
+fn a_clock_redraws_once_per_second() {
+    let mut drawn = u64::MAX;
+    assert!(crate::client::clock_second_changed(100, &mut drawn), "first draw");
+    assert!(!crate::client::clock_second_changed(100, &mut drawn), "same second: no redraw");
+    assert!(crate::client::clock_second_changed(101, &mut drawn), "next second");
+    // No clock on screen resets it, so a clock that appears draws at once.
+    assert!(!crate::client::clock_redraw_due(false, &mut drawn));
+    assert_eq!(drawn, u64::MAX);
+    assert!(crate::client::clock_redraw_due(true, &mut drawn));
 }
 
 #[test]

@@ -1264,6 +1264,32 @@ pub fn layout_shows_clock(layout: &LayoutJson) -> bool {
     }
 }
 
+/// Whether a clock on screen needs a redraw now (#1058): once per wall clock
+/// second, the only time its digits change. `drawn_sec` holds the second it
+/// was last drawn for; it is reset while no clock shows, so a clock that
+/// appears is drawn on the next pass.
+pub fn clock_redraw_due(shown: bool, drawn_sec: &mut u64) -> bool {
+    if !shown {
+        *drawn_sec = u64::MAX;
+        return false;
+    }
+    let sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    clock_second_changed(sec, drawn_sec)
+}
+
+/// The pure step of `clock_redraw_due`: true, and `drawn_sec` updated, when
+/// `sec` is a second the clock has not been drawn for.
+pub fn clock_second_changed(sec: u64, drawn_sec: &mut u64) -> bool {
+    if sec == *drawn_sec {
+        return false;
+    }
+    *drawn_sec = sec;
+    true
+}
+
 /// Check if the active pane is in server-side copy mode.
 /// When true, the client should NOT start its own text selection —
 /// the server handles cursor positioning and selection in copy mode.
@@ -3997,6 +4023,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut clock_active = false;
     // Some pane shows a clock, the focused one (`clock_active`) or another.
     let mut clock_shown = false;
+    // The wall clock second the clock digits were last drawn for.
+    let mut clock_drawn_sec: u64 = u64::MAX;
     #[allow(unused_assignments)]
     let mut clock_colour_str: Option<String> = None;
 
@@ -8940,7 +8968,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active || clock_shown;
+        let overlays_active = command_input || renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes;
+        // A clock on screen redraws when its second changes, as tmux's
+        // window_clock_timer_callback does, not on every pass of this loop:
+        // counted as an overlay it re-rendered the whole frame on every pass,
+        // 6 to 7% of a core while a clock sat beside the pane being typed in.
+        let clock_tick = clock_redraw_due(clock_active || clock_shown, &mut clock_drawn_sec);
         // An overlay that closes without the server changing anything (n at
         // `kill-pane? (y/n)`, Escape out of a prompt) leaves no new frame to
         // draw, and the skip checks below used to `continue` on exactly that
@@ -8984,13 +9017,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // ── STEP 3: Render if we have a frame ────────────────────────────
         // Also render if selection changed (for highlight overlay) even without new frame
         // Always render when overlays are active (command prompt, rename, choosers)
-        if !got_frame && !selection_changed && !overlays_active && !overlay_closed {
+        if !got_frame && !selection_changed && !overlays_active && !overlay_closed && !clock_tick {
             continue;
         }
 
         // Skip parse + render when the raw JSON is identical to the previous
         // frame AND selection hasn't changed AND no overlays are active.
-        if dump_buf == prev_dump_buf && !selection_changed && !overlays_active && !overlay_closed {
+        if dump_buf == prev_dump_buf && !selection_changed && !overlays_active && !overlay_closed && !clock_tick {
             last_dump_time = Instant::now();
             continue;
         }
