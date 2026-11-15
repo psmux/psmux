@@ -92,7 +92,7 @@ jobs:
           echo "Preflight OK: ref $REF_TYPE/$REF_NAME, tag $TAG, Cargo.toml $crate_version, dry_run $DRY_RUN"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable, reviewed 2026-11-16
         with:
           toolchain: stable
 
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable, reviewed 2026-11-16
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -450,7 +450,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, reviewed 2026-11-14
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable, reviewed 2026-11-16
         with:
           toolchain: stable
 
