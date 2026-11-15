@@ -127,9 +127,10 @@ function Run-Cases($route) {
         $hostLines = if (Test-Path $hostFile) { @(([IO.File]::ReadAllText($hostFile, [Text.Encoding]::UTF8) -split "`n")) } else { @('', '') }
         $hostPos = $hostLines[0]
         if ($route -eq 'inbox conhost' -and $Win10) {
-            # The Windows 10 host's own screen, which psmux shows.
-            $rows = (@(P capture-pane -p -t "s:$name") | Select-Object -First 10 | ForEach-Object { "$_".TrimEnd() }) -join '|'
-            Check "${route}: $name rows are the console host's" $rows $hostLines[1]
+            # The Windows 10 host's own screen, which psmux shows; capture-pane
+            # leaves out blank rows at the bottom, so neither side keeps them.
+            $rows = ((@(P capture-pane -p -t "s:$name") | Select-Object -First 10 | ForEach-Object { "$_".TrimEnd() }) -join '|') -replace '\|+$', ''
+            Check "${route}: $name rows are the console host's" $rows ("$($hostLines[1])" -replace '\|+$', '')
             Check "${route}: $name cursor is the console host's" $cursor $hostPos
             Check "${route}: $name alternate_on" $alt $c[4]
         } else {
