@@ -39,7 +39,7 @@ function Split-Case([string]$Session, [scriptblock]$Command) {
 }
 
 try {
-    $sessions = 'A', 'B', 'C', 'D', 'E', 'F', 'G'
+    $sessions = 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'R'
     foreach ($s in $sessions) { & $Bin -L $Ns new-session -d -s $s -x 120 -y 30 }
     Start-Sleep -Milliseconds 800
 
@@ -68,7 +68,7 @@ try {
     # every word after the options is the command, not only the first.
     function Find-Mark([string]$Mark) {
         for ($i = 0; $i -lt 50; $i++) {
-            foreach ($id in (& $Bin -L $Ns list-panes -s -t G -F '#{pane_id}')) {
+            foreach ($id in (& $Bin -L $Ns list-panes -s -t G -F '#{session_name}:#{window_index}.#{pane_index}')) {
                 if (((& $Bin -L $Ns capture-pane -p -t $id) -join ' ') -match $Mark) { return $true }
             }
             Start-Sleep -Milliseconds 200
@@ -92,15 +92,15 @@ try {
         }
         $false
     }
-    $rp = (& $Bin -L $Ns display-message -p -t G '#{pane_id}').Trim()
+    $rp = 'R:0.0'
     & $Bin -L $Ns respawn-pane -k -t $rp pwsh -NoProfile -Command "Write-Output MARK_CLI_RESPAWN; Start-Sleep 30"
     Check "CLI respawn-pane: exit 0" ($LASTEXITCODE -eq 0)
     Check 'CLI respawn-pane runs every word' (Pane-Has $rp 'MARK_CLI_RESPAWN')
     Set-Content $conf "respawn-pane -k -t $rp pwsh -NoProfile -Command `"Write-Output MARK_SRC_RESPAWN; Start-Sleep 30`""
-    & $Bin -L $Ns source-file -t G $conf
+    & $Bin -L $Ns source-file -t R $conf
     Check 'source-file respawn-pane runs every word' (Pane-Has $rp 'MARK_SRC_RESPAWN')
     Set-Content $conf "respawn-window -k -t $rp cmd /c `"echo MARK_SRC_RESPAWNW & timeout 30`""
-    & $Bin -L $Ns source-file -t G $conf
+    & $Bin -L $Ns source-file -t R $conf
     Check 'source-file respawn-window runs every word' (Pane-Has $rp 'MARK_SRC_RESPAWNW')
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new($Bin)
@@ -115,9 +115,12 @@ try {
         $cc.StandardInput.Flush()
         Check 'control mode: split-window runs its command' (Find-Mark 'MARK_CC_SPLIT')
         Check 'control mode: new-window runs every word' (Find-Mark 'MARK_CC_NEWW')
-        $cc.StandardInput.WriteLine("respawn-pane -k -t $rp pwsh -NoProfile -Command `"Write-Output MARK_CC_RESPAWN; Start-Sleep 30`"")
+        $cc.StandardInput.WriteLine("respawn-pane -k -t G:0.0 pwsh -NoProfile -Command `"Write-Output MARK_CC_RESPAWN; Start-Sleep 30`"")
         $cc.StandardInput.Flush()
-        Check 'control mode: respawn-pane runs its command' (Pane-Has $rp 'MARK_CC_RESPAWN')
+        Check 'control mode: respawn-pane runs its command' (Pane-Has 'G:0.0' 'MARK_CC_RESPAWN')
+        $cc.StandardInput.WriteLine("respawn-window -k -t G:0 pwsh -NoProfile -Command `"Write-Output MARK_CC_RESPAWNW; Start-Sleep 30`"")
+        $cc.StandardInput.Flush()
+        Check 'control mode: respawn-window runs every word' (Find-Mark 'MARK_CC_RESPAWNW')
     } finally {
         try { $cc.StandardInput.Close() } catch {}
         if (-not $cc.WaitForExit(3000)) { $cc.Kill() }

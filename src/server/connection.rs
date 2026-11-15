@@ -8785,6 +8785,20 @@ fn dispatch_control_command(
             }
             true
         }
+        "respawn-window" | "respawnw" => {
+            // Was "unknown command" in control mode (#1051 follow up). The
+            // same operands and reply as respawn-pane above.
+            let (args, command) = respawn_operands(cmd, args);
+            let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+            let (resp_s, resp_r) = mpsc::channel();
+            let env_sets = env_flag_values(&args);
+            let _ = tx.send(CtrlReq::RespawnWindow(workdir, command, resp_s, env_sets));
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
+            true
+        }
         "wait-for" | "wait" => {
             let op = if args.iter().any(|a| *a == "-L") { WaitForOp::Lock }
                      else if args.iter().any(|a| *a == "-U") { WaitForOp::Unlock }
