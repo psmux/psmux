@@ -53,8 +53,9 @@ if ($csc) {
 foreach ($exe in @($READ, $KEYINJ, $CLICKINJ, $WHEELINJ)) {
     if (-not (Test-Path $exe)) { Write-Error "could not build $(Split-Path $exe -Leaf)"; exit 1 }
 }
-$POWERSHELL = (Get-Command pwsh -EA SilentlyContinue).Source
-if (-not $POWERSHELL) { $POWERSHELL = (Get-Command powershell).Source }
+# The bare name: a full path under "C:\Program Files" has a space, and the
+# default-shell line below is split at it.
+$POWERSHELL = if (Get-Command pwsh -EA SilentlyContinue) { "pwsh" } else { "powershell" }
 
 $script:client = $null
 $script:ns = ""
