@@ -64,7 +64,7 @@ fn leaf(
         copy_cursor_col: None,
         content,
         rows_v2,
-        title: None, copy_hl: Vec::new(), images: vec![],
+        title: None, clock: false, copy_hl: Vec::new(), images: vec![],
     }
 }
 

@@ -530,12 +530,40 @@ pub fn switch_focus_keeping_modes<F: FnOnce(&mut AppState)>(app: &mut AppState, 
 fn park_clock(app: &mut AppState, prev: Option<usize>) {
     if matches!(app.mode, Mode::ClockMode) {
         if let Some(id) = prev {
+            // A pane killed with its clock parked leaves its id behind; drop
+            // those here, so the list never outgrows the panes that exist.
+            if !app.clock_panes.is_empty() {
+                let live: Vec<usize> = app.clock_panes.iter().copied()
+                    .filter(|&p| crate::tree::find_pane_by_id_global(app, p).is_some())
+                    .collect();
+                app.clock_panes = live;
+            }
             if !app.clock_panes.contains(&id) {
                 app.clock_panes.push(id);
             }
         }
         app.mode = Mode::Passthrough;
     }
+}
+
+/// Whether pane `id` is in clock mode, as the focused pane or a parked one.
+pub fn has_clock(app: &AppState, id: usize) -> bool {
+    (matches!(app.mode, Mode::ClockMode) && active_pane_id(app) == Some(id))
+        || app.clock_panes.contains(&id)
+}
+
+/// Close pane `id`'s clock, the focused pane's (`app.mode`) or a parked one.
+/// Returns whether the pane had a clock.
+pub fn close_clock_of(app: &mut AppState, id: usize) -> bool {
+    if matches!(app.mode, Mode::ClockMode) && active_pane_id(app) == Some(id) {
+        app.mode = Mode::Passthrough;
+        return true;
+    }
+    if let Some(i) = app.clock_panes.iter().position(|&p| p == id) {
+        app.clock_panes.swap_remove(i);
+        return true;
+    }
+    false
 }
 
 /// The focused pane takes back a clock mode it had parked.

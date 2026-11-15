@@ -226,7 +226,7 @@ fn dim_reaches_the_rendered_pane_background() {
         copy_cursor_row: None, copy_cursor_col: None,
         content: Vec::new(),
         rows_v2: vec![RowRunsJson { runs: vec![run("AB", "", "", 0, 2)] }],
-        title: None, copy_hl: Vec::new(), images: vec![],
+        title: None, clock: false, copy_hl: Vec::new(), images: vec![],
     };
     let styles = WindowContentStyles {
         inactive: None,

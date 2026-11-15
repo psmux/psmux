@@ -27,7 +27,7 @@ fn copy_leaf(w: u16, h: u16, cy: u16, oy: usize) -> LayoutJson {
         active: true, copy_mode: true, scroll_offset: oy, view_offset: oy,
         sel_start_row: None, sel_start_col: None, sel_end_row: None, sel_end_col: None,
         sel_mode: None, copy_cursor_row: Some(cy), copy_cursor_col: Some(0),
-        content, rows_v2: Vec::new(), title: None, copy_hl: Vec::new(), images: vec![],
+        content, rows_v2: Vec::new(), title: None, clock: false, copy_hl: Vec::new(), images: vec![],
     }
 }
 

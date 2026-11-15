@@ -5,7 +5,8 @@ using System.Threading;
 
 // Injects a left-button CLICK (press then release) at a console cell via
 // WriteConsoleInput MOUSE_EVENT records.
-// Usage: click_injector.exe <pid> <x> <y> [holdMs]
+// Usage: click_injector.exe <pid> <x> <y> [holdMs] [buttonMask]
+// buttonMask is dwButtonState: 1 left (the default), 2 right, 4 middle.
 class ClickInjector
 {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool FreeConsole();
@@ -47,11 +48,11 @@ class ClickInjector
     static int Main(string[] args)
     {
         string logPath = Path.Combine(Path.GetTempPath(), "psmux_click_inject.log");
-        if (args.Length < 3) { Console.Error.WriteLine("Usage: click_injector.exe <pid> <x> <y> [holdMs]"); return 1; }
+        if (args.Length < 3) { Console.Error.WriteLine("Usage: click_injector.exe <pid> <x> <y> [holdMs] [buttonMask]"); return 1; }
         uint pid = uint.Parse(args[0]);
         short x = short.Parse(args[1]);
         short y = short.Parse(args[2]);
-        int hold = args.Length > 3 ? int.Parse(args[3]) : 80;
+        int hold = args.Length > 3 ? int.Parse(args[3]) : 80; uint button = args.Length > 4 ? uint.Parse(args[4]) : FROM_LEFT_1ST_BUTTON_PRESSED;
 
         var log = new System.Text.StringBuilder();
         log.AppendLine(string.Format("ClickInjector pid={0} x={1} y={2}", pid, x, y));
@@ -62,7 +63,7 @@ class ClickInjector
         uint w;
         bool ok1 = WriteConsoleInput(h, new INPUT_RECORD[] { Rec(x, y, 0, MOUSE_MOVED) }, 1, out w);
         Thread.Sleep(30);
-        bool ok2 = WriteConsoleInput(h, new INPUT_RECORD[] { Rec(x, y, FROM_LEFT_1ST_BUTTON_PRESSED, 0) }, 1, out w);
+        bool ok2 = WriteConsoleInput(h, new INPUT_RECORD[] { Rec(x, y, button, 0) }, 1, out w);
         Thread.Sleep(hold);
         bool ok3 = WriteConsoleInput(h, new INPUT_RECORD[] { Rec(x, y, 0, 0) }, 1, out w);
         log.AppendLine(string.Format("move={0} press={1} release={2}", ok1, ok2, ok3));

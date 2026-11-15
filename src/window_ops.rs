@@ -1842,11 +1842,8 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
     // Focus the target pane only on actual clicks (not drag/hover).
     // tmux behavior: click-to-focus, not focus-follows-mouse.
     let is_click = matches!(button, 0 | 1 | 2) && press;
-    if is_click && win.active_path != path {
-        win.active_path = path.clone();
-        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &path) {
-            crate::tree::touch_mru(&mut win.pane_mru, pid);
-        }
+    if is_click {
+        focus_mouse_path(app, path.clone(), true);
     }
 
     // Handle copy mode: position cursor with pane-relative coordinates
@@ -2169,17 +2166,10 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     }
 
     // Focus the target pane
+    focus_pane_by_id(app, pane_id);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
-    for (path, _area) in &rects {
-        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, path) {
-            if pid == pane_id {
-                win.active_path = path.clone();
-                break;
-            }
-        }
-    }
 
     // Wheel gate: alternate_screen ONLY — the known-good pre-3.3.5 semantics.
     // Gating on mouse_protocol_mode (what #360's check kept) routed the wheel
@@ -2309,14 +2299,27 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
 /// own wheel handler (`handle_pane_scroll`), unchanged; an unbound key in
 /// root goes to the pane only if its program asked for mouse reports, and an
 /// unbound key in copy mode does nothing.
-pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Option<(i16, i16)>, mods: u8) {
+///
+/// A notch over a pane in clock mode closes its clock, with or without the
+/// focus, when the key reaches the pane: tmux's default WheelUpPane does
+/// `send -M` on a pane in a mode, and an unbound key is forwarded to the
+/// pane, both landing in `window_clock_key` (#1058). Returns whether a clock
+/// closed, so the caller fires pane-mode-changed.
+pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Option<(i16, i16)>, mods: u8) -> bool {
     if !app.mouse_enabled || matches!(app.mode, Mode::PopupMode { .. }) {
-        return handle_pane_scroll(app, pane_id, up, at);
+        handle_pane_scroll(app, pane_id, up, at);
+        return false;
     }
     let mods = crate::mouse_keys::mods_from_mask(mods);
     let key = crate::mouse_keys::wheel_pane_key(up, mods);
     let dispatch = crate::mouse_keys::resolve(app, key, app.mode.in_copy());
     mouse_log(&format!("handle_pane_wheel: pane={} up={} mods={:?} -> {:?}", pane_id, up, mods, dispatch));
+    if matches!(dispatch, crate::mouse_keys::Dispatch::Builtin | crate::mouse_keys::Dispatch::Forward)
+        && crate::copy_mode::close_clock_of(app, pane_id)
+    {
+        mouse_log("  -> the pane's clock takes the notch and closes");
+        return true;
+    }
     match dispatch {
         crate::mouse_keys::Dispatch::Builtin => handle_pane_scroll(app, pane_id, up, at),
         // An unmodified notch down with no root binding is what psmux's own
@@ -2340,6 +2343,7 @@ pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Optio
             run_mouse_binding(app, pane_id, &cmd);
         }
     }
+    false
 }
 
 /// A horizontal wheel notch over a pane (#1036): SGR buttons 66/67 over SSH,
@@ -2349,9 +2353,9 @@ pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Optio
 /// root they go to the program only if it asked for the mouse (the same #598
 /// gate as the vertical wheel), and a pane in copy mode drops them. They
 /// never scroll.
-pub fn handle_pane_hwheel(app: &mut AppState, pane_id: usize, right: bool, at: Option<(i16, i16)>, mods: u8) {
+pub fn handle_pane_hwheel(app: &mut AppState, pane_id: usize, right: bool, at: Option<(i16, i16)>, mods: u8) -> bool {
     if !app.mouse_enabled || matches!(app.mode, Mode::PopupMode { .. }) {
-        return;
+        return false;
     }
     let mods = crate::mouse_keys::mods_from_mask(mods);
     let button = if right { 7 } else { 6 };
@@ -2368,11 +2372,17 @@ pub fn handle_pane_hwheel(app: &mut AppState, pane_id: usize, right: bool, at: O
             run_mouse_binding(app, pane_id, &cmd);
         }
         crate::mouse_keys::Dispatch::Forward => {
+            // Forwarded to a pane in clock mode, the key closes the clock
+            // (window_clock_key, #1058).
+            if crate::copy_mode::close_clock_of(app, pane_id) {
+                return true;
+            }
             focus_pane_by_id(app, pane_id);
             forward_wheel_button_to_active_pane(app, btn, at);
         }
         crate::mouse_keys::Dispatch::Builtin | crate::mouse_keys::Dispatch::Drop => {}
     }
+    false
 }
 
 /// A wheel notch over the status line: tmux's `WheelUpStatus` /
@@ -2550,11 +2560,24 @@ pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press:
 /// drag from the press it already counted and never sees a second button
 /// down, so the replay must not count either: counted, it made the drag a
 /// double click 300 ms in (#1031).
-pub fn handle_client_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool, replay: bool) {
+///
+/// A press of any button on a pane in clock mode focuses that pane, closes
+/// its clock and goes no further (#1058). tmux's defaults for
+/// MouseDown1Pane, MouseDown2Pane and MouseDown3Pane all run
+/// `select-pane -t=; send -M` on a pane in clock mode (key-bindings.c), and
+/// `send -M` hands the press to the pane's mode, whose `window_clock_key`
+/// resets the mode for any key (window-clock.c). Returns whether a clock
+/// closed, so the caller fires pane-mode-changed.
+pub fn handle_client_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool, replay: bool) -> bool {
+    if matches!(button, 0 | 1 | 2) && press && !replay && crate::copy_mode::has_clock(app, pane_id) {
+        focus_pane_id(app, pane_id, true);
+        return crate::copy_mode::close_clock_of(app, pane_id);
+    }
     handle_pane_mouse(app, pane_id, button, col, row, press);
     if button == 0 && press && !replay {
         note_pane_press(app, pane_id, col, row);
     }
+    false
 }
 
 /// tmux's click timer for a left press in a pane (server-client.c
@@ -2700,14 +2723,50 @@ pub fn send_mouse_event(app: &mut AppState) {
 }
 
 fn focus_pane_by_id(app: &mut AppState, pane_id: usize) {
-    let win = &mut app.windows[app.active_idx];
+    focus_pane_id(app, pane_id, false);
+}
+
+/// `focus_pane_by_id`, with `mru` as `focus_mouse_path` takes it.
+fn focus_pane_id(app: &mut AppState, pane_id: usize, mru: bool) {
+    let win = &app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
-    for (path, _area) in &rects {
-        if crate::tree::get_active_pane_id(&win.root, path) == Some(pane_id) {
-            win.active_path = path.clone();
-            break;
+    let found = rects.into_iter()
+        .map(|(path, _)| path)
+        .find(|path| crate::tree::get_active_pane_id(&win.root, path) == Some(pane_id));
+    if let Some(path) = found {
+        focus_mouse_path(app, path, mru);
+    }
+}
+
+/// Focus the pane at `path` of the active window for a mouse event, the way
+/// select-pane does it: through `switch_with_copy_save`, so a clock or copy
+/// mode stays with the pane the focus leaves and the pane that gains it gets
+/// its own back (#1058). Setting `active_path` alone carried the focused
+/// pane's mode over to the pane under the pointer: a middle press on another
+/// pane moved the clock there, and a wheel notch on it dropped the clock for
+/// copy mode. `mru` records the pane as the last used one, as a click does.
+///
+/// Copy mode keeps its own rule here: a press on another pane carries it
+/// along (#732 pins that), so only a pane outside copy mode goes through the
+/// switch.
+fn focus_mouse_path(app: &mut AppState, path: Vec<usize>, mru: bool) {
+    if app.windows[app.active_idx].active_path == path {
+        return;
+    }
+    let set = move |app: &mut AppState| {
+        let win = &mut app.windows[app.active_idx];
+        win.active_path = path;
+        if mru {
+            if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                crate::tree::touch_mru(&mut win.pane_mru, pid);
+            }
         }
+    };
+    if app.mode.in_copy() {
+        set(app);
+    } else {
+        crate::copy_mode::switch_with_copy_save(app, set);
     }
 }
 
@@ -3286,6 +3345,9 @@ mod window_ops_tests {
 
     #[path = "../../../tests-rs/test_issue1031_drag_replay_click.rs"]
     mod test_issue1031_drag_replay_click;
+
+    #[path = "../../../tests-rs/test_clock_other_pane.rs"]
+    mod test_clock_other_pane;
 
     #[test]
     fn swap_with_path_updates_mru_for_focused_pane_after_swap() {
