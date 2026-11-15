@@ -6,7 +6,9 @@
 // which hands psmux the bytes as written).
 //
 // Before the fix the alternate grid's own cursor showed: 0,0 after
-// `ESC[5;4H AB ESC[?1049h`, where tmux and the hosts have 5,4.
+// `ESC[5;4H AB ESC[?1049h`, where tmux and the hosts have 5,4. 1049 set again
+// on the alternate screen does nothing, and 1049 reset puts back a cursor only
+// if 1049 saved one, as tmux's screen_alternate_on and screen_alternate_off.
 
 use vt100_psmux as vt100;
 
@@ -101,6 +103,36 @@ fn modes_1047_and_1048_are_ignored() {
     assert_eq!(cursor(&p), (5, 4));
     let p = run(&format!("{E}[5;4HAB{E}[?1048h{E}[9;20Hx{E}[?1048l"));
     assert_eq!(cursor(&p), (20, 8));
+}
+
+#[test]
+fn decset_1049_on_the_alternate_screen_changes_nothing() {
+    // tmux 3.8: `ESC[5;10H ESC[?1049h ESC[2;3H X ESC[?1049h` leaves 3,1 and the
+    // X (screen_alternate_on returns at once). It used to save again, clear
+    // and go to 0,0.
+    let p = run(&format!("{E}[5;10H{E}[?1049h{E}[2;3HX{E}[?1049h"));
+    assert!(p.screen().alternate_screen());
+    assert_eq!(cursor(&p), (3, 1));
+    assert_eq!(row(&p, 1), "  X");
+    // And the cursor 1049 saved first still comes back.
+    let p = run(&format!("{E}[5;10H{E}[?1049h{E}[2;3H{E}[?1049h{E}[?1049l"));
+    assert_eq!(cursor(&p), (9, 4));
+}
+
+#[test]
+fn decrst_1049_puts_back_only_a_cursor_1049_saved() {
+    // tmux 3.8: entered with 47, which saves no cursor, 1049 reset leaves it
+    // where the alternate screen had it (2,1); it used to go to 0,0.
+    let p = run(&format!("{E}[5;10H{E}[?47h{E}[2;3H{E}[?1049l"));
+    assert!(!p.screen().alternate_screen());
+    assert_eq!(cursor(&p), (2, 1));
+    // Off the alternate screen with nothing saved, it does nothing.
+    let p = run(&format!("{E}[5;4H{E}[?1049l"));
+    assert_eq!(cursor(&p), (3, 4));
+    // A cursor an earlier 1049 saved stays saved after it, as tmux's
+    // saved_cx: 3,4 in tmux 3.8.
+    let p = run(&format!("{E}[5;4H{E}[?1049h{E}[?1049l{E}[2;3H{E}[?47h{E}[9;20H{E}[?1049l"));
+    assert_eq!(cursor(&p), (3, 4));
 }
 
 #[test]
