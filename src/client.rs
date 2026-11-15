@@ -12090,6 +12090,10 @@ mod test_issue684_clipboard_head_cache;
 #[path = "../tests-rs/test_issue766_paste_then_key.rs"]
 mod test_issue766_paste_then_key;
 
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue1049_held_key_burst.rs"]
+mod test_issue1049_held_key_burst;
+
 #[cfg(test)]
 #[path = "../tests-rs/test_issue858_ctrlv_press.rs"]
 mod test_issue858_ctrlv_press;
