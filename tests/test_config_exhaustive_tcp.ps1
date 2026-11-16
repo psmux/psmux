@@ -375,7 +375,7 @@ $uo = @(
     'popup-style', 'popup-border-style', 'popup-border-lines',
     'window-style', 'window-active-style', 'wrap-search',
     'pane-border-format', 'pane-border-status',
-    'clock-mode-colour', 'clock-mode-style',
+    'clock-mode-colour',
     'lock-after-time', 'lock-command', 'status-keys'
 )
 foreach ($opt in $uo) {
@@ -384,6 +384,10 @@ foreach ($opt in $uo) {
     $show = Send-Tcp $sess "show-options -g $opt"
     Test-Result "uo-$opt" ($show -match $uniq) "Expected '$uniq', show='$show'"
 }
+# clock-mode-style takes tmux's four values only (options-table.c:38-40).
+Send-Tcp $sess "set-option -g clock-mode-style 12-with-seconds" | Out-Null
+$show = Send-Tcp $sess "show-options -g clock-mode-style"
+Test-Result "uo-clock-mode-style" ($show -match '12-with-seconds') "Expected '12-with-seconds', show='$show'"
 
 # ============================================================
 # SECTION 14: source-file via TCP + VERIFY loaded values

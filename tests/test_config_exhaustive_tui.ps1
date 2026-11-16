@@ -759,13 +759,15 @@ $uo = @(
     'popup-style', 'popup-border-style', 'popup-border-lines',
     'window-style', 'window-active-style', 'wrap-search',
     'pane-border-format', 'pane-border-status',
-    'clock-mode-colour', 'clock-mode-style',
+    'clock-mode-colour',
     'lock-after-time', 'lock-command', 'status-keys'
 )
 
 foreach ($opt in $uo) {
     Test-TuiOption "set-option -g $opt testval" $opt 'testval' "TUI uo: $opt"
 }
+# clock-mode-style takes tmux's four values only (options-table.c:38-40).
+Test-TuiOption "set-option -g clock-mode-style 12-with-seconds" 'clock-mode-style' '12-with-seconds' "TUI uo: clock-mode-style"
 
 # =============================================================================
 # SECTION 13: source-file via TUI
