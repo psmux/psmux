@@ -630,6 +630,13 @@ fn file_probing_uses_job_cwd_without_changing_process_cwd() {
 #[test]
 #[cfg(windows)]
 fn non_spaced_native_commands_keep_shell_evaluation_for_operators() {
+    // The shell is resolved here and again inside build_run_shell_command, and
+    // the two must agree. resolve_run_shell skips a Store packaged pwsh when
+    // SSH_CONNECTION or SSH_CLIENT is set, and test_run_shell_store_fallback
+    // sets them under this lock: without it, a parallel run resolved pwsh here
+    // and powershell.exe in the command (every `shell` filter run on a
+    // Store pwsh machine).
+    let _env = crate::util::lock_test_env();
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup {
         fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
