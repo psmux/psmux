@@ -93,6 +93,8 @@ pub enum ChoiceKind {
     StatusJustify,
     /// tmux `options_table_status_position_list` (options-table.c:53-55 at 3.8).
     StatusPosition,
+    /// tmux `options_table_clock_mode_style_list` (options-table.c:38-40 at 3.8).
+    ClockModeStyle,
 }
 
 /// The values tmux's CHOICE option `status-justify` takes.
@@ -133,11 +135,11 @@ impl ChoiceKind {
             // options_find_choice (options.c:1239-1255 at 3.8) compares with
             // strcmp, so the value must be one of the list as it is. The value
             // is stored as given and the client matches it the same way.
-            Self::StatusJustify | Self::StatusPosition => {
-                let choices = if self == Self::StatusJustify {
-                    STATUS_JUSTIFY_CHOICES
-                } else {
-                    STATUS_POSITION_CHOICES
+            Self::StatusJustify | Self::StatusPosition | Self::ClockModeStyle => {
+                let choices = match self {
+                    Self::StatusJustify => STATUS_JUSTIFY_CHOICES,
+                    Self::StatusPosition => STATUS_POSITION_CHOICES,
+                    _ => crate::clock_style::CHOICES,
                 };
                 if choices.contains(&value) {
                     Ok(())
@@ -179,7 +181,7 @@ impl ChoiceKind {
         match self {
             Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
             | Self::ExtendedKeys | Self::ExtendedKeysFormat | Self::RemainOnExit | Self::Sixel
-            | Self::StatusJustify | Self::StatusPosition => true,
+            | Self::StatusJustify | Self::StatusPosition | Self::ClockModeStyle => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -188,7 +190,7 @@ impl ChoiceKind {
         match self {
             Self::Priority | Self::Unvalidated | Self::CopyModeLineNumbers
             | Self::ExtendedKeys | Self::ExtendedKeysFormat | Self::RemainOnExit | Self::Sixel
-            | Self::StatusJustify | Self::StatusPosition => true,
+            | Self::StatusJustify | Self::StatusPosition | Self::ClockModeStyle => true,
             Self::PaneBorderIndicators => false,
         }
     }
@@ -421,6 +423,10 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // tmux options-table.c:354, window and pane scope, a string that has to
     // be a colour (OPTIONS_TABLE_IS_COLOUR).
     OptionDef { name: "cursor-colour", scope: Window, option_type: OptionType::ColourString, default: "", description: "Colour of the cursor, under the one a program sets with OSC 12; empty for the terminal's own" },
+    // tmux options-table.c:1330, window scope, default `24`. psmux keeps the
+    // format its clock always had, `24-with-seconds`. Stored as text in
+    // user_options and window_options; crate::clock_style reads it.
+    OptionDef { name: "clock-mode-style", scope: Window, option_type: Choice(ChoiceKind::ClockModeStyle), default: crate::clock_style::DEFAULT_NAME, description: "Time format of the clock in clock mode (12/24/12-with-seconds/24-with-seconds)" },
     OptionDef { name: "aggressive-resize", scope: Window, option_type: Boolean, default: "off", description: "Resize window to smallest attached client" },
     // tmux types both of these OPTIONS_TABLE_STRING (options-table.c:1474) and
     // documents a percentage form ("10%"), so they cannot be validated as a
@@ -659,6 +665,8 @@ pub static WINDOW_OPTION_NAMES: &[&str] = &[
     "remain-on-exit-format",
     "scroll-on-clear",
     "cursor-colour",
+    // A window option in tmux (options-table.c:1330).
+    "clock-mode-style",
     "window-status-format",
     "window-status-current-format",
     "window-status-separator",

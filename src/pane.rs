@@ -4278,7 +4278,7 @@ pub fn xtversion_reply() -> String {
 //
 // tmux answers all of them from its own parser, so psmux answering them is
 // parity rather than invention.  Citations, tmux next-3.8 `input.c` in
-// C:\Users\godwin\Documents\workspace\tmux:
+// the tmux source tree:
 //
 //   input.c:1581-1595  INPUT_CSI_DA        -> input_reply(ictx, 1, "\033[?1;2c"),
 //                                             "\033[?1;2;4c" when built with

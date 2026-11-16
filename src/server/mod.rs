@@ -4454,6 +4454,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 combined_buf.push_str("\"}");
                             }
                         }
+                        // clock-mode-style, the active window's or the global one.
+                        crate::clock_style::append_frame_json(&app, &mut combined_buf);
                         // Inject pane-border-status and pane-border-format
                         if let Some(pbs) = app.user_options.get("pane-border-status") {
                             if combined_buf.ends_with('}') {
@@ -9324,6 +9326,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         combined_buf.push_str("\"}");
                     }
                 }
+                // clock-mode-style, the active window's or the global one.
+                crate::clock_style::append_frame_json(&app, &mut combined_buf);
                 // Inject pane-border-status and pane-border-format
                 if let Some(pbs) = app.user_options.get("pane-border-status") {
                     if combined_buf.ends_with('}') {

@@ -278,7 +278,7 @@ As in tmux, a name that is neither in this table, nor in tmux's own options tabl
 | `popup-border-lines` | Str | `single` | Popup border glyph set: `single`, `double`, `heavy`, `simple`, `rounded`, `padded`, `none`. `display-popup -b` overrides it for one popup, `-B` draws no border |
 | `popup-style` | Str | | Colours of the popup content area: cells the program leaves at the terminal default take them. `display-popup -s` overrides its colours for one popup |
 | `clock-mode-colour` | Str | | Colour of the `clock-mode` digits |
-| `clock-mode-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
+| `clock-mode-style` | Choice | `24-with-seconds` | Time format of the `clock-mode` clock: `12`, `24`, `12-with-seconds` or `24-with-seconds`, as in tmux. `set -w` sets it for one window. tmux's default is `24`; psmux keeps the seconds its clock always showed |
 | `window-status-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Inactive tab format. See [program-attention opt-in](program-status.md#opt-in-to-attention-indicators) |
 | `window-status-current-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Active tab format. |
 | `window-status-separator` | Str | `" "` | Tab separator |
@@ -560,8 +560,6 @@ set -g window-active-style "bg=colour52"
 ```
 
 `popup-border-lines` accepts the tmux set: `single` (the default), `double`, `heavy`, `simple` (`+`, `-` and `|`), `rounded`, `padded` (blank cells) and `none`. With `none`, or `display-popup -B`, the popup has no frame and its command gets the whole `-w` by `-h` area. As in tmux, only the colours of `popup-border-style` and `popup-style` are used, a popup has no title unless `display-popup -T` gives one, and the `-S` and `-s` flags of `display-popup` win over the options for that popup.
-
-> **Note:** `clock-mode-style` is accepted and stored but never read. See [Accepted but Not Functional](#accepted-but-not-functional).
 
 ### Bell
 
@@ -993,7 +991,6 @@ setting that was never wired up.
 |---|---|
 | `lock-after-time` | Accepted and stored. Session locking is not implemented, so the timer never runs. `lock-client`, `lock-server` and `lock-session` exist as commands but nothing locks on a timer |
 | `lock-command` | Accepted and stored. Never read, for the same reason |
-| `clock-mode-style` | Accepted and stored. Use `clock-mode-colour`, which is read |
 
 Setting any of these produces no warning, because the values are stored verbatim in the user options
 map instead of being validated against a known option. For most of them `show-options` will read the

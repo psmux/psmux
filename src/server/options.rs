@@ -1083,6 +1083,9 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
         "pane-border-indicators" => crate::pane_border::INDICATORS_DEFAULT,
         // Consumed at src/server/helpers.rs, a missing entry disables the gutter.
         "copy-mode-line-numbers" => "off",
+        // Read by the client from the frame (crate::clock_style); a missing
+        // entry is psmux's default.
+        "clock-mode-style" => crate::clock_style::DEFAULT_NAME,
         "copy-mode-line-number-style" => "fg=brightblack",
         "copy-mode-current-line-number-style" => "fg=yellow,bold",
         // tmux's defaults, options-table.c at 3.4 to 3.7b (#694).
@@ -1620,6 +1623,7 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
         "window-style" | "window-active-style" | "pane-border-indicators"
             | "extended-keys" | "extended-keys-format" | "remain-on-exit-format"
             | "input-buffer-size" | "scroll-on-clear" | "cursor-colour"
+            | "clock-mode-style"
     ) {
         return;
     }

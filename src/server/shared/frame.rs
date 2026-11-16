@@ -129,6 +129,8 @@ fn build_frame(app: &mut AppState, c: &mut FrameCache, meta_dirty: &mut bool) ->
             buf.push_str("\"}");
         }
     }
+    // clock-mode-style, the active window's or the global one.
+    crate::clock_style::append_frame_json(app, buf);
     if let Some(pbs) = app.user_options.get("pane-border-status") {
         if buf.ends_with('}') {
             buf.pop();
