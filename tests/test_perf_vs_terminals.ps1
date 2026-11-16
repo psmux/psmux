@@ -268,6 +268,7 @@
 #   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1
 #   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1 -Quick
 #   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1 -Binary C:\scratch\pmux.exe
+#   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1 -OnlyTabs   (section 3b alone)
 
 param(
     [int]$N = 5,            # launch-to-prompt repetitions per host cell
@@ -288,13 +289,15 @@ param(
     [switch]$SkipLaunch,
     [switch]$SkipKeys,
     [switch]$SkipCreate,
-    [switch]$SkipTabs       # section 3b: new tab and split against WT and WezTerm
+    [switch]$SkipTabs,      # section 3b: new tab and split against WT and WezTerm
+    [switch]$OnlyTabs       # run section 3b alone (implies -SkipLaunch -SkipKeys, skips section 3)
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $ErrorActionPreference = "Continue"
 
 if ($Quick) { $N = 3; $Creates = 3 }
+if ($OnlyTabs) { $SkipLaunch = $true; $SkipKeys = $true; $SkipTabs = $false }
 if ($Keys -lt 40) { $Keys = 40 }
 if ($IdleSeconds -lt 1) { $IdleSeconds = 1 }
 
@@ -1077,7 +1080,7 @@ function Save-Metrics {
         wt_was_running = $WtWasRunning
         params         = [ordered]@{
             n = $N; keys = $Keys; creates = $Creates; idle_seconds = $IdleSeconds
-            skip_launch = [bool]$SkipLaunch; skip_keys = [bool]$SkipKeys; skip_create = [bool]$SkipCreate; skip_tabs = [bool]$SkipTabs
+            skip_launch = [bool]$SkipLaunch; skip_keys = [bool]$SkipKeys; skip_create = [bool]($SkipCreate -or $OnlyTabs); skip_tabs = [bool]$SkipTabs; only_tabs = [bool]$OnlyTabs
             quick = [bool]$Quick
         }
         launch_to_prompt    = $script:Launch
@@ -2145,7 +2148,7 @@ function Report-Create {
 }
 
 $script:CreateCells = @()
-if (-not $SkipCreate) {
+if (-not $SkipCreate -and -not $OnlyTabs) {
     Head "3. CREATION LATENCY  (default pane shell, so the warm pane pool is in play)"
     Info "timed to a visible prompt over one persistent control connection (about 0.15 ms per poll)"
     Info "each measured window is killed again at once, so the frame the harness re-reads stays small"
@@ -2723,7 +2726,7 @@ if (-not $SkipKeys -and $KeyLat) {
         if (-not $script:Resource[$c]) { [void]$missing.Add("resources:$c") }
     }
 }
-if (-not $SkipCreate) { foreach ($c in $script:CreateCells) { if (-not $script:Create[$c]) { [void]$missing.Add("creation:$c") } } }
+if (-not $SkipCreate -and -not $OnlyTabs) { foreach ($c in $script:CreateCells) { if (-not $script:Create[$c]) { [void]$missing.Add("creation:$c") } } }
 # A cell whose terminal could not be started at all is T9's to report, once,
 # with the reason; counting it again here would turn one machine fault into
 # five failures.
