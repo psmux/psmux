@@ -1267,6 +1267,34 @@ impl WarmPool {
         self.spares = dropped;
         before - self.spares.len()
     }
+    /// Give the lowest reserved pane id to a creation that cannot use a spare
+    /// (it runs a command, has `-e`, or the default shell is dynamic), and
+    /// retire only the one spare that held it.
+    ///
+    /// Such a creation used to take `next_pane_id`, which is above every id the
+    /// pooled spares reserved, so [`WarmPool::set_issued_floor`] then had to kill
+    /// the WHOLE pool and the refill booted three fresh shells beside the
+    /// command the user was waiting on: `new-window cmd` and `split-window cmd`
+    /// reached their command ~200 ms later than with the pool off. Taking the
+    /// front spare's id instead keeps the visible sequence in creation order
+    /// (the front is the lowest outstanding id) and leaves every other spare
+    /// valid.
+    ///
+    /// Only when nothing is in flight: a refill still inside `CreateProcessW`
+    /// may hold a lower id than the front, and handing out the front would put
+    /// that one in the past. The caller falls back to `next_pane_id` and
+    /// [`WarmPool::set_issued_floor`] then, as before.
+    pub fn yield_front_id(&mut self) -> Option<usize> {
+        if self.inflight > 0 {
+            return None;
+        }
+        let mut wp = self.spares.pop_front()?;
+        let id = wp.pane_id;
+        // Retired exactly as `set_issued_floor` retires a spare.
+        wp.child.kill().ok();
+        self.note_issued(id);
+        Some(id)
+    }
     pub fn issued_floor(&self) -> usize {
         self.issued_floor
     }
