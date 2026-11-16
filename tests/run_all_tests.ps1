@@ -571,6 +571,90 @@ $script:AuditImageFilter = "Name='cmd.exe' OR Name='conhost.exe' OR Name='OpenCo
 $script:AuditNeverKill = @('WindowsTerminal.exe')
 
 $script:AuditBaselineWins = @{}
+
+# A console window that opens DURING a suite is not always the suite's. On
+# 2026-11-16 the amesh daemon updated itself at 11:21 and its Task Scheduler
+# logon task started the new daemon, a console program, so Windows Terminal (the
+# default terminal) opened a window for it titled [claude]. The audit saw a new
+# CASCADIA window, closed it, and the daemon died with it; the amesh keeper
+# restarted the daemon 6 s later, inside the next suite, whose audit closed it
+# again: every suite from 645 on killed the mesh daemon once, and three agent
+# sessions on this machine dropped off the mesh. The window's owner pid is the
+# NEW WindowsTerminal.exe, which says nothing about whose console it shows, so
+# the audit now asks: for each process that started during the suite and whose
+# live parent chain reaches a system or shell process (Task Scheduler's svchost,
+# services, explorer) without passing through a terminal host, which window
+# shows its console? Those windows are protected. A suite's own clients are never
+# in that set: their parent is the suite's pwsh (gone by audit time, so the
+# chain breaks) or a terminal host the suite opened.
+# console_window_of.exe does the AttachConsole lookup in its own process, since
+# FreeConsole + AttachConsole in the runner would cost the runner its console.
+$script:ConsoleWindowOfExe = $null
+try {
+    $cwoSrc = Join-Path $PSScriptRoot 'helpers\console_window_of.cs'
+    $cwoExe = Join-Path $script:RunDir 'console_window_of.exe'
+    $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
+    if (-not (Test-Path $csc)) { $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' }
+    if ((Test-Path $cwoSrc) -and (Test-Path $csc)) {
+        & $csc /nologo /optimize /target:exe "/out:$cwoExe" $cwoSrc 2>&1 | Out-Null
+        if (Test-Path $cwoExe) { $script:ConsoleWindowOfExe = $cwoExe }
+    }
+} catch { }
+$script:AuditForeignRoots = @('svchost.exe', 'services.exe', 'wininit.exe', 'winlogon.exe', 'explorer.exe', 'sihost.exe', 'taskhostw.exe')
+$script:AuditTerminalHosts = @('WindowsTerminal.exe', 'OpenConsole.exe', 'conhost.exe', 'wezterm-gui.exe', 'alacritty.exe')
+
+# hwnd -> description of the foreign process whose console that window shows.
+# Also fills $script:AuditForeignPids (pid -> description), so pass 1 never ends
+# a foreign process either (a Task Scheduler `cmd /k` matches the parked console
+# rule, measured: the first version protected the window and pass 1 then killed
+# the cmd inside it).
+$script:AuditForeignPids = @{}
+function Get-ForeignConsoleWindows {
+    param([datetime]$SuiteStart)
+    $result = @{}
+    $script:AuditForeignPids = @{}
+    try {
+        $all = @{}
+        foreach ($p in (Get-CimInstance -Query "SELECT ProcessId,ParentProcessId,Name,CreationDate FROM Win32_Process" -ErrorAction SilentlyContinue)) {
+            $all[[int]$p.ProcessId] = $p
+        }
+        $cands = @{}
+        foreach ($p in $all.Values) {
+            $procId = [int]$p.ProcessId
+            if ($script:AuditOwnPids.ContainsKey($procId)) { continue }
+            if ($script:AuditTerminalHosts -contains $p.Name) { continue }
+            try { if (-not $p.CreationDate -or $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { continue }
+            # Walk LIVE parents. A parent that is already gone (the suite's own
+            # pwsh, usually) ends the walk: not provably foreign, so not protected.
+            $cur = [int]$p.ParentProcessId; $root = $null
+            for ($i = 0; $i -lt 8 -and $cur -gt 0; $i++) {
+                $pp = $all[$cur]
+                if (-not $pp) { break }
+                try { if ($pp.CreationDate -gt $p.CreationDate) { break } } catch { break }   # reused pid
+                if ($script:AuditOwnPids.ContainsKey($cur)) { break }
+                if ($script:AuditTerminalHosts -contains $pp.Name) { break }
+                if ($script:AuditForeignRoots -contains $pp.Name) { $root = "$($pp.Name) pid=$cur"; break }
+                $cur = [int]$pp.ParentProcessId
+            }
+            if ($root) { $cands[$procId] = "{0} pid={1} started by {2}" -f $p.Name, $procId, $root }
+        }
+        $script:AuditForeignPids = $cands
+        if ($cands.Count -eq 0 -or -not $script:ConsoleWindowOfExe) { return $result }
+        $psi = [Diagnostics.ProcessStartInfo]::new($script:ConsoleWindowOfExe, (($cands.Keys | ForEach-Object { "$_" }) -join ' '))
+        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
+        $pr = [Diagnostics.Process]::Start($psi)
+        $out = $pr.StandardOutput.ReadToEnd()
+        [void]$pr.WaitForExit(5000)
+        foreach ($line in ($out -split "`r?`n")) {
+            $f = $line.Trim().Split(' ')
+            if ($f.Count -ne 2) { continue }
+            $h = 0L; $q = 0
+            if ([long]::TryParse($f[1], [ref]$h) -and [int]::TryParse($f[0], [ref]$q) -and $h -ne 0) { $result[$h] = $cands[$q] }
+        }
+    } catch { }
+    return $result
+}
+
 $script:AuditTotalLeftovers = 0
 $script:AuditSuitesWithLeftovers = 0
 $script:AuditLog = Join-Path $script:RunDir "leftovers.log"
@@ -671,9 +755,19 @@ function Invoke-LeftoverAudit {
     $newWinPids = @{}
     $newWins = @()
     try {
+        $candWins = @()
         foreach ($w in [PsmuxWinAudit]::List()) {
             if ($Before.Wins.ContainsKey([long]$w.Handle)) { continue }
             if (Test-AuditWindowProtected $w) { continue }
+            $candWins += $w
+        }
+        $foreign = Get-ForeignConsoleWindows -SuiteStart $SuiteStart
+        foreach ($w in $candWins) {
+            if ($foreign.ContainsKey([long]$w.Handle)) {
+                Write-AuditLine ("PROTECTED-WINDOW {0} hwnd={1} pid={2} class={3} title=[{4}] shows the console of {5}; not the suite's, left alone" -f `
+                    $Suite, $w.Handle, $w.Pid, $w.Class, $w.Title, $foreign[[long]$w.Handle])
+                continue
+            }
             $newWins += $w
             $newWinPids[[int]$w.Pid] = $true
         }
@@ -687,6 +781,10 @@ function Invoke-LeftoverAudit {
             $procId = [int]$p.ProcessId
             if ($Before.Procs.ContainsKey($procId)) { continue }       # was already there
             if ($script:AuditOwnPids.ContainsKey($procId)) { continue } # our own ancestry
+            if ($script:AuditForeignPids.ContainsKey($procId)) {           # started by Task Scheduler, explorer...
+                Write-AuditLine ("PROTECTED {0} {1}; not the suite's, left alone" -f $Suite, $script:AuditForeignPids[$procId])
+                continue
+            }
             # Belt and braces against pid reuse: a process that started before the
             # suite did cannot be the suite's leftover.
             try { if ($p.CreationDate -and $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { }
