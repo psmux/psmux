@@ -781,10 +781,6 @@ function Invoke-LeftoverAudit {
             $procId = [int]$p.ProcessId
             if ($Before.Procs.ContainsKey($procId)) { continue }       # was already there
             if ($script:AuditOwnPids.ContainsKey($procId)) { continue } # our own ancestry
-            if ($script:AuditForeignPids.ContainsKey($procId)) {           # started by Task Scheduler, explorer...
-                Write-AuditLine ("PROTECTED {0} {1}; not the suite's, left alone" -f $Suite, $script:AuditForeignPids[$procId])
-                continue
-            }
             # Belt and braces against pid reuse: a process that started before the
             # suite did cannot be the suite's leftover.
             try { if ($p.CreationDate -and $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { }
@@ -793,6 +789,10 @@ function Invoke-LeftoverAudit {
             $isParked = ($p.Name -eq 'cmd.exe') -and ($cl -match '/c\s+pause\b' -or $cl -match '/k(\s|$)')
             $ownsWin  = $newWinPids.ContainsKey($procId)
             if (-not ($isParked -or $ownsWin)) { continue }
+            if ($script:AuditForeignPids.ContainsKey($procId)) {           # started by Task Scheduler, explorer...
+                Write-AuditLine ("PROTECTED {0} {1}; not the suite's, left alone" -f $Suite, $script:AuditForeignPids[$procId])
+                continue
+            }
 
             # Parent chain for attribution. Usually already dead by now, which is
             # exactly why spawn_trace.log (captured at spawn time) exists too.
