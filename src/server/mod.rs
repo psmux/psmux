@@ -1953,11 +1953,13 @@ pub(crate) fn read_fresh_config_warnings(since_epoch: u64) -> Vec<String> {
 fn kill_window_at(app: &mut AppState, pos: usize) {
     if pos >= app.windows.len() { return; }
     if app.windows.len() > 1 {
-        let mut win = app.windows.remove(pos);
-        kill_all_children(&mut win.root);
-        app.on_window_removed(pos);
-        if app.active_idx > pos { app.active_idx -= 1; }
-        if app.active_idx >= app.windows.len() { app.active_idx = app.windows.len() - 1; }
+        crate::copy_mode::remove_keeping_modes(app, |app| {
+            let mut win = app.windows.remove(pos);
+            kill_all_children(&mut win.root);
+            app.on_window_removed(pos);
+            if app.active_idx > pos { app.active_idx -= 1; }
+            if app.active_idx >= app.windows.len() { app.active_idx = app.windows.len() - 1; }
+        });
     } else {
         // Last window: kill all children; reaper will detect empty session and exit
         kill_all_children(&mut app.windows[0].root);
@@ -7160,12 +7162,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let mut refused = None;
                             if let Some(pos) = occupied {
                                 if kill {
-                                    let mut win = app.windows.remove(pos);
-                                    kill_all_children(&mut win.root);
-                                    app.on_window_removed(pos);
-                                    if app.active_idx >= app.windows.len() && !app.windows.is_empty() {
-                                        app.active_idx = app.windows.len() - 1;
-                                    }
+                                    crate::copy_mode::remove_keeping_modes(&mut app, |app| {
+                                        let mut win = app.windows.remove(pos);
+                                        kill_all_children(&mut win.root);
+                                        app.on_window_removed(pos);
+                                        // The current window slides down with the
+                                        // ones after the occupant, so -d keeps it.
+                                        if pos < app.active_idx {
+                                            app.active_idx -= 1;
+                                        }
+                                        if app.active_idx >= app.windows.len() && !app.windows.is_empty() {
+                                            app.active_idx = app.windows.len() - 1;
+                                        }
+                                    });
                                     notify_events.push("window-unlinked");
                                 } else {
                                     refused = Some(format!("index in use: {}", didx.unwrap_or(0)));
@@ -7175,6 +7184,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 app.status_message = Some((format!("link-window: {}", msg), std::time::Instant::now(), None));
                                 let _ = resp.send(Err(msg));
                             } else {
+                            // The source slid down too when it came after the
+                            // occupant, or the window after it was linked.
+                            let spos = match occupied {
+                                Some(p) if kill && p < spos => spos - 1,
+                                _ => spos,
+                            };
                             let spos = spos.min(app.windows.len().saturating_sub(1));
                             let src_id = app.windows[spos].id;
                             let src_name = app.windows[spos].name.clone();
@@ -7251,15 +7266,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let _ = resp.send(Err(msg));
                         }
                         Ok(removed_pos) if app.windows.len() > 1 => {
-                            let mut win = app.windows.remove(removed_pos);
-                            kill_all_children(&mut win.root);
-                            app.on_window_removed(removed_pos);
-                            if removed_pos < app.active_idx {
-                                app.active_idx -= 1;
-                            }
-                            if app.active_idx >= app.windows.len() {
-                                app.active_idx = app.windows.len() - 1;
-                            }
+                            crate::copy_mode::remove_keeping_modes(&mut app, |app| {
+                                let mut win = app.windows.remove(removed_pos);
+                                kill_all_children(&mut win.root);
+                                app.on_window_removed(removed_pos);
+                                if removed_pos < app.active_idx {
+                                    app.active_idx -= 1;
+                                }
+                                if app.active_idx >= app.windows.len() {
+                                    app.active_idx = app.windows.len() - 1;
+                                }
+                            });
                             resize_all_panes(&mut app);
                             meta_dirty = true;
                             state_dirty = true;

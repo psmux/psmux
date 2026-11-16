@@ -1554,6 +1554,10 @@ fn has_any_exited(node: &mut Node) -> bool {
 }
 
 pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
+    // A pane or a window that exits moves the focus without the switch the
+    // focus commands go through: the mode goes with the pane, and the pane
+    // that gets the focus brings its own back (copy_mode::remove_keeping_modes).
+    let focused = crate::copy_mode::active_pane_id(app);
     let global_remain = app.remain_on_exit;
     let kill_descendants = app.kill_descendants_on_exit();
     let mut newly_dead: Vec<usize> = Vec::new();
@@ -1626,6 +1630,12 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
     // (server-fn.c:395-417, PANE_STATUSDRAWN).
     for pane_id in newly_dead {
         crate::server::helpers::write_remain_on_exit_text(app, pane_id);
+    }
+    if any_pruned {
+        crate::copy_mode::forget_dead_clocks(app);
+        if !app.windows.is_empty() {
+            crate::copy_mode::retarget_mode_to_active_pane(app, focused);
+        }
     }
     Ok((app.windows.is_empty(), any_pruned, any_newly_dead))
 }

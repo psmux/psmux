@@ -4412,6 +4412,12 @@ fn resolve_break_dst(app: &AppState, spec: &str) -> Result<Option<usize>, String
 /// (`index in use: N`, cmd-break-pane.c:148 to 151), detach the pane, build the
 /// new window, and select it unless `-d` was given (cmd-break-pane.c:186).
 pub fn break_pane(app: &mut AppState, req: &BreakPaneRequest) -> Result<BrokenPane, String> {
+    // With -d the focus stays in the source window, on a pane that may have
+    // its own mode parked.
+    crate::copy_mode::remove_keeping_modes(app, |app| break_pane_inner(app, req))
+}
+
+fn break_pane_inner(app: &mut AppState, req: &BreakPaneRequest) -> Result<BrokenPane, String> {
     if app.windows.is_empty() { return Err("can't find pane".to_string()); }
     let (src_idx, src_path) = match req.src.as_deref() {
         Some(s) => resolve_pane_spec(app, s)?,
