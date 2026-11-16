@@ -489,6 +489,34 @@ pub fn retarget_mode_to_active_pane(app: &mut AppState, prev: Option<usize>) {
     sync_copy_prompt_status(app, had_prompt);
 }
 
+/// Remove windows (or panes) with `remove_fn` and hand the mode over to the
+/// pane that has the focus after it, as [`retarget_mode_to_active_pane`]
+/// does for a killed pane. In tmux a mode belongs to its `window_pane`, so a
+/// window going away takes its own mode with it and the pane that gets the
+/// focus keeps its own: closing a window used to leave the closed pane's
+/// clock or copy mode on the next one, and the next one's parked clock
+/// drawn over a pane that had no mode.
+pub fn remove_keeping_modes<R, F: FnOnce(&mut AppState) -> R>(app: &mut AppState, remove_fn: F) -> R {
+    let prev = active_pane_id(app);
+    let out = remove_fn(app);
+    forget_dead_clocks(app);
+    if !app.windows.is_empty() {
+        retarget_mode_to_active_pane(app, prev);
+    }
+    out
+}
+
+/// Drop the parked clocks of panes that no longer exist.
+pub(crate) fn forget_dead_clocks(app: &mut AppState) {
+    if app.clock_panes.is_empty() {
+        return;
+    }
+    let live: Vec<usize> = app.clock_panes.iter().copied()
+        .filter(|&p| crate::tree::find_pane_by_id_global(app, p).is_some())
+        .collect();
+    app.clock_panes = live;
+}
+
 /// Move the focus for one -t request without moving the focused pane's mode
 /// with it (#828).  `switch_fn` changes the active pane; the pane that loses
 /// focus keeps its own copy or clock mode parked, and the pane that gains it
@@ -532,13 +560,9 @@ fn park_clock(app: &mut AppState, prev: Option<usize>) {
         if let Some(id) = prev {
             // A pane killed with its clock parked leaves its id behind; drop
             // those here, so the list never outgrows the panes that exist.
-            if !app.clock_panes.is_empty() {
-                let live: Vec<usize> = app.clock_panes.iter().copied()
-                    .filter(|&p| crate::tree::find_pane_by_id_global(app, p).is_some())
-                    .collect();
-                app.clock_panes = live;
-            }
-            if !app.clock_panes.contains(&id) {
+            forget_dead_clocks(app);
+            // A pane that is gone takes its clock with it.
+            if !app.clock_panes.contains(&id) && crate::tree::find_pane_by_id_global(app, id).is_some() {
                 app.clock_panes.push(id);
             }
         }
