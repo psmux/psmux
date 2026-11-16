@@ -3481,3 +3481,7 @@ mod test_issue866_prompt_word_keys;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue862_copy_word_motion.rs"]
 mod test_issue862_copy_word_motion;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_window_close_modes.rs"]
+mod test_window_close_modes;
