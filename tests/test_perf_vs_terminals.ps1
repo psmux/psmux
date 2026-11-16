@@ -268,6 +268,7 @@
 #   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1
 #   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1 -Quick
 #   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1 -Binary C:\scratch\pmux.exe
+#   pwsh -NoProfile -File tests\test_perf_vs_terminals.ps1 -OnlyTabs   (section 3b alone)
 
 param(
     [int]$N = 5,            # launch-to-prompt repetitions per host cell
