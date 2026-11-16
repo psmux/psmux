@@ -374,7 +374,7 @@ $uo = @(
     'popup-style', 'popup-border-style', 'popup-border-lines',
     'window-style', 'window-active-style', 'wrap-search',
     'pane-border-format', 'pane-border-status',
-    'clock-mode-colour', 'clock-mode-style',
+    'clock-mode-colour',
     'lock-after-time', 'lock-command', 'status-keys'
 )
 foreach ($opt in $uo) {
@@ -383,6 +383,10 @@ foreach ($opt in $uo) {
     $show = CLI-Show $sess $opt
     Test-Result "cli-uo-$opt" ($show -match $uniq) "Expected '$uniq', show='$show'"
 }
+# clock-mode-style takes tmux's four values only (options-table.c:38-40).
+CLI-Set $sess @('-g', 'clock-mode-style', '12-with-seconds')
+$show = CLI-Show $sess 'clock-mode-style'
+Test-Result "cli-uo-clock-mode-style" ($show -match '12-with-seconds') "Expected '12-with-seconds', show='$show'"
 
 # ============================================================
 # SECTION 14: tmux compat options via CLI + verify server survives
