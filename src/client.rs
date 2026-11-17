@@ -10383,6 +10383,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 } else {
                     normal_style
                 };
+                // tmux style_add() leaves a `default` colour out, so a window
+                // style's `bg=default` inherits the status bar's background
+                // instead of painting the terminal default behind the tab.
+                let fallback_style = Style {
+                    fg: fallback_style.fg.map(|c| if c == Color::Reset { sb_fg } else { c }),
+                    bg: fallback_style.bg.map(|c| if c == Color::Reset { sb_bg } else { c }),
+                    ..fallback_style
+                };
                 let parsed = crate::style::parse_inline_styles(&tab_text, fallback_style);
                 let tab_start = tab_cursor;
                 let tab_w = crate::style::spans_visual_width(&parsed);
