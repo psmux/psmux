@@ -161,3 +161,30 @@ fn native_osc9_requires_ascii_control_free_text() {
         assert!(drain(&mut p).is_empty(), "control-bearing body {body:?}");
     }
 }
+
+#[test]
+fn conhost_notifications_survive_every_split_and_snapshot() {
+    // The upstream conhost wrapper splits at a doubled ESC before process_vt.
+    let input = b"\x1b\x1b]9;notice\x07\x1b]777;notify;title;body\x1b\\";
+    let expected = vec![
+        b"\x1b]9;notice\x07".to_vec(),
+        b"\x1b]777;notify;title;body\x1b\\".to_vec(),
+    ];
+    for chunk_size in 1..=input.len() {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.set_conhost_c0_cells(true);
+        for chunk in input.chunks(chunk_size) {
+            p.process(chunk);
+        }
+        assert!(p.snapshot().screen_mut().take_host_events().is_empty());
+        assert_eq!(drain(&mut p), expected, "chunk size {chunk_size}");
+        assert!(drain(&mut p).is_empty());
+    }
+    for cut in 0..=input.len() {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.set_conhost_c0_cells(true);
+        p.process(&input[..cut]);
+        p.process(&input[cut..]);
+        assert_eq!(drain(&mut p), expected, "split {cut}");
+    }
+}

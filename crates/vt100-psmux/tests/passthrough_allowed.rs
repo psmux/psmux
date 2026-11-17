@@ -157,6 +157,35 @@ fn toggling_allow_passthrough_applies_to_a_live_parser() {
     assert_eq!(explicit.len(), 1, "explicit enabled passthrough remains opaque");
     assert!(explicit[0].passthrough);
     assert_eq!(explicit[0].bytes, b"\x1b]9;7;opaque-command\x07");
+    // Exercise the production conhost wrapper, which splits process_vt at
+    // doubled ESCs, with intact, silent and consecutive lost-ST wrappers.
+    for (input, expected, text) in [
+        (&b"\x1bPtmux;\x1b\x1b]99;i=n;payload\x1b\x1b\\\x1b\\"[..], vec![&b"\x1b]99;i=n;payload\x1b\\"[..]], ""),
+        (&b"\x1bPtmux;\x1b\x1b]9;waiting\x07"[..], vec![&b"\x1b]9;waiting\x07"[..]], ""),
+        (&consecutive[..], vec![&b"\x1b]9;first\x07"[..], &b"\x1b]12345;opaque\x07"[..]], "plain"),
+    ] {
+        for cut in 0..=input.len() {
+            let mut p = vt100::Parser::new(4, 80, 0);
+            p.set_conhost_c0_cells(true);
+            p.process(&input[..cut]);
+            let mut events = p.screen_mut().take_host_events();
+            p.process(&input[cut..]);
+            events.extend(p.screen_mut().take_host_events());
+            assert_eq!(events.iter().map(|e| e.bytes.as_slice()).collect::<Vec<_>>(), expected, "conhost split {cut}");
+            assert!(events.iter().all(|e| e.passthrough));
+            assert_eq!(p.screen().contents(), text);
+            p.process(b"\x1b\\");
+            assert!(p.screen_mut().take_host_events().is_empty());
+        }
+    }
     vt100::set_allow_passthrough(false);
+    let off = b"\x1bPtmux;\x1b\x1b]9;off\x07\x1b\\";
+    for cut in 0..=off.len() {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.set_conhost_c0_cells(true);
+        p.process(&off[..cut]);
+        p.process(&off[cut..]);
+        assert!(p.screen_mut().take_host_events().is_empty(), "conhost off split {cut}");
+    }
 
 }
