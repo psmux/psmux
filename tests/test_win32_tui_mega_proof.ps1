@@ -25,10 +25,22 @@ $script:TestsFailed = 0
 $script:TestsSkipped = 0
 
 function Write-Pass  { param($msg) Write-Host "  [PASS] $msg" -ForegroundColor Green;  $script:TestsPassed++ }
-function Write-Fail  { param($msg) Write-Host "  [FAIL] $msg" -ForegroundColor Red;    $script:TestsFailed++ }
+function Write-Fail  {
+    param($msg)
+    # Keys this test needed were never typed (see Win32Mega.keybd_event): the
+    # check proved nothing either way, so it is a skip, not a failure.
+    $blocked = $false
+    try { $blocked = [bool]([Win32Mega]::Blocked) } catch {}
+    if ($blocked) { Write-Skip "$msg (keys not delivered: the psmux window was not in the foreground)"; return }
+    Write-Host "  [FAIL] $msg" -ForegroundColor Red;    $script:TestsFailed++
+}
 function Write-Skip  { param($msg) Write-Host "  [SKIP] $msg" -ForegroundColor Yellow; $script:TestsSkipped++ }
 function Write-Info  { param($msg) Write-Host "  [INFO] $msg" -ForegroundColor Cyan }
-function Write-Test  { param($msg) Write-Host "  [TEST] $msg" -ForegroundColor White }
+function Write-Test  {
+    param($msg)
+    try { [Win32Mega]::Blocked = $false } catch {}
+    Write-Host "  [TEST] $msg" -ForegroundColor White
+}
 
 # Resolve binary
 $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -EA SilentlyContinue).Path
@@ -56,10 +68,39 @@ public class Win32Mega {
     public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll", EntryPoint = "keybd_event")]
+    static extern void raw_keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+
+    // keybd_event types into whatever window is in the foreground. When
+    // Windows keeps another window in front (the user is working, a sweep is
+    // running beside other programs), the keys meant for psmux land in that
+    // window instead. So every key PRESS first checks that the foreground is
+    // the psmux client's own window (Target, resolved through its console),
+    // asks for it once, and is dropped if it still is not in front. Releases
+    // always go through, so a modifier that went down is never left stuck.
+    // Blocked records that a press was dropped; the test then reports SKIP,
+    // because nothing was delivered to psmux and nothing was proven.
+    public static IntPtr Target = IntPtr.Zero;
+    public static bool Blocked = false;
+    public static bool TargetInFront() {
+        if (Target == IntPtr.Zero) return false;
+        IntPtr fg = GetForegroundWindow();
+        return fg == Target || GetAncestor(fg, 3) == Target;
+    }
+    public static void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo) {
+        if ((dwFlags & KEYEVENTF_KEYUP) == 0) {
+            if (Blocked) return;
+            if (!TargetInFront()) {
+                if (Target != IntPtr.Zero) { SetForegroundWindow(Target); Thread.Sleep(250); }
+                if (!TargetInFront()) { Blocked = true; return; }
+            }
+        }
+        raw_keybd_event(bVk, bScan, dwFlags, dwExtraInfo);
+    }
 
     public const byte VK_CONTROL = 0x11;
     public const byte VK_RETURN  = 0x0D;
@@ -304,12 +345,32 @@ function Wait-SessionReady {
 function FocusWindow {
     param([System.Diagnostics.Process]$Proc)
     Start-Sleep -Seconds 2
-    $hwnd = $Proc.MainWindowHandle
+    # The window the user sees for this client. With Windows Terminal as the
+    # default terminal, MainWindowHandle is 0 (the client owns only a hidden
+    # pseudo console window), so ask the console itself: the helper attaches to
+    # the client's console in its own process and returns the root owner of its
+    # window, which is the visible conhost or Windows Terminal window.
+    $hwnd = [IntPtr]::Zero
+    $src = Join-Path $PSScriptRoot 'helpers\console_window_of.cs'
+    $exe = Join-Path $env:TEMP "psmux_console_window_of_$PID.exe"
+    $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
+    if (-not (Test-Path $csc)) { $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' }
+    if ((Test-Path $src) -and (Test-Path $csc)) {
+        & $csc /nologo /optimize /target:exe "/out:$exe" $src 2>&1 | Out-Null
+        if (Test-Path $exe) {
+            $line = (& $exe $Proc.Id 2>$null | Select-Object -First 1)
+            if ("$line" -match '^\d+\s+(\d+)$' -and [int64]$Matches[1] -ne 0) { $hwnd = [IntPtr][int64]$Matches[1] }
+            Remove-Item $exe -Force -EA SilentlyContinue
+        }
+    }
+    if ($hwnd -eq [IntPtr]::Zero) { $hwnd = $Proc.MainWindowHandle }
+    [Win32Mega]::Target = $hwnd
     if ($hwnd -ne [IntPtr]::Zero) {
         [Win32Mega]::ShowWindow($hwnd, 9) | Out-Null
         [Win32Mega]::SetForegroundWindow($hwnd) | Out-Null
     }
     Start-Sleep -Milliseconds 500
+    Write-Info ("psmux window hwnd={0} in foreground={1}" -f $hwnd, [Win32Mega]::TargetInFront())
     return $hwnd
 }
 
