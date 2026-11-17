@@ -960,6 +960,7 @@ fn enter(s: &mut Session, ids: &ServerIds, ns: &Option<String>) {
 /// One session's upkeep for one loop pass (copied from the tail of
 /// run_server's loop iteration, server/mod.rs at 0145958f).
 fn upkeep(app: &mut AppState, lp: &mut SessionLoop, pty_system: &dyn portable_pty::PtySystem) -> io::Result<Flow> {
+    helpers::drain_host_events(app);
     crate::format::set_sessionless(false);
     // copied from run_server (cc32087b): a set-option a hook or a key binding
     // ran in process already wrote its value; this is the rest of what the

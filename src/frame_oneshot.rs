@@ -1,5 +1,5 @@
 //! One shot side effects carried by a frame: a clipboard write (OSC 52) and
-//! a bell.
+//! a bell, host notifications and enabled tmux passthrough bodies.
 //!
 //! A frame is a full snapshot, so wherever frames queue up only the newest is
 //! kept: the server's per client frame slot (`types::push_frame`), the
@@ -19,7 +19,7 @@
 //! the later write and the one the clipboard ends up holding either way (the
 //! server's forward slot already collapses back to back writes to the newest,
 //! helpers::drain_osc52). The fields are always the LAST ones in the frame,
-//! clipboard then bell, written by [`append`] and read back by [`take`], so
+//! clipboard, host events, then bell, written by [`append`] and read back by [`take`], so
 //! nothing here has to parse the rest of the JSON.
 //!
 //! The sixel image blobs (#431) are carried the same way. The server sends
@@ -32,6 +32,10 @@
 const BLOBS_KEY: &str = ",\"image_blobs\":{";
 /// The clipboard field as the frame builders write it.
 const CLIP_KEY: &str = ",\"clipboard_osc52\":\"";
+/// Exact host event bytes, encoded individually to preserve event boundaries.
+const HOST_KEY: &str = ",\"host_events\":";
+const RAW_FIELD: &str = ",\"host_raw\":true";
+
 /// The bell field as the frame builders write it.
 const BELL_FIELD: &str = ",\"bell\":true";
 
@@ -42,11 +46,15 @@ pub(crate) struct OneShots {
     /// Base64 clipboard text for OSC 52.
     pub clip_b64: Option<String>,
     pub bell: bool,
+    /// Exact event bytes, oldest first, bounded without partial truncation.
+    pub host_events: Vec<Vec<u8>>,
+    /// At least one passthrough can have altered the host screen.
+    pub host_raw: bool,
 }
 
 impl OneShots {
     pub(crate) fn is_empty(&self) -> bool {
-        self.image_blobs.is_empty() && self.clip_b64.is_none() && !self.bell
+        self.image_blobs.is_empty() && self.clip_b64.is_none() && !self.bell && self.host_events.is_empty()
     }
 
     /// `newer` happened after `self`: the blobs of both are kept, a bell from
@@ -58,9 +66,18 @@ impl OneShots {
             }
             self.image_blobs.push_str(&newer.image_blobs);
         }
+        self.host_raw |= newer.host_raw;
+        for event in newer.host_events { self.push_host_event(event); }
         self.bell |= newer.bell;
         if newer.clip_b64.is_some() {
             self.clip_b64 = newer.clip_b64;
+        }
+    }
+
+    pub(crate) fn push_host_event(&mut self, event: Vec<u8>) {
+        let bytes: usize = self.host_events.iter().map(Vec::len).sum();
+        if self.host_events.len() < 256 && event.len() <= vt100::MAX_HOST_EVENT_BYTES.saturating_sub(bytes) {
+            self.host_events.push(event);
         }
     }
 
@@ -101,6 +118,14 @@ pub(crate) fn append(frame: &mut String, shots: &OneShots) {
         frame.push_str(b64);
         frame.push('"');
     }
+    if !shots.host_events.is_empty() {
+        use base64::Engine;
+        let encoded: Vec<String> = shots.host_events.iter().map(|bytes|
+            base64::engine::general_purpose::STANDARD.encode(bytes)).collect();
+        frame.push_str(HOST_KEY);
+        frame.push_str(&serde_json::to_string(&encoded).expect("base64 strings"));
+        if shots.host_raw { frame.push_str(RAW_FIELD); }
+    }
     if shots.bell {
         frame.push_str(BELL_FIELD);
     }
@@ -120,6 +145,24 @@ pub(crate) fn take(frame: &mut String) -> OneShots {
     if frame[..end].ends_with(BELL_FIELD) {
         shots.bell = true;
         end -= BELL_FIELD.len();
+    }
+    if frame[..end].ends_with(RAW_FIELD) {
+        shots.host_raw = true;
+        end -= RAW_FIELD.len();
+    }
+    let head = &frame[..end];
+    if head.ends_with(']') {
+        if let Some(pos) = head.rfind(HOST_KEY) {
+            if let Ok(encoded) = serde_json::from_str::<Vec<String>>(&head[pos + HOST_KEY.len()..]) {
+                use base64::Engine;
+                for item in encoded {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(item) {
+                        shots.push_host_event(bytes);
+                    }
+                }
+                end = pos;
+            }
+        }
     }
     let head = &frame[..end];
     if head.ends_with('"') {

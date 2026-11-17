@@ -11,7 +11,7 @@ fn frame(body: &str) -> String {
 }
 
 fn shots(clip: Option<&str>, bell: bool) -> OneShots {
-    OneShots { clip_b64: clip.map(str::to_string), bell, image_blobs: String::new() }
+    OneShots { clip_b64: clip.map(str::to_string), bell, image_blobs: String::new(), ..Default::default() }
 }
 
 #[test]
@@ -121,13 +121,15 @@ fn server_frame_slot_keeps_one_shots_of_a_replaced_frame() {
     let id = u64::MAX - 0x6f73_6335;
     let slot = crate::types::register_frame_channel(id, poke);
     let mut f1 = frame("1");
-    append(&mut f1, &shots(Some("T1NDTUFSSzE="), true));
+    let mut s = shots(Some("T1NDTUFSSzE="), true);
+    s.push_host_event(b"\x1b]99;i=test;body\x07".to_vec());
+    append(&mut f1, &s);
     crate::types::push_frame(&f1);
     crate::types::push_frame(&frame("2"));
     let held = slot.lock().unwrap().take();
     crate::types::deregister_frame_channel(id);
     let mut got = held.expect("a frame is waiting");
-    assert_eq!(take(&mut got), shots(Some("T1NDTUFSSzE="), true));
+    assert_eq!(take(&mut got), s);
     assert_eq!(got, frame("2"));
 }
 
@@ -216,4 +218,59 @@ fn a_superseded_frame_without_one_shots_changes_nothing() {
     let mut newer = sixel_frame("2", "");
     supersede(&mut older, &mut newer);
     assert_eq!(newer, sixel_frame("2", ""));
+}
+
+#[test]
+fn host_events_round_trip_coalesce_in_order_and_never_replay() {
+    let events = [b"\x1b]9;first\x07".to_vec(), b"\x1b]777;notify;t;b\x1b\\".to_vec()];
+    let mut older = frame("1");
+    let mut first = shots(Some("YQ=="), true);
+    first.push_host_event(events[0].clone());
+    append(&mut older, &first);
+    let mut newer = frame("2");
+    let mut second = OneShots::default();
+    second.push_host_event(events[1].clone());
+    second.host_raw = true;
+    append(&mut newer, &second);
+    supersede(&mut older, &mut newer);
+    let got = take(&mut newer);
+    assert_eq!(got.host_events, events);
+    assert!(got.host_raw && got.bell);
+    assert_eq!(got.clip_b64.as_deref(), Some("YQ=="));
+    assert!(take(&mut newer).is_empty());
+    assert_eq!(newer, frame("2"));
+}
+
+#[test]
+fn host_events_survive_client_queue() {
+    let event = b"\x1b]99;i=test:d=1;body\x07".to_vec();
+    let mut s = OneShots::default();
+    s.push_host_event(event.clone());
+    let mut initial = frame("1");
+    append(&mut initial, &s);
+    let (tx, rx) = crate::client_frame_queue::frame_queue();
+    assert!(tx.send(initial.clone()));
+    assert!(tx.send(frame("2")));
+    assert_eq!(take(&mut rx.try_recv().unwrap()).host_events, vec![event.clone()]);
+
+}
+
+#[test]
+fn host_event_limits_drop_whole_events() {
+    let mut s = OneShots::default();
+    let large = vec![b'x'; vt100::MAX_HOST_EVENT_BYTES - 1];
+    s.push_host_event(large.clone());
+    s.push_host_event(b"too much".to_vec());
+    assert_eq!(s.host_events, vec![large]);
+    let mut s = OneShots::default();
+    for _ in 0..300 { s.push_host_event(vec![7]); }
+    assert_eq!(s.host_events.len(), 256);
+}
+
+#[test]
+fn host_event_lookalikes_in_pane_text_are_not_fields() {
+    let raw = serde_json::json!({"text":",\"host_events\":[\"YQ==\"]"}).to_string();
+    let mut frame = raw.clone();
+    assert!(take(&mut frame).is_empty());
+    assert_eq!(frame, raw);
 }

@@ -17,8 +17,7 @@ static INPUT_BUFFER_SIZE: std::sync::atomic::AtomicUsize =
 /// Record the `input-buffer-size` server option for every pane parser in this
 /// process, as tmux's `input_set_buffer_size` (input.c) does.
 ///
-/// Only a sixel DCS is held to it here; tmux also holds OSC and APC strings
-/// to it.
+/// Sixel, host notification collection and tmux passthrough bodies honor it.
 pub fn set_input_buffer_size(bytes: usize) {
     INPUT_BUFFER_SIZE.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }
@@ -31,10 +30,9 @@ pub fn input_buffer_size() -> usize {
 
 /// Whether `allow-passthrough` is `on` or `all`. Off (the default, as in
 /// tmux) drops the body of a `DCS tmux;` passthrough unparsed, as tmux does
-/// (input.c:2672-2674). On, the parser reads the body as it always did here:
-/// vte ends the DCS at the first doubled ESC and acts on the inner sequence,
-/// so a wrapped OSC 52 still copies. tmux would instead write the body raw to
-/// the outer terminal; see docs/design/allow-passthrough-forwarding.md. One
+/// (input.c:2672-2674). On, exact unescaped bodies are queued for the host
+/// terminal without changing the pane screen. The server applies on/all
+/// visibility when draining the queue. One
 /// per process, like `input-buffer-size`, so a change applies to every pane
 /// at once.
 static ALLOW_PASSTHROUGH: std::sync::atomic::AtomicBool =
@@ -874,9 +872,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     ) {
         // `ESC P tmux;`: the final byte is the `t`, `mux;` comes to `put`.
         // tmux looks only at the data, whatever came before it
-        // (input_dcs_dispatch, input.c:2675). With allow-passthrough on the
-        // body is parsed as before, so nothing is matched.
-        self.tmux_prefix = u8::from(action == 't' && !allow_passthrough());
+        // (input_dcs_dispatch, input.c:2675). Every mode skips the body;
+        // on/all additionally collect it for raw host delivery.
+        self.tmux_prefix = u8::from(action == 't');
         // Sixel is DCS with final byte 'q' and NO intermediates.  DECRQSS also
         // ends in 'q' but carries the '$' (0x24) intermediate, so gating on an
         // empty intermediates slice keeps DECRQSS (and all other DCS) untouched.

@@ -307,3 +307,24 @@ fn none_target_captures_active_pane_as_before() {
     assert!(out.contains("ALPHA-WINDOW"),
         "no -t target must keep capturing the active pane, got: {:?}", out);
 }
+
+#[test]
+fn host_event_delivery_discards_control_only_output_before_normal_attach() {
+    let mut app = app_showing(b"\x1b]9;old-control-only\x07");
+    app.register_client(0x7501, true);
+    // A normal receiver in another session must not make this one attached.
+    let (poke, _wake) = std::sync::mpsc::channel();
+    let unrelated = u64::MAX - 0x7501_0103;
+    let _slot = crate::types::register_frame_channel(unrelated, poke);
+    crate::server::helpers::drain_host_events(&mut app);
+    crate::types::deregister_frame_channel(unrelated);
+    assert!(app.host_events.is_empty(), "control-only output must be discarded");
+    app.register_client(0x7502, false);
+    assert!(crate::server::helpers::take_frame_oneshots(&mut app).host_events.is_empty(), "normal attach cannot replay old output");
+    if let crate::types::Node::Leaf(p) = &app.windows[0].root {
+        p.term.lock().unwrap().process(b"\x1b]9;fresh\x07");
+    } else { panic!("fixture pane"); }
+    crate::server::helpers::drain_host_events(&mut app);
+    assert_eq!(crate::server::helpers::take_frame_oneshots(&mut app).host_events, vec![b"\x1b]9;fresh\x07".to_vec()]);
+    assert!(crate::server::helpers::take_frame_oneshots(&mut app).host_events.is_empty());
+}

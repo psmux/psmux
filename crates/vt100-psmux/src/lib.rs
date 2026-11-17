@@ -87,3 +87,6 @@ pub use width::{
     char_width, clear_codepoint_widths, has_overrides, parse_entry as parse_codepoint_width_entry,
     set_codepoint_widths, str_cells, str_width, WidthOverride, MAX_OVERRIDE_WIDTH,
 };
+
+mod host_events;
+pub use host_events::{HostEvent, MAX_HOST_EVENT_BYTES};

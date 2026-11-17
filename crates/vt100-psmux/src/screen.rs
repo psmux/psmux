@@ -194,6 +194,7 @@ pub struct Screen {
     /// so the client re-emits OSC 52 on its own stdout to reach the host
     /// terminal (Windows Terminal, etc.).
     osc52_clipboard: Option<(Vec<u8>, Vec<u8>)>,
+    pub(crate) host_events: crate::host_events::Events,
 
     /// OSC 8 hyperlink store.  URIs are interned here; a cell's `Attrs.link`
     /// is the index into this Vec plus 1 (0 = no link), mirroring tmux's
@@ -517,6 +518,7 @@ impl Screen {
             capture_queries: false,
             pending_queries: Vec::new(),
             osc52_clipboard: None,
+            host_events: Default::default(),
             hyperlinks: Vec::new(),
             sixel_images: Vec::new(),
             osc_shell_command: None,
@@ -1762,6 +1764,15 @@ impl Screen {
         if any_all {
             self.sixel_images.retain(|img| !img.is_all_erased());
         }
+    }
+
+    /// Drain exact notifications and enabled tmux passthrough bodies, once, in order.
+    pub fn take_host_events(&mut self) -> Vec<crate::HostEvent> {
+        self.host_events.take()
+    }
+
+    pub(crate) fn push_host_passthrough(&mut self, bytes: Vec<u8>) {
+        self.host_events.push(bytes, true);
     }
 
     /// Store an OSC 52 clipboard copy request emitted by the child.

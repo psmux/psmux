@@ -768,6 +768,7 @@ pub(crate) fn window_name_check_due(
 
 pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     let mut v = crate::program_status::version(app);
+    v = v.wrapping_add(((!app.host_events.is_empty()) as u64).wrapping_mul(0x7501_9001));
     fn walk(node: &Node, v: &mut u64) {
         match node {
             Node::Leaf(p) => {
@@ -912,6 +913,7 @@ fn alert_flags(win: &Window) -> (bool, bool, bool) {
 /// Also checks bell_pending on all panes and sets window bell_flag,
 /// and checks monitor-silence timeout to set silence_flag.
 pub(crate) fn check_window_activity(app: &mut AppState) -> WindowAlerts {
+    drain_host_events(app);
     let active = app.active_idx;
     let bell_action = app.bell_action.clone();
     let mut triggered_hooks: Vec<&'static str> = Vec::new();
@@ -1283,10 +1285,51 @@ pub(crate) fn drain_osc52(app: &mut AppState) {
     app.clipboard_osc52 = Some(text);
 }
 
+/// Drain on each activity tick, including hidden panes and detached sessions,
+/// so a later window switch or attach cannot replay events emitted unseen.
+pub(crate) fn drain_host_events(app: &mut AppState) {
+    fn pane(p: &crate::types::Pane, visible: bool, mode: &str, attached: bool, out: &mut crate::frame_oneshot::OneShots) {
+        let term = p.live_term.as_ref().unwrap_or(&p.term);
+        if let Ok(mut parser) = term.lock() {
+            for event in parser.screen_mut().take_host_events() {
+                if attached && if event.passthrough { mode == "all" || (mode == "on" && visible) } else { visible } {
+                    out.host_raw |= event.passthrough;
+                    out.push_host_event(event.bytes);
+                }
+            }
+        }
+    }
+    fn walk(node: &Node, visible: bool, zoom: Option<usize>, mode: &str, attached: bool, out: &mut crate::frame_oneshot::OneShots) {
+        match node {
+            Node::Leaf(p) => pane(p, visible && zoom.map_or(true, |id| id == p.id), mode, attached, out),
+            Node::Split { children, .. } => for child in children { walk(child, visible, zoom, mode, attached, out); },
+        }
+    }
+    let attached = app.client_registry.values().any(|client| !client.is_control);
+    let mut events = std::mem::take(&mut app.host_events);
+    if !attached { events = Default::default(); }
+    for (i, win) in app.windows.iter().enumerate() {
+        let visible = i == app.active_idx;
+        let zoom = if win.zoom_saved.is_some() { crate::tree::active_pane(&win.root, &win.active_path).map(|p| p.id) } else { None };
+        walk(&win.root, visible, zoom, &app.allow_passthrough, attached, &mut events);
+        for float in &win.floating {
+            pane(&float.pane, visible, &app.allow_passthrough, attached, &mut events);
+        }
+    }
+    if let crate::types::Mode::PopupMode { popup_pane: Some(p), .. } = &app.mode {
+        pane(p, true, &app.allow_passthrough, attached, &mut events);
+    }
+    app.host_events = events;
+}
+
 /// The clipboard write and bell staged for the next frame, taken so they go
 /// out once.
 pub(crate) fn take_frame_oneshots(app: &mut AppState) -> crate::frame_oneshot::OneShots {
+    drain_host_events(app);
+    let host = std::mem::take(&mut app.host_events);
     crate::frame_oneshot::OneShots {
+        host_events: host.host_events,
+        host_raw: host.host_raw,
         clip_b64: app.clipboard_osc52.take().map(|t| crate::util::base64_encode(&t)),
         bell: std::mem::take(&mut app.bell_forward),
         // Last in the frame with the clipboard and bell, so a frame that

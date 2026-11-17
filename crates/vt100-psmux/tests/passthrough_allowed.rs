@@ -1,6 +1,5 @@
-// allow-passthrough on/all keeps the parser's old reading of a DCS tmux;
-// passthrough: vte ends the DCS at the first doubled ESC and acts on the inner
-// sequence, so a wrapped OSC 52 still copies. Off drops the body as tmux does.
+// allow-passthrough on/all queues exact unescaped DCS tmux bodies for the
+// host, without parsing them as pane output. Off drops the body as tmux does.
 // The setting is one per process and read at each DCS, so a change applies
 // to a parser that already exists. Its own test binary: the flag is global,
 // and the tests in passthrough_discard.rs assume off.
@@ -43,14 +42,121 @@ fn toggling_allow_passthrough_applies_to_a_live_parser() {
     // The inbox conhost form, closing ST lost, then a redraw.
     p.process(&wrapped(b"b24y", false));
     p.process(b"\x1b[1mc\x1b[m");
-    assert_eq!(p.callbacks().copies, vec![b"b24x".to_vec(), b"b24y".to_vec()], "on: acted on as before");
+    assert!(p.callbacks().copies.is_empty(), "host passthrough never changes the pane screen");
+    let events = p.screen_mut().take_host_events();
+    assert_eq!(events.iter().map(|e| e.bytes.as_slice()).collect::<Vec<_>>(), vec![&b"\x1b]52;c;b24x\x07"[..], &b"\x1b]52;c;b24y\x07"[..]]);
+    assert!(events.iter().all(|e| e.passthrough));
 
     vt100::set_allow_passthrough(false);
     p.process(&wrapped(b"b2Zm", false));
     p.process(b"\x1b[1md\x1b[m");
-    assert_eq!(p.callbacks().copies.len(), 2, "off again: dropped");
+    assert!(p.callbacks().copies.is_empty(), "off again: dropped");
+    assert!(p.screen_mut().take_host_events().is_empty());
 
     assert_eq!(p.screen().contents_between(0, 0, 0, 60).trim_end(), "abcd");
     assert!(p.screen().cell(0, 2).unwrap().bold());
     assert!(p.screen().cell(0, 3).unwrap().bold());
+    vt100::set_allow_passthrough(true);
+    let input = b"\x1b]9;first\x07\x1bPtmux;\x1b\x1b]99;i=n;payload\x1b\x1b\\\x1b\\\x1b]9001;done\x07";
+    for cut in 0..=input.len() {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.process(&input[..cut]);
+        p.process(&input[cut..]);
+        let events = p.screen_mut().take_host_events();
+        assert_eq!(events.len(), 3, "split {cut}");
+        assert_eq!(events[0].bytes, b"\x1b]9;first\x07");
+        assert_eq!(events[1].bytes, b"\x1b]99;i=n;payload\x1b\\");
+        assert!(events[1].passthrough);
+        assert_eq!(events[2].bytes, b"\x1b]9001;done\x07");
+        assert!(p.screen().contents().is_empty());
+        assert!(p.screen_mut().take_host_events().is_empty());
+    }
+    let mut p = vt100::Parser::new(4, 80, 0);
+    p.process(b"\x1bPtmux;");
+    p.process(&vec![b'x'; vt100::MAX_HOST_EVENT_BYTES + 1]);
+    p.process(b"\x1b\\\x1b]9;after\x07");
+    let events = p.screen_mut().take_host_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].bytes, b"\x1b]9;after\x07");
+
+    // No further process call: the inbox conhost may lose the outer ST and
+    // an agent waiting for user input emits no following bytes at all.
+    let silent = b"\x1bPtmux;\x1b\x1b]9;waiting\x07";
+    let mut p = vt100::Parser::new(4, 80, 0);
+    p.process(silent);
+    let events = p.screen_mut().take_host_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].bytes, b"\x1b]9;waiting\x07");
+    p.process(b"\x1b\\");
+    assert!(p.screen_mut().take_host_events().is_empty(), "outer ST cannot replay an early notification");
+    let multiple = b"\x1bPtmux;\x1b\x1b]9;one\x07\x1b\x1b]777;notify;t;two\x07";
+    for cut in 0..=multiple.len() {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.process(&multiple[..cut]);
+        let mut events = p.screen_mut().take_host_events();
+        p.process(&multiple[cut..]);
+        events.extend(p.screen_mut().take_host_events());
+        assert_eq!(events.iter().map(|e| e.bytes.as_slice()).collect::<Vec<_>>(), vec![&b"\x1b]9;one\x07"[..], &b"\x1b]777;notify;t;two\x07"[..]], "split {cut}");
+        p.process(b"\x1b\\");
+        assert!(p.screen_mut().take_host_events().is_empty());
+    }
+    for input in [
+        &b"\x1bPtmux;prefix\x1b\x1b]9;waiting\x07"[..],
+        &b"\x1bPtmux;\x1b\x1b]1234;unknown\x07"[..],
+        &b"\x1bPtmux;\x1b\x1b]9;4;1;50\x07"[..],
+        &b"\x1bPtmux;\x1b\x1b]7501;?\x07"[..],
+    ] {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.process(input);
+        assert!(p.screen_mut().take_host_events().is_empty(), "generic or mixed bodies remain opaque until the wrapper ends");
+    }
+    // ConPTY drops each outer ST. A following wrapper starts with the same
+    // lone ESC that ends the previous one, and must still stop VTE at tmux;.
+    let consecutive = b"\x1bPtmux;\x1b\x1b]9;first\x07\x1bPtmux;\x1b\x1b]12345;opaque\x07plain";
+    for cut in 0..=consecutive.len() {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.process(&consecutive[..cut]);
+        let mut events = p.screen_mut().take_host_events();
+        p.process(&consecutive[cut..]);
+        events.extend(p.screen_mut().take_host_events());
+        assert_eq!(events.iter().map(|e| e.bytes.as_slice()).collect::<Vec<_>>(), vec![&b"\x1b]9;first\x07"[..], &b"\x1b]12345;opaque\x07"[..]], "lost ST split {cut}");
+        assert!(events.iter().all(|e| e.passthrough));
+        assert_eq!(p.screen().contents(), "plain");
+    }
+    // Prefix delivery cannot predict the wrapper's future suffix: once a
+    // complete notification was committed, a later generic suffix is separate.
+    let prefix = b"\x1bPtmux;\x1b\x1b]9;committed\x07";
+    for drop_suffix in [false, true] {
+        let mut p = vt100::Parser::new(4, 80, 0);
+        p.process(prefix);
+        let early = p.screen_mut().take_host_events();
+        assert_eq!(early.len(), 1);
+        assert_eq!(early[0].bytes, b"\x1b]9;committed\x07");
+        if drop_suffix {
+            p.process(&vec![b'x'; vt100::MAX_HOST_EVENT_BYTES + 1]);
+            p.process(b"\x1b\\");
+            assert!(p.screen_mut().take_host_events().is_empty(), "dropping a suffix cannot recall or replay the committed prefix");
+        } else {
+            p.process(b"\x1b\x1b[32msuffix\x1b\x1b[0m\x1b\\");
+            let suffix = p.screen_mut().take_host_events();
+            assert_eq!(suffix.len(), 1);
+            assert_eq!(suffix[0].bytes, b"\x1b[32msuffix\x1b[0m");
+        }
+    }
+    let mut p = vt100::Parser::new(4, 80, 0);
+    p.process(prefix);
+    assert_eq!(p.screen_mut().take_host_events().len(), 1);
+    p.process(b"\x1b\x1b]12345;suffix\x07plain");
+    let suffix = p.screen_mut().take_host_events();
+    assert_eq!(suffix.len(), 1);
+    assert_eq!(suffix[0].bytes, b"\x1b]12345;suffix\x07");
+    assert_eq!(p.screen().contents(), "plain", "lost outer ST recovers without replaying the committed prefix");
+    let mut p = vt100::Parser::new(4, 80, 0);
+    p.process(b"\x1bPtmux;\x1b\x1b]9;7;opaque-command\x07\x1b\\");
+    let explicit = p.screen_mut().take_host_events();
+    assert_eq!(explicit.len(), 1, "explicit enabled passthrough remains opaque");
+    assert!(explicit[0].passthrough);
+    assert_eq!(explicit[0].bytes, b"\x1b]9;7;opaque-command\x07");
+    vt100::set_allow_passthrough(false);
+
 }

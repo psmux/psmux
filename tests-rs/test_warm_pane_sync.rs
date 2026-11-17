@@ -368,3 +368,16 @@ fn reconcile_consumed_parser_propagates_alt_screen_flag() {
     reconcile_consumed_parser(&mut p, &app);
     assert!(!p.screen().allow_alternate_screen());
 }
+
+#[test]
+fn reconcile_consumed_parser_discards_warm_host_events() {
+    let mut p = vt100::Parser::new(4, 20, 0);
+    p.process(b"\x1b]9;warm-startup\x07");
+    let app = fresh_app();
+    reconcile_consumed_parser(&mut p, &app);
+    assert!(p.screen_mut().take_host_events().is_empty(), "claim cannot replay warm shell startup events");
+    p.process(b"\x1b]9;after-claim\x07");
+    let events = p.screen_mut().take_host_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].bytes, b"\x1b]9;after-claim\x07");
+}

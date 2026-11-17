@@ -2313,6 +2313,7 @@ pub struct AppState {
     pub manual_window_sizes: std::collections::HashMap<usize, (u16, u16)>,
     /// allow-passthrough: "on", "off", "all" (default "off")
     pub allow_passthrough: String,
+    pub host_events: crate::frame_oneshot::OneShots,
     /// copy-command: command to pipe yanked text to (default empty)
     pub copy_command: String,
     /// command-alias: the server ARRAY option, shared with the connection
@@ -3695,6 +3696,7 @@ impl AppState {
             window_size: "latest".to_string(),
             manual_window_sizes: std::collections::HashMap::new(),
             allow_passthrough: "off".to_string(),
+            host_events: Default::default(),
             copy_command: String::new(),
             command_aliases: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::command_alias::CommandAliases::with_defaults(),
@@ -5645,7 +5647,7 @@ impl CtrlReq {
 /// A client that already has this exact frame is not sent it again
 /// ([`frame_owed`]).
 pub fn push_frame(frame: &str) {
-    push_frame_answered(frame, None);
+    push_frame_inner(frame, None);
 }
 
 /// Forget what every client was last given, so the next frame reaches all
@@ -5659,11 +5661,22 @@ pub fn invalidate_delivered_frames() {
     }
 }
 
-/// [`push_frame`] for a frame that was also the full dump-state reply to the
-/// client `answered`: that client is pushed it regardless of what it had
-/// (see the comment inside), the others only if it is new to them.
-pub fn push_frame_answered(frame: &str, answered: Option<u64>) {
+/// Fan out a dump-state reply. The requester keeps its confirming screen
+/// push, but its one-shots travel only in the reply. Any older unread events
+/// move out of its slot into that reply, before the newer reply's events.
+pub fn push_frame_answered(frame: &mut String, answered: Option<u64>) {
+    let mut carried = push_frame_inner(frame, answered);
+    if !carried.is_empty() {
+        carried.merge_newer(crate::frame_oneshot::take(frame));
+        crate::frame_oneshot::append(frame, &carried);
+    }
+}
+
+/// Keep the new frame immutable throughout fanout: events carried from the
+/// requester's slot belong to its reply, never to another client's frame.
+fn push_frame_inner(frame: &str, answered: Option<u64>) -> crate::frame_oneshot::OneShots {
     let key = frame_key(frame);
+    let mut carried = crate::frame_oneshot::OneShots::default();
     if let Ok(mut slots) = FRAME_PUSH_SLOTS.lock() {
         slots.retain_mut(|r| {
             let FrameReceiver { client_id, slot, poke, last_key } = r;
@@ -5692,7 +5705,15 @@ pub fn push_frame_answered(frame: &str, answered: Option<u64>) {
                     // An unread frame being replaced keeps its clipboard
                     // write and bell (frame_oneshot): they are events, not
                     // screen state, and the newer snapshot does not have them.
-                    if let Some(mut older) = s.take() {
+                    if requester {
+                        // The connection writer sends replies before its slot.
+                        // Move older events to that ordered carrier, and omit
+                        // the new reply's events from the confirming push.
+                        crate::frame_oneshot::take(&mut frame);
+                        if let Some(mut older) = s.take() {
+                            carried.merge_newer(crate::frame_oneshot::take(&mut older));
+                        }
+                    } else if let Some(mut older) = s.take() {
                         crate::frame_oneshot::supersede(&mut older, &mut frame);
                     }
                     *s = Some(frame);
@@ -5706,6 +5727,7 @@ pub fn push_frame_answered(frame: &str, answered: Option<u64>) {
             }
         });
     }
+    carried
 }
 
 /// Check if any persistent clients are registered for push.

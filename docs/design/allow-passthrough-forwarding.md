@@ -1,9 +1,35 @@
 # Design: raw forwarding for `allow-passthrough on` and `all`
 
-Status: proposal, not implemented. Today `off` matches tmux (the passthrough
-is dropped) and `on`/`all` read the wrapped sequence as pane output; see
-`allow-passthrough` in [../compatibility.md](../compatibility.md). This page
-describes the step that would make `on` and `all` behave like tmux.
+Status: implemented for normal attached clients in the legacy and shared server.
+
+Unwrapped OSC 9 text notifications (excluding number-leading payloads),
+`777;notify`, OSC 99, and OSC 7501/9001 agent status reports are forwarded
+from visible panes of the active window without enabling passthrough.
+OSC 7501 capability queries stay local and are not forwarded. Other unknown
+OSCs remain ignored. Notification bytes, semicolons, BEL/ST terminators,
+OSC 99 identifiers, chunks and base64 data are preserved without decoding
+or reassembling the notification protocol in psmux.
+
+OSC 99 identifiers share the host terminal's namespace. Programs in visible
+split panes should use distinct identifiers; psmux does not rewrite IDs or
+merge chunks from separate panes. Visibility is evaluated when the server
+drains pane output; hidden and detached events are discarded, not replayed
+on a later window switch or attach.
+
+Bare OSC 9 payloads must be ASCII-control-free text (no C0 or DEL), and
+number-leading payloads are excluded after leading whitespace: ConEmu uses these for host commands, including GuiMacro and process
+execution, and some commands match a numeric prefix without a separator.
+Rejecting controls also prevents a downstream parser from stripping them to
+expose a hidden numeric command. UTF-8 text and semicolons are preserved.
+This also excludes number-leading notification text such as `123 completed`;
+use OSC 777/99 for such messages, or explicit enabled tmux passthrough. See
+[ConEmu's OSC command reference](https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC).
+OSC 9 progress and cwd continue to use their existing pane-local handlers.
+
+OSC 99 support here is notification display/chunk/base64 transport. Interactive
+responses (capability/liveness queries and click/close reports) are not routed
+back to the originating pane. The metadata is transported unchanged; this is
+not a complete implementation of the interactive kitty notification protocol.
 
 ## What tmux does
 
@@ -34,38 +60,57 @@ A program writes `ESC P tmux; <body with every ESC doubled> ESC \`.
   discarded, input.c:1289) and by the 5 second ground timer started when the
   DCS began (input.c:826-832, 2547).
 
-## Proposed psmux implementation
+## Implementation
 
-1. **Parser (vt100-psmux).** `src/passthrough.rs` already skips the body of a
-   passthrough before vte sees it and ends it at `ESC \`, at a lone ESC or at
-   text after a BEL (the inbox conhost drops the closing ST, #1026), or after
-   5 seconds. For forwarding, the skipper also collects the body with each
-   `ESC ESC` folded to one ESC, up to `input-buffer-size` (over that the
-   wrapper is dropped, like tmux's discard). At the wrapper's end the body is
-   queued on the `Screen` (bounded queue, total bytes held to
-   `input-buffer-size`). Collection only runs while the option is `on` or
-   `all`, so `off` costs nothing. With forwarding in place the parser no longer
-   reads the body as pane output for `on`/`all` either, which is the tmux
-   behaviour; the current "read it as pane output" opt in goes away.
-2. **Server.** In `helpers::take_frame_oneshots`, drain every pane's queue.
-   `on`: forward bodies only from panes that are visible (in the active window
-   and not hidden by a zoomed pane). `all`: forward from any pane of the
-   session. With no frame receiver the bodies are dropped, as tmux writes only
-   to clients that exist.
-3. **Frame.** A new one shot field, `"passthrough":"<base64>"`, written by
-   `frame_oneshot::append` with the clipboard and bell fields and read back by
-   `take`. `merge_newer` and `supersede` concatenate bodies in order, with the
-   same byte bound, so a superseded frame does not lose them. The shared mode
-   frame builder (`server/shared/frame.rs`) gets the same field behind
-   `PSMUX_SERVER_MODE`.
-4. **Client.** Where the clipboard and bell one shots are written, write the
-   decoded bytes raw to stdout, then force the next draw to resend cursor and
-   attributes (the equivalent of `tty_invalidate`).
-5. **Control clients.** Unchanged: `%output` carries the unwrapped body once;
-   frames never go to control clients, so nothing is delivered twice.
+1. **Parser.** An exact stream collector observes normal parser input before
+   VTE's OSC parameter limit can lose long or semicolon-rich payloads.
+   The tmux passthrough skipper collects unescaped bodies only while enabled;
+   the pane screen never interprets them. Fragmented reads, doubled inner ESC,
+   lost ConPTY closing ST recovery and the existing five second DCS timeout
+   retain their parser behavior. A complete single allowlisted OSC ending in
+   BEL is committed immediately, even if ConPTY drops the outer ST and the
+   writer goes silent. It is removed from the collected body, so a later ST
+   cannot replay it. This commits a notification prefix before the parser can
+   know whether generic content follows. A later suffix waits for normal
+   wrapper completion/recovery and can be dropped on timeout, overflow or
+   disabling passthrough without recalling the already delivered prefix.
+   Bodies with generic content before a notification are not committed early.
+2. **Server.** Each pane has an ordered consume-once event queue. The server
+   drains the live parser during copy mode; snapshots contain no pending events.
+   Passthrough `on` applies the same visible-pane filter as notifications,
+   `all` permits hidden panes too, and `off` drops passthrough bodies.
+   Tiled, floating and popup panes are covered. Events are discarded when the
+   session has no registered normal client; control clients and normal clients
+   in another shared-server session cannot retain events for a later attach.
+   Warm-pane claim reconciliation also discards its queued startup events.
+3. **Frames.** Exact bytes travel as a base64 array in one-shot `host_events`,
+   with `host_raw` requesting cache invalidation for arbitrary passthrough.
+   Clipboard, bell and image one-shots retain their existing semantics.
+   Every frame superseding location carries events forward in order. A legacy
+   dump-state reply absorbs the requester's older unread events before its new
+   events, and its confirming pushed screen omits those one-shots. Other clients
+   retain their own ordered events. Cached screen snapshots contain no events,
+   so redraw cannot replay them.
+4. **Client.** Event bytes are written once to stdout even when the screen
+   snapshot is unchanged. A raw passthrough write resets attributes and the
+   open hyperlink and invalidates the screen before the next redraw.
+5. **Bounds.** Each event is limited by the smaller of `input-buffer-size`
+   and 1 MiB. Pane, staged frame and coalesced client queues each hold at most
+   256 events and 1 MiB of raw bytes. When full, newer complete events are
+   discarded; no event is byte-truncated. These are transport bounds, so a
+   dropped OSC 99 chunk can leave the producer's notification incomplete.
+6. **Control clients.** Unchanged: `%output` carries unwrapped pane bytes;
+   normal frame side effects are not sent through the control stream.
 
 ## Gaps and risks
 
+- ConPTY can change bytes before psmux sees them. In direct control and raw
+  pane-reader captures, the tested inbox console host discarded whole
+  ST-terminated wrapped OSCs, unwrapped generic ANSI with normalized resets,
+  and retained BEL-terminated wrapped OSCs while dropping their outer ST.
+  Forwarding only applies to bytes received by psmux; an option cannot recover
+  a wrapper the console host already consumed. Regression captures must use
+  the direct control and raw pane ingress to distinguish these cases.
 - tmux's option is per window and per pane (options-table.c:1257-1259). psmux
   keeps one value per server (`app.allow_passthrough`, applied to the parsers
   through `vt100::set_allow_passthrough`). In shared server mode the value is

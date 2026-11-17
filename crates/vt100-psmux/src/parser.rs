@@ -10,6 +10,7 @@ pub struct Parser<CB: crate::callbacks::Callbacks = ()> {
     dcs_may_continue: bool,
     /// The last call's bytes ended in ESC; see [`Parser::process`].
     conhost_prev_esc: bool,
+    host_events: crate::host_events::Collector,
 }
 
 impl Parser {
@@ -27,6 +28,7 @@ impl Parser {
             passthrough: crate::passthrough::Passthrough::default(),
             dcs_may_continue: false,
             conhost_prev_esc: false,
+            host_events: Default::default(),
         }
     }
 }
@@ -53,6 +55,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
             passthrough: crate::passthrough::Passthrough::default(),
             dcs_may_continue: false,
             conhost_prev_esc: false,
+            host_events: Default::default(),
         }
     }
 
@@ -71,12 +74,14 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     {
         let mut screen = self.screen.screen.clone();
         screen.capture_queries(false);
+        screen.take_host_events();
         Self {
             parser: vte::Parser::new(),
             screen: crate::perform::WrappedScreen::from_screen(screen, CB::default()),
             passthrough: crate::passthrough::Passthrough::default(),
             dcs_may_continue: false,
             conhost_prev_esc: false,
+            host_events: Default::default(),
         }
     }
 
@@ -138,13 +143,28 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         if self.passthrough.expired() {
             self.passthrough.end();
             self.parser.advance(&mut self.screen, b"\x1b\\");
+            self.host_events.feed(b"\x1b\\", &mut self.screen.screen.host_events);
         }
         loop {
             if self.passthrough.active() {
-                match self.passthrough.skip(rest) {
+                let skipped = self.passthrough.skip(rest);
+                for event in self.passthrough.take_completed() {
+                    self.screen.screen.push_host_passthrough(event.bytes);
+                }
+                match skipped {
                     crate::passthrough::Skip::More => return,
                     crate::passthrough::Skip::End { resume, close } => {
+                        if let Some(body) = self.passthrough.take_body() {
+                            self.screen.screen.push_host_passthrough(body);
+                        }
                         self.parser.advance(&mut self.screen, close);
+                        self.host_events.feed(b"\x1b\\", &mut self.screen.screen.host_events);
+                        if close == b"\x1b" {
+                            self.host_events.feed(close, &mut self.screen.screen.host_events);
+                            // The ESC was handed to VTE separately; resume may
+                            // start with Ptmux;, which still needs its stop check.
+                            dcs_may_continue = true;
+                        }
                         rest = &rest[resume..];
                     }
                 }
@@ -160,6 +180,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
             dcs_may_continue = false;
             if start > 0 {
                 self.parser.advance(&mut self.screen, &rest[..start]);
+                self.host_events.feed(&rest[..start], &mut self.screen.screen.host_events);
                 rest = &rest[start..];
             }
             if rest.is_empty() {
@@ -168,6 +189,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
             // Stops right after an `ESC P tmux;`, so its body is skipped
             // above instead of parsed (see `passthrough`).
             let n = self.parser.advance_until_terminated(&mut self.screen, rest);
+            self.host_events.feed(&rest[..n], &mut self.screen.screen.host_events);
             rest = &rest[n..];
             if !self.screen.take_tmux_passthrough() {
                 return;
