@@ -129,10 +129,24 @@ try {
     $cc.ReadFor(300)
     $memStart = if ($serverPid) { (Get-Process -Id $serverPid).PrivateMemorySize64 } else { 0 }
     $memMax = $memStart
+    $memSamples = New-Object System.Collections.Generic.List[long]
     for ($i = 0; $i -lt 16; $i++) {
         Start-Sleep -Milliseconds 500
-        if ($serverPid) { $m = (Get-Process -Id $serverPid -EA SilentlyContinue).PrivateMemorySize64; if ($m -gt $memMax) { $memMax = $m } }
+        if ($serverPid) {
+            $m = (Get-Process -Id $serverPid -EA SilentlyContinue).PrivateMemorySize64
+            $memSamples.Add($m)
+            if ($m -gt $memMax) { $memMax = $m }
+        }
     }
+    # Growth over the second half of the stall (4 s to 8 s).  Before the fix
+    # the backlog kept piling up, so the server kept growing all the way
+    # (13.6 to 14.3 MB in total).  With pause-after the pane is paused within
+    # about a second and memory levels off; the total before that point
+    # depends on how much output got queued first (4 to 10 MB idle, with no
+    # control client 0 to 0.5 MB), so the total alone is not a stable check.
+    $lateMB = if ($memSamples.Count -ge 16) {
+        [Math]::Round((($memSamples | Select-Object -Skip 8 | Measure-Object -Maximum).Maximum - $memSamples[7]) / 1MB, 1)
+    } else { 0 }
     $atResume = $cc.Bytes()
     $cc.ReadFor(3000)
     $burst = $cc.Bytes() - $atResume
@@ -140,10 +154,10 @@ try {
     $pauseIdx = -1
     for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^%pause $paneRe\s*$") { $pauseIdx = $i; break } }
     $growMB = [Math]::Round(($memMax - $memStart) / 1MB, 1)
-    Write-Host "  burst after resume: $burst bytes, server private growth during stall: $growMB MB"
+    Write-Host "  burst after resume: $burst bytes, server private growth during stall: $growMB MB, in its second half: $lateMB MB"
     Check ($pauseIdx -ge 0) "%pause $pane arrives for the stalled client"
     Check ($burst -lt 4MB) "backlog delivered on resume is bounded ($burst bytes, was ~16 MB)"
-    Check ($growMB -lt 6) "server memory does not grow with the backlog ($growMB MB)"
+    Check ($lateMB -lt 2) "server memory stops growing once the pane is paused ($lateMB MB in the second half of the stall, $growMB MB in all)"
     if ($pauseIdx -ge 0) {
         $after = @($lines[($pauseIdx + 1)..($lines.Count - 1)] | Where-Object { $_ -match "^%(extended-)?output $paneRe " }).Count
         Check ($after -eq 0) "no output for the paused pane after %pause ($after lines)"
