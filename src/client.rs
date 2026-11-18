@@ -2,7 +2,7 @@ use std::io::{self, Write, BufRead, BufReader};
 use std::time::{Duration, Instant};
 use std::env;
 
-use chrono::Local;
+
 use crossterm::event::{Event, KeyCode, KeyModifiers, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -1886,11 +1886,13 @@ pub fn render_clock_overlay(
     window_style: Option<Style>,
 ) {
     let look = look.into();
-    let now = Local::now();
-    let time_str = {
-        use chrono::Timelike;
-        crate::clock_style::time_text(look.style, now.hour(), now.minute(), now.second())
-    };
+    let now = crate::strftime::now();
+    let time_str = crate::clock_style::time_text(
+        look.style,
+        now.hour() as u32,
+        now.minute() as u32,
+        now.second() as u32,
+    );
     render_clock_text(f, area, &time_str, look.colour, window_style);
 }
 
@@ -3527,7 +3529,7 @@ fn install_client_panic_hook() {
             format!(
                 "psmux client pid {} panicked at {}\n\n{info}\n\nBacktrace:\n{bt}",
                 std::process::id(),
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                crate::strftime::now_string("%Y-%m-%d %H:%M:%S%.3f"),
             ),
         );
         crate::debug_log::reconnect_log("CLIENT PANIC, see client_crash log");
@@ -8792,10 +8794,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 && !paste_confirmed
                 && !paste_stage2
             {
+                // Measured BEFORE the clipboard read: the hold is how long the
+                // character has waited for a follow up, and the read is not
+                // input gap.  The first read on this thread creates the owner
+                // window clipboard.rs opens the clipboard with, a few ms, and
+                // counting that against the 3 ms PASTE_HEAD_PREFIX_HOLD
+                // released the head of a paste as typing (test_altgr_letter_paste
+                // 'bi' before ESC[200~, test_issue684_paste_head 40 flushes).
+                let head_cache = &mut paste_clip_head;
+                let (held_for, clip_head) = held_for_then_read(paste_pend_start, move || head_cache.get());
                 PasteHeadEvidence {
                     gesture_open: paste_gesture.is_open(),
-                    clip_head: paste_clip_head.get(),
-                    held_for: paste_pend_start.map(|s| s.elapsed()).unwrap_or_default(),
+                    clip_head,
+                    held_for,
                     shifted_head: paste_head_shifted,
                     head_released: paste_head_released || !key_releases_seen || !release_shape_is_evidence,
                 }
@@ -11521,6 +11532,20 @@ fn stage2_paste_ended_by_new_key(paste_stage2: bool, pend_non_empty: bool, since
     paste_stage2 && pend_non_empty && since_last_char >= PASTE_STAGE2_QUIET
 }
 
+/// How long the pending buffer has waited, taken BEFORE `read` runs, and what
+/// `read` returned.
+///
+/// `read` is the clipboard head lookup, which opens the clipboard when its
+/// sequence number moved.  That costs a few milliseconds the first time a
+/// thread does it (clipboard.rs creates the window it opens the clipboard
+/// with), more than PASTE_HEAD_PREFIX_HOLD, so measuring after it released the
+/// head of a paste as typing before the rest of the paste could be read.
+#[cfg(windows)]
+fn held_for_then_read<R>(pend_start: Option<Instant>, read: impl FnOnce() -> R) -> (Duration, R) {
+    let held_for = pend_start.map(|s| s.elapsed()).unwrap_or_default();
+    (held_for, read())
+}
+
 #[cfg(windows)]
 impl<'a> PasteHeadEvidence<'a> {
     /// True when `pend` could be the start of the clipboard's text.
@@ -11625,7 +11650,13 @@ impl ClipboardHeadCache {
         read: impl FnOnce() -> Result<Option<String>, crate::clipboard::ClipboardBusy>,
     ) -> Option<&str> {
         if self.seq != Some(seq) {
-            match read() {
+            let started = Instant::now();
+            let result = read();
+            if input_log_enabled() {
+                input_log("paste", &format!(
+                    "clipboard head read (seq {}) took {} us", seq, started.elapsed().as_micros()));
+            }
+            match result {
                 Ok(text) => {
                     self.seq = Some(seq);
                     self.head = text.map(|t| t.chars().take(Self::HEAD_CHARS).collect::<String>());
@@ -12246,6 +12277,10 @@ mod test_issue744_paste_overlay_routing;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue684_clipboard_head_cache.rs"]
 mod test_issue684_clipboard_head_cache;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_paste_head_hold_before_read.rs"]
+mod test_paste_head_hold_before_read;
 
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue766_paste_then_key.rs"]

@@ -79,7 +79,7 @@ fn open_shared_log(filename: &str) -> Option<std::fs::File> {
     let _ = writeln!(
         file,
         "[{}][log] === {} pid {} opened {} (append) ===",
-        chrono::Local::now().format("%H:%M:%S%.3f"),
+        crate::strftime::now_string("%H:%M:%S%.3f"),
         std::env::current_exe()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -136,7 +136,7 @@ pub fn client_log(component: &str, msg: &str) {
             if let Ok(mut guard) = CLIENT_LOG.lock() {
                 if let Some(ref mut f) = *guard {
                     let _ = writeln!(f, "[{}][log] --- log cap reached ({} entries), further logging suppressed ---",
-                        chrono::Local::now().format("%H:%M:%S%.3f"), CLIENT_LOG_CAP);
+                        crate::strftime::now_string("%H:%M:%S%.3f"), CLIENT_LOG_CAP);
                     let _ = f.flush();
                 }
             }
@@ -146,7 +146,7 @@ pub fn client_log(component: &str, msg: &str) {
     if let Ok(mut guard) = CLIENT_LOG.lock() {
         if let Some(ref mut f) = *guard {
             let _ = writeln!(f, "[{}][{}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+                crate::strftime::now_string("%H:%M:%S%.3f"), component, msg);
             let _ = f.flush();
         }
     }
@@ -194,7 +194,7 @@ pub fn reconnect_log(msg: &str) {
     if let Ok(mut guard) = RECONNECT_LOG.lock() {
         if let Some(ref mut f) = *guard {
             let _ = writeln!(f, "[{}][reconnect][pid {}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"), std::process::id(), msg);
+                crate::strftime::now_string("%H:%M:%S%.3f"), std::process::id(), msg);
             let _ = f.flush();
         }
     }
@@ -274,7 +274,7 @@ pub fn style_log(component: &str, msg: &str) {
             if let Ok(mut guard) = STYLE_LOG.lock() {
                 if let Some(ref mut f) = *guard {
                     let _ = writeln!(f, "[{}][log] --- log cap reached ---",
-                        chrono::Local::now().format("%H:%M:%S%.3f"));
+                        crate::strftime::now_string("%H:%M:%S%.3f"));
                     let _ = f.flush();
                 }
             }
@@ -284,7 +284,7 @@ pub fn style_log(component: &str, msg: &str) {
     if let Ok(mut guard) = STYLE_LOG.lock() {
         if let Some(ref mut f) = *guard {
             let _ = writeln!(f, "[{}][{}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+                crate::strftime::now_string("%H:%M:%S%.3f"), component, msg);
             let _ = f.flush();
         }
     }
@@ -320,7 +320,7 @@ pub fn input_log(component: &str, msg: &str) {
             if let Ok(mut guard) = INPUT_LOG.lock() {
                 if let Some(ref mut f) = *guard {
                     let _ = writeln!(f, "[{}][log] --- log cap reached ---",
-                        chrono::Local::now().format("%H:%M:%S%.3f"));
+                        crate::strftime::now_string("%H:%M:%S%.3f"));
                     let _ = f.flush();
                 }
             }
@@ -330,7 +330,7 @@ pub fn input_log(component: &str, msg: &str) {
     if let Ok(mut guard) = INPUT_LOG.lock() {
         if let Some(ref mut f) = *guard {
             let _ = writeln!(f, "[{}][{}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+                crate::strftime::now_string("%H:%M:%S%.3f"), component, msg);
             let _ = f.flush();
         }
     }
@@ -361,7 +361,7 @@ pub fn server_log(component: &str, msg: &str) {
             if let Ok(mut guard) = SERVER_LOG.lock() {
                 if let Some(ref mut f) = *guard {
                     let _ = writeln!(f, "[{}][log] --- log cap reached ---",
-                        chrono::Local::now().format("%H:%M:%S%.3f"));
+                        crate::strftime::now_string("%H:%M:%S%.3f"));
                     let _ = f.flush();
                 }
             }
@@ -371,7 +371,7 @@ pub fn server_log(component: &str, msg: &str) {
     if let Ok(mut guard) = SERVER_LOG.lock() {
         if let Some(ref mut f) = *guard {
             let _ = writeln!(f, "[{}][{}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+                crate::strftime::now_string("%H:%M:%S%.3f"), component, msg);
             let _ = f.flush();
         }
     }
@@ -412,7 +412,7 @@ pub fn session_log(component: &str, msg: &str) {
             if let Ok(mut guard) = SESSION_LOG.lock() {
                 if let Some(ref mut f) = *guard {
                     let _ = writeln!(f, "[{}][log] --- log cap reached ---",
-                        chrono::Local::now().format("%H:%M:%S%.3f"));
+                        crate::strftime::now_string("%H:%M:%S%.3f"));
                     let _ = f.flush();
                 }
             }
@@ -422,7 +422,7 @@ pub fn session_log(component: &str, msg: &str) {
     if let Ok(mut guard) = SESSION_LOG.lock() {
         if let Some(ref mut f) = *guard {
             let _ = writeln!(f, "[{}][{}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+                crate::strftime::now_string("%H:%M:%S%.3f"), component, msg);
             let _ = f.flush();
         }
     }

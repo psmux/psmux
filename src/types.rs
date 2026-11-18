@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crossterm::event::{KeyCode, KeyModifiers};
 use portable_pty::MasterPty;
 use ratatui::prelude::Rect;
-use chrono::Local;
+
 use crate::terminal_features::TerminalFeatures;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -270,7 +270,7 @@ pub struct DeadInfo {
     /// empty and the code is always the status.
     pub status: u32,
     /// When the pane died, the time tmux keeps in `wp->dead_time`.
-    pub time: chrono::DateTime<chrono::Local>,
+    pub time: jiff::Timestamp,
 }
 
 /// Which client a format is expanded for (`display-message -c`, issue #724).
@@ -1267,6 +1267,34 @@ impl WarmPool {
         self.spares = dropped;
         before - self.spares.len()
     }
+    /// Give the lowest reserved pane id to a creation that cannot use a spare
+    /// (it runs a command, has `-e`, or the default shell is dynamic), and
+    /// retire only the one spare that held it.
+    ///
+    /// Such a creation used to take `next_pane_id`, which is above every id the
+    /// pooled spares reserved, so [`WarmPool::set_issued_floor`] then had to kill
+    /// the WHOLE pool and the refill booted three fresh shells beside the
+    /// command the user was waiting on: `new-window cmd` and `split-window cmd`
+    /// reached their command ~200 ms later than with the pool off. Taking the
+    /// front spare's id instead keeps the visible sequence in creation order
+    /// (the front is the lowest outstanding id) and leaves every other spare
+    /// valid.
+    ///
+    /// Only when nothing is in flight: a refill still inside `CreateProcessW`
+    /// may hold a lower id than the front, and handing out the front would put
+    /// that one in the past. The caller falls back to `next_pane_id` and
+    /// [`WarmPool::set_issued_floor`] then, as before.
+    pub fn yield_front_id(&mut self) -> Option<usize> {
+        if self.inflight > 0 {
+            return None;
+        }
+        let mut wp = self.spares.pop_front()?;
+        let id = wp.pane_id;
+        // Retired exactly as `set_issued_floor` retires a spare.
+        wp.child.kill().ok();
+        self.note_issued(id);
+        Some(id)
+    }
     pub fn issued_floor(&self) -> usize {
         self.issued_floor
     }
@@ -2068,7 +2096,7 @@ pub struct AppState {
     /// The command lines waiting for their prompt (no `-b`), by request id:
     /// each gets its reply when the prompt closes, as tmux's client waits.
     pub prompt_waiters: Vec<(u64, std::sync::mpsc::Sender<String>)>,
-    pub created_at: chrono::DateTime<Local>,
+    pub created_at: jiff::ZonedDateTime,
     pub next_win_id: usize,
     pub next_pane_id: usize,
     /// Pane ids already auto-healed once by `@heal-crashed-panes`. A pane is
@@ -3569,7 +3597,7 @@ impl AppState {
             prompt_request: None,
             prompt_request_seq: 0,
             prompt_waiters: Vec::new(),
-            created_at: Local::now(),
+            created_at: crate::strftime::now(),
             next_win_id: 1,
             next_pane_id: 1,
             healed_pane_ids: std::collections::HashSet::new(),

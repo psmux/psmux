@@ -2672,7 +2672,7 @@ if control_echo || control_quiet || control_noecho {
     // before it (issue #857).
     {
         let mut ws = write_lock.lock().unwrap();
-        let init_ts = chrono::Utc::now().timestamp();
+        let init_ts = jiff::Timestamp::now().as_second();
         // One write: DCS opener (no newline) and the block together.
         let _ = ws.write_all(control::initial_reply_block(init_ts, control_noecho).as_bytes());
         let _ = ws.flush();
@@ -2748,7 +2748,7 @@ if control_echo || control_quiet || control_noecho {
             });
             if let Some(name) = unknown {
                 cmd_counter += 1;
-                let ts = chrono::Utc::now().timestamp();
+                let ts = jiff::Timestamp::now().as_second();
                 let mut out = String::new();
                 if control_echo {
                     out.push_str(stripped);
@@ -2777,7 +2777,7 @@ if control_echo || control_quiet || control_noecho {
         if trimmed.is_empty() { continue; }
 
         cmd_counter += 1;
-        let ts = chrono::Utc::now().timestamp();
+        let ts = jiff::Timestamp::now().as_second();
 
         // A send merged into the one before it: its keys went out with that
         // write, and it answers its own empty block like any send (#799).
