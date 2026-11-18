@@ -519,7 +519,7 @@ pub(crate) fn dispatch(
                         String::new()
                     };
                     let windows = app.windows.len();
-                    let created = app.created_at.format("%a %b %e %H:%M:%S %Y");
+                    let created = crate::strftime::format("%a %b %e %H:%M:%S %Y", &app.created_at).unwrap_or_default();
                     let line = format!("{}: {} windows (created {}){}{}\n", app.session_name, windows, created, group, attached);
                     let _ = resp.send(line);
                 }

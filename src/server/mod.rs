@@ -28,7 +28,7 @@ use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all
     path_exists};
 
 use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_string,
-    list_windows_json_with_tabs, combined_data_version, TMUX_COMMANDS};
+    list_windows_json_with_tabs, combined_data_version};
 use options::{get_option_value, render_window_options, apply_set_option};
 
 use crate::input::{send_text_to_active, send_bytes_to_active, send_key_to_active, send_paste_to_active, move_focus, move_focus_preserving_zoom, find_best_pane_in_direction, find_wrap_target};
@@ -4184,7 +4184,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         String::new()
                     };
                     let windows = app.windows.len();
-                    let created = app.created_at.format("%a %b %e %H:%M:%S %Y");
+                    let created = crate::strftime::format("%a %b %e %H:%M:%S %Y", &app.created_at).unwrap_or_default();
                     let line = format!("{}: {} windows (created {}){}{}\n", app.session_name, windows, created, group, attached);
                     let _ = resp.send(line);
                 }
@@ -5871,7 +5871,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Warm server's created_at is the warm process start time, not the
                     // user's session-creation time — reset on claim or list-sessions /
                     // session_created / uptime would report the warm pool's age.
-                    app.created_at = chrono::Local::now();
+                    app.created_at = crate::strftime::now();
                     // Same reason for the status-interval phase: the warm server skips
                     // the timer (see should_run_status_interval_timer), so its last-fire
                     // stamp is the warm start time — reset it so a claimed session fires

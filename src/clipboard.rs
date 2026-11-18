@@ -38,6 +38,66 @@ fn clipboard_section() -> std::sync::MutexGuard<'static, ()> {
     CLIPBOARD_SECTION.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A message-only window to open the clipboard with.
+///
+/// `OpenClipboard(NULL)` does not lock other processes out: a second process
+/// that also opens with no window (pwsh `Get-Clipboard` and `Set-Clipboard`,
+/// another psmux, many small tools) gets the clipboard too, and the first one
+/// to call `CloseClipboard` closes it for both.  A write then failed at
+/// `EmptyClipboard` (ERROR_CLIPBOARD_NOT_OPEN; `set-buffer -w` warned "Windows
+/// refused the text" and the old text stayed) and a read got no data from
+/// `GetClipboardData`, so a paste or `refresh-client -l` silently used nothing.
+/// Opened with a window, the open is exclusive both ways: a no-window opener
+/// is refused while psmux holds it, and psmux is refused (and retries, like for
+/// any busy clipboard) while a no-window opener holds it.
+///
+/// The window lives for one clipboard section on the thread that opened the
+/// clipboard and is destroyed right after `CloseClipboard`, so no thread has
+/// to pump messages for it; the text stays on the clipboard.  If it cannot be
+/// created (no desktop) the clipboard is opened with no window, as before.
+#[cfg(windows)]
+struct ClipboardOwnerWindow(windows_sys::Win32::Foundation::HWND);
+
+#[cfg(windows)]
+impl ClipboardOwnerWindow {
+    fn new() -> Self {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, HWND_MESSAGE};
+        const STATIC_CLASS: [u16; 7] = [b'S' as u16, b'T' as u16, b'A' as u16, b'T' as u16, b'I' as u16, b'C' as u16, 0];
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                STATIC_CLASS.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        ClipboardOwnerWindow(hwnd)
+    }
+
+    fn handle(&self) -> windows_sys::Win32::Foundation::HWND {
+        self.0
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ClipboardOwnerWindow {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0);
+            }
+        }
+    }
+}
+
 /// Tests that assert what the clipboard holds take this for their whole body,
 /// so one test's write cannot land between another's write and read.
 #[cfg(test)]
@@ -92,10 +152,12 @@ pub fn try_copy_to_system_clipboard(text: &str) -> Result<bool, ClipboardBusy> {
 
     // Buffer is ready. Open the clipboard only for the minimal Win32 dance.
     // Other processes can briefly hold the clipboard open; retry a few times.
+    // Declared before the loop so it is destroyed after CloseClipboard.
+    let owner = ClipboardOwnerWindow::new();
     let mut result = Err(ClipboardBusy);
     for _ in 0..5 {
         let _section = clipboard_section();
-        let opened = unsafe { OpenClipboard(std::ptr::null_mut()) };
+        let opened = unsafe { OpenClipboard(owner.handle()) };
         if opened == 0 {
             drop(_section);
             thread::sleep(Duration::from_millis(2));
@@ -198,9 +260,10 @@ pub struct ClipboardBusy;
 #[cfg(windows)]
 pub fn try_read_from_system_clipboard() -> Result<Option<String>, ClipboardBusy> {
     const CF_UNICODETEXT: u32 = 13;
+    let owner = ClipboardOwnerWindow::new();
     for _ in 0..5 {
         let _section = clipboard_section();
-        let opened = unsafe { OpenClipboard(std::ptr::null_mut()) };
+        let opened = unsafe { OpenClipboard(owner.handle()) };
         if opened == 0 {
             drop(_section);
             thread::sleep(Duration::from_millis(2));
@@ -330,3 +393,7 @@ mod tests_clipboard_write_busy;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_clipboard_thread_lock.rs"]
 mod tests_clipboard_thread_lock;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_clipboard_owner_window.rs"]
+mod tests_clipboard_owner_window;

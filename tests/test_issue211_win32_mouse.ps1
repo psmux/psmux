@@ -33,12 +33,32 @@ function Write-Info($msg) { Write-Host "  [INFO] $msg" -ForegroundColor Cyan }
 function Write-Test($msg) { Write-Host "  [TEST] $msg" -ForegroundColor White }
 function Write-Skip($msg) { Write-Host "  [SKIP] $msg" -ForegroundColor DarkYellow }
 
-$PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path
+$PSMUX = $env:PSMUX_TEST_BIN
+if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path }
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\debug\psmux.exe" -ErrorAction SilentlyContinue).Path }
 if (-not $PSMUX) { Write-Error "psmux binary not found"; exit 1 }
 Write-Info "Using: $PSMUX"
 
-function Psmux { & $PSMUX @args 2>&1; Start-Sleep -Milliseconds 300 }
+# Its own -L namespace and PSMUX_DATA_DIR: the suite never touches the
+# default server or ~/.psmux, and cleans up with -L kill-server only.
+foreach ($v in 'PSMUX_SESSION_NAME','PSMUX_SESSION','PSMUX_PANE','TMUX','TMUX_PANE','PSMUX') { Remove-Item "Env:\$v" -EA SilentlyContinue }
+$NS = "w32sel211_$PID"
+$savedDataDir = $env:PSMUX_DATA_DIR
+$dataRoot = Join-Path $env:TEMP "w32sel211_$PID"
+$env:PSMUX_DATA_DIR = Join-Path $dataRoot "d"
+New-Item -ItemType Directory -Force $env:PSMUX_DATA_DIR | Out-Null
+
+function Psmux { & $PSMUX -L $NS @args 2>&1; Start-Sleep -Milliseconds 300 }
+
+# Seed and read the clipboard with the shared helpers. pwsh's one shot
+# Set-Clipboard is a silent no-op and Get-Clipboard returns '' whenever another
+# window has the clipboard open at that instant (a clipboard history listener,
+# an RDP bridge, the attached psmux client reading the clipboard head after it
+# changed). Full sweep 2026-11-16 failed 2.3 with "Ctrl+Shift+C unexpectedly
+# changed clipboard (got '')": the read, not psmux.
+. (Join-Path $PSScriptRoot "clipboard_test_helpers.ps1")
+$savedClip = $null; $clipSaved = $false
+try { $savedClip = Get-Clipboard -Raw -EA Stop; $clipSaved = $true } catch {}
 
 # ── Win32 API (window management + keybd_event only) ──────────────────────
 Add-Type @"
@@ -351,19 +371,13 @@ Write-Host "`n==========================================" -ForegroundColor Cyan
 Write-Host "  ISSUE #211: Win32 TUI Mouse Selection   " -ForegroundColor Cyan
 Write-Host "==========================================`n" -ForegroundColor Cyan
 
-# Clean slate
-& $PSMUX kill-server 2>$null
-Start-Sleep -Seconds 2
-Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -EA SilentlyContinue
-Remove-Item "$env:USERPROFILE\.psmux\*.key"  -Force -EA SilentlyContinue
-
 # Snapshot windows BEFORE launch
 $snap = [W32Sel]::Snapshot()
 Write-Info "$($snap.Count) windows before launch"
 
 # Launch via conhost.exe for a real conhost window (not WT)
 $script:proc = Start-Process -FilePath "conhost.exe" `
-    -ArgumentList "$PSMUX","new-session","-s",$SESSION `
+    -ArgumentList "$PSMUX","-L",$NS,"new-session","-s",$SESSION `
     -PassThru
 Start-Sleep -Seconds 4
 
@@ -371,7 +385,7 @@ Start-Sleep -Seconds 4
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $ready = $false
 while ($sw.ElapsedMilliseconds -lt 15000) {
-    & $PSMUX has-session -t $SESSION 2>$null
+    & $PSMUX -L $NS has-session -t $SESSION 2>$null
     if ($LASTEXITCODE -eq 0) { $ready = $true; break }
     Start-Sleep -Milliseconds 300
 }
@@ -417,9 +431,9 @@ if ($psmuxChild) {
 
 # Seed known text for selection verification
 $marker = "SELTEST_ABCDEFGHIJKLMNOP_12345"
-& $PSMUX send-keys -t $SESSION "echo $marker" Enter
+& $PSMUX -L $NS send-keys -t $SESSION "echo $marker" Enter
 Start-Sleep -Seconds 1
-& $PSMUX send-keys -t $SESSION "echo THE_QUICK_BROWN_FOX_JUMPS" Enter
+& $PSMUX -L $NS send-keys -t $SESSION "echo THE_QUICK_BROWN_FOX_JUMPS" Enter
 Start-Sleep -Seconds 1
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -431,7 +445,7 @@ if (Skip-IfDead "0") {} else {
     # Temporarily turn OFF pwsh-mouse-selection so copy-on-release is active
     Psmux set -g pwsh-mouse-selection off -t $SESSION
     Start-Sleep -Milliseconds 800
-    Set-Clipboard -Value "DIAGNOSTIC_MARKER"
+    [void](Set-ClipboardVerified "DIAGNOSTIC_MARKER")
     Start-Sleep -Milliseconds 200
 
     # Inject a drag from col 2 row 2 to col 30 row 2 (console cell coords)
@@ -441,7 +455,7 @@ if (Skip-IfDead "0") {} else {
         Write-Fail "0: WriteConsoleInput injection failed"
     } else {
         Start-Sleep -Milliseconds 800
-        $clip = Get-Clipboard -Raw -EA SilentlyContinue
+        $clip = Get-ClipboardSettled
         if ($null -ne $clip -and $clip -ne "DIAGNOSTIC_MARKER" -and $clip.Length -gt 0) {
             Write-Pass "0: Mouse events reach psmux! Clipboard: '$($clip.Substring(0, [Math]::Min(50, $clip.Length)))'"
             $script:MouseEventsWork = $true
@@ -480,7 +494,11 @@ if (Skip-IfDead "2.1") {} elseif ($script:hwnd -eq [IntPtr]::Zero) {
         $val = (Psmux show-options -t $SESSION -gv pwsh-mouse-selection | Out-String).Trim()
         if ($val -eq "on") { Write-Pass "2.1: Command prompt set option to on" }
         else { Write-Fail "2.1: Expected 'on', got '$val'" }
-    } else { Write-Fail "2.1: Cannot focus window" }
+    } else {
+        # keybd_event types into whatever window is in front; never type
+        # into another one (the pattern of test_win32_tui_mega_proof).
+        Write-Skip "2.1: the psmux window could not be brought to the front; no keys typed"
+    }
 }
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -491,14 +509,14 @@ Write-Test "2.2: Left-click drag (copy-on-release)"
 if (Skip-IfDead "2.2") {} elseif (-not $script:MouseEventsWork) {
     Write-Skip "2.2: Mouse injection did not work (skipped)"
 } else {
-    Set-Clipboard -Value "UNTOUCHED_MARKER"
+    [void](Set-ClipboardVerified "UNTOUCHED_MARKER")
     Start-Sleep -Milliseconds 200
 
     $ok = Invoke-ConsoleInject -TargetPid $script:TargetPid -Action "drag" `
         -Col1 2 -Row1 3 -Col2 30 -Row2 3
     Start-Sleep -Milliseconds 800
 
-    $clip = Get-Clipboard -Raw -EA SilentlyContinue
+    $clip = Get-ClipboardSettled
     if ($null -ne $clip -and $clip.Length -gt 0 -and $clip -ne "UNTOUCHED_MARKER") {
         Write-Pass "2.2: Drag copied on release: '$($clip.Substring(0, [Math]::Min(60, $clip.Length)))'"
     } else {
@@ -514,7 +532,7 @@ Write-Test "2.3: Ctrl+Shift+C with no active selection"
 if (Skip-IfDead "2.3") {} elseif (-not $script:MouseEventsWork) {
     Write-Skip "2.3: Mouse injection did not work (skipped)"
 } else {
-    Set-Clipboard -Value "BEFORE_COPY"
+    [void](Set-ClipboardVerified "BEFORE_COPY")
     Start-Sleep -Milliseconds 200
 
     # No selection is active here (2.2 clears selection after release).
@@ -522,7 +540,7 @@ if (Skip-IfDead "2.3") {} elseif (-not $script:MouseEventsWork) {
     $ok = Invoke-ConsoleInject -TargetPid $script:TargetPid -Action "ctrlshiftc"
     Start-Sleep -Milliseconds 500
 
-    $clip = Get-Clipboard -Raw -EA SilentlyContinue
+    $clip = Get-ClipboardSettled
     if ($clip -eq "BEFORE_COPY") {
         Write-Pass "2.3: Ctrl+Shift+C left clipboard unchanged without active selection"
     } else {
@@ -538,13 +556,13 @@ Write-Test "2.4: Smart Ctrl+C falls back to SIGINT when no selection"
 if (Skip-IfDead "2.4") {} elseif (-not $script:MouseEventsWork) {
     Write-Skip "2.4: Mouse injection did not work (skipped)"
 } else {
-    & $PSMUX send-keys -t $SESSION "ping -n 50 127.0.0.1" Enter
+    & $PSMUX -L $NS send-keys -t $SESSION "ping -n 50 127.0.0.1" Enter
     Start-Sleep -Seconds 2
 
     Invoke-ConsoleInject -TargetPid $script:TargetPid -Action "ctrlc" | Out-Null
     Start-Sleep -Seconds 2
 
-    & $PSMUX has-session -t $SESSION 2>$null
+    & $PSMUX -L $NS has-session -t $SESSION 2>$null
     if ($LASTEXITCODE -eq 0) { Write-Pass "2.4: Session alive after smart Ctrl+C" }
     else { Write-Fail "2.4: Session died after Ctrl+C"; $script:SessionDead = $true }
 }
@@ -557,7 +575,7 @@ Write-Test "2.5: Click + Ctrl+C keeps session alive"
 if (Skip-IfDead "2.5") {} elseif (-not $script:MouseEventsWork) {
     Write-Skip "2.5: Mouse injection did not work (skipped)"
 } else {
-    & $PSMUX send-keys -t $SESSION "ping -n 50 127.0.0.1" Enter
+    & $PSMUX -L $NS send-keys -t $SESSION "ping -n 50 127.0.0.1" Enter
     Start-Sleep -Seconds 2
 
     # Click to dismiss any selection
@@ -568,7 +586,7 @@ if (Skip-IfDead "2.5") {} elseif (-not $script:MouseEventsWork) {
     Invoke-ConsoleInject -TargetPid $script:TargetPid -Action "ctrlc" | Out-Null
     Start-Sleep -Seconds 2
 
-    & $PSMUX has-session -t $SESSION 2>$null
+    & $PSMUX -L $NS has-session -t $SESSION 2>$null
     if ($LASTEXITCODE -eq 0) { Write-Pass "2.5: Session alive after SIGINT Ctrl+C" }
     else { Write-Fail "2.5: Session died"; $script:SessionDead = $true }
 }
@@ -589,8 +607,11 @@ if (Skip-IfDead "2.6") {} else {
 # ══════════════════════════════════════════════════════════════════════════
 Write-Host "`n[Cleanup]" -ForegroundColor Yellow
 try { if (-not $script:proc.HasExited) { $script:proc.Kill() } } catch {}
-& $PSMUX kill-server 2>$null
+& $PSMUX -L $NS kill-server 2>$null
 Start-Sleep -Seconds 1
+$env:PSMUX_DATA_DIR = $savedDataDir
+Remove-Item -Recurse -Force $dataRoot -EA SilentlyContinue
+if ($clipSaved -and $null -ne $savedClip) { [void](Set-ClipboardVerified $savedClip) }
 
 # Summary
 Write-Host "`n==========================================" -ForegroundColor Cyan

@@ -956,7 +956,7 @@ pub fn prune_exited(
                         p.dead = true;
                         p.dead_info = Some(crate::types::DeadInfo {
                             status: status.exit_code(),
-                            time: chrono::Local::now(),
+                            time: jiff::Timestamp::now(),
                         });
                         dead_ids.push(p.id);
                         (Some(Node::Leaf(p)), 1)

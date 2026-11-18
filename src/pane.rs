@@ -1216,22 +1216,11 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
         // booting during that wait rather than after it.
         schedule_warm_refill(app);
     }
-    if claimed.is_none() {
-        // Nothing to hand over, so the cold path below is about to take
-        // `next_pane_id` for itself. Every id the in flight refills already
-        // reserved is lower than that, so those spares may no longer be handed
-        // out: doing so walked the visible sequence backwards (`%2 %3 %12 %4`).
-        // Retire them now and refuse them on arrival. Applies whether the pool
-        // was empty or the transplant was bypassed outright (a command, `-e`, a
-        // dynamic default-shell).
-        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
-        if dropped > 0 {
-            crate::warm_trace!(
-                "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
-                app.next_pane_id, dropped
-            );
-        }
-    }
+    // Nothing to hand over, so the cold path below needs an id of its own. See
+    // `cold_spawn_pane_id`. Applies whether the pool was empty or the
+    // transplant was bypassed outright (a command, `-e`, a dynamic
+    // default-shell).
+    let cold_id = if claimed.is_none() { Some(cold_spawn_pane_id(app)) } else { None };
     if let Some(mut wp) = claimed {
         crate::warm_trace!(
             "claim(new-window): pane={} spare_age={:.1}ms pool_left={} ready_left={} took={} last=\"{}\" inflight={} pool=[{}]",
@@ -1310,6 +1299,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let pane_id = cold_id.unwrap_or(app.next_pane_id);
     crate::startup_trace::mark("srv.pty.open");
     let pair = pty_system
         .openpty(size)
@@ -1336,7 +1326,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             shell_cmd.cwd(usable);
         }
     }
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
@@ -1378,7 +1368,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id, child_pid);
 
     let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
@@ -1386,10 +1376,14 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     conpty_preemptive_dsr_response(&mut *pty_writer);
     crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let pane_id = app.next_pane_id;
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None };
-    app.next_pane_id += 1;
+    if pane_id == app.next_pane_id {
+        app.next_pane_id += 1;
+    }
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
+    if !warm_eligible {
+        hold_pool_for_cold_pane(app, &pane);
+    }
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, window_options: Default::default(), activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
@@ -1648,6 +1642,56 @@ pub fn trickle_deficit(trickle: &mut bool, pool: &crate::types::WarmPool, defici
     }
     let booting = pool.inflight + (pool.len() - pool.ready_len());
     deficit.min(1usize.saturating_sub(booting))
+}
+
+/// The pane id for a creation that is about to cold spawn instead of taking a
+/// spare.
+///
+/// A spare's id is reserved when it is spawned (it is the shell's TMUX_PANE),
+/// so every pooled spare holds an id below `next_pane_id`. When the pool can
+/// give one up ([`crate::types::WarmPool::yield_front_id`]) this creation takes
+/// the lowest of them and only that spare is retired: ids still come out in
+/// creation order, as tmux numbers them, and the rest of the pool stays warm.
+/// Otherwise it takes `next_pane_id`, and every spare below that is retired
+/// and refused on arrival, since handing one out later would walk the visible
+/// sequence backwards (`%2 %3 %12 %4`).
+pub fn cold_spawn_pane_id(app: &mut AppState) -> usize {
+    if let Some(id) = app.warm_pane.yield_front_id() {
+        crate::warm_trace!(
+            "pool: cold spawn takes reserved id {} from the pool front, {} spare(s) kept",
+            id,
+            app.warm_pane.len()
+        );
+        return id;
+    }
+    let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
+    if dropped > 0 {
+        crate::warm_trace!(
+            "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
+            app.next_pane_id, dropped
+        );
+    }
+    app.next_pane_id
+}
+
+/// Keep the pool's refill back while a pane that bypassed the pool (a command,
+/// `-e`, a dynamic default-shell) starts.
+///
+/// The refill for the spare that pane retired would otherwise boot a shell
+/// beside the command the user is waiting on, and a pwsh booting beside another
+/// costs it ~70 ms (see [`crate::types::BootHold`]). The hold is the one a
+/// starting server uses: it lets go once the pane has drawn something, or gone
+/// quiet, or after [`crate::types::WARM_READY_MAX_WAIT`] at most. Claims are not
+/// held, only the spawning of replacements.
+fn hold_pool_for_cold_pane(app: &mut AppState, pane: &Pane) {
+    if !app.warm_enabled || app.warm_pane.target == 0 {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let hold = app.boot_hold.get_or_insert_with(|| crate::types::BootHold::new(now));
+    if hold.watch(pane.id, pane.data_version.clone(), pane.term.clone(), now) {
+        crate::warm_trace!("pool: boot hold watching cold pane={}", pane.id);
+    }
 }
 
 pub fn schedule_warm_refill(app: &mut AppState) {
@@ -2305,19 +2349,8 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
         }
         schedule_warm_refill(app);
     }
-    if claimed.is_none() {
-        // Cold path below: see the matching comment in `create_window_with_env`.
-        // Applies whether the pool was empty or the transplant was bypassed
-        // outright (a command, `-e`, a dynamic default-shell); either way this
-        // pane takes an id above every reserved one.
-        let dropped = app.warm_pane.set_issued_floor(app.next_pane_id);
-        if dropped > 0 {
-            crate::warm_trace!(
-                "pool: id floor raised to {}, discarded {} spare(s) whose ids are now in the past",
-                app.next_pane_id, dropped
-            );
-        }
-    }
+    // Cold path below: see `cold_spawn_pane_id`.
+    let cold_id = if claimed.is_none() { Some(cold_spawn_pane_id(app)) } else { None };
     if let Some(mut wp) = claimed {
         crate::warm_trace!(
             "claim(split): pane={} spare_age={:.1}ms pool_left={} ready_left={} took={} last=\"{}\" inflight={} pool=[{}]",
@@ -2373,6 +2406,7 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
     }
 
     // ── Normal path: cold-spawn a new ConPTY + shell ────────────────
+    let split_pane_id = cold_id.unwrap_or(app.next_pane_id);
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     // When no explicit command is given, use the configured default-shell.
     // Expand format variables like #{pane_current_path} at spawn time (#111).
@@ -2393,7 +2427,7 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
             shell_cmd.cwd(usable);
         }
     }
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    set_tmux_env(&mut shell_cmd, split_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     apply_env_removals(&mut shell_cmd, &app.env_scopes.child_removals(&app.environment));
@@ -2420,7 +2454,7 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
     let cq_writer = color_query_pending.clone();
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), split_pane_id, child_pid);
     // Queued like every other pane (78cebea missed this cold split path), so a
     // paste or keys into a split that was given a command never write the
     // pipe from the server thread.
@@ -2429,9 +2463,14 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
     conpty_preemptive_dsr_response(&mut *pty_writer);
     crate::pane::wire_resize_prime(&*pair.master, &*pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let split_pane_id = app.next_pane_id;
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None });
-    app.next_pane_id += 1;
+    let new_pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, dead_info: None, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, win32_input_latched: false, input_off: false, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, live_term: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command), cwd_hint: None };
+    if split_pane_id == app.next_pane_id {
+        app.next_pane_id += 1;
+    }
+    if !warm_eligible {
+        hold_pool_for_cold_pane(app, &new_pane);
+    }
+    let new_leaf = Node::Leaf(new_pane);
     insert_split_leaf(app, kind, new_leaf, placement);
     let win = &mut app.windows[app.active_idx];
     // Add new pane to MRU (most recent)
@@ -5141,6 +5180,10 @@ pub fn spawn_reader_thread(
 #[cfg(test)]
 #[path = "../tests-rs/test_sync_output_gate.rs"]
 mod test_sync_output_gate;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_cold_pane_keeps_pool.rs"]
+mod test_cold_pane_keeps_pool;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue597_xtversion_reply.rs"]
