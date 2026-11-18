@@ -3,22 +3,28 @@
 # https://github.com/psmux/psmux/issues/298
 #
 # Usage: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_issue298_set_buffer_clipboard.ps1
+#
+# Safety: its own -L namespace and PSMUX_DATA_DIR, honours PSMUX_TEST_BIN,
+# cleans up with -L kill-server only and never touches ~/.psmux; the user's
+# clipboard is saved and restored.
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot "clipboard_test_helpers.ps1")
+$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
+foreach ($v in 'PSMUX_SESSION_NAME','PSMUX_SESSION','PSMUX_PANE','TMUX','TMUX_PANE','PSMUX') { Remove-Item "Env:\$v" -EA SilentlyContinue }
+$NS = "test298clip_$PID"
+$savedDataDir = $env:PSMUX_DATA_DIR
+$root = Join-Path $env:TEMP "test298clip_$PID"
+$env:PSMUX_DATA_DIR = Join-Path $root "d"
+New-Item -ItemType Directory -Force $env:PSMUX_DATA_DIR | Out-Null
+function P { & $PSMUX -L $NS @args }
+
 $session = "test298clip"
 $passed = 0
 $failed = 0
 
-function Cleanup {
-    psmux kill-session -t $session 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 500
-    Remove-Item "$env:USERPROFILE\.psmux\$session.*" -Force -EA SilentlyContinue
-}
-
 function Setup {
-    Cleanup
-    psmux new-session -d -s $session
+    P new-session -d -s $session
     Start-Sleep -Seconds 4
     $rc = $LASTEXITCODE
     if ($rc -ne 0) { throw "Failed to create session (exit=$rc)" }
@@ -54,12 +60,14 @@ try { $savedClip = Get-Clipboard -Raw -EA Stop; $clipSaved = $true } catch {}
 
 Write-Host "`n=== Issue #298 Clipboard Tests ===`n"
 
+# The finally below cleans up even if Setup throws.
+try {
 Setup
 
 # ── Test 1: set-buffer -w propagates to Windows clipboard ──
 Test "set-buffer -w propagates to clipboard" {
     Seed "SENTINEL_BEFORE"
-    psmux set-buffer -w -t $session "ISSUE298_SETBUF" 2>&1 | Out-Null
+    P set-buffer -w -t $session "ISSUE298_SETBUF" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
     $clip = Get-ClipboardSettled
     if ($clip -ne "ISSUE298_SETBUF") {
@@ -70,7 +78,7 @@ Test "set-buffer -w propagates to clipboard" {
 # ── Test 2: set-buffer -w -b (named buffer) also propagates ──
 Test "set-buffer -w -b named propagates to clipboard" {
     Seed "SENTINEL_BEFORE"
-    psmux set-buffer -w -b mybuf -t $session "NAMED298" 2>&1 | Out-Null
+    P set-buffer -w -b mybuf -t $session "NAMED298" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
     $clip = Get-ClipboardSettled
     if ($clip -ne "NAMED298") {
@@ -81,7 +89,7 @@ Test "set-buffer -w -b named propagates to clipboard" {
 # ── Test 3: set-buffer WITHOUT -w does NOT touch clipboard ──
 Test "set-buffer without -w leaves clipboard untouched" {
     Seed "SENTINEL_UNTOUCHED"
-    psmux set-buffer -t $session "SHOULD_NOT_CLIP" 2>&1 | Out-Null
+    P set-buffer -t $session "SHOULD_NOT_CLIP" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
     $clip = Get-ClipboardSettled
     if ($clip -ne "SENTINEL_UNTOUCHED") {
@@ -92,9 +100,9 @@ Test "set-buffer without -w leaves clipboard untouched" {
 # ── Test 4: load-buffer -w still works (PR #293 regression guard) ──
 Test "load-buffer -w still propagates (PR #293)" {
     Seed "SENTINEL_BEFORE"
-    $tmpFile = "$env:TEMP\psmux_test298.txt"
+    $tmpFile = Join-Path $root "psmux_test298.txt"
     "LOADBUF298" | Set-Content $tmpFile -NoNewline
-    psmux load-buffer -w -t $session $tmpFile 2>&1 | Out-Null
+    P load-buffer -w -t $session $tmpFile 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
     $clip = Get-ClipboardSettled
     Remove-Item $tmpFile -Force -EA SilentlyContinue
@@ -105,9 +113,9 @@ Test "load-buffer -w still propagates (PR #293)" {
 
 # ── Test 5: set-buffer -w content also lands in paste buffer ──
 Test "set-buffer -w also stores in paste buffer" {
-    psmux set-buffer -w -t $session "DUAL_CHECK" 2>&1 | Out-Null
+    P set-buffer -w -t $session "DUAL_CHECK" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    $buf = (psmux show-buffer -t $session 2>&1 | Out-String).Trim()
+    $buf = (P show-buffer -t $session 2>&1 | Out-String).Trim()
     if ($buf -ne "DUAL_CHECK") {
         throw "Expected paste buffer 'DUAL_CHECK', got '$buf'"
     }
@@ -116,7 +124,7 @@ Test "set-buffer -w also stores in paste buffer" {
 # ── Test 6: set-buffer -w with spaces in content ──
 Test "set-buffer -w with spaces in content" {
     Seed "SENTINEL"
-    psmux set-buffer -w -t $session "hello world 298" 2>&1 | Out-Null
+    P set-buffer -w -t $session "hello world 298" 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
     $clip = Get-ClipboardSettled
     if ($clip -ne "hello world 298") {
@@ -124,8 +132,18 @@ Test "set-buffer -w with spaces in content" {
     }
 }
 
-Cleanup
-if ($clipSaved) { [void](Set-ClipboardVerified $savedClip) }
+}
+catch {
+    $failed++
+    Write-Host "  [FAIL] unexpected: $_" -ForegroundColor Red
+}
+finally {
+    try { P kill-server 2>&1 | Out-Null } catch {}
+    if ($clipSaved -and $null -ne $savedClip) { [void](Set-ClipboardVerified $savedClip) }
+    $env:PSMUX_DATA_DIR = $savedDataDir
+    Start-Sleep -Milliseconds 300
+    Remove-Item -Recurse -Force $root -EA SilentlyContinue
+}
 
 Write-Host "`n=== Results ==="
 Write-Host "  Passed: $passed"
