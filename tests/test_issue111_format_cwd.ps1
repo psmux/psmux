@@ -52,6 +52,22 @@ function Capture-Pane {
     return ($raw | Out-String)
 }
 
+# Polls the pane until its text, with all whitespace removed (so wrapped
+# lines join up), matches $pattern.  Git Bash takes 3 to 5 s to show its
+# first prompt on a loaded machine and a cd another 2 to 9 s; fixed sleeps
+# split before the cd had run (test 10 failed 15/15 under full CPU load, 0/8
+# when it waited for the prompt like this).
+function Wait-PaneText {
+    param($target, $pattern, [int]$TimeoutMs = 20000)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $flat = ((& $PSMUX capture-pane -t $target -p 2>&1) -join '') -replace '\s', ''
+        if ($flat -match $pattern) { return $true }
+        Start-Sleep -Milliseconds 150
+    }
+    return $false
+}
+
 function New-TestSession {
     param($name)
     Start-Process -FilePath $PSMUX -ArgumentList "new-session -d -s $name" -WindowStyle Hidden
@@ -80,19 +96,19 @@ try {
 
     # cd to testDir in the active pane
     & $PSMUX send-keys -t $SESSION "cd `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     # Verify CWD changed
     & $PSMUX send-keys -t $SESSION 'Write-Output "CWD1=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'CWD1=[^>]*>' 15000)
 
     # Split with #{pane_current_path}
     & $PSMUX split-window -h -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION '>$')
 
     # Check CWD in the new pane
     & $PSMUX send-keys -t $SESSION 'Write-Output "NEWPANE_CWD=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'NEWPANE_CWD=[^>]*>' 15000)
     $cap = Capture-Pane $SESSION
     $capFlat = ($cap -replace "`r?`n", "")
     $dirName = Split-Path $testDir -Leaf
@@ -118,13 +134,13 @@ try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
     & $PSMUX send-keys -t $SESSION "cd `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION '>$')
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "VPANE=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'VPANE=[^>]*>' 15000)
     $cap = Capture-Pane $SESSION
     $capFlat = ($cap -replace "`r?`n", "")
     $dirName = Split-Path $testDir -Leaf
@@ -150,13 +166,13 @@ try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
     & $PSMUX send-keys -t $SESSION "cd `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     & $PSMUX new-window -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION '>$')
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "NWPANE=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'NWPANE=[^>]*>' 15000)
     $cap = Capture-Pane $SESSION
     $capFlat = ($cap -replace "`r?`n", "")
     $dirName = Split-Path $testDir -Leaf
@@ -192,14 +208,14 @@ try {
 
     # cd to test directory
     & $PSMUX send-keys -t $SESSION "cd `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     # Use the bound key directly via command (simulates pressing prefix+V)
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION '>$')
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "BINDPANE=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'BINDPANE=[^>]*>' 15000)
     $cap = Capture-Pane $SESSION
     $capFlat = ($cap -replace "`r?`n", "")
     $dirName = Split-Path $testDir -Leaf
@@ -226,10 +242,10 @@ try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
     & $PSMUX split-window -h -c $testDir -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION '>$')
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "LITPANE=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'LITPANE=[^>]*>' 15000)
     $cap = Capture-Pane $SESSION
     $capFlat = ($cap -replace "`r?`n", "")
     $dirName = Split-Path $testDir -Leaf
@@ -255,7 +271,7 @@ try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
     & $PSMUX send-keys -t $SESSION "cd `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     $result = & $PSMUX display-message -t $SESSION -p '#{pane_current_path}' 2>&1 | Out-String
     $result = $result.Trim()
@@ -290,11 +306,11 @@ try {
 
     # Open a cmd.exe pane
     & $PSMUX split-window -h -t $SESSION "cmd.exe" 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    [void](Wait-PaneText $SESSION '>$')
 
     # cd in cmd.exe
     & $PSMUX send-keys -t $SESSION "cd /d `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     # Check #{pane_current_path}
     $result = (& $PSMUX display-message -t $SESSION -p '#{pane_current_path}' 2>&1 | Out-String).Trim()
@@ -322,17 +338,17 @@ try {
 
     # Open cmd.exe pane and cd
     & $PSMUX split-window -h -t $SESSION "cmd.exe" 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    [void](Wait-PaneText $SESSION '>$')
     & $PSMUX send-keys -t $SESSION "cd /d `"$testDir`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $testDir -Leaf)))>$")
 
     # Split from that pane using #{pane_current_path}
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION '>$')
 
     # The new pane (pwsh default) should be in testDir
     & $PSMUX send-keys -t $SESSION 'Write-Output "CMDSPLIT=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION 'CMDSPLIT=[^>]*>' 15000)
     $cap = Capture-Pane $SESSION
     $capFlat = ($cap -replace "`r?`n", "")
     $dirName = Split-Path $testDir -Leaf
@@ -370,17 +386,19 @@ try {
     # Convert to Unix-style path for bash
     $bashDir = $testDir -replace '\\', '/'
 
-    # Open bash pane
-    & $PSMUX split-window -h -t $SESSION "$gitBash" 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    $dirName = Split-Path $testDir -Leaf
 
-    # cd in bash
-    & $PSMUX send-keys -t $SESSION "cd '$bashDir'" Enter
-    Start-Sleep -Seconds 2
+    # Open bash pane and wait for its prompt
+    & $PSMUX split-window -h -t $SESSION "$gitBash" 2>&1 | Out-Null
+    $bashPane = (& $PSMUX display-message -t $SESSION -p '#{pane_id}' 2>&1 | Out-String).Trim()
+    if (-not (Wait-PaneText $bashPane '\$$')) { Write-Info "9: no bash prompt after 20 s" }
+
+    # cd in bash, and wait until the prompt shows the new directory
+    & $PSMUX send-keys -t $bashPane "cd '$bashDir'" Enter
+    if (-not (Wait-PaneText $bashPane "$([regex]::Escape($dirName))\`$$")) { Write-Info "9: bash prompt never showed $dirName" }
 
     # Check #{pane_current_path}
-    $result = (& $PSMUX display-message -t $SESSION -p '#{pane_current_path}' 2>&1 | Out-String).Trim()
-    $dirName = Split-Path $testDir -Leaf
+    $result = (& $PSMUX display-message -t $bashPane -p '#{pane_current_path}' 2>&1 | Out-String).Trim()
 
     if ($result -match [regex]::Escape($dirName)) {
         Write-Pass "9: Git Bash — #{pane_current_path} tracks cd ($result)"
@@ -405,21 +423,24 @@ try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
     $bashDir = $testDir -replace '\\', '/'
 
+    $dirName = Split-Path $testDir -Leaf
+
     & $PSMUX split-window -h -t $SESSION "$gitBash" 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
-    & $PSMUX send-keys -t $SESSION "cd '$bashDir'" Enter
-    Start-Sleep -Seconds 2
+    $bashPane = (& $PSMUX display-message -t $SESSION -p '#{pane_id}' 2>&1 | Out-String).Trim()
+    if (-not (Wait-PaneText $bashPane '\$$')) { Write-Info "10: no bash prompt after 20 s" }
+    & $PSMUX send-keys -t $bashPane "cd '$bashDir'" Enter
+    if (-not (Wait-PaneText $bashPane "$([regex]::Escape($dirName))\`$$")) { Write-Info "10: bash prompt never showed $dirName" }
 
     # Split from bash pane using #{pane_current_path}
-    & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    & $PSMUX split-window -v -c '#{pane_current_path}' -t $bashPane 2>&1 | Out-Null
+    $newPane = (& $PSMUX display-message -t $SESSION -p '#{pane_id}' 2>&1 | Out-String).Trim()
+    if (-not (Wait-PaneText $newPane '>$')) { Write-Info "10: no pwsh prompt in the new pane after 20 s" }
 
     # New pane should be in testDir
-    & $PSMUX send-keys -t $SESSION 'Write-Output "BASHSPLIT=$($PWD.Path)"' Enter
-    Start-Sleep -Seconds 2
-    $cap = Capture-Pane $SESSION
+    & $PSMUX send-keys -t $newPane 'Write-Output "BASHSPLIT=$($PWD.Path)"' Enter
+    [void](Wait-PaneText $newPane "BASHSPLIT=[^>]*>" 15000)
+    $cap = Capture-Pane $newPane
     $capFlat = ($cap -replace "`r?`n", "")
-    $dirName = Split-Path $testDir -Leaf
 
     if ($capFlat -match "BASHSPLIT=.*$([regex]::Escape($dirName))") {
         Write-Pass "10: Git Bash — split with #{pane_current_path} works"
@@ -445,12 +466,12 @@ try {
 
     # cd to dir1
     & $PSMUX send-keys -t $SESSION "cd `"$dir1`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $dir1 -Leaf)))>$")
     $r1 = (& $PSMUX display-message -t $SESSION -p '#{pane_current_path}' 2>&1 | Out-String).Trim()
 
     # cd to dir2
     & $PSMUX send-keys -t $SESSION "cd `"$dir2`"" Enter
-    Start-Sleep -Seconds 2
+    [void](Wait-PaneText $SESSION "$([regex]::Escape((Split-Path $dir2 -Leaf)))>$")
     $r2 = (& $PSMUX display-message -t $SESSION -p '#{pane_current_path}' 2>&1 | Out-String).Trim()
 
     $d1 = Split-Path $dir1 -Leaf
