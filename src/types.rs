@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crossterm::event::{KeyCode, KeyModifiers};
 use portable_pty::MasterPty;
 use ratatui::prelude::Rect;
-use chrono::Local;
+
 use crate::terminal_features::TerminalFeatures;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -270,7 +270,7 @@ pub struct DeadInfo {
     /// empty and the code is always the status.
     pub status: u32,
     /// When the pane died, the time tmux keeps in `wp->dead_time`.
-    pub time: chrono::DateTime<chrono::Local>,
+    pub time: jiff::Timestamp,
 }
 
 /// Which client a format is expanded for (`display-message -c`, issue #724).
@@ -2096,7 +2096,7 @@ pub struct AppState {
     /// The command lines waiting for their prompt (no `-b`), by request id:
     /// each gets its reply when the prompt closes, as tmux's client waits.
     pub prompt_waiters: Vec<(u64, std::sync::mpsc::Sender<String>)>,
-    pub created_at: chrono::DateTime<Local>,
+    pub created_at: jiff::ZonedDateTime,
     pub next_win_id: usize,
     pub next_pane_id: usize,
     /// Pane ids already auto-healed once by `@heal-crashed-panes`. A pane is
@@ -3597,7 +3597,7 @@ impl AppState {
             prompt_request: None,
             prompt_request_seq: 0,
             prompt_waiters: Vec::new(),
-            created_at: Local::now(),
+            created_at: crate::strftime::now(),
             next_win_id: 1,
             next_pane_id: 1,
             healed_pane_ids: std::collections::HashSet::new(),

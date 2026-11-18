@@ -82,6 +82,34 @@ fn strftime_status_line_keeps_text_on_refused_format() {
     assert_eq!(fmt_at("ok %", TIMES[0]), None);
 }
 
+#[test]
+fn strftime_log_timestamp_shape() {
+    // debug_log and client logs: HH:MM:SS.mmm and YYYY-MM-DD HH:MM:SS.mmm.
+    let short = crate::strftime::now_string("%H:%M:%S%.3f");
+    let b = short.as_bytes();
+    assert_eq!(b.len(), 12, "{short}");
+    assert!(b[2] == b':' && b[5] == b':' && b[8] == b'.', "{short}");
+    let long = crate::strftime::now_string("%Y-%m-%d %H:%M:%S%.3f");
+    assert_eq!(long.len(), 23, "{long}");
+    assert_eq!(long.as_bytes()[10], b' ', "{long}");
+}
+
+#[test]
+fn strftime_local_time_helpers() {
+    let epoch = crate::strftime::local_from_unix(0).expect("epoch");
+    assert_eq!(epoch.timestamp().as_second(), 0);
+    // Local means the system zone, as chrono's Local did.
+    assert_eq!(epoch.time_zone(), &jiff::tz::TimeZone::system());
+    assert!(crate::strftime::local_from_unix(i64::MAX).is_none());
+    // An elapsed time too large to subtract saturates at now, as chrono's
+    // Duration::from_std(..).unwrap_or_default() did.
+    let now = crate::strftime::now().timestamp().as_second();
+    let sat = crate::strftime::now_minus(std::time::Duration::from_secs(u64::MAX));
+    assert!((sat.timestamp().as_second() - now).abs() <= 2);
+    let ago = crate::strftime::now_minus(std::time::Duration::from_secs(3600));
+    assert!((now - 3600 - ago.timestamp().as_second()).abs() <= 2);
+}
+
 /// Recorded from chrono 0.4.45: (time index, format, output or None).
 const EXPECTED: &[(usize, &str, Option<&str>)] = &[
     (0, "%a", Some("Sun")),
