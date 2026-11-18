@@ -2884,3 +2884,25 @@ mod test_issue883_status_off_space;
 #[cfg(test)]
 #[path = "../tests-rs/test_control_client_size_formats.rs"]
 mod tests_control_client_size_formats;
+
+/// Formats a fixed date-time the way the status line formats the current
+/// local time, for the strftime parity table. None when the format is refused.
+#[cfg(test)]
+pub(crate) fn strftime_fixed_for_test(
+    fmt: &str,
+    t: (i32, u32, u32, u32, u32, u32, u32, i32),
+) -> Option<String> {
+    use chrono::TimeZone;
+    use std::fmt::Write;
+    let (y, mo, d, h, mi, s, ns, off) = t;
+    let tz = chrono::FixedOffset::east_opt(off)?;
+    let dt = tz.with_ymd_and_hms(y, mo, d, h, mi, s).single()?
+        + chrono::Duration::nanoseconds(ns as i64);
+    let mut buf = String::new();
+    write!(buf, "{}", dt.format(fmt)).ok()?;
+    Some(buf)
+}
+
+#[cfg(test)]
+#[path = "../tests-rs/test_strftime_parity.rs"]
+mod tests_strftime_parity;
