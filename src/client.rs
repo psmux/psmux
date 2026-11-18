@@ -2,7 +2,7 @@ use std::io::{self, Write, BufRead, BufReader};
 use std::time::{Duration, Instant};
 use std::env;
 
-use chrono::Local;
+
 use crossterm::event::{Event, KeyCode, KeyModifiers, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -1848,8 +1848,7 @@ pub fn render_clock_overlay(
         &["###", "# #", "###", "  #", "###"],
     ];
     const COLON: [&str; 5] = [" ", "#", " ", "#", " "];
-    let now = Local::now();
-    let time_str = now.format("%H:%M:%S").to_string();
+    let time_str = crate::strftime::now_string("%H:%M:%S");
     let total_w: u16 = time_str.chars().map(|c| if c == ':' { 2 } else { 4 }).sum::<u16>() - 1;
     let total_h: u16 = 5;
     // Clock mode owns the whole pane, as in tmux: `window_clock_draw_screen`
@@ -3476,7 +3475,7 @@ fn install_client_panic_hook() {
             format!(
                 "psmux client pid {} panicked at {}\n\n{info}\n\nBacktrace:\n{bt}",
                 std::process::id(),
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                crate::strftime::now_string("%Y-%m-%d %H:%M:%S%.3f"),
             ),
         );
         crate::debug_log::reconnect_log("CLIENT PANIC, see client_crash log");

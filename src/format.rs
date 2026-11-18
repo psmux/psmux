@@ -392,16 +392,13 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
     }
     // Expand strftime %-sequences only if the ORIGINAL format contained '%'
     if has_strftime && result.contains('%') {
-        // Use write! to catch chrono format errors instead of panicking.
-        // Expanded variable content has '%' escaped to '%%' above, so chrono
-        // will only interpret the real strftime codes from the original format.
-        use std::fmt::Write;
-        let formatted = chrono::Local::now().format(&result);
-        let mut buf = String::with_capacity(result.len() + 32);
-        if write!(buf, "{}", formatted).is_ok() {
+        // A refused format (unknown specifier, lone '%') yields None and the
+        // pre-strftime result is kept as-is, never a panic. Expanded variable
+        // content has '%' escaped to '%%' above, so only the real strftime
+        // codes from the original format are interpreted.
+        if let Some(buf) = crate::strftime::format(&result, &crate::strftime::now()) {
             result = buf;
         }
-        // On error, keep the pre-strftime result as-is
     }
     result
 }
@@ -1072,9 +1069,10 @@ fn apply_modifier(m: &Modifier, value: &str, app: &AppState, win_idx: usize) -> 
     match m {
         Modifier::Time => {
             if let Ok(ts) = value.parse::<i64>() {
-                if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
-                    let local: chrono::DateTime<chrono::Local> = dt.into();
-                    return local.format("%a %b %e %H:%M:%S %Y").to_string();
+                if let Some(local) = crate::strftime::local_from_unix(ts) {
+                    if let Some(s) = crate::strftime::format("%a %b %e %H:%M:%S %Y", &local) {
+                        return s;
+                    }
                 }
             }
             value.to_string()
@@ -1099,10 +1097,7 @@ fn apply_modifier(m: &Modifier, value: &str, app: &AppState, win_idx: usize) -> 
         Modifier::ExpandTime => {
             let expanded = expand_format_for_window(value, app, win_idx);
             if expanded.contains('%') {
-                use std::fmt::Write;
-                let formatted = chrono::Local::now().format(&expanded);
-                let mut buf = String::with_capacity(expanded.len() + 32);
-                if write!(buf, "{}", formatted).is_ok() { buf } else { expanded }
+                crate::strftime::format(&expanded, &crate::strftime::now()).unwrap_or(expanded)
             } else {
                 expanded
             }
@@ -1505,20 +1500,20 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
         "client_prefix" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) { "1".into() } else { "0".into() },
         "client_activity" => match format_client(app) {
             Some(ci) => epoch_secs_ago(ci.last_activity.elapsed()).to_string(),
-            None => app.created_at.timestamp().to_string(),
+            None => app.created_at.timestamp().as_second().to_string(),
         },
         "client_created" => match format_client(app) {
             Some(ci) => epoch_secs_ago(ci.connected_at.elapsed()).to_string(),
-            None => app.created_at.timestamp().to_string(),
+            None => app.created_at.timestamp().as_second().to_string(),
         },
         "client_activity_string" | "client_created_string" => {
             let at = format_client(app).map(|ci| {
                 if var == "client_activity_string" { ci.last_activity.elapsed() } else { ci.connected_at.elapsed() }
             });
             match at {
-                Some(ago) => (chrono::Local::now() - chrono::Duration::from_std(ago).unwrap_or_default())
-                    .format("%a %b %e %H:%M:%S %Y").to_string(),
-                None => app.created_at.format("%a %b %e %H:%M:%S %Y").to_string(),
+                Some(ago) => crate::strftime::format("%a %b %e %H:%M:%S %Y", &crate::strftime::now_minus(ago))
+                    .unwrap_or_default(),
+                None => crate::strftime::format("%a %b %e %H:%M:%S %Y", &app.created_at).unwrap_or_default(),
             }
         }
         "client_key_table" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) {
@@ -1713,10 +1708,10 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "session_attached" => app.attached_clients.to_string(),
         "session_windows" => app.windows.len().to_string(),
         "session_id" => format!("${}", app.session_id),
-        "session_created" => app.created_at.timestamp().to_string(),
-        "session_created_string" => app.created_at.format("%a %b %e %H:%M:%S %Y").to_string(),
-        "session_activity" | "session_last_attached" => app.created_at.timestamp().to_string(),
-        "session_activity_string" => app.created_at.format("%a %b %e %H:%M:%S %Y").to_string(),
+        "session_created" => app.created_at.timestamp().as_second().to_string(),
+        "session_created_string" => crate::strftime::format("%a %b %e %H:%M:%S %Y", &app.created_at).unwrap_or_default().to_string(),
+        "session_activity" | "session_last_attached" => app.created_at.timestamp().as_second().to_string(),
+        "session_activity_string" => crate::strftime::format("%a %b %e %H:%M:%S %Y", &app.created_at).unwrap_or_default().to_string(),
         "session_group" | "session_group_list" => app.session_group.clone().unwrap_or_default(),
         "session_alerts" | "session_stack" => String::new(),
         "session_group_attached" => {
@@ -1750,7 +1745,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "window_width" => win.area.width.to_string(),
         "window_height" => win.area.height.to_string(),
         "window_format" => "1".into(),
-        "window_activity" => app.created_at.timestamp().to_string(),
+        "window_activity" => app.created_at.timestamp().as_second().to_string(),
         "window_silence_flag" => if win.silence_flag { "1".into() } else { "0".into() },
         "window_bell_flag" => if win.bell_flag { "1".into() } else { "0".into() },
         "window_linked" => if win.linked_from.is_some() { "1".into() } else { "0".into() },
@@ -2088,7 +2083,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             .unwrap_or_default(),
         "pane_dead_time" => target_pane()
             .and_then(|p| p.dead_info)
-            .map(|info| info.time.timestamp().to_string())
+            .map(|info| info.time.as_second().to_string())
             .unwrap_or_default(),
         "pane_dead_signal" => String::new(),
         "pane_format" => "1".into(),
@@ -2444,7 +2439,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             let idx = BUFFER_IDX_OVERRIDE.get().unwrap_or(0);
             app.paste_buffers.get(idx).map(|b| b.name.clone()).unwrap_or_default()
         }
-        "buffer_created" => app.created_at.timestamp().to_string(),
+        "buffer_created" => app.created_at.timestamp().as_second().to_string(),
 
         // ── Client ──
         // Every client_* variable is answered by expand_client_var (#724).
@@ -2466,7 +2461,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             crate::session::read_namespace_instance(app.socket_name.as_deref()).unwrap_or_default()
         }
         "version" => VERSION.to_string(),
-        "start_time" => app.created_at.timestamp().to_string(),
+        "start_time" => app.created_at.timestamp().as_second().to_string(),
         "socket_path" => {
             // The server that answered (#730): `<dir>/default`, `<dir>/<-L label>`,
             // or the exact `-S` path its namespace was created for.
@@ -2884,3 +2879,23 @@ mod test_issue883_status_off_space;
 #[cfg(test)]
 #[path = "../tests-rs/test_control_client_size_formats.rs"]
 mod tests_control_client_size_formats;
+
+/// Formats a fixed date-time the way the status line formats the current
+/// local time, for the strftime parity table. None when the format is refused.
+#[cfg(test)]
+pub(crate) fn strftime_fixed_for_test(
+    fmt: &str,
+    t: (i32, u32, u32, u32, u32, u32, u32, i32),
+) -> Option<String> {
+    let (y, mo, d, h, mi, s, ns, off) = t;
+    let tz = jiff::tz::TimeZone::fixed(jiff::tz::Offset::from_seconds(off).ok()?);
+    let dt = jiff::civil::DateTime::new(
+        y as i16, mo as i8, d as i8, h as i8, mi as i8, s as i8, ns as i32,
+    )
+    .ok()?;
+    crate::strftime::format(fmt, &dt.to_zoned_datetime(tz).ok()?)
+}
+
+#[cfg(test)]
+#[path = "../tests-rs/test_strftime_parity.rs"]
+mod tests_strftime_parity;

@@ -39,6 +39,7 @@ mod layout;
 mod window_ops;
 mod util;
 mod format;
+mod strftime;
 mod help;
 mod server;
 mod preview;
@@ -7388,7 +7389,7 @@ fn command_line_error_exit(control_mode: u8, stderr_prefix: &str, msg: &str) -> 
         eprintln!("{}{}", stderr_prefix, msg);
         std::process::exit(1);
     }
-    let ts = chrono::Utc::now().timestamp();
+    let ts = jiff::Timestamp::now().as_second();
     let mut block = String::new();
     if control_mode == 2 {
         block.push_str("\x1bP1000p");

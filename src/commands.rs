@@ -783,7 +783,7 @@ pub fn server_info_text(app: &AppState) -> String {
         std::process::id(),
         app.session_name,
         app.windows.len(),
-        (chrono::Local::now() - app.created_at).num_seconds(),
+        crate::strftime::now().duration_since(&app.created_at).as_secs(),
         crate::paths::port_file(app.port_file_base())
     )
 }
