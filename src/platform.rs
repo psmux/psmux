@@ -1644,6 +1644,7 @@ pub mod mouse_inject {
     /// different causes.
     fn attach_error_meaning(err: u32) -> &'static str {
         match err {
+            1 => "ERROR_INVALID_FUNCTION: seen right after this process attached to and left the same console, and a retry a millisecond later takes",
             5 => "ERROR_ACCESS_DENIED: the caller is still attached to a console, or the target console refuses this caller (integrity or session mismatch)",
             6 => "ERROR_INVALID_HANDLE: that process exists but has no console",
             87 => "ERROR_INVALID_PARAMETER: no process with that id",
@@ -1836,6 +1837,10 @@ pub mod mouse_inject {
     #[path = "../../../tests-rs/test_issue989_attach_ctrl_c.rs"]
     mod tests_issue989_attach_ctrl_c;
 
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_attach_console_retry.rs"]
+    mod tests_attach_console_retry;
+
     unsafe fn free_and_attach_unguarded(child_pid: u32, site: &str) -> bool {
         let target = if fake_inject_fail() {
             debug_log(&format!(
@@ -1853,6 +1858,32 @@ pub mod mouse_inject {
         if AttachConsole(target) != 0 { return true; }
         let child_pid = target;
         let err1 = GetLastError();
+
+        let delays = attach_retry_delays_ms(err1);
+        if !delays.is_empty() {
+            let mut last = err1;
+            for (n, ms) in delays.iter().enumerate() {
+                std::thread::sleep(std::time::Duration::from_millis(*ms));
+                let freed_again = FreeConsole();
+                if AttachConsole(child_pid) != 0 {
+                    debug_log(&format!(
+                        "{}: AttachConsole({}) failed err={}, then succeeded on retry {} after {} ms \
+                         (FreeConsole ok={})",
+                        site, child_pid, err1, n + 1, ms, freed_again != 0
+                    ));
+                    return true;
+                }
+                last = GetLastError();
+            }
+            if debug_enabled() {
+                debug_log(&format!(
+                    "{} | {} retries failed, the last with err={} ({})",
+                    attach_failure_report(site, child_pid, &before, freed, free_err, err1, None),
+                    delays.len(), last, attach_error_meaning(last)
+                ));
+            }
+            return false;
+        }
 
         if err1 == 5 {
             // Still attached is the documented meaning, and a second detach is
@@ -1885,6 +1916,21 @@ pub mod mouse_inject {
             ));
         }
         false
+    }
+
+    /// How long to wait before each further attach after `AttachConsole`
+    /// failed with `err`.  Only ERROR_INVALID_FUNCTION (1) is retried here:
+    /// it came back now and then for an attach right after this process had
+    /// attached to and left the same console (the 2 s console mode re-check
+    /// runs just before a wheel record goes in), and the record was dropped.
+    /// Measured under the test runner, 10 of 10 took on the first retry, 1 ms
+    /// later.  Error 5 has its own immediate retry, and 6 and 87 (no console,
+    /// no process) cannot change by waiting.
+    pub(crate) fn attach_retry_delays_ms(err: u32) -> &'static [u64] {
+        match err {
+            1 => &[1, 2, 4],
+            _ => &[],
+        }
     }
 
     /// Extract the process ID from a portable_pty::Child trait object.
