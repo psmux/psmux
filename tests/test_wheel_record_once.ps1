@@ -63,12 +63,29 @@ function Run-Shape([string]$host_, [string[]]$cmd, [string]$dir, [bool]$mouse, [
     if ($echoLog) { $env:PSMUX_MOUSE_ECHO_LOG = $echoLog }
     Remove-Item $natLog -Force -EA SilentlyContinue
     & $PSMUX -L $ns new-session -d -s w -x 100 -y 30 @cmd | Out-Null
-    Start-Sleep -Seconds 3
+    # Wait for the app's READY line and then for the client, not fixed 3 s
+    # and 4 s: under the full runner the first notches sometimes went out
+    # before both were up, and the VT input on shape got 3 of 5.
+    $ready = if ($echoLog) { 'MOUSE_ECHO_READY' } else { 'NATIVE_MOUSE_READY' }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt 20000) {
+        $cap = & $PSMUX -L $ns capture-pane -t w -p 2>$null | Out-String
+        if ($cap -match $ready) { break }
+        Start-Sleep -Milliseconds 250
+    }
     & $PSMUX -L $ns set -g mouse $(if ($mouse) { 'on' } else { 'off' }) | Out-Null
     $proc = Start-Process -FilePath "$env:WINDIR\System32\conhost.exe" -ArgumentList "`"$PSMUX`"","-L",$ns,"attach","-t","w" -PassThru
     try {
-        Start-Sleep -Seconds 4
-        $c = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" | Where-Object { $_.Name -eq 'psmux.exe' } | Select-Object -First 1
+        $c = $null
+        $sw.Restart()
+        while ($sw.ElapsedMilliseconds -lt 20000) {
+            $c = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" | Where-Object { $_.Name -eq 'psmux.exe' } | Select-Object -First 1
+            $clients = & $PSMUX -L $ns list-clients 2>$null | Out-String
+            if ($c -and $clients.Trim()) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        # The attached client's first draw and its mouse mode setup.
+        Start-Sleep -Seconds 1
         if (-not $c) { return $null }
         for ($i = 0; $i -lt $N; $i++) {
             & $inj ([int]$c.ProcessId) $dir 1 20 8 | Out-Null
