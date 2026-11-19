@@ -609,8 +609,43 @@ $script:AuditTerminalHosts = @('WindowsTerminal.exe', 'OpenConsole.exe', 'conhos
 # rule, measured: the first version protected the window and pass 1 then killed
 # the cmd inside it).
 $script:AuditForeignPids = @{}
+
+# A suite can start a process that is not in its job and whose creator is not its
+# own (Win32_Process.Create makes it a child of WmiPrvSE, which walks up to
+# svchost). The foreign-root rule below rightly protects such a process, since a
+# Task Scheduler or daemon process looks the same, so on its own the audit could
+# never end it: test_runner_leftover_audit's Case B was left parked on the desktop
+# after every sweep since 95988cfa (PROTECTED ... started by svchost.exe).
+# The suite therefore DECLARES what it started, one "<pid><TAB><command line>" per
+# line, in the file named by PSMUX_TEST_DECLARED_PIDS. A declared pid is trusted
+# only while it is alive, was created after the suite started, and still has the
+# command line the suite recorded, so a declaration can never reach a process the
+# suite did not start (pid reuse included).
+function Get-DeclaredLeakFile {
+    param([string]$Suite)
+    return (Join-Path $script:SuiteDir "$Suite.declared_pids.txt")
+}
+function Get-DeclaredLeakPids {
+    param([string]$Suite, [datetime]$SuiteStart)
+    $ok = @{}
+    $file = Get-DeclaredLeakFile -Suite $Suite
+    if (-not (Test-Path $file)) { return $ok }
+    foreach ($line in (Get-Content $file -ErrorAction SilentlyContinue)) {
+        $f = $line -split "`t", 2
+        $q = 0
+        if ($f.Count -ne 2 -or -not [int]::TryParse($f[0].Trim(), [ref]$q)) { continue }
+        $p = Get-CimInstance -Query "SELECT ProcessId,CommandLine,CreationDate FROM Win32_Process WHERE ProcessId=$q" -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        try { if (-not $p.CreationDate -or $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { continue }
+        $cl = (([string]$p.CommandLine) -replace '\s+', ' ').Trim()
+        if ($cl -ne (($f[1] -replace '\s+', ' ').Trim())) { continue }
+        $ok[$q] = $true
+    }
+    return $ok
+}
+
 function Get-ForeignConsoleWindows {
-    param([datetime]$SuiteStart)
+    param([datetime]$SuiteStart, [hashtable]$Declared = @{})
     $result = @{}
     $script:AuditForeignPids = @{}
     try {
@@ -622,6 +657,7 @@ function Get-ForeignConsoleWindows {
         foreach ($p in $all.Values) {
             $procId = [int]$p.ProcessId
             if ($script:AuditOwnPids.ContainsKey($procId)) { continue }
+            if ($Declared.ContainsKey($procId)) { continue }               # the suite says it started it
             if ($script:AuditTerminalHosts -contains $p.Name) { continue }
             try { if (-not $p.CreationDate -or $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { continue }
             # Walk LIVE parents. A parent that is already gone (the suite's own
@@ -761,7 +797,9 @@ function Invoke-LeftoverAudit {
             if (Test-AuditWindowProtected $w) { continue }
             $candWins += $w
         }
-        $foreign = Get-ForeignConsoleWindows -SuiteStart $SuiteStart
+        $declared = Get-DeclaredLeakPids -Suite $Suite -SuiteStart $SuiteStart
+        foreach ($d in $declared.Keys) { Write-AuditLine ("DECLARED {0} pid={1}: the suite says it started it outside its job" -f $Suite, $d) }
+        $foreign = Get-ForeignConsoleWindows -SuiteStart $SuiteStart -Declared $declared
         foreach ($w in $candWins) {
             if ($foreign.ContainsKey([long]$w.Handle)) {
                 Write-AuditLine ("PROTECTED-WINDOW {0} hwnd={1} pid={2} class={3} title=[{4}] shows the console of {5}; not the suite's, left alone" -f `
@@ -1445,6 +1483,10 @@ function Run-TestFile {
         # anything already on screen is this suite's problem only if IT created it.
         $auditBefore = New-AuditSnapshot
         $auditStart  = Get-Date
+        # Where the suite may declare processes it started outside its job (see
+        # Get-DeclaredLeakPids). Inherited by the suite through the environment.
+        $env:PSMUX_TEST_DECLARED_PIDS = Get-DeclaredLeakFile -Suite $baseName
+        Remove-Item $env:PSMUX_TEST_DECLARED_PIDS -Force -ErrorAction SilentlyContinue
         # Tell the spawn watcher which suite owns the next burst of console starts.
         try { [System.IO.File]::WriteAllText($script:CurrentSuiteFile, $baseName) } catch { }
 
