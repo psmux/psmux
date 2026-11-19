@@ -340,9 +340,20 @@ if ($opencodePath) {
     # Line-count based: opencode's spinner and clock redraw make raw capture
     # equality useless as a content signal (captures differ while the
     # viewport is still effectively empty).
-    $ocLines = @($capOC2 -split "`n" | Where-Object { $_.Trim().Length -gt 0 }).Count
-    if ($ocLines -lt 15) {
-        Write-Host "  [SKIP] opencode produced no scrollable content ($ocLines non-empty lines); model backend likely unreachable. Scroll checks skipped." -ForegroundColor DarkYellow
+    # Count rows that carry text once opencode's box drawing is stripped:
+    # its frame and gutter rows are non-empty but say nothing, and an error
+    # reply (an expired subscription, an unreachable endpoint) plus its toast
+    # took a raw non-empty count past 15 while the whole conversation still
+    # fitted on screen, leaving nothing to scroll. Only a reply that fills
+    # the pane gives the wheel something to move.
+    $ocLines = @($capOC2 -split "`n" | Where-Object { ($_ -replace '[\s─-▟]', '').Length -gt 0 }).Count
+    $ocHeight = 0
+    [int]::TryParse(((& $PSMUX display-message -t $SESSION -p '#{pane_height}' 2>&1) | Out-String).Trim(), [ref]$ocHeight) | Out-Null
+    $ocNeed = [Math]::Max(15, $ocHeight - 6)
+    if ($ocLines -lt $ocNeed) {
+        $ocWhy = ($capOC2 -split "`n" | Where-Object { $_ -match 'subscription|error|unauthori|failed|refused' } | Select-Object -First 1)
+        $ocWhy = if ($ocWhy) { " opencode said: " + ($ocWhy -replace '[─-▟]', '').Trim() } else { '' }
+        Write-Host "  [SKIP] opencode produced no scrollable content ($ocLines text rows, $ocNeed needed to fill a $ocHeight row pane); model backend likely unreachable.$ocWhy Scroll checks skipped." -ForegroundColor DarkYellow
     } else {
     # Test 5: Mouse wheel in opencode with mouse-selection ON
     Write-Host "`n[Test 5] Mouse wheel UP in opencode with mouse-selection ON" -ForegroundColor Yellow
