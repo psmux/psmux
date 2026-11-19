@@ -4,15 +4,15 @@
 #
 # FIXED: auto_save.ps1 now takes a named Mutex ('Local\psmux-continuum-autosave')
 # before starting its save loop, so repeat client-attached firings start a
-# script instance that finds the mutex held and exits immediately instead of
-# accumulating. See scripts/auto_save.ps1 header comment for issue #24.
+# script instance that finds the mutex held and exits (after waiting up to
+# MUTEX_HANDOVER_MS for it) instead of accumulating. See scripts/auto_save.ps1 header comment for issue #24.
 #
 # This is now a REGRESSION test (inverted from the original bug-reproduction
 # script): it sources the real continuum plugin.conf into a live psmux
 # session, attaches/detaches a client N times via Win32, and counts the pwsh
 # processes running auto_save.ps1 after each attach. It PASSES when the count
-# stays capped at 1 (the fix holds) and FAILS if the count grows with attaches
-# (the duplicate-spawn bug has regressed).
+# comes back to 1 once the handover wait is over (the fix holds) and FAILS if
+# more than one is still running then (the duplicate-spawn bug has regressed).
 
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
@@ -39,6 +39,30 @@ function Kill-AutoSave {
     Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -EA SilentlyContinue |
         Where-Object { $_.CommandLine -and $_.CommandLine -like '*auto_save*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
+}
+
+# plugin.conf's hook runs ~/.psmux/plugins/psmux-continuum/scripts/auto_save.ps1,
+# where ppm installs it, and that script exits at once unless psmux-resurrect
+# sits beside it. With continuum only under plugins\psmux-plugins\ (a clone of
+# the whole collection) the hook starts nothing, and every count below is 0.
+# That is a missing prerequisite, not a result.
+$HOOKSCRIPT = "$psmuxDir\plugins\psmux-continuum\scripts\auto_save.ps1"
+$RESURRECT = "$psmuxDir\plugins\psmux-resurrect\scripts\save.ps1"
+foreach ($need in $HOOKSCRIPT, $RESURRECT) {
+    if (-not (Test-Path $need)) {
+        Write-Host "[SKIP] $need not found - install psmux-continuum and psmux-resurrect with ppm (prefix + I)" -ForegroundColor Yellow
+        exit 0
+    }
+}
+# A second auto_save.ps1 waits up to MUTEX_HANDOVER_MS for the mutex before it
+# exits (psmux-plugins 45cc03fd, so a restarted server takes the loop over), so
+# for that long after a start a waiting copy is still running and counted.
+$hm = Select-String -LiteralPath $HOOKSCRIPT -Pattern 'MUTEX_HANDOVER_MS\s*=\s*(\d+)' | Select-Object -First 1
+$HANDOVER_MS = if ($hm) { [int]$hm.Matches[0].Groups[1].Value } else { 0 }
+function Wait-Handover {
+    # Until at most one is left, or the handover wait (plus slack) is over.
+    $deadline = (Get-Date).AddMilliseconds($HANDOVER_MS + 5000)
+    while ((Count-AutoSave) -gt 1 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
 }
 
 function Cleanup {
@@ -85,16 +109,19 @@ for ($i = 1; $i -le $ATTACHES; $i++) {
     Write-Host "    after detach #$i : auto_save processes = $after (should persist if bug present)"
 }
 
+# The counts above include copies still waiting for the mutex. Give the
+# last one its handover wait, then count what is left.
+Wait-Handover
 $final = Count-AutoSave
-Write-Host "`n  final auto_save process count: $final after $ATTACHES attaches" -ForegroundColor Yellow
+Write-Host "`n  final auto_save process count: $final after $ATTACHES attaches and the $HANDOVER_MS ms handover wait" -ForegroundColor Yellow
 
-# REGRESSED if the count grows with attaches (more than 1 surviving process);
-# the mutex guard in auto_save.ps1 should keep this capped at 1 no matter how
-# many times client-attached fires.
-if ($final -ge 2 -and $counts[-1] -gt $counts[0]) {
+# REGRESSED if more than one is still running after the handover wait; the
+# mutex guard in auto_save.ps1 should leave exactly 1 no matter how many
+# times client-attached fires.
+if ($final -ge 2) {
     Write-Fail "REGRESSION: auto_save processes accumulate per attach (final=$final, progression: $($counts -join ','))"
 } elseif ($final -eq 1 -and ($counts | Where-Object { $_ -ge 1 }).Count -eq $ATTACHES) {
-    Write-Pass "Single-instance guard holds: auto_save stayed capped at 1 process across $ATTACHES attaches (progression: $($counts -join ','))"
+    Write-Pass "Single-instance guard holds: 1 auto_save process left after $ATTACHES attaches (progression while waiting: $($counts -join ','))"
 } else {
     Write-Fail "Inconclusive: final=$final progression=$($counts -join ',') (hook may not have fired -- check client-attached wiring)"
 }

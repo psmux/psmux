@@ -3,9 +3,10 @@
 #
 # Two independent proofs:
 #   A) Direct guard check: launch auto_save.ps1 twice by hand; the second must
-#      exit immediately, leaving exactly one running process.
+#      exit within the handover wait, leaving the first one running.
 #   B) End-to-end via psmux: attach a client N times; the count must reach 1
-#      (proving the hook fires) and stay at exactly 1 (proving no accumulation).
+#      (proving the hook fires) and be exactly 1 once the handover wait is over
+#      (proving no accumulation).
 
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
@@ -33,6 +34,30 @@ function Kill-AutoSave {
         Where-Object { $_.CommandLine -and $_.CommandLine -like '*auto_save*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
 }
+# plugin.conf's hook runs ~/.psmux/plugins/psmux-continuum/scripts/auto_save.ps1,
+# where ppm installs it, and that script exits at once unless psmux-resurrect
+# sits beside it. With continuum only under plugins\psmux-plugins\ (a clone of
+# the whole collection) the hook starts nothing, and every count below is 0.
+# That is a missing prerequisite, not a result.
+$HOOKSCRIPT = "$psmuxDir\plugins\psmux-continuum\scripts\auto_save.ps1"
+$RESURRECT = "$psmuxDir\plugins\psmux-resurrect\scripts\save.ps1"
+foreach ($need in $HOOKSCRIPT, $RESURRECT) {
+    if (-not (Test-Path $need)) {
+        Write-Host "[SKIP] $need not found - install psmux-continuum and psmux-resurrect with ppm (prefix + I)" -ForegroundColor Yellow
+        exit 0
+    }
+}
+# A second auto_save.ps1 waits up to MUTEX_HANDOVER_MS for the mutex before it
+# exits (psmux-plugins 45cc03fd, so a restarted server takes the loop over), so
+# for that long after a start a waiting copy is still running and counted.
+$hm = Select-String -LiteralPath $HOOKSCRIPT -Pattern 'MUTEX_HANDOVER_MS\s*=\s*(\d+)' | Select-Object -First 1
+$HANDOVER_MS = if ($hm) { [int]$hm.Matches[0].Groups[1].Value } else { 0 }
+function Wait-Handover {
+    # Until at most one is left, or the handover wait (plus slack) is over.
+    $deadline = (Get-Date).AddMilliseconds($HANDOVER_MS + 5000)
+    while ((Count-AutoSave) -gt 1 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+}
+
 function Cleanup {
     & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
@@ -52,14 +77,16 @@ Start-Sleep -Seconds 3
 Start-Process pwsh -ArgumentList "-NoProfile","-File",$AUTOSAVE,"-IntervalMinutes","1" -WindowStyle Hidden | Out-Null
 Start-Sleep -Seconds 2
 $afterFirst = Count-AutoSave
-Start-Process pwsh -ArgumentList "-NoProfile","-File",$AUTOSAVE,"-IntervalMinutes","1" -WindowStyle Hidden | Out-Null
-Start-Sleep -Seconds 2
+$second = Start-Process pwsh -ArgumentList "-NoProfile","-File",$AUTOSAVE,"-IntervalMinutes","1" -WindowStyle Hidden -PassThru
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$secondExited = $second.WaitForExit($HANDOVER_MS + 5000)
+$sw.Stop()
 $afterSecond = Count-AutoSave
-Write-Host "  count after 1st launch: $afterFirst, after 2nd launch: $afterSecond"
-if ($afterFirst -eq 1 -and $afterSecond -eq 1) {
-    Write-Pass "Second instance exited immediately (mutex guard holds, count stays 1)"
+Write-Host "  count after 1st launch: $afterFirst; 2nd launch exited: $secondExited after $($sw.ElapsedMilliseconds) ms (handover wait $HANDOVER_MS ms); count then: $afterSecond"
+if ($afterFirst -eq 1 -and $secondExited -and $afterSecond -eq 1) {
+    Write-Pass "Second instance exited within the handover wait (mutex guard holds, count back to 1)"
 } else {
-    Write-Fail "Guard failed: afterFirst=$afterFirst afterSecond=$afterSecond (expected 1 and 1)"
+    Write-Fail "Guard failed: afterFirst=$afterFirst secondExited=$secondExited afterSecond=$afterSecond (expected 1, True, 1)"
 }
 Kill-AutoSave
 Start-Sleep -Seconds 1
@@ -83,12 +110,14 @@ for ($i = 1; $i -le 4; $i++) {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
     Start-Sleep -Seconds 2
 }
+# The counts above include copies still waiting for the mutex.
+Wait-Handover
 $final = Count-AutoSave
-Write-Host "  progression: $($counts -join ','); final=$final"
-if ($reached1 -and $final -eq 1 -and (($counts | Measure-Object -Maximum).Maximum -eq 1)) {
+Write-Host "  progression while waiting: $($counts -join ','); final after the handover wait=$final"
+if ($reached1 -and $final -eq 1) {
     Write-Pass "Hook fired each attach yet exactly ONE auto_save survives (no accumulation)"
 } else {
-    Write-Fail "Unexpected: reached1=$reached1 final=$final max=$(($counts|Measure-Object -Maximum).Maximum)"
+    Write-Fail "Unexpected: reached1=$reached1 final=$final"
 }
 
 Cleanup
