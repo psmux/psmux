@@ -87,9 +87,13 @@ function Run-Shape([string]$host_, [string[]]$cmd, [string]$dir, [bool]$mouse, [
         # The attached client's first draw and its mouse mode setup.
         Start-Sleep -Seconds 1
         if (-not $c) { return $null }
+        # How many wheel records the app had after each notch, for the
+        # failure message: a short count says which notch went missing.
+        $script:Trail = @()
         for ($i = 0; $i -lt $N; $i++) {
             & $inj ([int]$c.ProcessId) $dir 1 20 8 | Out-Null
             Start-Sleep -Milliseconds 500
+            if (-not $echoLog) { $script:Trail += if (Test-Path $natLog) { @(Get-Content $natLog | Where-Object { $_ -match '^MOUSE .*flags=0x4 ' }).Count } else { 0 } }
         }
         Start-Sleep -Seconds 1
         if ($echoLog) { if (Test-Path $echoLog) { Get-Content $echoLog } else { @() } }
@@ -116,14 +120,14 @@ foreach ($h in $hosts) {
         $wheel = @($lines | Where-Object { $_ -match '^MOUSE .*flags=0x4 ' })
         $right = @($wheel | Where-Object { $_ -match "wheel=$sign\d" -and $_ -notmatch "wheel=$(if ($sign) {''} else {'-'})\d" })
         if ($wheel.Count -eq $N -and $right.Count -eq $N) { Write-Pass "$N notches -> $($wheel.Count) wheel records" }
-        else { Write-Fail "$N notches -> $($wheel.Count) wheel records: $(($wheel | ForEach-Object { ($_ -split 'buttons=')[1] }) -join ' / ')" }
+        else { Write-Fail "$N notches -> $($wheel.Count) wheel records (after each notch: $($script:Trail -join ' ')): $(($wheel | ForEach-Object { ($_ -split 'buttons=')[1] }) -join ' / ')" }
 
         Write-Host "`n[$h] record reader, VT input on (Bubble Tea, #277), wheel $dir" -ForegroundColor Yellow
         $lines = Run-Shape $h @($nat, 'vti') $dir $true $null
         if ($null -eq $lines) { Write-Fail "client did not start"; continue }
         $wheel = @($lines | Where-Object { $_ -match '^MOUSE .*flags=0x4 ' })
         if ($wheel.Count -eq $N) { Write-Pass "$N notches -> $($wheel.Count) wheel records (the injected record still arrives)" }
-        else { Write-Fail "$N notches -> $($wheel.Count) wheel records with VTI on: $(($wheel | ForEach-Object { ($_ -split 'buttons=')[1] }) -join ' / ')" }
+        else { Write-Fail "$N notches -> $($wheel.Count) wheel records with VTI on (after each notch: $($script:Trail -join ' ')): $(($wheel | ForEach-Object { ($_ -split 'buttons=')[1] }) -join ' / ')" }
     }
 
     Write-Host "`n[$h] VT mouse app" -ForegroundColor Yellow
