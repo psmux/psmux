@@ -210,7 +210,12 @@ function Probe($mode, $tag, $specs) {
     $probeArgs = @($p.Id) + $specs
     & $rawinjectExe @probeArgs 2>&1 | Out-Null
     Start-Sleep -Seconds 7
-    try { Stop-Process -Id $p.Id -Force -EA SilentlyContinue } catch {}
+    # Stop keydump with its cmd. keydump's 8 s deadline is checked only
+    # between reads, and on Windows 10 (build 19045) the injected Ctrl+Space
+    # record makes no VT byte, so its ReadFile never returns; stopping cmd
+    # alone left keydump508.exe running for good, holding the runner's
+    # working folder.
+    & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null
     if (Test-Path $log) { return (Get-Content $log) }
     return @("NO_LOG")
 }
