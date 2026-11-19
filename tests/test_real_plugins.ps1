@@ -255,10 +255,16 @@ if (-not (Start-FreshSession)) {
     Write-Info "Script output: $($output.Trim())"
     Start-Sleep -Milliseconds 500
 
-    Write-Test "sensible: escape-time 50"
+    # The value comes from the plugin script, which has changed it before
+    # (50, then 10 in psmux-plugins 1e4d6847, the tmux 3.5+ default).
+    $sensibleText = Get-Content -Raw "$PLUGIN_DIR\psmux-sensible\psmux-sensible.ps1"
+    $m = [regex]::Match($sensibleText, '(?m)^[^#\r\n]*\bset -go escape-time (\d+)')
+    $wantEscape = if ($m.Success) { $m.Groups[1].Value } else { '' }
+    Write-Test "sensible: escape-time $wantEscape (as the plugin script sets it)"
     $v = (Psmux show-options -g -v escape-time -t $S | Out-String).Trim()
-    if ($v -eq "50") { Write-Pass "escape-time: $v" }
-    else { Write-Fail "escape-time: '$v'" }
+    if (-not $wantEscape) { Write-Fail "escape-time: no 'set -go escape-time' line in psmux-sensible.ps1" }
+    elseif ($v -eq $wantEscape) { Write-Pass "escape-time: $v" }
+    else { Write-Fail "escape-time: '$v', the plugin sets $wantEscape" }
 
     Write-Test "sensible: history-limit 50000"
     $v = (Psmux show-options -g -v history-limit -t $S | Out-String).Trim()
