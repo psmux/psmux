@@ -72,7 +72,15 @@ class ConptyTimedHost
             string line = raw.TrimEnd();
             if (line.Length == 0 || line.StartsWith("#")) continue;
             var p = line.Split(new[] { ' ' }, 3);
-            if (p[0] == "S") { Thread.Sleep(int.Parse(p[1])); continue; }
+            if (p[0] == "S") {
+                // A short wait spins on the clock: Thread.Sleep(4), even with
+                // timeBeginPeriod(1), came back after 4 to 21 ms on a loaded
+                // machine, and #841's split Down needs [B inside escape-time.
+                int ms = int.Parse(p[1]);
+                if (ms <= 20) { var sw = System.Diagnostics.Stopwatch.StartNew(); while (sw.Elapsed.TotalMilliseconds < ms) Thread.SpinWait(50); }
+                else Thread.Sleep(ms);
+                continue;
+            }
             if (p[0] == "X") {
                 var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + p[2]);
                 psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.CreateNoWindow = true;
