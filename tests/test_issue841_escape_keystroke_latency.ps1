@@ -212,11 +212,20 @@ function Invoke-PrefixCheck([string]$route) {
 foreach ($route in 'w32', 'vt') {
     Write-Host "`n[Part 5] prefix keys on the $route route" -ForegroundColor Yellow
     $r = Invoke-PrefixCheck $route
+    # The split Down only tests the escape-time wait when [B came inside
+    # escape-time (10). Written later, a lone Escape is the right reading,
+    # so a late try is run again rather than counted.
+    $late = { $route -eq 'vt' -and $r['down'] -and $r['down'][0] -ne 1 -and $r['downgap'] -ge 10 }
+    for ($try = 2; $try -le 3 -and (& $late); $try++) {
+        Write-Host "  [INFO] [B was written $($r['downgap']) ms after ESC, past escape-time 10; try $try" -ForegroundColor DarkGray
+        $r = Invoke-PrefixCheck $route
+    }
     if (-not $r['start'] -or -not $r['altup']) { Write-Fail "$route prefix check: no pane readings ($(($r.Keys) -join ','))"; continue }
     if ($r['start'][0] -eq 1 -and $r['up'][0] -eq 0) { Write-Pass "$route prefix Up selected the pane above (1 -> 0)" }
     else { Write-Fail "$route prefix Up: pane $($r['start'][0]) -> $($r['up'][0])" }
     $gapNote = if ($route -eq 'vt') { ", written as ESC then [B $($r['downgap']) ms apart (4 asked, escape-time 10)" } else { '' }
     if ($r['down'][0] -eq 1) { Write-Pass "$route prefix Down came back (0 -> 1)$gapNote" }
+    elseif (& $late) { Write-Host "  [SKIP] $route prefix Down: [B came past escape-time on all 3 tries$gapNote" -ForegroundColor Yellow }
     else { Write-Fail "$route prefix Down: pane $($r['up'][0]) -> $($r['down'][0])$gapNote" }
     if ($r['altup'][1] -ne $r['down'][1]) { Write-Pass "$route prefix Alt+Up resized the pane (height $($r['down'][1]) -> $($r['altup'][1]))" }
     else { Write-Fail "$route prefix Alt+Up left the height at $($r['altup'][1])" }
