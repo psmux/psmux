@@ -468,6 +468,23 @@ Three things differ from tmux:
 - An option set while a client is attached counts from the next write. tmux reads both at attach.
 - `Spb` is expanded for `%p1`, `%p2`, `%d` and `%%`. A value with any other terminfo operator writes nothing, and so does a value that does not use `%p2`, which is also what tmux does for that one.
 
+### Clipboard Read (OSC 52 ; ?)
+
+A pane program asks for the clipboard with `ESC ] 52 ; c ; ? ESC \`. As in tmux, the query is read only with `set-clipboard on`; with `external`, the default, or `off`, it gets no reply, so nothing a program prints can read back what you copied unless you turn this on. With `on`, psmux answers as the `get-clipboard` server option says, as tmux's `input_osc_52_reply` does:
+
+| `get-clipboard` | The reply |
+|---|---|
+| `off` | none |
+| `buffer` (the default) | the newest automatic paste buffer, none without one; a named buffer (`set-buffer -b`) is not read |
+| `request` | the Windows clipboard's text, as `refresh-client -l` reads it, where tmux asks the terminal of the most recently used client; none with no client attached, as in tmux |
+| `both` | the same, kept as a new paste buffer too |
+
+The reply is `ESC ] 52 ; selection ; base64 data`, ended the way the query was, and names the first selection character tmux knows (`cpqs01234567`) that the query gave, or none. A clipboard write earlier in the same output is read back on `set-clipboard on`, where it makes a buffer. When another window holds the Windows clipboard open, `request` and `both` wait for it for up to a second, as a paste does, and the pane's other replies wait behind it, while other panes go on; past that the query gets no reply. tmux waits up to 5 seconds for its terminal's answer. `request` and `both` let any pane program read what you copied, so leave them off unless you want that.
+
+One difference:
+
+- **Not through the inbox conhost of Windows 11.** It drops the query before psmux sees it (builds 26200 and 26300), so a pane there gets no reply whatever the options. The Windows 10 one (build 19045) passes it on when it next draws, and OpenConsole (`PSMUX_CONPTY_DIR`) passes it on.
+
 ## Behavioral Differences from tmux
 
 A few commands intentionally behave differently from upstream tmux. These are deliberate choices, not bugs.

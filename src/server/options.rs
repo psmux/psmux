@@ -1092,6 +1092,8 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
         // tmux options-table.c:402 and :411 (#846). Stored as text in
         // user_options; a missing entry is the tmux default.
         "extended-keys" => "off",
+        // tmux options-table.c:440, `default_num = 1`.
+        "get-clipboard" => "buffer",
         "extended-keys-format" => "xterm",
         // tmux options-table.c:439, INPUT_BUF_DEFAULT_SIZE. Stored as text in
         // user_options like extended-keys; the parsers read the number.

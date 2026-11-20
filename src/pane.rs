@@ -4868,6 +4868,12 @@ pub(crate) enum ReplyFallback {
     /// Nothing else carries it, so it is logged as lost: a DCS written to a
     /// pane's input pipe arrives as a bare ESC with its body eaten (#597).
     Lost(&'static str),
+    /// The clipboard's reply (`OSC 52 ; ?`), which only the server loop can
+    /// give, from its paste buffers or the system clipboard as its options
+    /// say: the batch holding it goes there (crate::clipboard_read), which
+    /// puts the reply in or leaves it out and delivers the batch. Once in,
+    /// it is lost if it cannot be injected, as an OSC is.
+    Clipboard { selection: u8, bel: bool },
 }
 
 /// One reply to one query.
@@ -4977,6 +4983,11 @@ pub(crate) fn pane_replies(
                 fallback: ReplyFallback::Lost("OSC 12"),
                 console_host: false,
             }),
+            DeviceQuery::Clipboard { selection, bel } => Some(PaneReply {
+                text: String::new(),
+                fallback: ReplyFallback::Clipboard { selection, bel },
+                console_host: false,
+            }),
             DeviceQuery::GraphicsAttribute { item, action, value } => Some(PaneReply {
                 text: graphics_reply(item, action, value, !*console_host_da1_open),
                 fallback: ReplyFallback::Pipe,
@@ -5000,7 +5011,7 @@ pub(crate) fn pane_replies(
 /// `ReplyFallback` way, the PTY ones in order with the console host's.
 /// Returns true when anything was left for the server loop to write, so the
 /// caller wakes it again.
-fn deliver_replies(
+pub(crate) fn deliver_replies(
     pane_id: usize,
     child_pid: Option<u32>,
     replies: &[PaneReply],
@@ -5024,6 +5035,9 @@ fn deliver_replies(
             ReplyFallback::Colour(bit) => bits |= bit,
             ReplyFallback::Lost(kind) => {
                 crate::platform::mouse_inject::log_lost_reply(child_pid, kind, r.text.len());
+            }
+            ReplyFallback::Clipboard { .. } => {
+                crate::platform::mouse_inject::log_lost_reply(child_pid, "OSC 52", r.text.len());
             }
         }
     }
@@ -5470,7 +5484,18 @@ pub fn spawn_reader_thread(
                 let replies = pane_replies(
                     &device_queries, &st, &colours, &mut console_host_da1_open,
                 );
-                if deliver_replies(pane_id, child_pid, &replies, &color_query_pending) {
+                if crate::clipboard_read::wanted(&replies) || crate::clipboard_read::waits(pane_id) {
+                    // The server loop answers the clipboard and delivers the
+                    // batch, so the replies keep their order; a batch with no
+                    // clipboard query goes behind one that still waits.
+                    crate::clipboard_read::queue(crate::clipboard_read::Batch::new(
+                        pane_id,
+                        child_pid,
+                        replies,
+                        color_query_pending.clone(),
+                    ));
+                    crate::types::wake_server_loop();
+                } else if deliver_replies(pane_id, child_pid, &replies, &color_query_pending) {
                     crate::types::PTY_DATA_READY.store(true, Ordering::Release);
                     crate::types::wake_server_loop();
                 }

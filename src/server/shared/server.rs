@@ -671,10 +671,16 @@ fn run(ns: Option<String>) -> ! {
                 // window-style and window-active-style, for the OSC 10 and
                 // OSC 11 replies.
                 crate::style_colours::reconcile(app);
+                // A pane's OSC 52 query, answered by the session that has
+                // the pane.
+                crate::clipboard_read::serve(app, crate::clipboard_read::has_pane);
             })
             .into_iter()
             .map(|sid| (sid, "panic")),
         );
+        crate::clipboard_read::drop_orphans(|id| {
+            sessions.values().any(|s| crate::clipboard_read::has_pane(&s.app, id))
+        });
         let data_ready = crate::types::PTY_DATA_READY.swap(false, Ordering::AcqRel);
         if data_ready {
             let cpr = crate::types::CPR_DATA_PENDING.swap(false, Ordering::AcqRel);
