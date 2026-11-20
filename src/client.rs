@@ -10018,9 +10018,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 popup_rect_last = Some(oa);
                 let title = if preview_enabled {
-                    " choose-session (f=filter, /=search, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close, drag border to move) "
+                    " choose-session (f=filter, digits+enter=jump, /=search, enter=switch, x=kill, p=preview, esc=clear/close, drag border to move) "
                 } else {
-                    " choose-session (f=filter, /=search, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close) "
+                    " choose-session (f=filter, digits+enter=jump, /=search, enter=switch, x=kill, p=preview, esc=clear/close) "
                 };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
@@ -10410,7 +10410,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             if buffer_chooser {
                 let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 let overlay = Block::default().borders(Borders::ALL)
-                    .title(" choose-buffer (/=search, digits+enter=jump, Enter=paste, d=delete, q/Esc=close) ")
+                    .title(" choose-buffer (digits+enter=jump, /=search, Enter=paste, d=delete, q/Esc=close) ")
                     .border_style(sel_style);
                 let buffer_rows: u16 = (if buffer_num_buffer.is_empty() { 0 } else { 2 })
                     + (if chooser_search_prompt.is_some() { 2 } else { 0 });
