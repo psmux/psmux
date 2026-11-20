@@ -2,34 +2,20 @@
 
 Status: implemented for normal attached clients in the legacy and shared server.
 
-Unwrapped OSC 9 text notifications (excluding number-leading payloads),
-`777;notify`, OSC 99, and OSC 7501/9001 agent status reports are forwarded
-from visible panes of the active window without enabling passthrough.
-OSC 7501 capability queries stay local and are not forwarded. Other unknown
-OSCs remain ignored. Notification bytes, semicolons, BEL/ST terminators,
-OSC 99 identifiers, chunks and base64 data are preserved without decoding
-or reassembling the notification protocol in psmux.
+Only an explicit tmux passthrough reaches the host terminal, as in tmux 3.8.
+A pane's own notification OSCs (OSC 9 text, `777;notify`, OSC 99, OSC 7501,
+OSC 9001) are not forwarded, whatever `allow-passthrough` says: tmux's
+`input_exit_osc` (input.c) acts on OSC 9;4 progress and drops every other
+OSC 9 and every OSC it does not know. A program that wants a desktop
+notification inside tmux or psmux wraps it, `ESC P tmux; ESC ESC ]9;text BEL
+ESC \`, and the user opts in with `set -g allow-passthrough on`. With the
+default `off` nothing a pane writes is sent raw to the host terminal.
 
 OSC 99 identifiers share the host terminal's namespace. Programs in visible
 split panes should use distinct identifiers; psmux does not rewrite IDs or
 merge chunks from separate panes. Visibility is evaluated when the server
 drains pane output; hidden and detached events are discarded, not replayed
 on a later window switch or attach.
-
-Bare OSC 9 payloads must be ASCII-control-free text (no C0 or DEL), and
-number-leading payloads are excluded after leading whitespace: ConEmu uses these for host commands, including GuiMacro and process
-execution, and some commands match a numeric prefix without a separator.
-Rejecting controls also prevents a downstream parser from stripping them to
-expose a hidden numeric command. UTF-8 text and semicolons are preserved.
-This also excludes number-leading notification text such as `123 completed`;
-use OSC 777/99 for such messages, or explicit enabled tmux passthrough. See
-[ConEmu's OSC command reference](https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC).
-OSC 9 progress and cwd continue to use their existing pane-local handlers.
-
-OSC 99 support here is notification display/chunk/base64 transport. Interactive
-responses (capability/liveness queries and click/close reports) are not routed
-back to the originating pane. The metadata is transported unchanged; this is
-not a complete implementation of the interactive kitty notification protocol.
 
 ## What tmux does
 
@@ -62,9 +48,7 @@ A program writes `ESC P tmux; <body with every ESC doubled> ESC \`.
 
 ## Implementation
 
-1. **Parser.** An exact stream collector observes normal parser input before
-   VTE's OSC parameter limit can lose long or semicolon-rich payloads.
-   The tmux passthrough skipper collects unescaped bodies only while enabled;
+1. **Parser.** The tmux passthrough skipper collects unescaped bodies only while enabled;
    the pane screen never interprets them. Fragmented reads, doubled inner ESC,
    lost ConPTY closing ST recovery and the existing five second DCS timeout
    retain their parser behavior. A complete single allowlisted OSC ending in
@@ -77,8 +61,11 @@ A program writes `ESC P tmux; <body with every ESC doubled> ESC \`.
    Bodies with generic content before a notification are not committed early.
 2. **Server.** Each pane has an ordered consume-once event queue. The server
    drains the live parser during copy mode; snapshots contain no pending events.
-   Passthrough `on` applies the same visible-pane filter as notifications,
-   `all` permits hidden panes too, and `off` drops passthrough bodies.
+   Passthrough `on` forwards from visible panes (active window, zoom aware),
+   `all` permits hidden panes too, and `off` drops passthrough bodies. A
+   process wide pending count lets the server skip the per pane drain (and
+   its parser locks) whenever nothing is queued, which is always the case
+   with `off`.
    Tiled, floating and popup panes are covered. Events are discarded when the
    session has no registered normal client; control clients and normal clients
    in another shared-server session cannot retain events for a later attach.

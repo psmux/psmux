@@ -17,7 +17,7 @@ static INPUT_BUFFER_SIZE: std::sync::atomic::AtomicUsize =
 /// Record the `input-buffer-size` server option for every pane parser in this
 /// process, as tmux's `input_set_buffer_size` (input.c) does.
 ///
-/// Sixel, host notification collection and tmux passthrough bodies honor it.
+/// Sixel and collected tmux passthrough bodies honor it.
 pub fn set_input_buffer_size(bytes: usize) {
     INPUT_BUFFER_SIZE.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }

@@ -1771,7 +1771,11 @@ impl Screen {
         self.host_events.take()
     }
 
-    pub(crate) fn push_host_passthrough(&mut self, bytes: Vec<u8>) {
+    /// Queue an unescaped passthrough body as the parser does for an enabled
+    /// `DCS tmux;`. Public so server tests can queue one without flipping
+    /// the process wide `allow-passthrough` flag under parallel tests.
+    #[doc(hidden)]
+    pub fn push_host_passthrough(&mut self, bytes: Vec<u8>) {
         self.host_events.push(bytes, true);
     }
 

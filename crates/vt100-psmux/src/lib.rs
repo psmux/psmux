@@ -89,4 +89,4 @@ pub use width::{
 };
 
 mod host_events;
-pub use host_events::{HostEvent, MAX_HOST_EVENT_BYTES};
+pub use host_events::{host_events_pending, HostEvent, MAX_HOST_EVENT_BYTES};

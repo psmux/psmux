@@ -62,19 +62,19 @@ fn toggling_allow_passthrough_applies_to_a_live_parser() {
         let mut p = vt100::Parser::new(4, 80, 0);
         p.process(&input[..cut]);
         p.process(&input[cut..]);
+        // Only the wrapped body: tmux forwards no unwrapped OSC 9 / 9001,
+        // whatever allow-passthrough says (input.c input_exit_osc).
         let events = p.screen_mut().take_host_events();
-        assert_eq!(events.len(), 3, "split {cut}");
-        assert_eq!(events[0].bytes, b"\x1b]9;first\x07");
-        assert_eq!(events[1].bytes, b"\x1b]99;i=n;payload\x1b\\");
-        assert!(events[1].passthrough);
-        assert_eq!(events[2].bytes, b"\x1b]9001;done\x07");
+        assert_eq!(events.len(), 1, "split {cut}");
+        assert_eq!(events[0].bytes, b"\x1b]99;i=n;payload\x1b\\");
+        assert!(events[0].passthrough);
         assert!(p.screen().contents().is_empty());
         assert!(p.screen_mut().take_host_events().is_empty());
     }
     let mut p = vt100::Parser::new(4, 80, 0);
     p.process(b"\x1bPtmux;");
     p.process(&vec![b'x'; vt100::MAX_HOST_EVENT_BYTES + 1]);
-    p.process(b"\x1b\\\x1b]9;after\x07");
+    p.process(b"\x1b\\\x1bPtmux;\x1b\x1b]9;after\x07\x1b\\");
     let events = p.screen_mut().take_host_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].bytes, b"\x1b]9;after\x07");

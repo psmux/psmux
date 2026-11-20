@@ -1,11 +1,13 @@
-//! Exact, bounded host notification bytes, independent of vte's OSC parameter limit.
+//! Exact, bounded bytes a pane addressed to the host terminal through an
+//! enabled tmux passthrough (`allow-passthrough on` or `all`). Unwrapped
+//! notification OSCs are not forwarded, as in tmux.
 
 /// Bound each stage of delivery by bytes and event count. Overflow drops whole
 /// events; it must never leave an incomplete terminal sequence at the host.
 pub const MAX_HOST_EVENT_BYTES: usize = 1 << 20;
 const MAX_EVENTS: usize = 256;
 
-/// Whether bytes were explicitly addressed to the host through tmux passthrough.
+/// Bytes explicitly addressed to the host through tmux passthrough.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostEvent {
     /// An explicit tmux passthrough body, subject to on/all visibility.
@@ -14,10 +16,45 @@ pub struct HostEvent {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Default)]
+/// Events queued in any parser of this process. The server polls this on
+/// every loop pass, so with nothing queued (always, while
+/// `allow-passthrough` is off) it never has to lock a pane to look.
+static PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether any parser in this process holds host events not yet taken.
+#[must_use]
+pub fn host_events_pending() -> bool {
+    PENDING.load(std::sync::atomic::Ordering::Acquire) != 0
+}
+
+fn release(n: usize) {
+    if n > 0 {
+        let _ = PENDING.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |v| Some(v.saturating_sub(n)),
+        );
+    }
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct Events {
     bytes: usize,
     items: Vec<HostEvent>,
+}
+
+/// A cloned screen (copy mode snapshot, warm pane copy) starts with no
+/// events: they are consumed once, from the live parser only.
+impl Clone for Events {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl Drop for Events {
+    fn drop(&mut self) {
+        release(self.items.len());
+    }
 }
 
 impl Events {
@@ -30,98 +67,20 @@ impl Events {
                 bytes: event,
                 passthrough,
             });
+            PENDING.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
     }
 
     pub(crate) fn take(&mut self) -> Vec<HostEvent> {
         self.bytes = 0;
-        std::mem::take(&mut self.items)
+        let items = std::mem::take(&mut self.items);
+        release(items.len());
+        items
     }
 }
 
-#[derive(Debug, Default)]
-enum State {
-    #[default]
-    Ground,
-    Escape,
-    String(bool),
-    Osc(bool),
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct Collector {
-    state: State,
-    bytes: Vec<u8>,
-    overflow: bool,
-}
-
-impl Collector {
-    pub(crate) fn feed(&mut self, input: &[u8], events: &mut Events) {
-        let mut i = 0;
-        while i < input.len() {
-            if matches!(self.state, State::Ground) {
-                let Some(off) = memchr::memchr(0x1b, &input[i..]) else {
-                    break;
-                };
-                i += off;
-            }
-            let b = input[i];
-            i += 1;
-            match self.state {
-                State::Ground => self.state = State::Escape,
-                State::Escape => match b {
-                    b']' => {
-                        self.bytes.clear();
-                        self.bytes.extend_from_slice(b"\x1b]");
-                        self.overflow = false;
-                        self.state = State::Osc(false);
-                    }
-                    b'P' | b'_' | b'^' | b'X' => self.state = State::String(false),
-                    0x1b => {}
-                    _ => self.state = State::Ground,
-                },
-                State::String(esc) => {
-                    if matches!(b, 0x18 | 0x1a) || (esc && b == b'\\') {
-                        self.state = State::Ground;
-                    } else if esc {
-                        self.state = State::Escape;
-                        i -= 1;
-                    } else {
-                        self.state = State::String(b == 0x1b);
-                    }
-                }
-                State::Osc(esc) => {
-                    if matches!(b, 0x18 | 0x1a) || (esc && b != b'\\') {
-                        self.bytes.clear();
-                        self.state = if esc { State::Escape } else { State::Ground };
-                        if esc {
-                            i -= 1;
-                        }
-                        continue;
-                    }
-                    if !self.overflow {
-                        if self.bytes.len() < crate::input_buffer_size().min(MAX_HOST_EVENT_BYTES) {
-                            self.bytes.push(b);
-                        } else {
-                            self.bytes.clear();
-                            self.overflow = true;
-                        }
-                    }
-                    if b == 0x07 || (esc && b == b'\\') {
-                        if !self.overflow && notification(&self.bytes) {
-                            events.push(std::mem::take(&mut self.bytes), false);
-                        }
-                        self.bytes.clear();
-                        self.state = State::Ground;
-                    } else {
-                        self.state = State::Osc(b == 0x1b);
-                    }
-                }
-            }
-        }
-    }
-}
-
+/// A notification OSC that may be committed from inside a passthrough before
+/// its closing ST arrives (see [`completed_notification`]).
 fn notification(bytes: &[u8]) -> bool {
     let end = bytes.len() - if bytes.ends_with(b"\x07") { 1 } else { 2 };
     let body = &bytes[2..end];

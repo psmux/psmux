@@ -28,12 +28,3 @@
   measurement. `display-message` and `list-panes` synchronize OSC titles and can
   mask a missing refresh in the unsolicited server-push path. Query only after
   capture ends; compare parser/pane state with the host OSC output separately.
-
-## Passthrough Regression Tests
-
-- Compare a direct ConPTY control capture with the raw pane reader ingress
-  (`PSMUX_PTY_TRACE`, stage `r`) before attributing missing wrapper bytes to
-  psmux. ConPTY can consume ST-terminated wrappers or unwrap/normalize their
-  contents before the parser receives them. Use retained BEL wrappers to test
-  forwarding and a silent writer to check prompt delivery; see
-  [the forwarding design](docs/design/allow-passthrough-forwarding.md).

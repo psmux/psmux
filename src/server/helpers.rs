@@ -1287,12 +1287,24 @@ pub(crate) fn drain_osc52(app: &mut AppState) {
 
 /// Drain on each activity tick, including hidden panes and detached sessions,
 /// so a later window switch or attach cannot replay events emitted unseen.
+/// Only enabled tmux passthrough bodies are queued, so with
+/// `allow-passthrough off` this is one atomic load and locks no pane.
 pub(crate) fn drain_host_events(app: &mut AppState) {
+    if !vt100::host_events_pending() {
+        if !app.host_events.host_events.is_empty()
+            && !app.client_registry.values().any(|client| !client.is_control)
+        {
+            app.host_events = Default::default();
+        }
+        return;
+    }
     fn pane(p: &crate::types::Pane, visible: bool, mode: &str, attached: bool, out: &mut crate::frame_oneshot::OneShots) {
         let term = p.live_term.as_ref().unwrap_or(&p.term);
         if let Ok(mut parser) = term.lock() {
             for event in parser.screen_mut().take_host_events() {
-                if attached && if event.passthrough { mode == "all" || (mode == "on" && visible) } else { visible } {
+                // tmux writes a passthrough only for `on` (visible panes) and
+                // `all` (any pane); nothing else reaches the host terminal.
+                if attached && event.passthrough && (mode == "all" || (mode == "on" && visible)) {
                     out.host_raw |= event.passthrough;
                     out.push_host_event(event.bytes);
                 }
