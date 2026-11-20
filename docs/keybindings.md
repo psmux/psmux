@@ -206,6 +206,8 @@ so muscle memory carries over.
 | `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty). A window or pane of another session switches to that session on that window or pane |
 | `f` | Enter session-name filter mode (choose-session only) |
 | `p` | Toggle live preview |
+| `/`, `?` or `C-s` | Search: type at the `(search) ` prompt and press `Enter` to move to the next row it matches (choose-tree: a session or window name, or the command running in a pane; choose-session: a session name; choose-buffer: a buffer name or its content). All lower case ignores case. `Esc` closes the prompt |
+| `n` / `N` | Repeat the last search forward / backward, wrapping around the list |
 | `x` | Kill the highlighted entry (session in choose-session, window in choose-tree), with confirmation |
 | `Esc` | Answer a pending kill question with no; otherwise clear an active session filter; otherwise close the chooser |
 | `q` / `C-g` | Close the chooser (`q` types into an active session filter instead) |
