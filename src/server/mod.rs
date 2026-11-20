@@ -7159,6 +7159,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // otherwise an occupied index is tmux's
                             // "index in use: N" at exit 1 (server_link_window).
                             let occupied = didx.and_then(|i| app.win_pos(i));
+                            // tmux selects the new link when -k removes the
+                            // current window, -d or not (server_link_window,
+                            // server-fn.c: "Force select/redraw if current").
+                            let detach = detach && !(kill && occupied == Some(app.active_idx));
                             let mut refused = None;
                             if let Some(pos) = occupied {
                                 if kill {
@@ -7218,10 +7222,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     // (tmux passes !dflag to server_link_window);
                                     // with -d the current window stays put.
                                     if detach {
+                                        // Back to the window that had the focus,
+                                        // with its own mode: create_window parked it.
                                         if let Some(p) = prev_active_id
                                             .and_then(|id| app.windows.iter().position(|w| w.id == id))
                                         {
-                                            app.active_idx = p;
+                                            switch_with_copy_save(&mut app, |app| { app.active_idx = p; });
                                         }
                                     } else if let Some(p) = app.windows.iter().position(|w| w.id == new_id) {
                                         if p != app.active_idx {

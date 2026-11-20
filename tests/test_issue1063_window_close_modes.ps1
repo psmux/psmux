@@ -113,6 +113,37 @@ try {
         if ($first -eq 'three') { Write-Pass "link-window $flag -s :3 -t :0 links three" } else { Write-Fail "link-window $flag -s :3 -t :0 should link three, window 0 is [$first]" }
         if ($cur -eq $wantCur) { Write-Pass "link-window $flag leaves the focus on $wantCur" } else { Write-Fail "link-window $flag should leave the focus on $wantCur, it is on [$cur]" }
     }
+
+    # Both routes: the CLI goes through the server request, source-file
+    # through the in server command. tmux selects the new link when -k
+    # removes the current window, -d or not (server-fn.c, "Force
+    # select/redraw if current"), and -d otherwise hands the focus back to
+    # the current window with its own mode.
+    $srcFile = Join-Path $TMP "lw.conf"
+    foreach ($route in 'cli', 'source-file') {
+        function LW([string]$line) {
+            if ($route -eq 'cli') { P @($line -split ' ') | Out-Null }
+            else { Set-Content -Path $srcFile -Value $line -Encoding ASCII; P source-file $srcFile | Out-Null }
+        }
+        Write-Host "`n[5] link-window -d, $route" -ForegroundColor Yellow
+        Fresh
+        P rename-window zero | Out-Null
+        foreach ($n in 'one', 'two', 'three') { NewWindow -n $n }
+        P select-window -t :0 | Out-Null
+        LW 'link-window -d -k -s :3 -t :0'
+        Start-Sleep 1
+        $cur = (P display -p '#{window_index}:#{window_name}' | Out-String).Trim()
+        if ($cur -eq '0:three') { Write-Pass "link-window -d -k over the current window selects the link ($cur, $route)" } else { Write-Fail "link-window -d -k over the current window should select 0:three, it is on [$cur] ($route)" }
+
+        Fresh
+        NewWindow -d
+        P copy-mode | Out-Null
+        LW 'link-window -d -s :1 -t :5'
+        Start-Sleep 1
+        $got = Focus
+        $n5 = (P display -p -t :5 '#{window_index}' | Out-String).Trim()
+        if ($got -eq '0.0 copy-mode' -and $n5 -eq '5') { Write-Pass "link-window -d keeps the current pane's copy mode ($got, $route)" } else { Write-Fail "link-window -d should keep 0.0 in copy-mode and link 5, focus [$got] link [$n5] ($route)" }
+    }
 }
 catch {
     Write-Fail "exception: $_"
