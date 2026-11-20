@@ -94,9 +94,17 @@ Write-Test "baseline: no override enters and leaves the alternate screen once"
 $r = Invoke-NewSession "off" $confOff
 if (-not $r) { Write-Fail "no capture"; Finish }
 if (-not $r.Status) { Write-Fail "the client never drew its status line ($($r.Len) bytes), the capture is not a real attach"; Finish }
+# The client's 1049h and 1049l are read back through an inbox pseudo console.
+# On Windows 10 (build 19045) that host takes both itself and passes neither
+# on (a pane program's 1049h never reaches psmux there either, see #1033), so
+# 0 and 0 is all it can show, with the override or without: the counts below
+# cannot tell the two apart there.
+$Measure1049 = -not ([Environment]::OSVersion.Version.Build -lt 22000 -and $r.H -eq 0 -and $r.L -eq 0)
 if ($r.H -eq 1 -and $r.L -eq 1) { Write-Pass "1049h=$($r.H) 1049l=$($r.L)" }
+elseif (-not $Measure1049) { Write-Skip "Windows 10 inbox pseudo console passes no 1049h or 1049l on (got 0 and 0), the 1049 counts are not measurable here" }
 else { Write-Fail "expected 1049h=1 1049l=1, got 1049h=$($r.H) 1049l=$($r.L)" }
 
+if ($Measure1049) {
 Write-Test "config: set -ga terminal-overrides ',*:smcup@:rmcup@' (TERM=xterm-256color)"
 for ($i = 1; $i -le 3; $i++) {
     $r = Invoke-NewSession "on_$i" $confOn
@@ -115,15 +123,18 @@ Write-Test "config: a pattern that does not match TERM changes nothing"
 $r = Invoke-NewSession "other" $confOther
 if ($r -and $r.H -eq 1 -and $r.L -eq 1) { Write-Pass "screen* does not match xterm-256color: 1049h=1 1049l=1" }
 else { Write-Fail "expected 1049h=1 1049l=1, got 1049h=$($r.H) 1049l=$($r.L)" }
+}
 
 Write-Test "runtime: set -ga applies to a NEW attach, set -g replaces the array"
 & $PSMUX -L $SOCK kill-server 2>&1 | Out-Null
 & $PSMUX -L $SOCK -f $confOff new-session -d -s c1 "pwsh -NoProfile -Command Start-Sleep 120"
 Start-Sleep -Milliseconds 800
 & $PSMUX -L $SOCK set -ga terminal-overrides ',*:smcup@:rmcup@'
+if ($Measure1049) {
 $r = Invoke-Client "rt_ga" "-L $SOCK attach -t c1" 3500
 if ($r -and $r.Status -and $r.H -eq 0) { Write-Pass "after runtime set -ga the attach sent 1049h=0" }
 else { Write-Fail "after runtime set -ga expected 1049h=0, got 1049h=$($r.H) status=$($r.Status)" }
+}
 
 $show = (& $PSMUX -L $SOCK show-options -g terminal-overrides 2>&1) -join "`n"
 $show = $show -replace "`n", "|"
@@ -142,9 +153,11 @@ else { Write-Fail "show-options -gv printed '$showv'" }
 $show = (& $PSMUX -L $SOCK show-options -g terminal-overrides 2>&1) -join "|"
 if ($show -eq "terminal-overrides[0] screen*:smcup@:rmcup@") { Write-Pass "set -g replaced the array: $show" }
 else { Write-Fail "after set -g, show printed '$show'" }
+if ($Measure1049) {
 $r = Invoke-Client "rt_g" "-L $SOCK attach -t c1" 3500
 if ($r -and $r.H -eq 1) { Write-Pass "after set -g to a non matching pattern the attach sent 1049h=1 again" }
 else { Write-Fail "after set -g expected 1049h=1, got 1049h=$($r.H)" }
+}
 
 & $PSMUX -L $SOCK set -gu terminal-overrides
 $show = (& $PSMUX -L $SOCK show-options -g terminal-overrides 2>&1) -join "|"
