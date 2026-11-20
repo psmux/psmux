@@ -934,15 +934,39 @@ Step 3, the next one, each item its own PR and still entirely behind the switch:
    summary of the session. The `dispatch.rs` file had the arm, but `router.rs`
    stopped the line.
 
+   Second batch (round 16), again copied arms only: respawn-window,
+   resize-window, find-window, list-clients (`-F`, `-f` too) and
+   refresh-client, from an attached client and as one shot commands. Measured
+   on master first (shared mode): find-window, respawn-window, list-clients
+   and refresh-client answered `unknown command`, and `resize-window -x 90 -y
+   20` exited 0 while the window stayed 120x30. list-clients lists the
+   clients of the session it runs in, as a per session server does; the CLI
+   already asks each session for a bare `list-clients`, so the output is the
+   same as the default mode's. A one shot `refresh-client -C/-B/-A/-f` stays
+   the handler's own `not a control client` error, as in the default mode.
+   show-window-options was never refused as a one shot command (the handler
+   sends `ShowWindowOptionsFor`, which step 2 already served); only the old
+   `ShowWindowOptions` request, which nothing sends any more, still has a name
+   in `refused.rs`.
+
+   Several namespaces side by side (`tests/test_issue798_multi_namespace_shared.ps1`):
+   two `-L` namespaces in shared mode with the same session names, next to a
+   namespace in the default mode, in one data directory. Each shared namespace
+   has one process and its own marker, every session its own port, key and
+   files, names never resolve across namespaces, send-keys, capture-pane,
+   attach, switch-client, kill-session and kill-server stay inside their
+   namespace, and the default namespace keeps one server per session. Nothing
+   needed fixing.
+
    Still refused. A one shot command gets `unknown command`; an attached client's
    binding, prompt or menu puts `not supported in shared server mode yet: <name>`
    on that session's status line instead of doing nothing (`refused.rs`):
-   break-pane, join-pane, new-pane (floats), respawn-window, resize-window,
+   break-pane, join-pane, new-pane (floats),
    pipe-pane, move-window, swap-window, link-window, unlink-window,
-   find-window, rename-session (the registry rename), `new-session -t` (groups),
-   choose-buffer, display-menu, display-popup, customize-mode, list-clients,
+   rename-session (the registry rename), `new-session -t` (groups),
+   choose-buffer, display-menu, display-popup, customize-mode,
    detach-client (`-a`, `-s`, another client), lock-client, suspend-client,
-   refresh-client, source-file, show-window-options,
+   `refresh-client -f` from an attached client, source-file,
    list-commands, the prompt history commands, run-shell and wait-for. The
    `router.rs` file also stops the internal request `__config-warnings`. An
    attached client sees the name `show-messages` in the status line message for

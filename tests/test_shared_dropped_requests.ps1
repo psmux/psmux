@@ -56,8 +56,44 @@ try {
     $buffers = (P list-buffers -t A) -join ' | '
     if ($buffers -match 'DROPS_MARKER_42') { Write-Pass "list-buffers runs as a one shot command" } else { Write-Fail "list-buffers: $buffers" }
 
+    # #798 step 3 item 3, second batch, as one shot commands (refused on the
+    # shared server before: unknown command, or nothing at exit 0)
+    P new-window -d -t A: -n findme | Out-Null
+    $o = (P find-window -t A findme) -join ' | '
+    if ($o -match '^\d+: findme') { Write-Pass "find-window lists the matching window ($o)" } else { Write-Fail "find-window: $o" }
+    $o = (P show-window-options -g -t A mode-keys) -join ' '
+    if ($o -match '^mode-keys ') { Write-Pass "show-window-options answers ($o)" } else { Write-Fail "show-window-options: $o" }
+    $pp0 = (P display -p -t A:findme '#{pane_pid}') -join ''
+    $o = (P respawn-window -k -t A:findme) -join ' '; $rc = $LASTEXITCODE
+    Start-Sleep -Milliseconds 800
+    $pp1 = (P display -p -t A:findme '#{pane_pid}') -join ''
+    if ($rc -eq 0 -and $pp0 -and $pp1 -and $pp0 -ne $pp1) { Write-Pass "respawn-window -k starts a new process ($pp0 -> $pp1)" } else { Write-Fail "respawn-window -k: rc=$rc $o pid $pp0 -> $pp1" }
+    $o = (P resize-window -t A:findme -x 90 -y 20) -join ' '; $rc = $LASTEXITCODE
+    $sz = (P display -p -t A:findme '#{window_width}x#{window_height}') -join ''
+    if ($rc -eq 0 -and $sz -eq '90x20') { Write-Pass "resize-window -x 90 -y 20 resizes the window" } else { Write-Fail "resize-window: rc=$rc $o size=$sz" }
+    $szB = (P display -p -t B '#{window_width}x#{window_height}') -join ''
+    if ($szB -eq '120x30') { Write-Pass "and B's window keeps its size" } else { Write-Fail "B size $szB" }
+    $o = (P list-clients -t A) -join ' | '
+    if ($o -notmatch 'unknown command|ERROR') { Write-Pass "list-clients answers with no client attached ('$o')" } else { Write-Fail "list-clients: $o" }
+    $o = (P refresh-client -t A) -join ' '; $rc = $LASTEXITCODE
+    if ($rc -eq 0 -and $o -notmatch 'unknown command|ERROR') { Write-Pass "refresh-client runs" } else { Write-Fail "refresh-client: rc=$rc $o" }
+    P kill-window -t A:findme | Out-Null
+
     $proc = Start-Process -FilePath $Exe -ArgumentList "-L", $ns, "attach", "-t", "A" -PassThru
     Start-Sleep -Seconds 3
+
+    $o = (P list-clients -F '#{client_session}') -join ','
+    if ($o -eq 'A') { Write-Pass "list-clients -F lists the attached client in A" } else { Write-Fail "list-clients -F: '$o'" }
+    $o = (P list-clients -t B) -join ','
+    if ($o -eq '') { Write-Pass "list-clients -t B lists no client" } else { Write-Fail "list-clients -t B: '$o'" }
+    P bind -n F8 refresh-client | Out-Null
+    Start-Sleep -Milliseconds 400
+    & $injector $proc.Id "{F8}" | Out-Null
+    Start-Sleep -Milliseconds 800
+    $dump = (P dump-state -t A) -join ''
+    $sm = if ($dump -match '"status_message":"([^"]*)"') { $Matches[1] } else { '' }
+    if ($sm -notmatch 'not supported') { Write-Pass "a binding's refresh-client is not refused ('$sm')" } else { Write-Fail "F8 refresh-client: '$sm'" }
+    P unbind -n F8 | Out-Null
 
     $l0 = (P display -p -t A '#{window_layout}') -join ''
     & $injector $proc.Id "^b{SLEEP:400} " | Out-Null

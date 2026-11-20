@@ -3287,6 +3287,65 @@ pub(crate) fn dispatch(
                         }
                     }
                 }
+                // copied from server/mod.rs run_server (lines 8588 to 8606 at df7c6968)
+                CtrlReq::RespawnWindow(workdir, command, resp, env_sets) => {
+                    match respawn_active_pane(&mut app, Some(pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets) {
+                        Ok(()) => {
+                            state_dirty = true;
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(e) => {
+                            // tmux cmd-respawn-window.c: "respawn window failed: %s".
+                            let msg = format!("respawn window failed: {}", e);
+                            app.status_message = Some((msg.clone(), Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (lines 8528 to 8543 at df7c6968)
+                CtrlReq::ResizeWindow(request, resp) => {
+                    match crate::resize_window::apply_resize_window(&mut app, &request) {
+                        Ok(resized) => {
+                            state_dirty = true;
+                            meta_dirty = true;
+                            if let Some(n) = control::layout_change(&app, resized.window_index, resized.area) {
+                                control::emit_notification(&app, n);
+                            }
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = resp.send(Err(error));
+                        }
+                    }
+                }
+                // copied from server/mod.rs run_server (lines 7530 to 7556 at df7c6968).
+                // The clients are this session's own (its registry), the way a
+                // per session server lists them; the CLI asks each session.
+                CtrlReq::ListClients(resp) => {
+                    let fmt = crate::format::default_list_clients_format();
+                    let _ = resp.send(crate::format::format_list_clients(&app, fmt, None));
+                }
+                CtrlReq::ListClientsFormat(resp, fmt, filter) => {
+                    let _ = resp.send(crate::format::format_list_clients(&app, &fmt, filter.as_deref()));
+                }
+                // copied from server/mod.rs run_server (lines 8090 to 8098 at df7c6968)
+                CtrlReq::RefreshClient => {
+                    app.shipped_image_ids.clear();
+                    crate::types::invalidate_delivered_frames();
+                    state_dirty = true;
+                    meta_dirty = true;
+                }
+                // copied from server/mod.rs run_server (lines 7345 to 7353 at df7c6968)
+                CtrlReq::FindWindow(resp, pattern) => {
+                    let mut output = String::new();
+                    for (i, win) in app.windows.iter().enumerate() {
+                        if win.name.contains(&pattern) {
+                            output.push_str(&format!("{}: {} []\n", app.win_display_index(i), win.name));
+                        }
+                    }
+                    let _ = resp.send(output);
+                }
                 // shared: everything else step 2 does not handle. A one shot
                 // command for it was refused by the router already, so what
                 // arrives here is an attached client's request (a binding,

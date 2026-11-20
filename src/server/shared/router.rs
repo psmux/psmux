@@ -33,6 +33,9 @@ pub const SUPPORTED: &[&str] = &[
     "swap-pane", "swapp",
     "respawn-pane", "respawnp",
     "clear-history", "clearhist",
+    "respawn-window", "respawnw",
+    "resize-window", "resizew",
+    "find-window", "findw",
     // copy mode: the dispatcher had its arms (CopyEnter, CopyModeCmd) from
     // step 2, but a one shot `copy-mode` was refused here, so a script's
     // `copy-mode -t s:` left pane_in_mode at 0 at exit 0
@@ -75,6 +78,11 @@ pub const SUPPORTED: &[&str] = &[
     "set-hook", "show-hooks",
     "bind-key", "bind", "unbind-key", "unbind",
     "list-keys", "lsk",
+    // clients: the session's own, as a per session server lists them. A one
+    // shot `refresh-client -C/-B/-A/-f` is the handler's own "not a control
+    // client" error; `-l` sets a buffer, of which the server keeps one set.
+    "list-clients", "lsc",
+    "refresh-client", "refresh",
     // the attach handshake
     "client-attach", "client-detach", "client-size", "client-flags",
     "client-environ", "client-last-session", "host-colors",

@@ -160,6 +160,68 @@ fn the_ported_commands_run_as_one_shot_commands_too() {
 }
 
 #[test]
+fn the_window_and_client_batch_runs_as_one_shot_commands() {
+    // #798 step 3 item 3, second batch: refused by the router on master.
+    for ok in ["respawn-window", "respawnw", "resize-window", "resizew", "find-window", "findw",
+        "list-clients", "lsc", "refresh-client", "refresh", "show-window-options", "showw"] {
+        assert!(router::is_supported(ok), "BUG: {ok} is still refused");
+    }
+    // still refused: they need the server wide view or a design decision
+    for no in ["detach-client", "lock-client", "suspend-client", "source-file", "run-shell",
+        "wait-for", "pipe-pane", "rename-session", "list-commands"] {
+        assert!(!router::is_supported(no), "{no}");
+    }
+}
+
+#[test]
+fn find_window_lists_only_the_matching_windows_of_its_own_session() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("tdrops".to_string());
+    let mut ids = ServerIds::new();
+    let mut a = session("A");
+    let mut b = session("B");
+    let (tx, rx) = mpsc::channel();
+    send(&mut a, &mut ids, &ns, CtrlReq::FindWindow(tx, "zz".into()));
+    assert_eq!(rx.try_recv().as_deref(), Ok(""),
+        "BUG: find-window got no reply (the request was refused)");
+    assert_eq!(status(&a.app), None, "a supported request shows no refusal");
+    let (tx, rx) = mpsc::channel();
+    send(&mut b, &mut ids, &ns, CtrlReq::FindWindow(tx, String::new()));
+    assert!(rx.try_recv().is_ok(), "BUG: find-window got no reply from B");
+}
+
+#[test]
+fn list_clients_answers_with_the_clients_of_its_own_session() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("tdrops".to_string());
+    let mut ids = ServerIds::new();
+    let mut a = session("A");
+    // A session with no attached client lists nothing, as in tmux (#434).
+    let (tx, rx) = mpsc::channel();
+    send(&mut a, &mut ids, &ns, CtrlReq::ListClients(tx));
+    assert_eq!(rx.try_recv().as_deref(), Ok(""),
+        "BUG: list-clients got no reply (the request was refused)");
+    let (tx, rx) = mpsc::channel();
+    send(&mut a, &mut ids, &ns, CtrlReq::ListClientsFormat(tx, "#{client_session}".into(), None));
+    assert_eq!(rx.try_recv().as_deref(), Ok(""), "BUG: list-clients -F got no reply");
+    assert_eq!(status(&a.app), None);
+}
+
+#[test]
+fn refresh_client_redraws_without_a_refusal() {
+    let _lock = crate::util::lock_test_env();
+    let _back = EnvBack(std::env::var("PSMUX_TARGET_SESSION").ok());
+    let ns = Some("tdrops".to_string());
+    let mut ids = ServerIds::new();
+    let mut a = session("A");
+    send(&mut a, &mut ids, &ns, CtrlReq::RefreshClient);
+    assert_eq!(status(&a.app), None,
+        "BUG: refresh-client from a binding said it is not supported");
+}
+
+#[test]
 fn server_info_and_info_reach_show_messages_through_the_default_aliases() {
     let a = session("A");
     let alias = |name: &str| alias_of(&a.app.command_aliases, name);
