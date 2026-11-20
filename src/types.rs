@@ -4893,13 +4893,14 @@ pub enum CtrlReq {
         window_id: Option<usize>,
         size: Option<(u16, u16)>,
     },
-    /// respawn-window. Fields: optional workdir (-c), optional shell-command
-    /// operand, per-request reply. Shares `respawn_active_pane` with
+    /// respawn-window. Fields: optional workdir (-c), `-k` (without it a
+    /// window with a live pane is refused, tmux spawn.c "window s:i still
+    /// active"), optional shell-command operand, per-request reply. Shares `respawn_active_pane` with
     /// `RespawnPane` and therefore shared its server-killing `?`; the spawn
     /// failures (bad `-c`, unspawnable command) are routine and belong to the
     /// requesting client. tmux: `respawn window failed: <cause>`, exit 1.
     /// The last field is the `-e KEY=VALUE` environment (#708).
-    RespawnWindow(Option<String>, Option<String>, mpsc::Sender<Result<(), String>>, Vec<(String, String)>),
+    RespawnWindow(Option<String>, bool, Option<String>, mpsc::Sender<Result<(), String>>, Vec<(String, String)>),
     FocusIn,
     FocusOut,
     /// `command-prompt <args>` from the command line (#789 follow up): open

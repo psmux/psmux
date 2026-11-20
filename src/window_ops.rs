@@ -4580,7 +4580,24 @@ pub fn clear_active_pane_history(app: &mut AppState) {
     }
 }
 
-pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>, empty: bool, extra_env: &[(String, String)]) -> io::Result<()> {
+/// tmux spawn.c `spawn_window` with SPAWN_RESPAWN and no SPAWN_KILL: a
+/// window is refused while any of its panes still has a live process
+/// ("window <session>:<index> still active"); a window whose panes all
+/// exited (kept by remain-on-exit) is respawned. Floating panes count as
+/// panes of the window. `None` when the respawn may go ahead.
+pub fn respawn_window_refusal(app: &AppState, idx: usize) -> Option<String> {
+    fn any_live(node: &Node) -> bool {
+        match node {
+            Node::Leaf(p) => !p.dead,
+            Node::Split { children, .. } => children.iter().any(any_live),
+        }
+    }
+    let win = app.windows.get(idx)?;
+    let live = any_live(&win.root) || win.floating.iter().any(|f| !f.pane.dead);
+    live.then(|| format!("window {}:{} still active", app.session_name, app.win_display_index(idx)))
+}
+
+pub fn respawn_active_pane(app: &mut AppState,pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>, empty: bool, extra_env: &[(String, String)]) -> io::Result<()> {
     // tmux semantics: without -k, respawn only works on dead panes.
     // With -k, kill the running process first and respawn.
     {

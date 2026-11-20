@@ -248,17 +248,25 @@ try {
     Write-Host ""
     Write-Host "  respawn-window (same respawn_active_pane, same old ? )"
     $winBefore = Window-Count
+    # Without -k a window with a live pane is a routine refusal, as in tmux
+    # ("respawn window failed: window s:i still active"); the server stays.
     $rw = Run-P @('respawn-window', '-t', $S)
+    if ($rw.Code -ne 0 -and $rw.Out -match 'still active' -and (Server-Alive)) {
+        Write-Pass "respawn-window without -k on a live window is refused and the server survives"
+    } else {
+        Write-Fail "respawn-window without -k: rc=$($rw.Code) [$($rw.Out)] alive=$(Server-Alive)"
+    }
+    $rw = Run-P @('respawn-window', '-k', '-t', $S)
     Start-Sleep -Seconds 3
     if (Server-Alive -and (Window-Count) -eq $winBefore) {
-        Write-Pass "respawn-window kept the server and all $winBefore windows"
+        Write-Pass "respawn-window -k kept the server and all $winBefore windows"
     } else {
-        Write-Fail "respawn-window disturbed the session (alive=$(Server-Alive) windows=$(Window-Count) was $winBefore)"
+        Write-Fail "respawn-window -k disturbed the session (alive=$(Server-Alive) windows=$(Window-Count) was $winBefore)"
     }
     if ($rw.Code -eq 0) {
-        Write-Pass "respawn-window exits 0 on the success path"
+        Write-Pass "respawn-window -k exits 0 on the success path"
     } else {
-        Write-Fail "respawn-window exited $($rw.Code): [$($rw.Out)]"
+        Write-Fail "respawn-window -k exited $($rw.Code): [$($rw.Out)]"
     }
 }
 finally {

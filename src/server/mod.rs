@@ -8585,12 +8585,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::RespawnWindow(workdir, command, resp, env_sets) => {
+                CtrlReq::RespawnWindow(workdir, kill, command, resp, env_sets) => {
                     // Kill all panes in the active window and respawn. Same
                     // rule as RespawnPane above: a spawn refusal here (bad -c
                     // directory, unspawnable command) is the caller's error and
-                    // must not unwind the event loop.
-                    match respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets) {
+                    // must not unwind the event loop. Without -k a window with
+                    // a live pane is refused, as tmux does; it used to be
+                    // killed whether -k was given or not.
+                    let outcome = match crate::window_ops::respawn_window_refusal(&app, app.active_idx).filter(|_| !kill) {
+                        Some(cause) => Err(std::io::Error::new(std::io::ErrorKind::Other, cause)),
+                        None => respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets),
+                    };
+                    match outcome {
                         Ok(()) => {
                             state_dirty = true;
                             let _ = resp.send(Ok(()));

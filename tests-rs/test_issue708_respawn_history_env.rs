@@ -336,8 +336,8 @@ fn the_respawn_requests_carry_the_env() {
         _ => unreachable!(),
     }
     let (tx, _rx) = std::sync::mpsc::channel();
-    match crate::types::CtrlReq::RespawnWindow(None, None, tx, env.clone()) {
-        crate::types::CtrlReq::RespawnWindow(_, _, _, e) => assert_eq!(e, env),
+    match crate::types::CtrlReq::RespawnWindow(None, true, None, tx, env.clone()) {
+        crate::types::CtrlReq::RespawnWindow(_, _, _, _, e) => assert_eq!(e, env),
         _ => unreachable!(),
     }
 }

@@ -3288,8 +3288,12 @@ pub(crate) fn dispatch(
                     }
                 }
                 // copied from server/mod.rs run_server (lines 8588 to 8606 at df7c6968)
-                CtrlReq::RespawnWindow(workdir, command, resp, env_sets) => {
-                    match respawn_active_pane(&mut app, Some(pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets) {
+                CtrlReq::RespawnWindow(workdir, kill, command, resp, env_sets) => {
+                    let outcome = match crate::window_ops::respawn_window_refusal(&app, app.active_idx).filter(|_| !kill) {
+                        Some(cause) => Err(std::io::Error::new(std::io::ErrorKind::Other, cause)),
+                        None => respawn_active_pane(&mut app, Some(pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets),
+                    };
+                    match outcome {
                         Ok(()) => {
                             state_dirty = true;
                             let _ = resp.send(Ok(()));

@@ -195,6 +195,72 @@ fn k_on_a_live_pane_and_a_bare_respawn_of_a_dead_pane_both_pass_the_guard() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 1b. respawn-window without -k (tmux spawn.c spawn_window): refused while
+//     ANY pane of the window has a live process. psmux used to kill it with
+//     or without -k.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The active window of `app_with_windows` with a second pane added;
+/// `live` gives the `dead` flag of each of the two panes.
+fn two_pane_window(live: [bool; 2]) -> AppState {
+    let mut app = app_with_windows("rsp_unit", 2);
+    let idx = app.active_idx;
+    let mut extra = make_pane(900, 40, 80);
+    extra.dead = !live[1];
+    if let Node::Split { children, sizes, .. } = &mut app.windows[idx].root {
+        children.push(Node::Leaf(extra));
+        *sizes = vec![50, 50];
+    }
+    if let Some(p) = crate::window_ops::active_pane_mut(&mut app.windows[idx].root, &vec![0]) {
+        p.dead = !live[0];
+    }
+    app
+}
+
+#[test]
+fn respawn_window_without_k_is_refused_while_any_pane_lives() {
+    for live in [[true, true], [true, false], [false, true]] {
+        let app = two_pane_window(live);
+        assert_eq!(
+            crate::window_ops::respawn_window_refusal(&app, app.active_idx).as_deref(),
+            Some("window rsp_unit:1 still active"),
+            "BUG: a window with a live pane ({live:?}) must be refused like tmux \
+             (`window %s:%d still active`)"
+        );
+    }
+}
+
+#[test]
+fn respawn_window_without_k_goes_ahead_when_every_pane_exited() {
+    let app = two_pane_window([false, false]);
+    assert_eq!(crate::window_ops::respawn_window_refusal(&app, app.active_idx), None,
+        "a window whose panes all exited (remain-on-exit) is respawned without -k");
+    assert_eq!(crate::window_ops::respawn_window_refusal(&app, 99), None, "no such window: no refusal text");
+}
+
+/// Both RespawnWindow arms (per session and shared) apply the rule unless
+/// -k, and every place that builds the request reads -k. On master the
+/// request had no kill field and the arm always passed `true`.
+#[test]
+fn every_respawn_window_path_carries_k_and_checks_the_window() {
+    let conn = include_str!("../src/server/connection.rs");
+    let sends: Vec<&str> = conn.lines().filter(|l| l.contains("CtrlReq::RespawnWindow(")).collect();
+    assert_eq!(sends.len(), 2, "one-shot/attached and control mode: {sends:?}");
+    for l in &sends {
+        assert!(l.contains("(workdir, kill, command"), "BUG: respawn-window sent without -k: {l}");
+    }
+    for (name, src) in [
+        ("run_server", run_server_body()),
+        ("shared dispatch", include_str!("../src/server/shared/dispatch.rs")),
+    ] {
+        let at = src.find("CtrlReq::RespawnWindow(").unwrap_or_else(|| panic!("{name}: arm"));
+        let arm = &src[at..(at + 1200).min(src.len())];
+        assert!(arm.contains("respawn_window_refusal(") && arm.contains("!kill"),
+            "BUG: the {name} RespawnWindow arm must refuse a live window without -k");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // 2. The event loop must never turn a routine error into server death.
 //
 //    This is the generic guard, not a respawn-pane guard. `run_server` is
