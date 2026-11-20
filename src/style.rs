@@ -488,6 +488,16 @@ fn color_sgr(c: ratatui::style::Color, fg: bool) -> String {
     }
 }
 
+/// An inline `fg=`/`bg=` colour; `default` is the base style's colour (tmux
+/// style_parse uses the current default cell), `terminal` stays the terminal's.
+fn inline_colour(value: &str, base: Option<Color>) -> Color {
+    if value.trim().eq_ignore_ascii_case("default") {
+        base.unwrap_or(Color::Reset)
+    } else {
+        map_color(value)
+    }
+}
+
 /// Parse inline `#[fg=...,bg=...,bold]` style directives from pre-expanded text.
 ///
 /// Unlike `parse_status()`, this does NOT re-expand status variables.
@@ -516,8 +526,10 @@ pub fn parse_inline_styles(text: &str, base_style: Style) -> Vec<Span<'static>> 
                 let token = &text[i + 2..i + 2 + end];
                 for part in token.split(',') {
                     let p = part.trim();
-                    if p.starts_with("fg=") { cur_style = cur_style.fg(map_color(&p[3..])); }
-                    else if p.starts_with("bg=") { cur_style = cur_style.bg(map_color(&p[3..])); }
+                    // tmux style.c:221-233 resolves fg=default / bg=default to
+                    // the current default cell, which is the base style here.
+                    if p.starts_with("fg=") { cur_style = cur_style.fg(inline_colour(&p[3..], base_style.fg)); }
+                    else if p.starts_with("bg=") { cur_style = cur_style.bg(inline_colour(&p[3..], base_style.bg)); }
                     // tmux style.c:236 accepts `us=` for the underscore colour.
                     else if p.starts_with("us=") { cur_style = cur_style.underline_color(map_color(&p[3..])); }
                     else if p == "default" || p == "none" { cur_style = base_style; }

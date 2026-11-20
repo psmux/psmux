@@ -38,3 +38,20 @@ fn a_terminal_default_bar_stays_terminal_default() {
     assert_eq!(s.bg, Some(Color::Reset));
     assert_eq!(s.fg, Some(Color::Yellow));
 }
+
+#[test]
+fn inline_bg_default_in_the_window_format_means_the_tab_colour() {
+    let tab = Style::default().fg(Color::Yellow).bg(Color::Blue);
+    let spans = parse_inline_styles("#[fg=red,bg=default]WWW", tab);
+    let w = spans.iter().find(|s| s.content == "WWW").expect("WWW span");
+    assert_eq!(w.style.fg, Some(Color::Red));
+    assert_eq!(w.style.bg, Some(Color::Blue));
+}
+
+#[test]
+fn inline_fg_default_means_the_base_foreground() {
+    let tab = Style::default().fg(Color::Yellow).bg(Color::Blue);
+    let spans = parse_inline_styles("#[fg=red]A#[fg=default]B", tab);
+    let b = spans.iter().find(|s| s.content == "B").expect("B span");
+    assert_eq!(b.style.fg, Some(Color::Yellow));
+}
