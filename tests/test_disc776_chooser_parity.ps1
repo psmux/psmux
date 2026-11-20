@@ -153,7 +153,17 @@ if ($capChild) {
         Send-Keys $capProc $case.Keys
         $r = Cursor-After $from $case.Marker
         Add-Result "$($case.Name) drawn" $r.Drawn ""
-        Add-Result "$($case.Name) hides the pane cursor" ($r.State -eq "hidden") "last DECTCEM: $($r.State)"
+        # The inbox pseudo console of Windows 10 (19045) re-renders the
+        # client's output and writes its own cursor visibility: with a chooser
+        # open the last DECTCEM read "unchanged" in 3 of 3 choosers in one run
+        # and "shown" in 1 of 3 in another. With the build psmux sees faked to
+        # 19045 (PSMUX_FAKE_WIN_BUILD) on Windows 11 the client hides it in
+        # all 3, so this check is not measurable through that host.
+        if ([Environment]::OSVersion.Version.Build -lt 22000) {
+            Write-Host "  [SKIP] $($case.Name) hides the pane cursor: the Windows 10 pseudo console writes its own DECTCEM (read $($r.State))" -ForegroundColor Yellow
+        } else {
+            Add-Result "$($case.Name) hides the pane cursor" ($r.State -eq "hidden") "last DECTCEM: $($r.State)"
+        }
         Write-Test "$($case.Name): Escape closes it and the cursor comes back"
         $from = (Read-Cap).Length
         Send-Keys $capProc "{ESC}{SLEEP:900}"

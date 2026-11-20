@@ -108,6 +108,12 @@ foreach ($case in @(
     $txt = Decode (Read-Shared $out)
     $got = [bool]($txt -match '<ESC>\[\?[0-9;]*100[0236][0-9;]*h')
     if ($got -eq $case.Expect) { Write-Pass "$($case.Mode) -> registered=$got ($($case.Why))" }
+    elseif ($case.Expect -and [Environment]::OSVersion.Version.Build -lt 22000) {
+        # No ConPTY mouse before build 22523 (#457): the inbox pseudo console
+        # of Windows 10 (19045) emits no mouse DECSET for ENABLE_MOUSE_INPUT
+        # either, so nothing registers mouse there; a platform fact, no psmux.
+        Write-Host "  [SKIP] $($case.Mode) -> registered=${got}: the Windows 10 pseudo console has no mouse to register" -ForegroundColor Yellow
+    }
     else { Write-Fail "$($case.Mode) -> registered=$got, expected $($case.Expect) ($($case.Why))" }
 }
 

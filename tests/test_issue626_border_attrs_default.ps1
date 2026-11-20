@@ -202,7 +202,11 @@ if (New-Split "i626bold") {
         Write-Skip "no client capture for the bold border"
     } else {
         $row = Row-Sgr $t 15
-        if ($row -match "31m") { Write-Pass "inactive border carries the red: $(Vis $row)" }
+        # The inbox pseudo console of Windows 10 (19045) renders bold with a
+        # basic colour as the bright code (1;91 for 1;31, see #425's suites),
+        # so with bold on, the bright code is that host's spelling of the red.
+        $BoldBright = [Environment]::OSVersion.Version.Build -lt 22000
+        if ($row -match "31m" -or ($BoldBright -and $row -match "\[1m" -and $row -match "91m")) { Write-Pass "inactive border carries the red: $(Vis $row)" }
         else { Write-Fail "inactive border lost the red: $(Vis $row)" }
         # This is the reported bug: the colour arrived, the attribute did not.
         if ($row -match "\[1m") { Write-Pass "inactive border carries the BOLD: $(Vis $row)" }
@@ -218,7 +222,9 @@ if (New-Split "i626attrs") {
     if ($null -eq $t) {
         Write-Skip "no client capture for the active border attributes"
     } else {
-        $active = (Border-Sgrs $t) | Where-Object { $_ -match "34m" } | Select-Object -First 1
+        # 1;94 is the Windows 10 inbox host's spelling of bold blue, as above.
+        $blue = if ([Environment]::OSVersion.Version.Build -lt 22000) { "(34|94)m" } else { "34m" }
+        $active = (Border-Sgrs $t) | Where-Object { $_ -match $blue } | Select-Object -First 1
         if (-not $active) {
             Write-Fail "active border never took the blue"
         } else {

@@ -291,14 +291,22 @@ set NO_COLOR=
     if (Test-Path $outBin) {
         $bytes = [System.IO.File]::ReadAllBytes($outBin)
         $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+        # No passthrough mode before Windows 11: the inbox pseudo console of
+        # Windows 10 (19045) re-renders what the client wrote, and it has no
+        # underline styles, so 4:2 to 4:5 cannot come out of it whatever the
+        # client wrote (the pane checks above, from psmux's own grid, pass
+        # there).
+        $NoUlStyles = [Environment]::OSVersion.Version.Build -lt 22000
         foreach ($want in @("4:3", "4:4", "4:5")) {
             if ($text.Contains($want)) { Write-Pass "TUI: client wrote $want to its terminal" }
+            elseif ($NoUlStyles) { Write-Skip "TUI: $want, the Windows 10 pseudo console re-renders without underline styles" }
             else { Write-Fail "TUI: client never wrote $want (this is the reported bug)" }
         }
         # `4:2` reaches the outer terminal as the legacy 21 when an outer
         # conhost re-renders, so accept either spelling.
         if ($text.Contains("4:2") -or $text.Contains("$([char]27)[21m")) {
             Write-Pass "TUI: client wrote a double underline"
+        } elseif ($NoUlStyles) { Write-Skip "TUI: double underline, the Windows 10 pseudo console re-renders without underline styles"
         } else { Write-Fail "TUI: client never wrote a double underline" }
         # crossterm's semicolon form of SGR 58 is mis-parsed by conhost into
         # blink plus strikethrough, so psmux must use the colon form.

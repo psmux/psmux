@@ -35,6 +35,20 @@ function Kill-Session {
     Start-Sleep -Milliseconds 400
     Remove-Item "$env:USERPROFILE\.psmux\$SESSION.*" -Force -EA SilentlyContinue
 }
+# The bytes are read back through an inbox pseudo console, and the one of
+# Windows 10 (19045) re-encodes a 256 colour index as the RGB of that index
+# (measured there: 48;5;52 came out as 48;2;95;0;0, 38;5;201 as
+# 38;2;255;0;255). Map such an RGB back to its index there, so the checks
+# below still read what psmux wrote. Only exact xterm cube and grey values
+# map, so the dim check's 48;2;57;0;0 stays as it is.
+function ConvertFrom-Win10Rgb([string]$s) {
+    if ([Environment]::OSVersion.Version.Build -ge 22000) { return $s }
+    $lv = @(0, 95, 135, 175, 215, 255)
+    $map = @{}
+    for ($i = 16; $i -le 231; $i++) { $n = $i - 16; $map["$($lv[[int][math]::Floor($n / 36)]);$($lv[[int][math]::Floor($n / 6) % 6]);$($lv[$n % 6])"] = $i }
+    for ($i = 232; $i -le 255; $i++) { $g = 8 + 10 * ($i - 232); $map["$g;$g;$g"] = $i }
+    return [regex]::Replace($s, '(38|48);2;(\d+);(\d+);(\d+)', { param($m) $k = "$($m.Groups[2].Value);$($m.Groups[3].Value);$($m.Groups[4].Value)"; if ($map.ContainsKey($k)) { "$($m.Groups[1].Value);5;$($map[$k])" } else { $m.Value } })
+}
 function Read-BinEscaped {
     if (-not (Test-Path $BIN)) { return "" }
     $fs = [System.IO.File]::Open($BIN, 'Open', 'Read', 'ReadWrite')
@@ -47,7 +61,7 @@ function Read-BinEscaped {
         elseif ($b -ge 32 -and $b -lt 127) { [void]$sb.Append([char]$b) }
         elseif ($b -eq 0x0a) { [void]$sb.Append("\n") } else { [void]$sb.Append(("<{0:X2}>" -f $b)) }
     }
-    return $sb.ToString()
+    return (ConvertFrom-Win10Rgb $sb.ToString())
 }
 
 # Boots a fresh single pane session under a real pseudoconsole, applies the

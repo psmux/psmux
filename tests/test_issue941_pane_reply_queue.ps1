@@ -108,8 +108,15 @@ Write-Host "`n--- 1. inbox console host ---" -ForegroundColor Cyan
 P new-session -d -s i -x 120 -y 30 | Out-Null
 if (-not (WaitSession 'i')) { Check 'session starts' $false ''; Cleanup; exit $script:TestsFailed }
 Start-Sleep -Seconds 2
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    # The inbox conhost of Windows 10 (19045) answers or drops these queries
+    # itself: the probe got no reply at all there, in any order. Part 2 runs
+    # the same queue with the pane on OpenConsole.
+    Write-Host "  [SKIP] Windows 10 inbox conhost: the pane's queries do not reach psmux, see the OpenConsole part" -ForegroundColor Yellow
+} else {
 Case 'i' 'window report, then XTVERSION' '\e[16t\e[>q' 'CELL XTVERSION' 3
 Case 'i' 'scheme, palette, window report, XTVERSION' '\e[?996n\e]4;1;?\e\\e[14t\e[>q' 'SCHEME OSC4:1 AREA XTVERSION' 2
+}
 
 if (-not $conptyDir -or -not (Test-Path (Join-Path $conptyDir 'conpty.dll')) -or -not (Test-Path (Join-Path $conptyDir 'OpenConsole.exe'))) {
     Write-Host "`n--- 2. OpenConsole: SKIP, set PSMUX_CONPTY_DIR_FOR_TEST to a directory with conpty.dll and OpenConsole.exe ---" -ForegroundColor Yellow
