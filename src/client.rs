@@ -8802,10 +8802,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // released the head of a paste as typing (test_altgr_letter_paste
                 // 'bi' before ESC[200~, test_issue684_paste_head 40 flushes).
                 let head_cache = &mut paste_clip_head;
-                let (held_for, clip_head) = held_for_then_read(paste_pend_start, move || head_cache.get());
+                let read_started = Instant::now();
+                let (held_for, (clip_head, clip_busy)) = held_for_then_read(paste_pend_start, move || head_cache.get_state());
+                // Nor is it input gap for the 20 ms window that the top of
+                // the loop measures from paste_pend_start: a busy clipboard
+                // read retries for 10 to 15 ms, and two of them used the
+                // window up while the rest of the paste sat unread in the
+                // console input buffer ('bi' flushed as typing, then 'r
+                // sonraki...' pasted on its own).
+                paste_pend_start = shift_pend_start_past_read(paste_pend_start, read_started.elapsed());
                 PasteHeadEvidence {
                     gesture_open: paste_gesture.is_open(),
                     clip_head,
+                    clip_busy,
                     held_for,
                     shifted_head: paste_head_shifted,
                     head_released: paste_head_released || !key_releases_seen || !release_shape_is_evidence,
@@ -8858,8 +8867,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     let gesture = evidence.gesture_open;
                     let prefix = evidence.clipboard_starts_with(&paste_pend);
                     let shifted = evidence.shifted_head && paste_pend.chars().count() == 1;
-                    let why = if gesture || prefix || shifted {
-                        format!("head of a paste (ctrl-v gesture={}, clipboard prefix={}, shifted head={})", gesture, prefix, shifted)
+                    let busy = evidence.clip_busy;
+                    let why = if gesture || prefix || shifted || busy {
+                        format!("head of a paste (ctrl-v gesture={}, clipboard prefix={}, shifted head={}, clipboard busy={})", gesture, prefix, shifted, busy)
                     } else {
                         "newline or tab never takes the zero latency path".to_string()
                     };
@@ -11445,6 +11455,15 @@ struct PasteHeadEvidence<'a> {
     /// prefix of it is the strongest evidence available at the first
     /// character.
     clip_head: Option<&'a str>,
+    /// The clipboard could not be opened (another window held it), so
+    /// `clip_head` is unknown, not empty.
+    ///
+    /// Unknown must not read as "not a paste": a clipboard history listener
+    /// or any NULL owner open held across the first character released the
+    /// head of a paste as typing (`bi` ahead of `ESC[200~` in
+    /// test_altgr_letter_paste, 3 of 5 runs with a second process holding the
+    /// clipboard 40 ms in every 100, 0 of 8 without one).
+    clip_busy: bool,
     /// How long the pending buffer has been held so far.
     held_for: Duration,
     /// The first pending character came with Shift and nothing else.
@@ -11546,6 +11565,14 @@ fn held_for_then_read<R>(pend_start: Option<Instant>, read: impl FnOnce() -> R) 
     (held_for, read())
 }
 
+/// The pending buffer's start, moved later by the time the clipboard read
+/// blocked the input loop, so the paste windows count only time in which
+/// input could have been read.  Never moved past now.
+#[cfg(windows)]
+fn shift_pend_start_past_read(pend_start: Option<Instant>, read_took: Duration) -> Option<Instant> {
+    pend_start.map(|s| (s + read_took).min(Instant::now()))
+}
+
 #[cfg(windows)]
 impl<'a> PasteHeadEvidence<'a> {
     /// True when `pend` could be the start of the clipboard's text.
@@ -11576,7 +11603,12 @@ impl<'a> PasteHeadEvidence<'a> {
         if self.shifted_head && lone && self.held_for < PASTE_HEAD_PREFIX_HOLD {
             return true;
         }
-        if !self.clipboard_starts_with(pend) {
+        // A busy clipboard gives no answer either way. The characters were
+        // written by a host (a typed one returned above), so they get the
+        // same short hold a matching prefix gets: a paste's next characters
+        // land inside it, and anything else still goes out as typing once it
+        // runs out.
+        if !self.clipboard_starts_with(pend) && !self.clip_busy {
             return false;
         }
         // One character on prefix evidence alone: hold it for
@@ -11626,6 +11658,9 @@ fn should_zero_latency_flush_paste_pend(
 struct ClipboardHeadCache {
     seq: Option<u32>,
     head: Option<String>,
+    /// The last read could not open the clipboard: the head is unknown, which
+    /// is not the same as a clipboard holding no text.
+    busy: bool,
 }
 
 #[cfg(windows)]
@@ -11633,7 +11668,12 @@ impl ClipboardHeadCache {
     const HEAD_CHARS: usize = 64;
 
     fn get(&mut self) -> Option<&str> {
-        self.get_with(
+        self.get_state().0
+    }
+
+    /// The head, and whether it is unknown because the clipboard was busy.
+    fn get_state(&mut self) -> (Option<&str>, bool) {
+        self.state_with(
             crate::clipboard::clipboard_sequence_number(),
             crate::clipboard::try_read_from_system_clipboard,
         )
@@ -11649,6 +11689,14 @@ impl ClipboardHeadCache {
         seq: u32,
         read: impl FnOnce() -> Result<Option<String>, crate::clipboard::ClipboardBusy>,
     ) -> Option<&str> {
+        self.state_with(seq, read).0
+    }
+
+    fn state_with(
+        &mut self,
+        seq: u32,
+        read: impl FnOnce() -> Result<Option<String>, crate::clipboard::ClipboardBusy>,
+    ) -> (Option<&str>, bool) {
         if self.seq != Some(seq) {
             let started = Instant::now();
             let result = read();
@@ -11660,6 +11708,7 @@ impl ClipboardHeadCache {
                 Ok(text) => {
                     self.seq = Some(seq);
                     self.head = text.map(|t| t.chars().take(Self::HEAD_CHARS).collect::<String>());
+                    self.busy = false;
                 }
                 Err(_) => {
                     if input_log_enabled() {
@@ -11668,10 +11717,11 @@ impl ClipboardHeadCache {
                     }
                     self.seq = None;
                     self.head = None;
+                    self.busy = true;
                 }
             }
         }
-        self.head.as_deref()
+        (self.head.as_deref(), self.busy)
     }
 }
 

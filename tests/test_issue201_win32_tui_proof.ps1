@@ -111,7 +111,14 @@ Remove-Item "$psmuxDir\$SESSION.*" -Force -EA SilentlyContinue
 # Step 1: Launch ATTACHED psmux session (creates a real console window)
 Write-Test "Launching real attached psmux window"
 $psmuxExe = (Get-Command psmux -EA Stop).Source
+# The window runs with the input log on, so a failed check below can show
+# whether the keys reached psmux and what it did with them (a rare Test A
+# miss, about 1 in 48 runs, left nothing to go on).
+$inputLog = Join-Path $psmuxDir 'input_debug.log'
+$inputLogStart = if (Test-Path $inputLog) { @(Get-Content $inputLog).Count } else { 0 }
+$env:PSMUX_INPUT_DEBUG = '1'
 $proc = Start-Process -FilePath $psmuxExe -ArgumentList "new-session","-s",$SESSION -PassThru
+Remove-Item env:PSMUX_INPUT_DEBUG -EA SilentlyContinue
 
 # Step 2: Wait for session to be ready
 $ready = $false
@@ -135,13 +142,20 @@ if (-not $ready) {
 # Step 3: Focus the window (best effort, keybd_event may still work via auto-focus on launch)
 Start-Sleep -Seconds 2
 $hwnd = $proc.MainWindowHandle
-if ($hwnd -ne [IntPtr]::Zero) {
-    [Win32Proof]::ShowWindow($hwnd, 9) | Out-Null
-    [Win32Proof]::SetForegroundWindow($hwnd) | Out-Null
-    Write-Host "  Window focused via HWND=$hwnd" -ForegroundColor DarkGray
-} else {
-    Write-Host "  HWND=0 (process launched in separate console, keystrokes via auto-focus)" -ForegroundColor DarkGray
+# The keys below go to whichever window holds the foreground. Confirm it is
+# the psmux window first: a refused SetForegroundWindow used to read as
+# "prefix+dollar did not rename the session" and typed into somebody else's
+# window.
+. "$PSScriptRoot\helpers\focus_guard.ps1"
+$focus = Confirm-TestForeground -Hwnd $hwnd
+if (-not $focus.Ok) {
+    Write-Host "  [SKIP] keystroke tests not run: $($focus.Why)" -ForegroundColor Yellow
+    & psmux kill-session -t $SESSION 2>&1 | Out-Null
+    if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch {} }
+    Remove-Item "$psmuxDir\$SESSION.*" -Force -EA SilentlyContinue
+    exit 0
 }
+Write-Host "  Window focused via HWND=$hwnd (confirmed foreground)" -ForegroundColor DarkGray
 Start-Sleep -Milliseconds 500
 
 # ================================================================
@@ -216,6 +230,14 @@ Add-Result "prefix+comma renamed WINDOW" $winRenamed "list-windows contains '$($
 $afterSessAlive = & psmux has-session -t $beforeSessName 2>&1
 $sessUnchanged = $LASTEXITCODE -eq 0
 Add-Result "Session name unchanged after prefix+comma" $sessUnchanged "has-session '$beforeSessName' exit=$LASTEXITCODE"
+if ($fail -gt 0 -and -not (Test-TestForeground -Hwnd $hwnd)) {
+    Write-Host "  Note: the psmux window lost the foreground while the keys were sent; it is now held by $([PsmuxFocusGuard]::Describe([PsmuxFocusGuard]::Foreground()))" -ForegroundColor Yellow
+}
+if ($fail -gt 0) {
+    Write-Host "  psmux input log for this window (key events and prefix handling):" -ForegroundColor DarkGray
+    @(Get-Content $inputLog -EA SilentlyContinue) | Select-Object -Skip $inputLogStart |
+        Where-Object { $_ -notmatch 'kind=Release' } | Select-Object -First 120 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+}
 
 # ================================================================
 # Cleanup

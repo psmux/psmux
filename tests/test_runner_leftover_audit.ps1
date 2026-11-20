@@ -143,7 +143,16 @@ if (($shapes | Where-Object { $_ -like '"*' }).Count -ge 1 -and ($shapes | Where
 }
 
 foreach ($o in $newOnes) {
-    "{0}`t{1}" -f $o.ProcessId, (([string]$o.CommandLine) -replace '\s+', ' ').Trim() | Add-Content -Path $pidFile -Encoding UTF8
+    $decl = "{0}`t{1}" -f $o.ProcessId, (([string]$o.CommandLine) -replace '\s+', ' ').Trim()
+    $decl | Add-Content -Path $pidFile -Encoding UTF8
+    # Case B's creator is WmiPrvSE (under svchost), which the runner protects as
+    # foreign unless the suite declares the process as its own.
+    if ($env:PSMUX_TEST_DECLARED_PIDS) { $decl | Add-Content -Path $env:PSMUX_TEST_DECLARED_PIDS -Encoding UTF8 }
+}
+if ($env:PSMUX_TEST_DECLARED_PIDS) {
+    P "declared both pids to the runner in $env:PSMUX_TEST_DECLARED_PIDS"
+} else {
+    F "runner did not provide PSMUX_TEST_DECLARED_PIDS, so it cannot end the escaped console"
 }
 Write-Host ""
 Write-Host "  leaked pids recorded in: $pidFile" -ForegroundColor DarkGray

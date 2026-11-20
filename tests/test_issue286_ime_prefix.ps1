@@ -218,6 +218,16 @@ if (Test-Path $csc) {
     & $csc /nologo /optimize /out:$imeTestExe $imeTestSrc 2>&1 | Out-Null
     if (Test-Path $imeTestExe) {
         $imeResult = & $imeTestExe 2>&1 | Out-String
+        if ($imeResult -match "NO_CONSOLE") {
+            # The suite itself has a console with no window (a runner started
+            # from a windowless console host reports console window=0x0), so
+            # GetConsoleWindow has nothing to give.  Run the probe in a console
+            # of its own, the way psmux runs inside a real console window.
+            $imeOut = "$env:TEMP\psmux_ime_test.out"
+            Remove-Item $imeOut -Force -EA SilentlyContinue
+            Start-Process $imeTestExe -WindowStyle Minimized -RedirectStandardOutput $imeOut -Wait
+            $imeResult = (Get-Content $imeOut -Raw -EA SilentlyContinue) + " (ran in its own console)"
+        }
         if ($imeResult -match "API_CALLABLE:YES") {
             Write-Pass "IME Win32 API is callable (ImmGetContext/ImmSetOpenStatus/ImmReleaseContext)"
         } elseif ($imeResult -match "NO_IME_CONTEXT") {

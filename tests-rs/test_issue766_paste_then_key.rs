@@ -51,6 +51,7 @@ fn shifted(held_ms: u64) -> PasteHeadEvidence<'static> {
     PasteHeadEvidence {
         gesture_open: false,
         clip_head: None,
+        clip_busy: false,
         held_for: Duration::from_millis(held_ms),
         shifted_head: true,
         head_released: true,

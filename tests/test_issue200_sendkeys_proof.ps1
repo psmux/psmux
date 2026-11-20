@@ -134,16 +134,21 @@ if ($hwnd -eq [IntPtr]::Zero) {
     Write-Host "  Window title: '$title'"
 }
 
-# Bring window to front
-if ($hwnd -ne [IntPtr]::Zero) {
-    [Win32Input]::ShowWindow($hwnd, 9) | Out-Null  # SW_RESTORE
-    [Win32Input]::SetForegroundWindow($hwnd) | Out-Null
-    Write-Host "  [OK] Window focused (handle: $hwnd)" -ForegroundColor Green
+# Bring window to front, and confirm it really is the foreground: the keys
+# below go to whichever window holds it, so a refused SetForegroundWindow used
+# to read as "the command prompt code path may still be broken" and typed the
+# command into somebody else's window.
+. "$PSScriptRoot\helpers\focus_guard.ps1"
+$focus = Confirm-TestForeground -Hwnd $hwnd
+$focusSkip = -not $focus.Ok
+if ($focusSkip) {
+    Write-Host "  [SKIP] keystroke proof not run: $($focus.Why)" -ForegroundColor Yellow
 } else {
-    Write-Host "  [WARN] No window handle, will try anyway" -ForegroundColor Yellow
+    Write-Host "  [OK] Window focused (handle: $hwnd, confirmed foreground)" -ForegroundColor Green
 }
 
 Start-Sleep -Milliseconds 500
+if (-not $focusSkip) {
 
 # Step 3: Send Ctrl+B (prefix), then : to open command prompt
 Write-Host "[3/5] Sending prefix (Ctrl+B) then ':' to open command prompt..." -ForegroundColor Yellow
@@ -176,10 +181,14 @@ for ($i = 0; $i -lt 80; $i++) {
         } catch {}
     }
 }
+$keptFocus = Test-TestForeground -Hwnd $hwnd
+}
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
-if ($created) {
+if ($focusSkip) {
+    Write-Host "  SKIP: the psmux window never got the keyboard focus, so nothing was typed." -ForegroundColor Yellow
+} elseif ($created) {
     Write-Host "  PASS: Session '$TargetSession' was CREATED!" -ForegroundColor Green
     Write-Host "  Port file: $psmuxDir\$TargetSession.port" -ForegroundColor Green
     Write-Host "  Port: $tp" -ForegroundColor Green
@@ -191,6 +200,9 @@ if ($created) {
     Write-Host "  FAIL: Session '$TargetSession' was NOT created!" -ForegroundColor Red
     Write-Host "  Port file not found at: $psmuxDir\$TargetSession.port" -ForegroundColor Red
     Write-Host "  The command prompt code path may still be broken." -ForegroundColor Red
+    if (-not $keptFocus) {
+        Write-Host "  Note: the psmux window lost the foreground while the keys were sent; it is now held by $([PsmuxFocusGuard]::Describe([PsmuxFocusGuard]::Foreground()))" -ForegroundColor Yellow
+    }
 }
 Write-Host "=========================================" -ForegroundColor Cyan
 
@@ -226,4 +238,4 @@ Start-Sleep -Seconds 1
 Remove-Item "$psmuxDir\$SessionName.*" -Force -EA SilentlyContinue
 Remove-Item "$psmuxDir\$TargetSession.*" -Force -EA SilentlyContinue
 
-if ($created) { exit 0 } else { exit 1 }
+if ($focusSkip -or $created) { exit 0 } else { exit 1 }
