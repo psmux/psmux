@@ -171,8 +171,10 @@ Add-Result "customize row numbering uses dynamic width" `
 
 # ── Renderer: 'go to N' indicator ──────────────────────────────
 Write-Test "Renderer: tree picker reserves no 'go to N' row"
+# The only rows the tree reserves are the #1065 search prompt's, and only
+# while that prompt is open: no digit accumulator ever takes a row.
 Add-Result "tree reserves no prompt row" `
-    ($src -match '(?s)tree_chooser\s*\{.*?let\s+buffer_rows:\s*u16\s*=\s*0;') ""
+    ($src -match '(?s)tree_chooser\s*\{.*?let\s+buffer_rows:\s*u16\s*=\s*(0|if\s+chooser_search_prompt\.is_some\(\)\s*\{\s*2\s*\}\s*else\s*\{\s*0\s*\});') ""
 
 Write-Test "Renderer: buffer picker draws 'go to N' indicator"
 Add-Result "buffer 'go to N' indicator rendered" `
