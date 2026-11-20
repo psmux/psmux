@@ -274,6 +274,12 @@ if (-not (Test-Path $capExe)) {
             Write-Test "#800 harness gates"
             if ($allText -notmatch 'MARKERAFTER') {
                 Write-Skip "client never painted frame 2 (no MARKERAFTER on the replayed screen)"
+            } elseif ($ever -lt 100 -and [Environment]::OSVersion.Version.Build -lt 22000) {
+                # PSEUDOCONSOLE_PASSTHROUGH_MODE (flag 8) is not there before
+                # Windows 11: the inbox pseudo console of Windows 10 (19045)
+                # takes the flag and still re-renders, so these are its bytes,
+                # not the client's, and the replay has nothing to judge.
+                Write-Skip "Windows 10 pseudo console has no passthrough mode, the capture is the host's re-render (EVER=$ever)"
             } elseif ($ever -lt 100) {
                 Write-Fail "frame 1 never painted green on the screen (EVER=$ever), results would be meaningless"
             } else {

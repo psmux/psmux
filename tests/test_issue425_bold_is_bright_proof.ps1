@@ -15,6 +15,16 @@
 
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
+# The bytes below are read back through an inbox pseudo console, and on
+# Windows 10 (build 19045) that host re-encodes every colour it renders: bold
+# with a basic colour comes out as bold plus the bright code (1;92 for 1;32)
+# and 38;5;N below 16 as the basic code, with no psmux in the path at all
+# (the bare reference run turns 38;5;2;1 into 1;32 there). What psmux wrote
+# cannot be read back on that host, so there is nothing to compare.
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    Write-Host "[SKIP] Windows 10 inbox pseudo console re-encodes the colours this suite compares (bold basic to bright, 38;5;N to basic)" -ForegroundColor Yellow
+    exit 0
+}
 $HOSTEXE = "$env:TEMP\conpty_host.exe"
 $CTRL = "$env:TEMP\conpty_ctrl.txt"
 $OUT = "$env:TEMP\conpty_out.bin"

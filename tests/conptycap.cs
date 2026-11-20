@@ -139,6 +139,17 @@ static class ConPtyCap
         Thread.Sleep(2000);
         try { fs.Flush(); fs.Close(); } catch { }
         Log("CONPTYCAP_DONE bytes=" + total);
+        // Close the pseudo console before leaving, on a thread that may block,
+        // with a bounded wait. Windows 10 (build 19045) keeps the pseudo
+        // console's conhost.exe running after its owner exits without this,
+        // and a caller that waits for the whole process tree (Start-Process
+        // -Wait) then never returns: #626, #639 and #644 hung there. On
+        // Windows 11 the conhost goes with its owner either way.
+        var closer = new Thread(() => ClosePseudoConsole(hPC));
+        closer.IsBackground = true;
+        closer.Start();
+        bool closed = closer.Join(3000);
+        Log("ClosePseudoConsole returned=" + closed);
         Environment.Exit(0);
     }
 }
