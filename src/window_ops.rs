@@ -4708,6 +4708,8 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
             .replace("~\\", &format!("{}\\", home));
         shell_cmd.cwd(std::path::Path::new(&expanded));
     }
+    // The command's own `cd`/`env` run inside sh after `-c` and `-e` (#1077).
+    crate::pane::apply_launch_overrides(&mut shell_cmd, command);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – required for ConPTY.
     drop(pair.slave);
