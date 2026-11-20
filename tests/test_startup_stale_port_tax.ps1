@@ -37,6 +37,7 @@ function Make-StaleRegistries($n) {
     Start-Sleep -Milliseconds 400
     foreach ($i in 1..$n) { & $PSMUX new-session -d -s "taxstale$i" 2>&1 | Out-Null }
     Start-Sleep -Seconds 2
+    $killed = @()
     foreach ($i in 1..$n) {
         $pidFile = "$psmuxDir\taxstale$i.pid"
         if (Test-Path $pidFile) {
@@ -44,11 +45,14 @@ function Make-StaleRegistries($n) {
             $p = ((Get-Content $pidFile -Raw).Trim().Split(':'))[0]
             if ($p -match '^\d+$') {
                 $proc = Get-Process -Id ([int]$p) -EA SilentlyContinue
-                if ($proc -and $proc.ProcessName -eq "psmux") { Stop-Process -Id ([int]$p) -Force }
+                if ($proc -and $proc.ProcessName -eq "psmux") { Stop-Process -Id ([int]$p) -Force; $killed += [int]$p }
             }
         }
     }
-    Start-Sleep -Seconds 1
+    # Wait for the servers to be gone rather than a fixed second: ANY psmux
+    # invocation on this machine reaps dead-pid registries (that is the feature),
+    # so the longer the gap, the likelier another process does it first.
+    if ($killed) { Wait-Process -Id $killed -Timeout 5 -EA SilentlyContinue }
     return (Get-ChildItem "$psmuxDir\taxstale*.port" -EA SilentlyContinue).Count
 }
 
@@ -56,7 +60,17 @@ Write-Host "`n=== Startup stale-port tax tests ===" -ForegroundColor Cyan
 
 # === TEST 1: stale registries are reaped by the next invocation ===
 Write-Host "`n[Test 1] Dead-PID registries are reaped without network probes" -ForegroundColor Yellow
-$made = Make-StaleRegistries 6
+# Another psmux process can reap the planted registries before our own first
+# invocation does: measured 2026-11-20, 4 of 14 plantings were reaped within
+# 1.5 s by a psmux started by a background daemon (amesh) that runs psmux
+# commands periodically. That is correct behaviour, but then this test would not
+# be the one exercising the reap, so plant again.
+$made = 0
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    $made = Make-StaleRegistries 6
+    if ($made -eq 6) { break }
+    Write-Host "  [INFO] attempt ${attempt}: $made of 6 stale .port files left; another psmux process reaped the rest first, planting again" -ForegroundColor DarkGray
+}
 if ($made -eq 6) { Write-Pass "planted 6 genuine stale registries" }
 else { Write-Fail "expected 6 stale .port files, got $made" }
 

@@ -282,6 +282,54 @@ pub fn process_is_alive(pid: u32) -> bool {
     }
 }
 
+/// True only on a POSITIVE sign that `pid` has exited or is exiting: a handle
+/// opened and the process already has an exit status.
+///
+/// The strict counterpart of [`process_is_alive`], for callers where a pid that
+/// cannot be opened must NOT be read as dead (a live server in another Terminal
+/// Services session refuses the handle, #650). It exists for the window right
+/// after a process is terminated: until the kernel finishes tearing it down it
+/// is still in the process table under its image name and
+/// QueryFullProcessImageNameW still answers, so a name based liveness check
+/// calls it alive. Measured 2026-11-20 on 10.0.26300: after `Stop-Process
+/// -Force` and Wait-Process, 2 of 90 killed servers were in exactly that state
+/// (exit code 0xFFFFFFFF, still listed as psmux), and their registries were the
+/// only ones a cleanup pass left behind.
+///
+/// The exit code, not the handle's signaled state, is the signal: the status is
+/// recorded when termination starts, but the object is signaled only once every
+/// thread has unwound, and a first version that waited on the handle still left
+/// 3 of 20 runs with survivors in that state. A process with an exit status
+/// other than STILL_ACTIVE never runs user code again. A process that is
+/// running, or that exited with 259 itself, reads as not exited, which only
+/// errs towards keeping a registry, as before.
+#[cfg(windows)]
+pub fn process_has_exited(pid: u32) -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+        fn GetExitCodeProcess(hProcess: isize, lpExitCode: *mut u32) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h == 0 {
+            return false; // unknown, not dead
+        }
+        let mut code: u32 = STILL_ACTIVE;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code != STILL_ACTIVE
+    }
+}
+
+#[cfg(not(windows))]
+pub fn process_has_exited(_pid: u32) -> bool {
+    false
+}
+
 /// A SYNCHRONIZE handle on one process, so its exit can be waited on as an
 /// event instead of on a timer. Open it while the pid is known to be the
 /// process meant (a pid is only a name until a handle pins it).

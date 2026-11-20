@@ -1583,6 +1583,20 @@ function Run-TestFile {
         if ($timedOut) {
             Write-Host "  [TIMEOUT] Killing $baseName process tree after ${timeoutSec}s" -ForegroundColor Red
             Write-Log "TIMEOUT $baseName after ${timeoutSec}s, killing process tree"
+            # What the suite was doing when it hung, taken before the kill erases
+            # it. Sweep 2026-11-20_02-33-04: test_issue642_ctrl_j_prefix hung with
+            # no output line and no console spawn at all (it passes in 120 s
+            # otherwise), and nothing left could say whether its pwsh had even
+            # started the script. CPU time and its live children answer that.
+            try {
+                $sp = Get-Process -Id $proc.Id -ErrorAction Stop
+                $kids = @(Get-CimInstance -Query "SELECT ProcessId,Name,CommandLine FROM Win32_Process WHERE ParentProcessId=$($proc.Id)" -ErrorAction SilentlyContinue |
+                    ForEach-Object { $c = ([string]$_.CommandLine) -replace '\s+', ' '; if ($c.Length -gt 120) { $c = $c.Substring(0, 120) }; "$($_.Name)#$($_.ProcessId)[$c]" })
+                $outLen = 0; try { $outLen = (Get-Item $outFile -ErrorAction Stop).Length } catch { }
+                Write-Log ("TIMEOUT-STATE {0} pid={1} cpu={2:F1}s threads={3} handles={4} stdout_bytes={5} children={6}" -f `
+                    $baseName, $proc.Id, $sp.TotalProcessorTime.TotalSeconds, $sp.Threads.Count, $sp.HandleCount, $outLen,
+                    $(if ($kids.Count) { $kids -join ' ' } else { '<none>' }))
+            } catch { Write-Log "TIMEOUT-STATE $baseName pid=$($proc.Id) could not be read: $($_.Exception.Message)" }
             if ($inJob) {
                 Write-KillNote ("JOBKILL timeout suite={0} assigned pid={1}" -f $baseName, $proc.Id)
                 [PsmuxTestJob]::Kill($job)   # kills every descendant, even orphans
