@@ -9,6 +9,10 @@
 // <steps> is a comma separated list, run in order:
 //   w<ms>   wait
 //   <hex>   write one byte, e.g. 0a for Ctrl+J, 02 for Ctrl+B, 0d for Enter
+//   x<hex>  write all these bytes in ONE write, e.g. x1b4f7a, the way a
+//           terminal writes the whole sequence of one key; byte at a time
+//           writes can land further apart than escape-time on a loaded
+//           machine, and then psmux rightly reads a lone Escape
 //   h<ms>   hold the pseudoconsole open, then close it and end the client
 //
 // The child inherits this process's environment, so the caller sets
@@ -103,6 +107,14 @@ class ConPtyVtKeys
             if (s.Length == 0) continue;
             if (s[0] == 'w') { Thread.Sleep(int.Parse(s.Substring(1))); continue; }
             if (s[0] == 'h') { Thread.Sleep(int.Parse(s.Substring(1))); break; }
+            if (s[0] == 'x')
+            {
+                string hex = s.Substring(1);
+                byte[] seq = new byte[hex.Length / 2];
+                for (int i = 0; i < seq.Length; i++) seq[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+                WriteFile(inWrite, seq, (uint)seq.Length, out w, IntPtr.Zero);
+                continue;
+            }
             byte b = Convert.ToByte(s, 16);
             WriteFile(inWrite, new byte[] { b }, 1, out w, IntPtr.Zero);
         }
