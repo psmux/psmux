@@ -504,6 +504,102 @@ pub fn mode_tree_alias(code: KeyCode, mods: KeyModifiers, tree: bool) -> Option<
     }
 }
 
+/// Which way `n` and `N` walk, tmux's `enum mode_tree_search_dir`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchDir {
+    Forward,
+    Backward,
+}
+
+/// The key that opens a chooser's search prompt. tmux `mode_tree_key` puts
+/// `?`, `/` and `C-s` in one arm (mode-tree.c:1769-1776), each opening the
+/// `(search) ` prompt with the direction set to forward.
+pub fn opens_search(code: KeyCode, mods: KeyModifiers) -> bool {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let alt = mods.contains(KeyModifiers::ALT);
+    match code {
+        KeyCode::Char('/') | KeyCode::Char('?') => !ctrl && !alt,
+        KeyCode::Char(c) => ctrl && !alt && c.eq_ignore_ascii_case(&'s'),
+        _ => false,
+    }
+}
+
+/// The direction `n` (forward) or `N` (backward) repeats the last search in
+/// (mode-tree.c:1777-1784). Any other key is not a repeat.
+pub fn repeat_search(code: KeyCode, mods: KeyModifiers) -> Option<SearchDir> {
+    if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    match code {
+        KeyCode::Char('n') => Some(SearchDir::Forward),
+        KeyCode::Char('N') => Some(SearchDir::Backward),
+        _ => None,
+    }
+}
+
+/// tmux `mode_tree_is_lowercase`: a search typed all in lower case ignores
+/// case (`strcasestr`), and one with any upper case letter matches exactly
+/// (`strstr`). The same smart case rule copy mode uses.
+pub fn search_ignores_case(search: &str) -> bool {
+    !search.chars().any(|c| c.is_uppercase())
+}
+
+/// Whether `text` contains `search`, as `strstr` or `strcasestr` decides.
+pub fn search_hit(text: &str, search: &str, icase: bool) -> bool {
+    if icase {
+        text.to_lowercase().contains(&search.to_lowercase())
+    } else {
+        text.contains(search)
+    }
+}
+
+/// tmux `mode_tree_search_forward` and `mode_tree_search_backward` over rows
+/// kept in tree order (a session, then each window, then that window's
+/// panes), which is the order tmux's walk visits items in: forward is the
+/// next item in pre order, backward the previous, and both wrap around the
+/// whole tree. The walk starts on the row after (or before) `current` and
+/// stops when it comes back to `current`, which is never tested, so a search
+/// whose only hit is the row already selected finds nothing and the cursor
+/// stays where it is. Collapsed rows are walked too: tmux searches items,
+/// not visible lines, and expands the hit's parents afterwards.
+pub fn search_step(
+    len: usize,
+    current: usize,
+    dir: SearchDir,
+    mut hit: impl FnMut(usize) -> bool,
+) -> Option<usize> {
+    if len == 0 || current >= len {
+        return None;
+    }
+    let mut i = current;
+    loop {
+        i = match dir {
+            SearchDir::Forward => (i + 1) % len,
+            SearchDir::Backward => (i + len - 1) % len,
+        };
+        if i == current {
+            return None;
+        }
+        if hit(i) {
+            return Some(i);
+        }
+    }
+}
+
+/// tmux `mode_tree_search_set`: every ancestor of the found item is expanded
+/// so the item has a visible line to put the cursor on.
+pub fn expand_ancestors(kinds: &[RowKind], collapsed: &mut HashSet<usize>, idx: usize) {
+    let mut at = idx;
+    while let Some(p) = parent_of(kinds, at) {
+        collapsed.remove(&p);
+        at = p;
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1065_chooser_search.rs"]
+mod tests_issue1065_chooser_search;
+
 #[cfg(test)]
 #[path = "../tests-rs/test_issue625_choose_tree_lines.rs"]
 mod tests_issue625_choose_tree_lines;

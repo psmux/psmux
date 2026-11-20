@@ -3736,6 +3736,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Track active window name from last dump-state for #W expansion
     let mut active_window_name = String::new();
 
+    // The chooser search (#1065), tmux's `mtd->search`: `/`, `?` or `C-s`
+    // opens a `(search) ` prompt whose text is `chooser_search_prompt` while
+    // it is being typed; Enter makes it `chooser_search`, which `n` and `N`
+    // repeat until the chooser closes. Each chooser opens with neither.
+    let mut chooser_search_prompt: Option<String> = None;
+    let mut chooser_search: Option<String> = None;
+    // The name each `tree_all` row is searched by: a session's name and a
+    // window's name. A pane row's is empty here, since tmux searches a pane
+    // by the command running in it, which is asked for when a search runs.
+    let mut tree_search_names: Vec<String> = Vec::new();
     let mut tree_chooser = false;
     // The VISIBLE rows of the chooser, which is what tmux calls line_list:
     // the cursor, the renderer, Enter and the jump keys all index this list.
@@ -3776,6 +3786,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     macro_rules! open_buffer_chooser {
         () => {{
             buffer_chooser = true;
+            chooser_search_prompt = None;
+            chooser_search = None;
             buffer_selected = 0;
             buffer_scroll = 0;
             buffer_num_buffer.clear();
@@ -4672,6 +4684,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     macro_rules! open_tree_chooser {
         () => {{
             tree_chooser = true;
+            chooser_search_prompt = None;
+            chooser_search = None;
+            tree_search_names.clear();
             tree_entries.clear();
             tree_all.clear();
             tree_collapsed.clear();
@@ -4743,6 +4758,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     tree_all.push((true, usize::MAX, 0,
                         tree_session_header(tree_ns, sess_name, nw, is_current),
                         sess_name.clone()));
+                    tree_search_names.push(crate::session::display_session_name(tree_ns, sess_name).to_string());
                     // Every session's windows carry their panes, as
                     // tmux's window_tree_build_window builds pane items
                     // for every window of every session. Only the
@@ -4756,10 +4772,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         tree_all.push((true, *wid, 0,
                             format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
                             sess_name.clone()));
+                        tree_search_names.push(wname.clone());
                         for (pid, ptitle) in panes {
                             tree_all.push((false, *wid, *pid,
                                 format!("    {}", ptitle),
                                 sess_name.clone()));
+                            tree_search_names.push(String::new());
                         }
                     }
                 }
@@ -4770,8 +4788,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     let marker = if wi.active { "*" } else { "" };
                     if wi.active { tree_selected = tree_all.len(); }
                     tree_all.push((true, wi.id, 0, format!("{}{}", wi.name, marker), current_session.clone()));
+                    tree_search_names.push(wi.name.clone());
                     for pi in &wi.panes {
                         tree_all.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
+                        tree_search_names.push(String::new());
                     }
                 }
             }
@@ -4792,9 +4812,81 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 .unwrap_or(0);
         }};
     }
+    // tmux `mode_tree_search_set` for whichever chooser is open (#1065): walk
+    // from the current row in `$dir` for the next row `chooser_search` hits,
+    // wrapping, and put the cursor on it. No hit leaves the cursor alone.
+    //
+    // What a row is searched by follows each tmux mode's search callback.
+    // The tree (window_tree_search): a session by its name, a window by its
+    // name, a pane by the command running in it, which is asked of that
+    // session's server only once the walk reaches one of its panes, so a
+    // search that stops on a session or window asks nothing. The session
+    // list: the session's name. The buffers (window_buffer_search): the
+    // buffer's name, then its whole content, fetched one buffer at a time.
+    macro_rules! run_chooser_search {
+        ($dir:expr) => {{
+            if let Some(search) = chooser_search.clone() {
+                use crate::choose_tree::{search_hit, search_step, RowKind};
+                let icase = crate::choose_tree::search_ignores_case(&search);
+                let dir: crate::choose_tree::SearchDir = $dir;
+                if tree_chooser {
+                    if let Some(cur) = tree_vis_map.get(tree_selected).copied() {
+                        let mut pane_cmds: std::collections::HashMap<String, std::collections::HashMap<usize, String>> =
+                            std::collections::HashMap::new();
+                        let found = search_step(tree_all.len(), cur, dir, |i| {
+                            let (is_win, wid, pid, _, sess) = &tree_all[i];
+                            match crate::choose_tree::row_kind(*is_win, *wid) {
+                                RowKind::Pane => pane_cmds
+                                    .entry(sess.clone())
+                                    .or_insert_with(|| fetch_session_pane_commands(sess))
+                                    .get(pid)
+                                    .map_or(false, |cmd| search_hit(cmd, &search, icase)),
+                                _ => tree_search_names
+                                    .get(i)
+                                    .map_or(false, |name| search_hit(name, &search, icase)),
+                            }
+                        });
+                        if let Some(t) = found {
+                            let kinds = tree_row_kinds(&tree_all);
+                            crate::choose_tree::expand_ancestors(&kinds, &mut tree_collapsed, t);
+                            let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+                            tree_entries = rows;
+                            tree_vis_map = map;
+                            tree_selected = tree_vis_map.iter().position(|&i| i == t).unwrap_or(tree_selected);
+                        }
+                    }
+                } else if session_chooser {
+                    let shown = session_filtered_indices(&session_entries, &session_filter);
+                    let ns = crate::session::session_namespace(&current_session);
+                    let found = search_step(shown.len(), session_selected, dir, |i| {
+                        session_entries.get(shown[i]).map_or(false, |(base, _)| {
+                            search_hit(crate::session::display_session_name(ns, base), &search, icase)
+                        })
+                    });
+                    if let Some(t) = found {
+                        session_selected = t;
+                        session_num_buffer.clear();
+                    }
+                } else if buffer_chooser {
+                    let found = search_step(buffer_entries.len(), buffer_selected, dir, |i| {
+                        let name = &buffer_entries[i].0;
+                        search_hit(name, &search, icase)
+                            || fetch_buffer_text(port, &session_key, name)
+                                .map_or(false, |text| search_hit(&text, &search, icase))
+                    });
+                    if let Some(t) = found {
+                        buffer_selected = t;
+                        buffer_num_buffer.clear();
+                    }
+                }
+            }
+        }};
+    }
     macro_rules! open_session_chooser {
         () => {{
             session_chooser = true;
+            chooser_search_prompt = None;
+            chooser_search = None;
             session_entries.clear();
             session_selected = 0;
             session_scroll = 0;
@@ -5876,6 +5968,53 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                         }
+                        // A chooser's `(search) ` prompt (#1065) takes every key
+                        // while it is open, the prefix and Escape included, as
+                        // tmux's status prompt does (it sees a key before any
+                        // key table). Enter runs the search forward from the
+                        // current row, and an empty Enter or Escape drops the
+                        // search: tmux's callback frees `mtd->search` when the
+                        // text is empty or the prompt was cancelled
+                        // (mode-tree.c:1304-1306). The chooser stays open.
+                        else if chooser_search_prompt.is_some()
+                            && (tree_chooser || session_chooser || buffer_chooser)
+                            && chooser_kill.is_none()
+                        {
+                            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                            let alt = key.modifiers.contains(KeyModifiers::ALT);
+                            match key.code {
+                                KeyCode::Esc => {
+                                    chooser_search_prompt = None;
+                                    chooser_search = None;
+                                }
+                                KeyCode::Char(c) if ctrl && !alt && (c.eq_ignore_ascii_case(&'c') || c.eq_ignore_ascii_case(&'g')) => {
+                                    chooser_search_prompt = None;
+                                    chooser_search = None;
+                                }
+                                KeyCode::Enter => {
+                                    let typed = chooser_search_prompt.take().unwrap_or_default();
+                                    if typed.is_empty() {
+                                        chooser_search = None;
+                                    } else {
+                                        chooser_search = Some(typed);
+                                        run_chooser_search!(crate::choose_tree::SearchDir::Forward);
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if let Some(p) = chooser_search_prompt.as_mut() { p.pop(); }
+                                }
+                                KeyCode::Char(c) if ctrl && !alt && c.eq_ignore_ascii_case(&'u') => {
+                                    if let Some(p) = chooser_search_prompt.as_mut() { p.clear(); }
+                                }
+                                KeyCode::Char(c) if !ctrl && !alt && !paste_suppress_until.map_or(false, |t| Instant::now() < t) => {
+                                    if let Some(p) = chooser_search_prompt.as_mut() {
+                                        if p.len() < 256 { p.push(c); }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            selection_changed = true;
+                        }
                         // A `-k` prompt is answered by Escape like any other
                         // key ("Escape", status.c:1438), so it is left to the
                         // prompt's own arm.
@@ -6594,6 +6733,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                                // `/`, `?` or `C-s` opens the `(search) ` prompt and
+                                // `n` / `N` repeat the last search forward and
+                                // backward (#1065, mode-tree.c:1769-1784). A session
+                                // filter being typed keeps these as its text.
+                                code if (tree_chooser || session_chooser || buffer_chooser)
+                                    && !filter_typing
+                                    && crate::choose_tree::opens_search(code, key.modifiers) => {
+                                    chooser_search_prompt = Some(String::new());
+                                }
+                                code if (tree_chooser || session_chooser || buffer_chooser)
+                                    && !filter_typing
+                                    && crate::choose_tree::repeat_search(code, key.modifiers).is_some() => {
+                                    if let Some(dir) = crate::choose_tree::repeat_search(code, key.modifiers) {
+                                        run_chooser_search!(dir);
                                     }
                                 }
                                 // `q` or `C-g`: the mode exits, as Escape does.
@@ -7591,11 +7746,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         // Route paste into the active client-side text overlay
                         // (issue #290) so it does not leak past the command
                         // prompt / rename prompts into the underlying pane.
-                        let consumed = route_paste_to_overlay(
-                            &data,
-                            command_input, &mut command_buf, command_back,
-                            renaming, &mut rename_buf,
-                        );
+                        let consumed = match chooser_search_prompt.as_mut() {
+                            // A chooser's search prompt is a text overlay too
+                            // (#1065): the paste is its text, up to the first
+                            // line end, and never reaches the pane.
+                            Some(p) if tree_chooser || session_chooser || buffer_chooser => {
+                                let line = data.split(['\r', '\n']).next().unwrap_or("");
+                                for c in line.chars().filter(|c| !c.is_control()) {
+                                    if p.len() >= 256 { break; }
+                                    p.push(c);
+                                }
+                                selection_changed = true;
+                                true
+                            }
+                            _ => route_paste_to_overlay(
+                                &data,
+                                command_input, &mut command_buf, command_back,
+                                renaming, &mut rename_buf,
+                            ),
+                        };
                         let duplicate = !consumed && paste_event_is_duplicate(&paste_gesture, &data);
                         if duplicate {
                             // Windows crossterm can emit Event::Paste *and* the
@@ -9748,7 +9917,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // is ON expand to 85x75% so the right-side preview has room.
                 let jump_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
                 let filter_rows: u16 = if session_filter_active { 2 } else { 0 };
-                let buffer_rows = jump_rows.saturating_add(filter_rows);
+                // The `(search) ` prompt (#1065) takes two rows like the filter.
+                let search_rows: u16 = if chooser_search_prompt.is_some() { 2 } else { 0 };
+                let buffer_rows = jump_rows.saturating_add(filter_rows).saturating_add(search_rows);
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
                 let (popup_w, popup_h) = if preview_enabled {
@@ -9778,9 +9949,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 popup_rect_last = Some(oa);
                 let title = if preview_enabled {
-                    " choose-session (f=filter, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close, drag border to move) "
+                    " choose-session (f=filter, /=search, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close, drag border to move) "
                 } else {
-                    " choose-session (f=filter, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close) "
+                    " choose-session (f=filter, /=search, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close) "
                 };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
@@ -9846,6 +10017,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         format!("Filter: {}", session_filter),
                         sel_style,
                     )));
+                }
+                if let Some(typed) = &chooser_search_prompt {
+                    lines.push(Line::from(""));
+                    lines.push(chooser_search_prompt_line(typed, sel_style));
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, list_area);
@@ -9963,7 +10138,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // is ON expand to 85x75% so the right-side preview has room.
                 // No digit accumulator any more: a jump key acts on the keystroke,
                 // so the chooser never reserves rows for a pending "go to N".
-                let buffer_rows: u16 = 0;
+                // Only the `(search) ` prompt (#1065) reserves rows, while open.
+                let buffer_rows: u16 = if chooser_search_prompt.is_some() { 2 } else { 0 };
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
                 let (popup_w, popup_h) = if preview_enabled {
@@ -9992,9 +10168,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 popup_rect_last = Some(oa);
                 let title = if preview_enabled {
-                    " choose-tree (0-9=jump  Enter=switch  Left/Right=collapse/expand  p=preview  Esc=close  drag border to move) "
+                    " choose-tree (0-9=jump  Enter=switch  Left/Right=collapse/expand  /=search n/N=next/prev  p=preview  Esc=close  drag border to move) "
                 } else {
-                    " choose-tree (0-9=jump  Enter=switch  Left/Right=collapse/expand  p=preview  Esc=close) "
+                    " choose-tree (0-9=jump  Enter=switch  Left/Right=collapse/expand  /=search n/N=next/prev  p=preview  Esc=close) "
                 };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
@@ -10059,6 +10235,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         Line::from(row)
                     };
                     lines.push(line);
+                }
+                if let Some(typed) = &chooser_search_prompt {
+                    lines.push(Line::from(""));
+                    lines.push(chooser_search_prompt_line(typed, sel_style));
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, list_area);
@@ -10161,9 +10341,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             if buffer_chooser {
                 let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 let overlay = Block::default().borders(Borders::ALL)
-                    .title(" choose-buffer (digits+enter=jump, Enter=paste, d=delete, q/Esc=close) ")
+                    .title(" choose-buffer (/=search, digits+enter=jump, Enter=paste, d=delete, q/Esc=close) ")
                     .border_style(sel_style);
-                let buffer_rows: u16 = if buffer_num_buffer.is_empty() { 0 } else { 2 };
+                let buffer_rows: u16 = (if buffer_num_buffer.is_empty() { 0 } else { 2 })
+                    + (if chooser_search_prompt.is_some() { 2 } else { 0 });
                 let buf_h = ((buffer_entries.len() as u16).saturating_add(2).saturating_add(buffer_rows))
                     .max(5)
                     .min(content_chunk.height.saturating_sub(2));
@@ -10199,6 +10380,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         format!("go to {}", buffer_num_buffer),
                         sel_style,
                     )));
+                }
+                if let Some(typed) = &chooser_search_prompt {
+                    lines.push(Line::from(""));
+                    lines.push(chooser_search_prompt_line(typed, sel_style));
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, inner);
@@ -12173,6 +12358,62 @@ fn fetch_buffer_entries(port: u16, session_key: &str) -> Vec<(String, usize, Str
     .unwrap_or_default()
 }
 
+/// The chooser's `(search) ` prompt line (#1065), tmux's prompt string with
+/// the text typed so far and a cursor after it.
+fn chooser_search_prompt_line(typed: &str, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("(search) {}", typed), style),
+        Span::styled(" ".to_string(), style.add_modifier(Modifier::REVERSED)),
+    ])
+}
+
+/// The command running in each pane of one session, by pane id, which is what
+/// tmux's tree search matches a pane row against (`osdep_get_name` in
+/// window_tree_search). Asked of that session's own server, the way the tree
+/// asks each server for its rows. Empty when the server does not answer.
+fn fetch_session_pane_commands(base: &str) -> std::collections::HashMap<usize, String> {
+    let port = std::fs::read_to_string(crate::paths::port_file(base))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok());
+    let key = read_session_key(base).unwrap_or_default();
+    let Some(port) = port else { return std::collections::HashMap::new() };
+    crate::session::fetch_authed_response_multi(
+        &format!("127.0.0.1:{}", port),
+        &key,
+        b"list-panes -s -F \"#{pane_id} #{pane_current_command}\"\n",
+        Duration::from_millis(100),
+        Duration::from_millis(500),
+    )
+    .map(|reply| parse_pane_commands(&reply))
+    .unwrap_or_default()
+}
+
+/// `%<id> <command>` lines into a pane id to command map.
+pub(crate) fn parse_pane_commands(reply: &str) -> std::collections::HashMap<usize, String> {
+    reply
+        .lines()
+        .filter_map(|line| {
+            let (id, cmd) = line.trim_end_matches('\r').split_once(' ')?;
+            let id = id.strip_prefix('%')?.parse::<usize>().ok()?;
+            Some((id, cmd.to_string()))
+        })
+        .collect()
+}
+
+/// One paste buffer's whole content, for the buffer chooser's search, which
+/// tmux matches against the content as well as the name
+/// (window_buffer_search). The chooser's own rows carry only a preview.
+fn fetch_buffer_text(port: u16, session_key: &str, name: &str) -> Option<String> {
+    let cmd = format!("show-buffer -b {}\n", crate::util::quote_arg_if_needed(name));
+    crate::session::fetch_authed_response_multi(
+        &format!("127.0.0.1:{}", port),
+        session_key,
+        cmd.as_bytes(),
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+    )
+}
+
 fn top_paste_buffer(port: u16, session_key: &str) -> Option<String> {
     crate::session::fetch_authed_first_line_raw(
         &format!("127.0.0.1:{}", port),
@@ -12516,3 +12757,7 @@ mod test_issue839_rename_session_identity;
 #[cfg(test)]
 #[path = "../tests-rs/test_pr1017_prompt_vi_style.rs"]
 mod test_pr1017_prompt_vi_style;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1065_pane_commands.rs"]
+mod tests_issue1065_pane_commands;
