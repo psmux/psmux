@@ -1,6 +1,6 @@
 //! The body of a tmux passthrough, `ESC P tmux; ... ESC \`, which the pane
-//! parser must not act on while `allow-passthrough` is off (with it on or
-//! all the body is parsed as it always was here, see `allow_passthrough`).
+//! parser never acts on. `allow-passthrough on/all` additionally collect its
+//! unescaped body for consume-once host delivery; off only skips it.
 //!
 //! tmux keeps the whole DCS in its input buffer and, at the ST, either drops
 //! it (`allow-passthrough off`) or writes the part after `tmux;` to the outer
@@ -53,11 +53,17 @@ pub enum Skip {
 #[derive(Default, Debug)]
 pub struct Passthrough {
     state: Option<(State, Instant)>,
+    body: Vec<u8>,
+    collect: bool,
+    completed: crate::host_events::Events,
 }
 
 impl Passthrough {
     pub(crate) fn begin(&mut self) {
         self.state = Some((State::Inside, Instant::now()));
+        self.body.clear();
+        self.completed.take();
+        self.collect = crate::allow_passthrough();
     }
 
     pub(crate) fn active(&self) -> bool {
@@ -72,6 +78,35 @@ impl Passthrough {
 
     pub(crate) fn end(&mut self) {
         self.state = None;
+        self.body.clear();
+        self.collect = false;
+        self.completed.take();
+    }
+
+    pub(crate) fn take_completed(&mut self) -> Vec<crate::HostEvent> {
+        self.completed.take()
+    }
+
+    pub(crate) fn take_body(&mut self) -> Option<Vec<u8>> {
+        if self.collect && crate::allow_passthrough() && !self.body.is_empty() {
+            Some(std::mem::take(&mut self.body))
+        } else {
+            self.body.clear();
+            None
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        if !crate::allow_passthrough() { self.collect = false; }
+        if self.collect && bytes.len() <= crate::input_buffer_size().min(crate::MAX_HOST_EVENT_BYTES).saturating_sub(self.body.len()) {
+            self.body.extend_from_slice(bytes);
+            if bytes.ends_with(&[BEL]) && crate::host_events::completed_notification(&self.body) {
+                self.completed.push(std::mem::take(&mut self.body), true);
+            }
+        } else {
+            self.collect = false;
+            self.body.clear();
+        }
     }
 
     /// Consume wrapper bytes from the start of `bytes`.
@@ -87,22 +122,24 @@ impl Passthrough {
                     // Payload bytes: jump to the next one that matters.
                     match memchr::memchr2(ESC, BEL, &bytes[i..]) {
                         Some(off) => {
+                            self.append(&bytes[i..i + off]);
                             i += off;
+                            if bytes[i] == BEL { self.append(&[BEL]); }
                             state = if bytes[i] == ESC { State::Esc } else { State::AfterBel };
                         }
-                        None => break,
+                        None => { self.append(&bytes[i..]); break; },
                     }
                 }
                 State::AfterBel => match b {
                     ESC => state = State::Esc,
-                    BEL => {}
+                    BEL => self.append(&[BEL]),
                     _ => {
                         self.state = None;
                         return Skip::End { resume: i, close: b"\x1b\\" };
                     }
                 },
                 State::Esc => match b {
-                    ESC => state = State::Inside,
+                    ESC => { self.append(&[ESC]); state = State::Inside; },
                     b'\\' => {
                         self.state = None;
                         return Skip::End { resume: i + 1, close: b"\x1b\\" };

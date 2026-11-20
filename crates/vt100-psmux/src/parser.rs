@@ -71,6 +71,7 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     {
         let mut screen = self.screen.screen.clone();
         screen.capture_queries(false);
+        screen.take_host_events();
         Self {
             parser: vte::Parser::new(),
             screen: crate::perform::WrappedScreen::from_screen(screen, CB::default()),
@@ -141,10 +142,22 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         }
         loop {
             if self.passthrough.active() {
-                match self.passthrough.skip(rest) {
+                let skipped = self.passthrough.skip(rest);
+                for event in self.passthrough.take_completed() {
+                    self.screen.screen.push_host_passthrough(event.bytes);
+                }
+                match skipped {
                     crate::passthrough::Skip::More => return,
                     crate::passthrough::Skip::End { resume, close } => {
+                        if let Some(body) = self.passthrough.take_body() {
+                            self.screen.screen.push_host_passthrough(body);
+                        }
                         self.parser.advance(&mut self.screen, close);
+                        if close == b"\x1b" {
+                            // The ESC was handed to VTE separately; resume may
+                            // start with Ptmux;, which still needs its stop check.
+                            dcs_may_continue = true;
+                        }
                         rest = &rest[resume..];
                     }
                 }

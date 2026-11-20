@@ -307,3 +307,53 @@ fn none_target_captures_active_pane_as_before() {
     assert!(out.contains("ALPHA-WINDOW"),
         "no -t target must keep capturing the active pane, got: {:?}", out);
 }
+
+fn queue_passthrough(app: &AppState, body: &[u8]) {
+    if let crate::types::Node::Leaf(p) = &app.windows[0].root {
+        p.term.lock().unwrap().screen_mut().push_host_passthrough(body.to_vec());
+    } else { panic!("fixture pane"); }
+}
+
+#[test]
+fn host_event_delivery_discards_control_only_output_before_normal_attach() {
+    let mut app = app_showing(b"");
+    app.allow_passthrough = "on".to_string();
+    queue_passthrough(&app, b"\x1b]9;old-control-only\x07");
+    app.register_client(0x7501, true);
+    // A normal receiver in another session must not make this one attached.
+    let (poke, _wake) = std::sync::mpsc::channel();
+    let unrelated = u64::MAX - 0x7501_0103;
+    let _slot = crate::types::register_frame_channel(unrelated, poke);
+    crate::server::helpers::drain_host_events(&mut app);
+    crate::types::deregister_frame_channel(unrelated);
+    assert!(app.host_events.is_empty(), "control-only output must be discarded");
+    app.register_client(0x7502, false);
+    assert!(crate::server::helpers::take_frame_oneshots(&mut app).host_events.is_empty(), "normal attach cannot replay old output");
+    queue_passthrough(&app, b"\x1b]9;fresh\x07");
+    crate::server::helpers::drain_host_events(&mut app);
+    let shots = crate::server::helpers::take_frame_oneshots(&mut app);
+    assert_eq!(shots.host_events, vec![b"\x1b]9;fresh\x07".to_vec()]);
+    assert!(shots.host_raw, "a passthrough body invalidates the client screen");
+    assert!(crate::server::helpers::take_frame_oneshots(&mut app).host_events.is_empty());
+}
+
+#[test]
+fn host_event_delivery_matches_tmux_allow_passthrough_modes() {
+    let mut app = app_showing(b"");
+    app.register_client(0x7503, false);
+    // Unwrapped notifications are pane output only, in every mode (tmux).
+    for mode in ["off", "on", "all"] {
+        app.allow_passthrough = mode.to_string();
+        if let crate::types::Node::Leaf(p) = &app.windows[0].root {
+            p.term.lock().unwrap().process(b"\x1b]9;plain\x07\x1b]777;notify;t;b\x07\x1b]9001;CmdNotFound;x\x07");
+        }
+        assert!(crate::server::helpers::take_frame_oneshots(&mut app).host_events.is_empty(), "{mode}: unwrapped OSC forwarded");
+    }
+    // off drops a queued body (the option was turned off before the drain).
+    app.allow_passthrough = "off".to_string();
+    queue_passthrough(&app, b"\x1b]9;dropped\x07");
+    assert!(crate::server::helpers::take_frame_oneshots(&mut app).host_events.is_empty(), "off forwards nothing");
+    app.allow_passthrough = "on".to_string();
+    queue_passthrough(&app, b"\x1b]9;visible\x07");
+    assert_eq!(crate::server::helpers::take_frame_oneshots(&mut app).host_events, vec![b"\x1b]9;visible\x07".to_vec()]);
+}

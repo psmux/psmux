@@ -3268,6 +3268,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // dramatically reduces CPU usage when the session is idle while
         // keeping responsiveness high during interaction.
         let data_ready = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
+        helpers::drain_host_events(&mut app);
         if data_ready {
             state_dirty = true;
             // #548 follow-up: attribute any newly-enabled mouse protocol to
@@ -4563,7 +4564,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // fields like bell and clipboard reach all clients.
                     // The cached copy omits them for NC dedup safety.
                     crate::pty_trace::mark_plain("s", combined_buf.len());
-                    crate::types::push_frame_answered(&combined_buf, Some(dump_client_id));
+                    crate::types::push_frame_answered(&mut combined_buf, Some(dump_client_id));
                     let _ = resp.send(combined_buf.clone());
                     dump_state_seen_full.insert(dump_client_id);
                 }

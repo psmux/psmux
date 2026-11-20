@@ -377,6 +377,9 @@ fn respawn(app: &mut AppState, _pty_system: &dyn portable_pty::PtySystem, refuse
 /// consume-time consistency even if a future caller forgets to
 /// invoke `apply` on a state change.
 pub fn reconcile_consumed_parser(parser: &mut vt100::Parser, app: &AppState) {
+    // Startup output was emitted while the spare was not visible to a client.
+    // Claiming it must not replay those host notifications/passthrough bodies.
+    parser.screen_mut().take_host_events();
     let screen = parser.screen();
     let need_history = screen.scrollback_len() != app.history_limit;
     let need_alt = screen.allow_alternate_screen() != app.allow_alternate_screen;

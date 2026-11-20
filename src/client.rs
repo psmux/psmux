@@ -5207,6 +5207,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
             }
         }
+        if !drained_oneshots.host_events.is_empty() {
+            let mut stdout = std::io::stdout().lock();
+            for event in &drained_oneshots.host_events {
+                let _ = std::io::Write::write_all(&mut stdout, event);
+            }
+            if drained_oneshots.host_raw {
+                let _ = std::io::Write::write_all(&mut stdout, b"\x1b[0m\x1b]8;;\x1b\\");
+            }
+            let _ = std::io::Write::flush(&mut stdout);
+            drop(stdout);
+            if drained_oneshots.host_raw {
+                // Raw passthrough can move the cursor or alter attributes/cells.
+                // Invalidate ratatui's screen before drawing its next snapshot.
+                let _ = terminal.clear();
+                selection_changed = true;
+            }
+        }
         if drained_oneshots.bell {
             let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
             let _ = std::io::Write::flush(&mut std::io::stdout());

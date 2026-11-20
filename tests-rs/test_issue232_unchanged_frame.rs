@@ -88,11 +88,11 @@ fn the_dump_state_requester_still_gets_the_pushed_copy() {
     let other = u64::MAX - 0x0232_0005;
     let slot = register_frame_channel(id, poke);
     let slot2 = register_frame_channel(other, poke2);
-    let a = frame("issue232-answered-a");
+    let mut a = frame("issue232-answered-a");
     push_frame(&a);
     slot.lock().unwrap().take();
     slot2.lock().unwrap().take();
-    push_frame_answered(&a, Some(id));
+    push_frame_answered(&mut a, Some(id));
     let requester_got = holds(&slot, &a);
     let other_got = holds(&slot2, &a);
     deregister_frame_channel(id);
@@ -161,4 +161,40 @@ fn read_only_queries_owe_no_frame() {
     // These change what a client draws.
     assert!(!CtrlReq::RenameWindow("x".into()).is_read_only_query());
     assert!(!CtrlReq::NextWindow.is_read_only_query());
+}
+
+#[test]
+fn host_event_delivery_dump_reply_and_push_are_ordered_once_per_client() {
+    let _guard = super::tests_pr267_backpressure::BP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (poke, _wake) = std::sync::mpsc::channel();
+    let (poke2, _wake2) = std::sync::mpsc::channel();
+    let requester = u64::MAX - 0x7501_0101;
+    let other = u64::MAX - 0x7501_0102;
+    let slot = register_frame_channel(requester, poke);
+    let other_slot = register_frame_channel(other, poke2);
+    let old = b"\x1b]99;i=test:d=0;old\x07".to_vec();
+    let new = b"\x1b]99;i=test:d=1;new\x07".to_vec();
+    let mut old_frame = frame("old");
+    let mut shots = crate::frame_oneshot::OneShots::default();
+    shots.push_host_event(old.clone());
+    crate::frame_oneshot::append(&mut old_frame, &shots);
+    push_frame(&old_frame);
+    other_slot.lock().unwrap().take(); // the other client already consumed old
+    let mut reply = frame("new");
+    let mut shots = crate::frame_oneshot::OneShots::default();
+    shots.push_host_event(new.clone());
+    crate::frame_oneshot::append(&mut reply, &shots);
+    push_frame_answered(&mut reply, Some(requester));
+    let pushed = slot.lock().unwrap().take().unwrap();
+    let mut other_frame = other_slot.lock().unwrap().take().unwrap();
+    deregister_frame_channel(requester);
+    deregister_frame_channel(other);
+    // connection's writer drains command responses before the pending slot.
+    let (tx, rx) = crate::client_frame_queue::frame_queue();
+    assert!(tx.send(reply));
+    assert!(tx.send(pushed));
+    let mut merged = rx.try_recv().unwrap();
+    assert_eq!(crate::frame_oneshot::take(&mut merged).host_events, vec![old, new.clone()]);
+    assert_eq!(crate::frame_oneshot::take(&mut other_frame).host_events, vec![new]);
+    assert_eq!(merged, frame("new"));
 }
