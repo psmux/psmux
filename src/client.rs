@@ -1826,30 +1826,86 @@ pub(crate) fn compute_active_rect_json_zoom_aware(
     }
 }
 
+/// How a clock is drawn: its colour (`clock-mode-colour`) and its time
+/// format (`clock-mode-style`). A bare colour is the default format.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClockLook {
+    pub colour: Color,
+    pub style: crate::clock_style::ClockStyle,
+}
+
+impl From<Color> for ClockLook {
+    fn from(colour: Color) -> Self {
+        Self { colour, style: crate::clock_style::ClockStyle::default() }
+    }
+}
+
+/// One character of the big clock as 5 rows of equal width, `#` drawn.
+/// psmux's own glyphs, 3 wide; `M` is tmux's (window-clock.c:120-124 at tag
+/// 3.8), as 3 columns cannot hold it. A space is a gap as wide as a digit,
+/// as tmux skips one glyph for it (window-clock.c:301-303). `None` for a
+/// character the clock never shows.
+fn clock_glyph(ch: char) -> Option<[&'static str; 5]> {
+    Some(match ch {
+        '0' => ["###", "# #", "# #", "# #", "###"],
+        '1' => ["  #", "  #", "  #", "  #", "  #"],
+        '2' => ["###", "  #", "###", "#  ", "###"],
+        '3' => ["###", "  #", "###", "  #", "###"],
+        '4' => ["# #", "# #", "###", "  #", "  #"],
+        '5' => ["###", "#  ", "###", "  #", "###"],
+        '6' => ["###", "#  ", "###", "# #", "###"],
+        '7' => ["###", "  #", "  #", "  #", "  #"],
+        '8' => ["###", "# #", "###", "# #", "###"],
+        '9' => ["###", "# #", "###", "  #", "###"],
+        ':' => [" ", "#", " ", "#", " "],
+        'A' => ["###", "# #", "###", "# #", "# #"],
+        'P' => ["###", "# #", "###", "#  ", "#  "],
+        'M' => ["#   #", "## ##", "# # #", "#   #", "#   #"],
+        ' ' => ["   ", "   ", "   ", "   ", "   "],
+        _ => return None,
+    })
+}
+
+/// The width in columns of `text` in big glyphs: each glyph and one blank
+/// column between glyphs.
+pub fn clock_text_width(text: &str) -> u16 {
+    let widths: Vec<u16> = text.chars().filter_map(clock_glyph).map(|g| g[0].len() as u16).collect();
+    if widths.is_empty() {
+        return 0;
+    }
+    widths.iter().sum::<u16>() + widths.len() as u16 - 1
+}
+
 /// Render a large ASCII clock overlay (tmux clock-mode).
 /// Top-level so both the main viewport and the choose-tree/choose-session
 /// preview can share one implementation.
 pub fn render_clock_overlay(
     f: &mut Frame,
     area: Rect,
+    look: impl Into<ClockLook>,
+    window_style: Option<Style>,
+) {
+    let look = look.into();
+    let now = crate::strftime::now();
+    let time_str = crate::clock_style::time_text(
+        look.style,
+        now.hour() as u32,
+        now.minute() as u32,
+        now.second() as u32,
+    );
+    render_clock_text(f, area, &time_str, look.colour, window_style);
+}
+
+/// Draw the clock showing `time_str` (from crate::clock_style::time_text)
+/// over `area`, as [`render_clock_overlay`] does for the time now.
+pub fn render_clock_text(
+    f: &mut Frame,
+    area: Rect,
+    time_str: &str,
     colour: Color,
     window_style: Option<Style>,
 ) {
-    const DIGITS: [&[&str; 5]; 10] = [
-        &["###", "# #", "# #", "# #", "###"],
-        &["  #", "  #", "  #", "  #", "  #"],
-        &["###", "  #", "###", "#  ", "###"],
-        &["###", "  #", "###", "  #", "###"],
-        &["# #", "# #", "###", "  #", "  #"],
-        &["###", "#  ", "###", "  #", "###"],
-        &["###", "#  ", "###", "# #", "###"],
-        &["###", "  #", "  #", "  #", "  #"],
-        &["###", "# #", "###", "# #", "###"],
-        &["###", "# #", "###", "  #", "###"],
-    ];
-    const COLON: [&str; 5] = [" ", "#", " ", "#", " "];
-    let time_str = crate::strftime::now_string("%H:%M:%S");
-    let total_w: u16 = time_str.chars().map(|c| if c == ':' { 2 } else { 4 }).sum::<u16>() - 1;
+    let total_w = clock_text_width(time_str);
     let total_h: u16 = 5;
     // Clock mode owns the whole pane, as in tmux: `window_clock_draw_screen`
     // clears the screen before drawing, so none of the pane's own content
@@ -1860,12 +1916,13 @@ pub fn render_clock_overlay(
     let glyph_style = fill_style.fg(colour);
     if area.width < total_w || area.height < total_h {
         // Too small for the big digits: tmux falls back to the plain time,
-        // centred, when it fits at all.
+        // centred, when it fits at all (window-clock.c:267-276 at tag 3.8,
+        // which centres as width / 2 - len / 2).
         let w = time_str.len() as u16;
         if area.width >= w && area.height >= 1 {
-            let x = area.x + (area.width - w) / 2;
+            let x = area.x + area.width / 2 - w / 2;
             let y = area.y + area.height / 2;
-            let s = Span::styled(time_str, glyph_style);
+            let s = Span::styled(time_str.to_string(), glyph_style);
             f.render_widget(Paragraph::new(Line::from(s)), Rect::new(x, y, w, 1));
         }
         return;
@@ -1874,19 +1931,15 @@ pub fn render_clock_overlay(
     let start_y = area.y + (area.height.saturating_sub(total_h)) / 2;
     for row in 0..5u16 {
         let mut x = start_x;
-        for ch in time_str.chars() {
-            if ch == ':' {
-                let cell_area = Rect::new(x, start_y + row, 1, 1);
-                let s = Span::styled(COLON[row as usize], glyph_style);
-                f.render_widget(Paragraph::new(Line::from(s)), cell_area);
-                x += 2;
-            } else if let Some(d) = ch.to_digit(10) {
-                let pattern = DIGITS[d as usize][row as usize];
-                let cell_area = Rect::new(x, start_y + row, 3, 1);
+        for glyph in time_str.chars().filter_map(clock_glyph) {
+            let pattern = glyph[row as usize];
+            let w = pattern.len() as u16;
+            if pattern.contains('#') {
+                let cell_area = Rect::new(x, start_y + row, w, 1);
                 let s = Span::styled(pattern, glyph_style);
                 f.render_widget(Paragraph::new(Line::from(s)), cell_area);
-                x += 4;
             }
+            x += w + 1;
         }
     }
 }
@@ -2483,7 +2536,7 @@ pub fn render_layout_json(
     border_style: Style,
     active_border_style: Style,
     clock_mode: bool,
-    clock_colour: Color,
+    clock_look: impl Into<ClockLook>,
     active_rect: Option<Rect>,
     mode_style_str: &str,
     zoomed: bool,
@@ -2495,6 +2548,7 @@ pub fn render_layout_json(
     window_styles: WindowContentStyles,
     border_indicators: PaneBorderIndicators,
 ) {
+    let clock_look = clock_look.into();
     let border_style = complete_pane_border_colors(border_style);
     let active_border_style = complete_pane_border_colors(active_border_style);
     match node {
@@ -2854,7 +2908,7 @@ pub fn render_layout_json(
             // pane). A server that predates the mark only reports the focused
             // pane's clock, through `clock_mode`.
             if !*copy_mode && (*clock || (*active && clock_mode)) {
-                render_clock_overlay(f, inner, clock_colour, window_fill);
+                render_clock_overlay(f, inner, clock_look, window_fill);
             }
 
             if *copy_mode && *active {
@@ -2931,7 +2985,7 @@ pub fn render_layout_json(
             if zoomed {
                 if let Some(i) = effective_sizes.iter().position(|&s| s != 0) {
                     if let Some(child) = children.get(i) {
-                        render_layout_json(f, child, area, dim_preds, border_style, active_border_style, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles, border_indicators);
+                        render_layout_json(f, child, area, dim_preds, border_style, active_border_style, clock_mode, clock_look, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles, border_indicators);
                     }
                 }
                 return;
@@ -2941,7 +2995,7 @@ pub fn render_layout_json(
 
             for (i, child) in children.iter().enumerate() {
                 if i < rects.len() {
-                    render_layout_json(f, child, rects[i], dim_preds, border_style, active_border_style, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles, border_indicators);
+                    render_layout_json(f, child, rects[i], dim_preds, border_style, active_border_style, clock_mode, clock_look, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles, border_indicators);
                 }
             }
             // pane-border-lines none: children are drawn, but no separators.
@@ -4083,6 +4137,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut clock_drawn_sec: u64 = u64::MAX;
     #[allow(unused_assignments)]
     let mut clock_colour_str: Option<String> = None;
+    // clock-mode-style as the last frame gave it.
+    #[allow(unused_assignments)]
+    let mut clock_style = crate::clock_style::ClockStyle::default();
 
     // ── Customize-mode overlay state ──
     #[allow(unused_assignments)]
@@ -4257,6 +4314,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// clock-mode-colour (tmux option)
         #[serde(default)]
         clock_colour: Option<String>,
+        /// clock-mode-style (tmux option), sent only when set; a server that
+        /// predates it sends none, which is the default.
+        #[serde(default)]
+        clock_style: Option<String>,
         /// Dynamic key bindings from server
         #[serde(default)]
         bindings: Vec<BindingEntry>,
@@ -9336,6 +9397,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         clock_active = state.clock_mode;
         clock_shown = layout_shows_clock(&root);
         clock_colour_str = state.clock_colour;
+        clock_style = state
+            .clock_style
+            .as_deref()
+            .and_then(crate::clock_style::ClockStyle::parse)
+            .unwrap_or_default();
         let state_cursor_style_code = state.cursor_style_code;
         let state_cursor_blink_mode = state.cursor_blink_mode;
         // Server-side overlay state (update persistent variables)
@@ -9710,7 +9776,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             collect_layout_borders(&root, content_chunk, &mut border_path, &mut client_borders);
 
             let active_rect = compute_active_rect_json_zoom_aware(&root, content_chunk, state.zoomed);
-            let clock_col = clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan);
+            let clock_col = ClockLook {
+                colour: clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan),
+                style: clock_style,
+            };
             let border_status = state.pane_border_status.as_deref().unwrap_or("off");
             // tmux defaults pane-border-format to a non-empty value, so enabling
             // pane-border-status alone renders the pane title. Match that default

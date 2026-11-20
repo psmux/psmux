@@ -117,6 +117,7 @@ fn non_default_value(name: &str) -> Option<&'static str> {
         "remain-on-exit-format" => "bye #{pane_dead_status}",
         "scroll-on-clear" => "off",
         "cursor-colour" => "blue",
+        "clock-mode-style" => "12",
         "aggressive-resize" => "on",
         "main-pane-width" => "50",
         "main-pane-height" => "40",
