@@ -274,7 +274,8 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 **respawn-window** (`respawnw`)
 - Boolean: `-k`
 - Value: `-c` (start directory), `-e` (`KEY=VALUE`, repeatable), `-t` (target window)
-- Respawns the active pane of the window, keeping its history like `respawn-pane`.
+- As in tmux, the window keeps only its FIRST pane: every other pane (floating ones too) is closed, its process tree ended, with no `pane-exited` or `pane-died` hook; the window is unzoomed, the first pane becomes active at the full window size and is respawned with its pane id and history kept, like `respawn-pane`. Earlier releases respawned the active pane and left the others running.
+- Without `-k`, a window with any pane whose process is still running is refused, as in tmux: `respawn window failed: window <session>:<index> still active`, exit 1. A window whose panes have all exited (kept by `remain-on-exit`) is respawned. Earlier releases killed the running process with or without `-k`.
 
 **list-windows** (`lsw`)
 - Boolean: `-a` (all sessions), `-J` (JSON output, a psmux extension)

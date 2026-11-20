@@ -4586,6 +4586,45 @@ pub fn clear_active_pane_history(app: &mut AppState) {
     }
 }
 
+/// tmux spawn.c `spawn_window` with SPAWN_RESPAWN and no SPAWN_KILL: a
+/// window is refused while any of its panes still has a live process
+/// ("window <session>:<index> still active"); a window whose panes all
+/// exited (kept by remain-on-exit) is respawned. Floating panes count as
+/// panes of the window. `None` when the respawn may go ahead.
+pub fn respawn_window_refusal(app: &AppState, idx: usize) -> Option<String> {
+    fn any_live(node: &Node) -> bool {
+        match node {
+            Node::Leaf(p) => !p.dead,
+            Node::Split { children, .. } => children.iter().any(any_live),
+        }
+    }
+    let win = app.windows.get(idx)?;
+    let live = any_live(&win.root) || win.floating.iter().any(|f| !f.pane.dead);
+    live.then(|| format!("window {}:{} still active", app.session_name, app.win_display_index(idx)))
+}
+
+/// The pane step of tmux's respawn-window (spawn.c spawn_window with
+/// SPAWN_RESPAWN, -k or not, once the refusal is passed): every pane of
+/// window `idx` but the FIRST one goes (window_destroy_panes, no pane-exited
+/// or pane-died hook for them, floating panes included), the window is
+/// unzoomed and its layout becomes that one pane at the full window size,
+/// and the first pane is made active. It keeps its pane id; the caller then
+/// respawns it as the active pane. Returns how many panes went.
+pub fn reduce_window_to_first_pane(app: &mut AppState, idx: usize) -> usize {
+    let Some(first) = app.windows.get(idx).and_then(|w| crate::tree::collect_pane_ids(&w.root).first().copied()) else {
+        return 0;
+    };
+    let killed = crate::pane::kill_panes_except(app, idx, first);
+    if let Some(win) = app.windows.get_mut(idx) {
+        if let Some(path) = crate::tree::find_path_by_id(&win.root, first) {
+            win.active_path = path;
+        }
+        win.floating_focus = None;
+        win.pane_mru.retain(|id| *id == first);
+    }
+    killed
+}
+
 pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>, empty: bool, extra_env: &[(String, String)]) -> io::Result<()> {
     // tmux semantics: without -k, respawn only works on dead panes.
     // With -k, kill the running process first and respawn.

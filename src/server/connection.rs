@@ -7288,9 +7288,12 @@ match cmd {
         // `#{pane_start_command}` (#580), and every operand is kept (#1051).
         let (args, command) = respawn_operands(cmd, &args);
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+        // Without -k a window with a live pane is refused (tmux spawn.c);
+        // the server always killed it, -k or not.
+        let kill = args.iter().any(|a| *a == "-k");
         let (resp_s, resp_r) = mpsc::channel();
         let env_sets = env_flag_values(&args);
-        let _ = tx.send(CtrlReq::RespawnWindow(workdir, command, resp_s, env_sets));
+        let _ = tx.send(CtrlReq::RespawnWindow(workdir, kill, command, resp_s, env_sets));
         if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
             let _ = writeln!(write_stream, "ERROR: {}", e);
             let _ = write_stream.flush();
@@ -8790,9 +8793,10 @@ fn dispatch_control_command(
             // same operands and reply as respawn-pane above.
             let (args, command) = respawn_operands(cmd, args);
             let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+            let kill = args.iter().any(|a| *a == "-k");
             let (resp_s, resp_r) = mpsc::channel();
             let env_sets = env_flag_values(&args);
-            let _ = tx.send(CtrlReq::RespawnWindow(workdir, command, resp_s, env_sets));
+            let _ = tx.send(CtrlReq::RespawnWindow(workdir, kill, command, resp_s, env_sets));
             match resp_r.recv_timeout(Duration::from_secs(5)) {
                 Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
                 _ => { let _ = resp_tx.send(String::new()); }

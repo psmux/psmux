@@ -304,12 +304,13 @@ Test-Assert "choose-client returns without error" (-not ($ccStr -match 'unknown 
 Write-Host "`n[Test Group 13] respawn-window / respawnw" -ForegroundColor Magenta
 
 # Test 13.1: respawn-window accepted
-$rwResult = & $exe -t test-cli respawn-window 2>&1
+# -k: without it a live window is refused, as in tmux
+$rwResult = & $exe -t test-cli respawn-window -k 2>&1
 $rwExitCode = $LASTEXITCODE
 Test-Assert "respawn-window accepted" ($rwExitCode -eq 0 -or $rwExitCode -eq $null) "Exit code: $rwExitCode"
 
 # Test 13.2: respawnw alias accepted
-$rwAliasResult = & $exe -t test-cli respawnw 2>&1
+$rwAliasResult = & $exe -t test-cli respawnw -k 2>&1
 $rwAliasExitCode = $LASTEXITCODE
 Test-Assert "respawnw alias accepted" ($rwAliasExitCode -eq 0 -or $rwAliasExitCode -eq $null) "Exit code: $rwAliasExitCode"
 
