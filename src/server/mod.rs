@@ -8594,7 +8594,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // killed whether -k was given or not.
                     let outcome = match crate::window_ops::respawn_window_refusal(&app, app.active_idx).filter(|_| !kill) {
                         Some(cause) => Err(std::io::Error::new(std::io::ErrorKind::Other, cause)),
-                        None => respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets),
+                        None => {
+                            // tmux keeps only the window's first pane and
+                            // respawns it at the full window size (spawn.c).
+                            let idx = app.active_idx;
+                            if crate::window_ops::reduce_window_to_first_pane(&mut app, idx) > 0 {
+                                meta_dirty = true;
+                            }
+                            respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false, &env_sets)
+                        }
                     };
                     match outcome {
                         Ok(()) => {

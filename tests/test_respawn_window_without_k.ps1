@@ -9,8 +9,12 @@
 #
 # Every entry point is checked: the CLI and its alias, a source-file line, a
 # key binding of an attached client (status line), control mode (%error),
-# and the shared server mode. -k keeps its old behaviour (the active pane
-# gets a new process), and respawn-pane's own refusal is unchanged.
+# and the shared server mode. respawn-pane's own refusal is unchanged.
+#
+# Second part, the respawn itself (spawn.c, -k or every pane dead): tmux keeps
+# only the window's FIRST pane, with its pane id, respawns it at the full
+# window size, unzooms the window, and fires no pane-exited / pane-died hook
+# for the panes it destroys. psmux respawned the active pane and kept the rest.
 #
 # Isolation: a unique -L namespace, a private PSMUX_DATA_DIR, an empty config;
 # cleanup only with `-L <ns> kill-server` and the client windows by PID.
@@ -85,11 +89,34 @@ try {
     Start-Sleep -Milliseconds 800
     Check ((Pids s:0) -eq $p0) "a source-file line kills nothing" "$p0 -> $(Pids s:0)"
 
-    # ---- -k unchanged: the active pane gets a new process ----
-    $active0 = ((P display -p -t s:0 '#{pane_pid}') -join '')
+    # ---- -k, as tmux spawn.c: only the FIRST pane is kept (with its id),
+    # respawned at the full window size, the window unzoomed, and the
+    # panes that go fire no pane-exited / pane-died hook ----
+    P split-window -d -h -t s:0.1 | Out-Null
+    Start-Sleep -Milliseconds 800
+    P select-pane -t s:0.2 | Out-Null
+    P resize-pane -Z -t s:0.2 | Out-Null
+    $ids0 = @((P list-panes -t s:0 -F '#{pane_id}'))
+    $pids0 = @((P list-panes -t s:0 -F '#{pane_pid}'))
+    $zoom0 = (P display -p -t s:0 '#{window_zoomed_flag}') -join ''
+    P set-hook -g pane-exited 'set -g @rw_hook exited' | Out-Null
+    P set-hook -g pane-died 'set -g @rw_hook died' | Out-Null
     $o = (P respawn-window -k -t s:0) -join ' '; $rc = $LASTEXITCODE
-    Check ($rc -eq 0) "respawn-window -k exits 0" "rc=$rc $o"
-    Check (WaitFor { ((P display -p -t s:0 '#{pane_pid}') -join '') -ne $active0 }) "and respawns the active pane" ""
+    Check ($rc -eq 0) "respawn-window -k exits 0 (3 panes, pane 2 active and zoomed=$zoom0)" "rc=$rc $o"
+    Start-Sleep -Milliseconds 1200
+    $ids1 = @((P list-panes -t s:0 -F '#{pane_id}'))
+    Check ($ids1.Count -eq 1 -and $ids1[0] -eq $ids0[0]) "only the first pane is left, with its id ($($ids0 -join ',') -> $($ids1 -join ','))" ""
+    $a = (P display -p -t s:0 '#{pane_id} #{pane_active} #{window_zoomed_flag} #{pane_width}x#{pane_height} #{window_width}x#{window_height}') -join ''
+    $f = $a -split ' '
+    Check ($f[0] -eq $ids0[0] -and $f[1] -eq '1') "the first pane is active" $a
+    Check ($f[2] -eq '0') "the window is not zoomed" $a
+    Check ($f[3] -eq $f[4]) "the pane fills the window" $a
+    $newPid = (P display -p -t $ids0[0] '#{pane_pid}') -join ''
+    Check ($newPid -and $newPid -ne $pids0[0]) "the first pane runs a new process ($($pids0[0]) -> $newPid)" ""
+    $gone = @($pids0 | Select-Object -Skip 1 | Where-Object { Get-Process -Id $_ -EA SilentlyContinue })
+    Check (WaitFor { @($pids0 | Select-Object -Skip 1 | Where-Object { Get-Process -Id $_ -EA SilentlyContinue }).Count -eq 0 }) "the other panes' processes ended" ($gone -join ',')
+    $hk = (P show -gv '@rw_hook') -join ''
+    Check ($hk -notmatch 'exited|died') "no pane-exited / pane-died hook fired for them, as in tmux" "@rw_hook=$hk"
     $p0 = Pids s:0
 
     # ---- respawn-pane is unchanged ----
@@ -100,6 +127,11 @@ try {
     P set -g remain-on-exit on | Out-Null
     P new-window -d -t s:3 -n dead 'cmd /c exit 0' | Out-Null
     Check (WaitFor { ((P display -p -t s:dead '#{pane_dead}') -join '') -eq '1' }) "a window whose only pane exited is dead" ""
+    # positive control for the hook check above: a pane whose process exits
+    # under remain-on-exit does fire the hooks (pane-died, then pane-exited)
+    Check (WaitFor { ((P show -gv '@rw_hook') -join '') -match '^(died|exited)$' }) "(control) the hooks fire for a pane whose process exits" ((P show -gv '@rw_hook') -join '')
+    P set-hook -gu pane-exited | Out-Null
+    P set-hook -gu pane-died | Out-Null
     $o = (P respawn-window -t s:dead 'cmd /k echo RESPAWNED_OK') -join ' '; $rc = $LASTEXITCODE
     Check ($rc -eq 0) "respawn-window without -k respawns a dead window" "rc=$rc $o"
     Check (WaitFor { ((P display -p -t s:dead '#{pane_dead}') -join '') -eq '0' }) "and its pane runs again" ""
@@ -112,6 +144,17 @@ try {
     $flags = ((P list-panes -t s:half -F '#{pane_dead}') -join ',')
     $o = (P respawn-window -t s:half) -join ' '; $rc = $LASTEXITCODE
     Check ($rc -eq 1 -and $o -match 'window s:4 still active') "one dead pane and one live pane: still refused (panes dead=$flags)" "rc=$rc $o"
+
+    # every pane dead: no -k needed, and again only the first pane is kept
+    P new-window -d -t s:6 -n alldead 'cmd /c exit 0' | Out-Null
+    Start-Sleep -Milliseconds 1000
+    P split-window -d -t s:alldead 'cmd /c exit 0' | Out-Null
+    Check (WaitFor { ((P list-panes -t s:alldead -F '#{pane_dead}') -join ',') -eq '1,1' }) "a window with two dead panes" ((P list-panes -t s:alldead -F '#{pane_dead}') -join ',')
+    $ad0 = @((P list-panes -t s:alldead -F '#{pane_id}'))
+    $o = (P respawn-window -t s:alldead 'cmd /k echo ALLDEAD_BACK') -join ' '; $rc = $LASTEXITCODE
+    Start-Sleep -Milliseconds 1000
+    $ad1 = @((P list-panes -t s:alldead -F '#{pane_id}:#{pane_dead}'))
+    Check ($rc -eq 0 -and $ad1.Count -eq 1 -and $ad1[0] -eq "$($ad0[0]):0") "respawn-window keeps the first pane and runs it ($($ad0 -join ',') -> $($ad1 -join ','))" "rc=$rc $o"
     P set -g remain-on-exit off | Out-Null
 
     # ---- a key binding of an attached client: the status line says why ----

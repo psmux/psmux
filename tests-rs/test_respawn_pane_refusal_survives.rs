@@ -238,6 +238,36 @@ fn respawn_window_without_k_goes_ahead_when_every_pane_exited() {
     assert_eq!(crate::window_ops::respawn_window_refusal(&app, 99), None, "no such window: no refusal text");
 }
 
+/// tmux spawn.c: the respawn keeps the window's FIRST pane (not the active
+/// one), with its pane id, makes it active at the full window size, and
+/// unzooms. psmux used to respawn the active pane and keep the others.
+#[test]
+fn respawn_window_keeps_only_the_first_pane_active_and_unzoomed() {
+    let mut app = two_pane_window([true, true]);
+    let idx = app.active_idx;
+    let first = crate::tree::collect_pane_ids(&app.windows[idx].root)[0];
+    app.windows[idx].active_path = vec![1];
+    // zoomed on the second pane
+    app.windows[idx].zoom_saved = Some(vec![(vec![], vec![50, 50])]);
+    let killed = crate::window_ops::reduce_window_to_first_pane(&mut app, idx);
+    assert_eq!(killed, 1, "BUG: the second pane must go");
+    let win = &app.windows[idx];
+    assert_eq!(crate::tree::collect_pane_ids(&win.root), vec![first], "only the first pane is left, with its id");
+    assert_eq!(crate::tree::get_active_pane_id(&win.root, &win.active_path), Some(first), "and it is active");
+    assert!(win.zoom_saved.is_none(), "the window is unzoomed");
+    assert!(win.pane_mru.iter().all(|i| *i == first), "no killed pane is left in the MRU: {:?}", win.pane_mru);
+    let other_window = crate::tree::collect_pane_ids(&app.windows[0].root);
+    assert_eq!(other_window.len(), 1, "the other window is untouched");
+}
+
+#[test]
+fn reducing_a_one_pane_window_kills_nothing() {
+    let mut app = app_with_windows("rsp_unit", 1);
+    let before = crate::tree::collect_pane_ids(&app.windows[0].root);
+    assert_eq!(crate::window_ops::reduce_window_to_first_pane(&mut app, 0), 0);
+    assert_eq!(crate::tree::collect_pane_ids(&app.windows[0].root), before);
+}
+
 /// Both RespawnWindow arms (per session and shared) apply the rule unless
 /// -k, and every place that builds the request reads -k. On master the
 /// request had no kill field and the arm always passed `true`.
@@ -257,6 +287,8 @@ fn every_respawn_window_path_carries_k_and_checks_the_window() {
         let arm = &src[at..(at + 1200).min(src.len())];
         assert!(arm.contains("respawn_window_refusal(") && arm.contains("!kill"),
             "BUG: the {name} RespawnWindow arm must refuse a live window without -k");
+        assert!(arm.contains("reduce_window_to_first_pane("),
+            "BUG: the {name} RespawnWindow arm must keep only the first pane, as tmux");
     }
 }
 
