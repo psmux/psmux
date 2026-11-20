@@ -102,6 +102,19 @@ function Invoke-Case([string]$Tag, [string]$TextFile, [string]$Text, [int]$Delay
     return $res
 }
 
+# The inbox pseudo console of Windows 10 (19045) hands a written paste to the
+# client a little at a time: with no psmux at all, a console app under it got
+# the 424 characters spread over 77 to 209 ms (5 ms on Windows 11) and the CR
+# written 200 to 300 ms after the paste only 33 to 197 ms after their last one,
+# often closer than the gaps of a paste sshd hands over in fragments (#598),
+# and the client, reading behind that drip, saw the CR 0 to 60 ms after the
+# paste's last character: a trailing newline of the paste, as far as anything
+# on that route can tell. The em dash is a second host fact there: injected as
+# a record, the child's ReadFile under code page 65001 reads it as one NUL
+# byte on 19045 (discussion #1074; ReadConsoleW gets it right). Those checks
+# are skips on that host; every other check still runs.
+$W10 = [Environment]::OSVersion.Version.Build -lt 22000
+
 try {
     # ── 1. console input route ─────────────────────────────────────────────
     Write-Host "`n[1] console input route (default): CR 200 and 250 ms after the paste" -ForegroundColor Cyan
@@ -121,9 +134,11 @@ try {
             }
             if ($ready -eq 0) { Write-Fail "[$delay ms $kind] the pane never came up"; continue }
             if ($after -eq $ready) { Write-Pass "[$delay ms $kind] the CR arrived after ESC[201~ in $after/$ready runs" }
+            elseif ($W10) { Write-Skip "[$delay ms $kind] CR after ESC[201~ in $after/$ready runs: the Windows 10 host delivers the CR right behind its drip of the paste" }
             else { Write-Fail "[$delay ms $kind] the CR arrived after ESC[201~ in only $after/$ready runs (inside the paste otherwise)" }
             if ($kind -eq "uni") {
                 if ($dash -eq $ready) { Write-Pass "[$delay ms uni] the em dash (an Alt code record) reached the pane in $dash/$ready runs" }
+                elseif ($W10) { Write-Skip "[$delay ms uni] em dash in $dash/$ready runs: ReadFile under code page 65001 reads a non ASCII record as NUL on 19045" }
                 else { Write-Fail "[$delay ms uni] the em dash reached the pane in only $dash/$ready runs" }
             }
         }
@@ -150,8 +165,10 @@ try {
             }
             if ($ready -eq 0) { Write-Fail "[vt $delay ms $kind] the pane never came up"; continue }
             if ($after -eq $ready) { Write-Pass "[vt $delay ms $kind] the CR arrived after ESC[201~ in $after/$ready runs" }
+            elseif ($W10) { Write-Skip "[vt $delay ms $kind] CR after ESC[201~ in $after/$ready runs: the Windows 10 host delivers the CR right behind its drip of the paste" }
             else { Write-Fail "[vt $delay ms $kind] the CR arrived after ESC[201~ in only $after/$ready runs" }
             if ($exact -eq $ready) { Write-Pass "[vt $delay ms $kind] the bracketed text is byte exact in $exact/$ready runs" }
+            elseif ($W10 -and ($after -lt $ready -or $kind -eq "uni")) { Write-Skip "[vt $delay ms $kind] byte exact in $exact/$ready runs: the CR the host delivered inside it, or the em dash read as NUL, see above" }
             else { Write-Fail "[vt $delay ms $kind] the bracketed text is byte exact in only $exact/$ready runs" }
             if ($clean -eq $ready) { Write-Pass "[vt $delay ms $kind] nothing reached the pane ahead of ESC[200~ in $clean/$ready runs" }
             else { Write-Fail "[vt $delay ms $kind] characters reached the pane ahead of ESC[200~ in $($ready - $clean)/$ready runs" }
