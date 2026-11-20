@@ -1094,6 +1094,17 @@ pub(crate) fn move_pane_in_window(app: &mut AppState, pos: usize, src_pane: Opti
 pub(crate) fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<usize>,
                    target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool,
                    detach: bool, before: bool, size: Option<(u16, bool)>) -> bool {
+    // Moving a window's last pane removes the window, and the focus lands on
+    // a pane that may have its own mode parked.
+    crate::copy_mode::remove_keeping_modes(app, |app| {
+        join_pane_local_inner(app, src_win, src_pane, target_win, target_pane, horizontal, detach, before, size)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn join_pane_local_inner(app: &mut AppState, src_win: Option<usize>, src_pane: Option<usize>,
+                   target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool,
+                   detach: bool, before: bool, size: Option<(u16, bool)>) -> bool {
     // Resolve source/target display indices to Vec positions (default: active
     // window). win_pos honors gapped indices left by renumber-windows off.
     let src_pos = match src_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
@@ -3073,19 +3084,21 @@ pub(crate) fn kill_windows_except(app: &mut AppState, keep: usize) -> usize {
     if keep >= app.windows.len() {
         return 0;
     }
-    let mut killed = 0;
-    for pos in (0..app.windows.len()).rev() {
-        if pos == keep {
-            continue;
+    crate::copy_mode::remove_keeping_modes(app, |app| {
+        let mut killed = 0;
+        for pos in (0..app.windows.len()).rev() {
+            if pos == keep {
+                continue;
+            }
+            let mut win = app.windows.remove(pos);
+            kill_all_children(&mut win.root);
+            app.on_window_removed(pos);
+            killed += 1;
         }
-        let mut win = app.windows.remove(pos);
-        kill_all_children(&mut win.root);
-        app.on_window_removed(pos);
-        killed += 1;
-    }
-    // Only the kept window is left, and it is the current one.
-    app.active_idx = 0;
-    killed
+        // Only the kept window is left, and it is the current one.
+        app.active_idx = 0;
+        killed
+    })
 }
 
 /// `kill-pane -a [-t target]` on the in server route (#964). No target is the
@@ -3377,15 +3390,17 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
             if let Some(pos) = removed_pos {
                 if app.windows.len() > 1 && pos < app.windows.len() {
-                    let mut win = app.windows.remove(pos);
-                    kill_all_children(&mut win.root);
-                    app.on_window_removed(pos);
-                    if app.active_idx > pos {
-                        app.active_idx -= 1;
-                    }
-                    if app.active_idx >= app.windows.len() {
-                        app.active_idx = app.windows.len() - 1;
-                    }
+                    crate::copy_mode::remove_keeping_modes(app, |app| {
+                        let mut win = app.windows.remove(pos);
+                        kill_all_children(&mut win.root);
+                        app.on_window_removed(pos);
+                        if app.active_idx > pos {
+                            app.active_idx -= 1;
+                        }
+                        if app.active_idx >= app.windows.len() {
+                            app.active_idx = app.windows.len() - 1;
+                        }
+                    });
                 }
             }
         }
@@ -4597,14 +4612,31 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         if occupied.is_some() && !has("-k") {
                             app.status_message = Some((format!("link-window: index in use: {}", didx.unwrap_or(0)), Instant::now(), None));
                         } else {
+                            // tmux selects the new link when -k removes the
+                            // current window, -d or not (server_link_window,
+                            // server-fn.c: "Force select/redraw if current").
+                            let detach = has("-d") && occupied != Some(app.active_idx);
                             if let Some(pos) = occupied {
-                                let mut win = app.windows.remove(pos);
-                                kill_all_children(&mut win.root);
-                                app.on_window_removed(pos);
-                                if app.active_idx >= app.windows.len() && !app.windows.is_empty() {
-                                    app.active_idx = app.windows.len() - 1;
-                                }
+                                crate::copy_mode::remove_keeping_modes(app, |app| {
+                                    let mut win = app.windows.remove(pos);
+                                    kill_all_children(&mut win.root);
+                                    app.on_window_removed(pos);
+                                    // The current window slides down with the
+                                    // ones after the occupant, so -d keeps it.
+                                    if pos < app.active_idx {
+                                        app.active_idx -= 1;
+                                    }
+                                    if app.active_idx >= app.windows.len() && !app.windows.is_empty() {
+                                        app.active_idx = app.windows.len() - 1;
+                                    }
+                                });
                             }
+                            // The source slid down too when it came after the
+                            // occupant, or the window after it was linked.
+                            let src_pos = match occupied {
+                                Some(p) if p < src_pos => src_pos - 1,
+                                _ => src_pos,
+                            };
                             let src_pos = src_pos.min(app.windows.len().saturating_sub(1));
                             let src_id = app.windows[src_pos].id;
                             let src_name = app.windows[src_pos].name.clone();
@@ -4623,11 +4655,13 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                                         app.windows.insert(d, win);
                                     }
                                 }
-                                if has("-d") {
+                                if detach {
+                                    // Back to the window that had the focus, with
+                                    // its own mode: create_window parked it.
                                     if let Some(p) = prev_active_id
                                         .and_then(|id| app.windows.iter().position(|w| w.id == id))
                                     {
-                                        app.active_idx = p;
+                                        switch_with_copy_save(app, |app| { app.active_idx = p; });
                                     }
                                 } else if let Some(p) = app.windows.iter().position(|w| w.id == new_id) {
                                     if p != app.active_idx { app.last_window_idx = app.active_idx; }
@@ -4658,15 +4692,17 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         app.status_message = Some((format!("unlink-window: {}", msg), Instant::now(), None));
                     }
                     Ok(removed_pos) if app.windows.len() > 1 => {
-                        let mut win = app.windows.remove(removed_pos);
-                        kill_all_children(&mut win.root);
-                        app.on_window_removed(removed_pos);
-                        if removed_pos < app.active_idx {
-                            app.active_idx -= 1;
-                        }
-                        if app.active_idx >= app.windows.len() {
-                            app.active_idx = app.windows.len() - 1;
-                        }
+                        crate::copy_mode::remove_keeping_modes(app, |app| {
+                            let mut win = app.windows.remove(removed_pos);
+                            kill_all_children(&mut win.root);
+                            app.on_window_removed(removed_pos);
+                            if removed_pos < app.active_idx {
+                                app.active_idx -= 1;
+                            }
+                            if app.active_idx >= app.windows.len() {
+                                app.active_idx = app.windows.len() - 1;
+                            }
+                        });
                         fire_hooks(app, "window-unlinked");
                     }
                     Ok(_) => {}

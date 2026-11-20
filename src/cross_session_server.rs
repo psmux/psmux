@@ -18,6 +18,16 @@ pub fn handle_pane_forward_extract(
     target: &crate::types::TempTarget,
     resp: mpsc::Sender<String>,
 ) {
+    // The pane leaves this session, its window too when it was the last one,
+    // and the focus may land on a pane with its own mode parked.
+    crate::copy_mode::remove_keeping_modes(app, |app| extract_inner(app, target, resp))
+}
+
+fn extract_inner(
+    app: &mut AppState,
+    target: &crate::types::TempTarget,
+    resp: mpsc::Sender<String>,
+) {
     // The window is a window INDEX (it used to be read as a position in the
     // window list) and a pane index past the end is an error (it used to
     // fall back to the active pane and move that one instead).
