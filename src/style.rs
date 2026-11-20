@@ -146,6 +146,24 @@ fn style_names_colour(colour: Option<Color>) -> bool {
     !matches!(colour, None | Some(Color::Reset))
 }
 
+/// Resolve a `default` (Reset) fg or bg in a window tab's style to the status
+/// line's colour.
+///
+/// tmux draws window-status-style and window-status-current-style as a
+/// `#[...]` directive in the window list (options-table.c:129, 153-155), and
+/// format_draw parses it against the status line's cell (format-draw.c:828),
+/// where style_parse resolves `fg=default` and `bg=default` to that cell's
+/// colour (style.c:221-233). So a tab with `bg=default` keeps the bar's
+/// background. status-style itself is untouched: its own `default` still
+/// means the terminal colour, which arrives here as a Reset `bar_fg`/`bar_bg`.
+pub fn resolve_tab_default_colours(style: Style, bar_fg: Color, bar_bg: Color) -> Style {
+    Style {
+        fg: style.fg.map(|c| if c == Color::Reset { bar_fg } else { c }),
+        bg: style.bg.map(|c| if c == Color::Reset { bar_bg } else { c }),
+        ..style
+    }
+}
+
 /// Resolve the effective content style for the ACTIVE pane.
 ///
 /// tmux `tty.c` `tty_default_colours` (tmux next-3.8) reads:
@@ -1445,6 +1463,10 @@ mod test_issue185_layout_directives;
 #[cfg(test)]
 #[path = "../tests-rs/test_style_attrs.rs"]
 mod test_style_attrs;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1069_tab_default_colour.rs"]
+mod test_issue1069_tab_default_colour;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_status_list_viewport.rs"]
