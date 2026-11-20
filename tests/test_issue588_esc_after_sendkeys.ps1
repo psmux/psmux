@@ -113,8 +113,14 @@ if (-not $script:Test1Skipped) {
     Feed "HEX 1b 5b 37 37 3b 35 30 3b 31 33 3b 31 3b 38 3b 31 5f 1b 5b 37 37 3b 35 30 3b 31 33 3b 30 3b 38 3b 31 5f"
     $afterCtrlM = KeyLines
     $newCtrlM = @($afterCtrlM | Select-Object -Skip $afterFirstEsc.Count)
+    # The inbox pseudo console of Windows 10 (19045) has no win32-input-mode,
+    # so neither win32 sequence can be read there; the #588 latch it repairs
+    # belongs to a host that has the mode.
+    $NoW32 = [Environment]::OSVersion.Version.Build -lt 22000
     if (@($newCtrlM | Where-Object { $_ -match 'key=M' -and $_ -match 'Control' }).Count -ge 1) {
         Write-Pass "the win32-input-mode sequence delivers a real Ctrl+M record (this is what #305 needs)"
+    } elseif ($NoW32) {
+        Write-Skip "Windows 10 inbox pseudo console has no win32-input-mode (got: $($newCtrlM -join ' | '))"
     } else {
         Write-Fail "the win32-input-mode sequence did not deliver Ctrl+M (got: $($newCtrlM -join ' | '))"
     }
@@ -139,6 +145,8 @@ if (-not $script:Test1Skipped) {
     $newFix = @($afterFix | Select-Object -Skip $afterDeadEsc.Count)
     if (@($newFix | Where-Object { $_ -match 'key=Escape' }).Count -ge 1) {
         Write-Pass "Escape written in win32 form arrives as key=Escape even on a latched ConPTY (the fix)"
+    } elseif ($NoW32) {
+        Write-Skip "Windows 10 inbox pseudo console has no win32-input-mode, Escape in win32 form is not read there"
     } else {
         Write-Fail "Escape in win32 form did not arrive (got: $($newFix -join ' | '))"
     }

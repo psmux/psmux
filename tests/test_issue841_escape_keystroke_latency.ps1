@@ -155,8 +155,12 @@ function Assert-Route($name, $res, [switch]$EscMayWait, [double]$EscCeiling = 0)
     }
 }
 
+# The inbox pseudo console of Windows 10 (19045) has no win32-input-mode, so
+# the w32 route (Part 1, and the w32 half of Part 5) cannot be driven there.
+$NoW32 = [Environment]::OSVersion.Version.Build -lt 22000
 Write-Host "`n[Part 1] win32-input-mode route (what Windows Terminal writes)" -ForegroundColor Yellow
-Assert-Route "win32-input-mode" (Invoke-PtyRoute 'w32' '')
+if ($NoW32) { Write-Host "  [SKIP] Windows 10 inbox pseudo console has no win32-input-mode" -ForegroundColor Yellow }
+else { Assert-Route "win32-input-mode" (Invoke-PtyRoute 'w32' '') }
 
 Write-Host "`n[Part 2] classic console window, key held 80 ms like a person" -ForegroundColor Yellow
 Assert-Route "classic console" (Invoke-ClassicRoute)
@@ -211,6 +215,7 @@ function Invoke-PrefixCheck([string]$route) {
 }
 foreach ($route in 'w32', 'vt') {
     Write-Host "`n[Part 5] prefix keys on the $route route" -ForegroundColor Yellow
+    if ($route -eq 'w32' -and $NoW32) { Write-Host "  [SKIP] Windows 10 inbox pseudo console has no win32-input-mode" -ForegroundColor Yellow; continue }
     $r = Invoke-PrefixCheck $route
     # The split Down only tests the escape-time wait when [B reached psmux
     # inside escape-time (10). The gap is taken where the host writes, and
