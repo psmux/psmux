@@ -10654,6 +10654,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 } else {
                     normal_style
                 };
+                // A window style's `fg=default` / `bg=default` keeps the status
+                // bar's colour instead of the terminal's (tmux style_parse
+                // resolves `default` against the status line cell).
+                let fallback_style = crate::style::resolve_tab_default_colours(fallback_style, sb_fg, sb_bg);
                 let parsed = crate::style::parse_inline_styles(&tab_text, fallback_style);
                 let tab_start = tab_cursor;
                 let tab_w = crate::style::spans_visual_width(&parsed);
