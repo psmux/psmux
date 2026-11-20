@@ -24,6 +24,16 @@ $script:TestsFailed = 0
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
+# Every check here is a click written as an SGR report into the client's own
+# pseudo console. The inbox one of Windows 10 (19045) has no ConPTY mouse
+# (#457) and hands the client no click at all (every check read [none] there),
+# so there is nothing to measure on that host. The suite passes on Windows 11
+# with the build psmux sees faked to 19045 (PSMUX_FAKE_WIN_BUILD).
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    Write-Host "[SKIP] Windows 10 inbox pseudo console hands the client no mouse report, the click ranges cannot be driven there" -ForegroundColor Yellow
+    exit 0
+}
+
 if (-not $Exe) { $Exe = (Get-Command psmux -EA Stop).Source }
 $PSMUX = (Resolve-Path $Exe).Path
 $TESTS = $PSScriptRoot

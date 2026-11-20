@@ -445,6 +445,10 @@ set NO_COLOR=
         Write-Pass "the click moved the active pane from 1 to 0, the one row pane"
     } elseif ($after -eq "0") {
         Write-Pass "the one row pane is active after the click (was '$before')"
+    } elseif ([Environment]::OSVersion.Version.Build -lt 22000) {
+        # The click is an SGR report written into the client's pseudo console,
+        # and the inbox one of Windows 10 (19045) has no ConPTY mouse (#457).
+        Write-Skip "Windows 10 pseudo console hands the client no click (active '$before' then '$after')"
     } else {
         Write-Fail "the click did not reach the one row pane (active '$before' then '$after')"
     }

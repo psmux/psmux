@@ -105,11 +105,19 @@ if ($r1.Bytes -gt 0 -and -not $r1.HasEnable) { Write-Pass "no mouse-enable bypas
 else { Write-Fail "build 20348 default: bytes=$($r1.Bytes) enableBlock=$($r1.HasEnable)" }
 $r2 = Measure-MouseEnable -Tag "forced" -FakeBuild "20348" -ForceMouse "1" -TermProgram "WezTerm"
 Write-Info "$($r2.Tag): bytes=$($r2.Bytes) enableBlock=$($r2.HasEnable)"
+# The client's bytes are read back through an inbox pseudo console, and the
+# one of Windows 10 (19045) passes no mouse-enable on at all (it has no ConPTY
+# mouse, #457), so where one is expected it cannot be seen there. These checks
+# fake the build psmux sees anyway (20348, 26200) and pass on Windows 11: what
+# differs on Windows 10 is the host reading the bytes back.
+$NoMouseOut = [Environment]::OSVersion.Version.Build -lt 22000
 if ($r2.HasEnable) { Write-Pass "PSMUX_FORCE_MOUSE=1 restores the mouse-enable on build 20348" }
+elseif ($NoMouseOut) { Write-Host "  [SKIP] Windows 10 inbox pseudo console passes no mouse-enable on, its presence cannot be read there" -ForegroundColor Yellow }
 else { Write-Fail "PSMUX_FORCE_MOUSE=1 did not restore the mouse-enable" }
 $r3 = Measure-MouseEnable -Tag "modern" -FakeBuild "26200" -TermProgram "WezTerm"
 Write-Info "$($r3.Tag): bytes=$($r3.Bytes) enableBlock=$($r3.HasEnable)"
 if ($r3.HasEnable) { Write-Pass "a modern build still emits the mouse-enable with no override" }
+elseif ($NoMouseOut) { Write-Host "  [SKIP] Windows 10 inbox pseudo console passes no mouse-enable on, its presence cannot be read there" -ForegroundColor Yellow }
 else { Write-Fail "REGRESSION: a modern build stopped emitting the mouse-enable" }
 $r4 = Measure-MouseEnable -Tag "pinnedoff" -FakeBuild "26200" -ForceMouse "0" -TermProgram "WezTerm"
 Write-Info "$($r4.Tag): bytes=$($r4.Bytes) enableBlock=$($r4.HasEnable)"
@@ -122,8 +130,8 @@ $s2 = Measure-MouseEnable -Tag "sshforced" -FakeBuild "20348" -ForceMouse "1" -S
 $s3 = Measure-MouseEnable -Tag "sshmodern" -FakeBuild "26200" -Ssh
 Write-Info "ssh 20348=$($s1.HasEnable) ssh 20348 forced=$($s2.HasEnable) ssh 26200=$($s3.HasEnable)"
 if ($s1.Bytes -gt 0 -and -not $s1.HasEnable) { Write-Pass "SSH on 20348: gated by default" } else { Write-Fail "SSH on 20348 default: bytes=$($s1.Bytes) enableBlock=$($s1.HasEnable)" }
-if ($s2.HasEnable) { Write-Pass "SSH on 20348 with PSMUX_FORCE_MOUSE=1: mouse-enable emitted" } else { Write-Fail "SSH on 20348 forced: no mouse-enable" }
-if ($s3.HasEnable) { Write-Pass "SSH on a modern build: mouse-enable emitted" } else { Write-Fail "SSH on 26200: no mouse-enable" }
+if ($s2.HasEnable) { Write-Pass "SSH on 20348 with PSMUX_FORCE_MOUSE=1: mouse-enable emitted" } elseif ($NoMouseOut) { Write-Host "  [SKIP] Windows 10 inbox pseudo console passes no mouse-enable on, its presence cannot be read there" -ForegroundColor Yellow } else { Write-Fail "SSH on 20348 forced: no mouse-enable" }
+if ($s3.HasEnable) { Write-Pass "SSH on a modern build: mouse-enable emitted" } elseif ($NoMouseOut) { Write-Host "  [SKIP] Windows 10 inbox pseudo console passes no mouse-enable on, its presence cannot be read there" -ForegroundColor Yellow } else { Write-Fail "SSH on 26200: no mouse-enable" }
 
 Write-Host "`n[Part 3] a real wheel in a real WezTerm window, build faked to 20348" -ForegroundColor Yellow
 $wez = "C:\Program Files\WezTerm\wezterm-gui.exe"

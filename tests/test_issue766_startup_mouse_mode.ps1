@@ -129,6 +129,12 @@ try {
 
     # ── 2. the request written after raw mode reaches psmux ─────────────────
     Write-Host "`n[2] the request repeated after raw mode: flags and the wheel" -ForegroundColor Cyan
+    # The wheel-ups are written as SGR reports into the client's own pseudo
+    # console, and the inbox one of Windows 10 (19045) has no ConPTY mouse
+    # (#457): it hands the client no wheel at all, so the wheel half cannot be
+    # driven there. The same checks pass on Windows 11 with the build psmux
+    # sees faked to 19045 (PSMUX_FAKE_WIN_BUILD).
+    $NoMouseIn = [Environment]::OSVersion.Version.Build -lt 22000
     $ok = 0; $ready = 0; $flagsOk = 0
     for ($i = 1; $i -le $Reps; $i++) {
         $r = Invoke-PsmuxCase "again$i" "libuv again" $wheelScript
@@ -142,6 +148,7 @@ try {
         if ($flagsOk -eq $ready) { Write-Pass "mouse_any_flag and mouse_sgr_flag read 11 in $flagsOk/$ready runs" }
         else { Write-Fail "flags read 11 in only $flagsOk/$ready runs" }
         if ($ok -eq $ready) { Write-Pass "all 3 wheel-ups reached the app in $ok/$ready runs" }
+        elseif ($NoMouseIn) { Write-Skip "Windows 10 pseudo console hands the client no wheel ($ok/$ready runs)" }
         else { Write-Fail "all 3 wheel-ups reached the app in only $ok/$ready runs" }
     }
 
@@ -163,6 +170,7 @@ try {
     }
     if ($ready -eq 0) { Write-Fail "[force] the pane never came up" }
     elseif ($ok -eq $ready) { Write-Pass "PSMUX_FORCE_WHEEL=1 delivers all 3 wheel-ups to the early requester in $ok/$ready runs" }
+    elseif ($NoMouseIn) { Write-Skip "[force] Windows 10 pseudo console hands the client no wheel ($ok/$ready runs)" }
     else { Write-Fail "PSMUX_FORCE_WHEEL=1 delivered all 3 wheel-ups in only $ok/$ready runs" }
 
     # ── 4. ESC ESC ──────────────────────────────────────────────────────────
