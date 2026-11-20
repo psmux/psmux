@@ -4,7 +4,8 @@
 # 1. send-paste delivers text intact (capture-pane verification)
 # 2. Multi-line indented send-paste preserves indentation
 # 3. Large paste (350+ lines) completes without truncation (WriteConsoleInputW retry)
-# 4. Bracket paste detector (Rust unit tests)
+# (A 4th part ran `cargo test bracket_paste_detect`; those unit tests went
+# with src/app.rs in 44de6009, so it built the test target for 0 tests.)
 #
 # Run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_issue74_paste.ps1
 
@@ -93,10 +94,16 @@ Write-Test "2.1 Multi-line indented paste delivered"
 Psmux send-keys -t paste74 "clear" Enter 2>$null | Out-Null
 Start-Sleep -Milliseconds 500
 Psmux send-paste -t paste74 $enc2 2>$null | Out-Null
-Start-Sleep -Milliseconds 1500
 
-# Capture pane content and check for the paste text
-$cap2 = (Psmux capture-pane -t paste74 -p 2>$null | Out-String)
+# Wait for the last line rather than a fixed 1.5 s: on a loaded machine (the
+# full runner) PSReadLine had not drawn line 7 yet when the capture was taken.
+$cap2 = ''
+$sw2 = [System.Diagnostics.Stopwatch]::StartNew()
+while ($sw2.ElapsedMilliseconds -lt 10000) {
+    $cap2 = (Psmux capture-pane -t paste74 -p 2>$null | Out-String)
+    if ($cap2 -match "line7_no_indent") { break }
+    Start-Sleep -Milliseconds 250
+}
 
 $foundLine1 = $cap2 -match "line1_no_indent"
 $foundLine3 = $cap2 -match "line3_indent5"
@@ -232,41 +239,6 @@ if (Test-Path $pasteTestFile) {
     Write-Fail "Skipped (no output file)"
 }
 Start-Sleep -Milliseconds 300
-
-# ============================================================
-# TEST 4: Bracket paste detection (Rust unit tests)
-# ============================================================
-Write-Host ""
-Write-Host ("=" * 60)
-Write-Host "TEST 4: Bracket paste detection (Rust unit tests)"
-Write-Host ("=" * 60)
-
-# The bracket paste detector runs in the event loop and processes
-# keys from the outer terminal (crossterm Event::Key) -- NOT from
-# send-keys (which writes directly to the child PTY).
-#
-# The detector is tested via 7 Rust unit tests:
-#   - simple_paste
-#   - multiline_paste_preserves_indentation
-#   - aborted_open_replays_keys
-#   - non_esc_forwarded
-#   - esc_in_paste_is_not_close
-#   - large_paste_content
-#   - consecutive_pastes
-#
-# Run: cargo test bracket_paste_detect
-
-Write-Test "4.1 Bracket paste detector unit tests"
-Push-Location "$PSScriptRoot\.."
-$unitResult = & cargo test bracket_paste_detect 2>&1 | Out-String
-Pop-Location
-if ($unitResult -match "test result: ok") {
-    $unitPassed = [regex]::Match($unitResult, '(\d+) passed').Groups[1].Value
-    Write-Pass "Bracket paste detector: $unitPassed unit tests passed"
-} else {
-    Write-Fail "Bracket paste detector: unit tests failed"
-    Write-Info $unitResult
-}
 
 # ============================================================
 # CLEANUP

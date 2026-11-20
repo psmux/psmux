@@ -72,7 +72,15 @@ class ConptyTimedHost
             string line = raw.TrimEnd();
             if (line.Length == 0 || line.StartsWith("#")) continue;
             var p = line.Split(new[] { ' ' }, 3);
-            if (p[0] == "S") { Thread.Sleep(int.Parse(p[1])); continue; }
+            if (p[0] == "S") {
+                // A short wait spins on the clock: Thread.Sleep(4), even with
+                // timeBeginPeriod(1), came back after 4 to 21 ms on a loaded
+                // machine, and #841's split Down needs [B inside escape-time.
+                int ms = int.Parse(p[1]);
+                if (ms <= 20) { var sw = System.Diagnostics.Stopwatch.StartNew(); while (sw.Elapsed.TotalMilliseconds < ms) Thread.SpinWait(50); }
+                else Thread.Sleep(ms);
+                continue;
+            }
             if (p[0] == "X") {
                 var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + p[2]);
                 psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.CreateNoWindow = true;
@@ -83,8 +91,11 @@ class ConptyTimedHost
             byte[] data = p[0] == "H" ? Hex(p[2]) : System.Text.Encoding.UTF8.GetBytes(p[2]);
             double t = Now();
             WriteFile(inW, data, data.Length, out w, IntPtr.Zero);
+            // No log write here: rewriting the whole log after each write
+            // put file I/O between two timed writes (#841 asks for ESC and
+            // [B 4 ms apart and got 11.3 ms under the full runner). The next
+            // X line and the end write it.
             lines.Add(string.Format("{0:F3} {1}", t, p[1]));
-            File.WriteAllLines(log, lines);
         }
         Thread.Sleep(500);
         File.WriteAllLines(log, lines);

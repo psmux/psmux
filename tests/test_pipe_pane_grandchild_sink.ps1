@@ -26,7 +26,10 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ((Sinks).Count -lt 2 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
     Check ((Sinks).Count -ge 2) 'sink shell and its grandchild are running'
-    P send-keys -t s '1..300000 | % { "BULKLINE $_ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }; echo BULK_DONE' Enter | Out-Null
+    # The pane stalls after about 1000 lines, so 50000 still cannot finish
+    # before the stall is seen. 300000 took more than the 60 s below to drain
+    # under the full runner once the pipe was stopped.
+    P send-keys -t s '1..50000 | % { "BULKLINE $_ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }; echo BULK_DONE' Enter | Out-Null
     # Wait until the pane output stops moving: the sink is backpressuring it.
     $last = ''; $stable = 0
     for ($i = 0; $i -lt 60 -and $stable -lt 3; $i++) {
@@ -40,12 +43,16 @@ try {
     P pipe-pane -t s | Out-Null
     Check ($sw.ElapsedMilliseconds -lt 2000) "stopping the pipe answers promptly ($($sw.ElapsedMilliseconds) ms)"
     $done = $false
+    $stalledAt = $last
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not $done -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 500
         $done = ((P capture-pane -p -t s) -join "`n") -match '(?m)^BULK_DONE'
     }
-    Check $done 'pane output resumes and finishes after the pipe is stopped'
+    # On a miss, say whether the output moved at all after the stop (resumed
+    # but slow) or stayed where it stalled (still frozen).
+    $note = if ($done) { '' } else { "; stalled at '$stalledAt', 60 s after the stop at '$(LastBulk)'" }
+    Check $done "pane output resumes and finishes after the pipe is stopped$note"
     Check ((Sinks).Count -eq 0) 'no process of the stopped sink is left running'
     Check (((P display-message -t s -p 'ALIVE') -join '') -eq 'ALIVE') 'server still answers'
 } finally {

@@ -210,15 +210,27 @@ function Probe($mode, $tag, $specs) {
     $probeArgs = @($p.Id) + $specs
     & $rawinjectExe @probeArgs 2>&1 | Out-Null
     Start-Sleep -Seconds 7
-    try { Stop-Process -Id $p.Id -Force -EA SilentlyContinue } catch {}
+    # Stop keydump with its cmd. keydump's 8 s deadline is checked only
+    # between reads, and on Windows 10 (build 19045) the injected Ctrl+Space
+    # record makes no VT byte, so its ReadFile never returns; stopping cmd
+    # alone left keydump508.exe running for good, holding the runner's
+    # working folder.
+    & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null
     if (Test-Path $log) { return (Get-Content $log) }
     return @("NO_LOG")
 }
 
 $vtBytes = (Probe "vt" "wez_cspace" @("raw:0x20,0x20,0x8")) -join " | "
 Write-Info "VT stream for (VK_SPACE, 0x20, CTRL): $vtBytes"
+# The inbox conhost of Windows 10 (build 19045) turns this record into
+# nothing at all on the VT stream, not a NUL; WezTerm's own pseudo console
+# does the same there for a real Ctrl+Space. Parts B to D, psmux's VT route,
+# do not depend on it.
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 if ($vtBytes -match "BYTES: 00") {
     Write-Pass "conhost re-encodes WezTerm's Ctrl+Space as the NUL byte 0x00 on the VT stream"
+} elseif ($Win10 -and $vtBytes -notmatch "BYTES:") {
+    Write-Pass "Windows 10 inbox conhost drops WezTerm's Ctrl+Space record from the VT stream (no byte at all)"
 } else {
     Write-Fail "expected a lone NUL byte, got: $vtBytes"
 }
@@ -354,8 +366,14 @@ if ($weztermGui) {
     $env:PSMUX_CONFIG_FILE = $pconf
     $env:PSMUX_NO_WARM = "1"
     # -n skips the user's wezterm.lua so defaults (win32 input mode ON) apply.
-    $wp = Start-Process -FilePath $weztermGui `
-        -ArgumentList @("-n","start","--",$PSMUX,"new-session","-s",$S) -PassThru
+    # That also skips its front_end, and where OpenGL is too old for the
+    # default one (a Hyper-V guest: "The OpenGL implementation is too old to
+    # work with glium") no window opens. PSMUX_TEST_WEZTERM_FRONT_END (WebGpu
+    # there) picks one without reading wezterm.lua.
+    $wezArgs = @("-n")
+    if ($env:PSMUX_TEST_WEZTERM_FRONT_END) { $wezArgs += @("--config", "front_end='$($env:PSMUX_TEST_WEZTERM_FRONT_END)'") }
+    $wezArgs += @("start", "--", $PSMUX, "new-session", "-s", $S)
+    $wp = Start-Process -FilePath $weztermGui -ArgumentList $wezArgs -PassThru
     Start-Sleep -Seconds 10
     $env:PSMUX_CONFIG_FILE = $null
 
@@ -373,11 +391,16 @@ if ($weztermGui) {
         # keystroke that was never delivered. Capture it and skip instead.
         $sentE = (& $sendhwExe "pid:$($wp.Id)" "sleep:1200" "C-Space" "sleep:600" "c" 2>&1 | Out-String)
         $focused = -not ($sentE -match "NO_FOCUS")
+        # NO_WINDOW: wezterm-gui never opened its window (its log says why),
+        # while the mux server still started the session. Nothing was typed.
+        $windowed = -not ($sentE -match "NO_WINDOW")
         Start-Sleep -Seconds 4
         $after = Wins $S
         Write-Info "windows in WezTerm session: $before -> $after"
         if ($after -gt $before) {
             Write-Pass "REAL Ctrl+Space in REAL WezTerm opened a window: the prefix works end to end"
+        } elseif (-not $windowed) {
+            Write-Skip "WezTerm end to end: wezterm-gui opened no window, no keystroke was delivered (set PSMUX_TEST_WEZTERM_FRONT_END, e.g. WebGpu)"
         } elseif (-not $focused) {
             # The VT-path fold itself is already proven above over the VT reader,
             # which needs no foreground.

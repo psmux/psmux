@@ -181,7 +181,10 @@ Start-Sleep -Seconds 3
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $style = (& $PSMUX show-options -g -v status-style -t $sess 2>&1 | Out-String).Trim()
 $autorename = (& $PSMUX show-options -g -v automatic-rename -t $sess 2>&1 | Out-String).Trim()
-$escape = (& $PSMUX show-options -g -v escape-time -t $sess 2>&1 | Out-String).Trim()
+# history-limit, not escape-time: sensible's escape-time (10 since
+# psmux-plugins 1e4d6847) is also psmux's default, so it cannot show that the
+# plugin ran. Its history-limit 50000 differs from the default 2000.
+$history = (& $PSMUX show-options -g -v history-limit -t $sess 2>&1 | Out-String).Trim()
 $sw.Stop()
 
 if ($style -match "#3c3836|#ebdbb2") { Write-Pass "Gruvbox theme loaded synchronously (status-style='$style')" }
@@ -190,8 +193,8 @@ else { Write-Fail "Theme not sync: status-style='$style'" }
 if ($autorename -eq "off") { Write-Pass "User override preserved (automatic-rename=off)" }
 else { Write-Fail "User override lost (automatic-rename='$autorename')" }
 
-if ($escape -eq "50") { Write-Pass "Sensible default applied (escape-time=50)" }
-else { Write-Fail "Sensible not applied: escape-time='$escape'" }
+if ($history -eq "50000") { Write-Pass "Sensible default applied (history-limit=50000)" }
+else { Write-Fail "Sensible not applied: history-limit='$history'" }
 
 Write-Perf "3 option queries: $($sw.ElapsedMilliseconds)ms"
 

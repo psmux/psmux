@@ -21,6 +21,7 @@
 # under a ConPTY inside this hyperv container (also crashes under plain
 # docker exec), so sessions here must use Windows PowerShell 5.1 or cmd as
 # the pane shell. pwsh works fine under sshd's ConPTY (ssh -tt login shell).
+# PowerShell tracks the crash as PowerShell/PowerShell#25541 (closed as External).
 $script:PaneShell  = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 $script:DockerKey  = Join-Path $env:USERPROFILE ".ssh\psmux_docker_key"
@@ -33,7 +34,10 @@ function Get-DockerExe {
     if ($cmd) { return $cmd.Source }
     $desktop = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
     if (Test-Path $desktop) { return $desktop }
-    throw "docker CLI not found"
+    # Missing docker = missing prerequisite, as in test_docker_exec_lib.ps1:
+    # skip (exit 0) instead of throwing, which the runner counted as a FAIL.
+    Write-Host "[SKIP] docker CLI not found - docker suites need docker\Run-PsmuxDev.ps1 environment" -ForegroundColor Yellow
+    exit 0
 }
 
 function Get-ContainerIP {

@@ -17,7 +17,10 @@
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $NODE = (Get-Command node -EA Stop).Source
-$YAZI = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\yazi.exe"
+# yazi from PATH first: winget can put it there from WinGet\Packages without
+# a WinGet\Links shim, which is all this used to look at.
+$YAZI = (Get-Command yazi -CommandType Application -EA SilentlyContinue | Select-Object -First 1).Source
+if (-not $YAZI) { $YAZI = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\yazi.exe" }
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $PROBE = Join-Path $PSScriptRoot "color_query_timing_probe.js"
 $outDir = Join-Path $env:TEMP "psmux_test_556"
