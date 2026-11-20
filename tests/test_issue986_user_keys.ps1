@@ -84,6 +84,11 @@ function Write-Conf($lines) {
 }
 # The bytes of a string as conpty_vt_keys steps (comma separated hex).
 function Hex([string]$s) { ([Text.Encoding]::UTF8.GetBytes($s) | ForEach-Object { '{0:x2}' -f $_ }) -join ',' }
+# One key's whole sequence in one write, as a terminal sends it. Written a byte
+# at a time, the bytes of `\eOz` landed more than escape-time (10 ms) apart now
+# and then on a loaded machine; psmux then rightly read a lone Escape (tmux
+# arms the same partial key timer) and the z reached the pane.
+function HexW([string]$s) { 'x' + (([Text.Encoding]::UTF8.GetBytes($s) | ForEach-Object { '{0:x2}' -f $_ }) -join '') }
 $E = [char]27
 $SEQ0 = "$E[5;30012~"; $SEQ1 = "$E[99~"; $SEQ3 = "${E}Oz"
 
@@ -165,13 +170,26 @@ try {
         Write-Host "`n[2] The VT input route" -ForegroundColor Yellow
         New-Ns
         $rec = Join-Path $TempHome "rec_vt.txt"
-        $steps = "$(Hex $SEQ0),w700,02,$(Hex $SEQ3),w700,$(Hex $SEQ1),w300,1b,$(Hex $SEQ1),w300,79"
+        # The inbox pseudo console of Windows 10 (build 19045) parses a whole
+        # sequence written at once itself (ESC[5;30012~ comes out as a key
+        # with modifiers), and of the bytes written one at a time it passes
+        # ESC[5;30012~ on but drops ESC O z and ESC ESC[99~ entirely: psmux's
+        # own input log there shows the C-b and then the next step, nothing in
+        # between. Neither can reach psmux on that host, so only the first
+        # check is made there, with the bytes written one at a time.
+        $Win10 = [Environment]::OSVersion.Version.Build -lt 22000
+        $steps = if ($Win10) { "$(Hex $SEQ0),w700,02,$(Hex $SEQ3),w700,$(Hex $SEQ1),w300,1b,$(Hex $SEQ1),w300,79" }
+                 else { "$(HexW $SEQ0),w700,02,$(HexW $SEQ3),w700,$(HexW $SEQ1),w300,$(HexW "$E$SEQ1"),w300,79" }
         $p = Start-Client $conf $steps $true $rec
         Start-Sleep -Milliseconds 10000
         Check "the sequence of user-keys[0] runs bind -n User0" (P show -gqv '@hit0') "yes"
-        Check "the prefix and the sequence of user-keys[3] run bind User3" (P show -gqv '@hit3') "yes"
-        Check "ESC and the sequence of user-keys[1] run bind -n M-User1" (P show -gqv '@hitm') "yes"
-        Check "the unbound User1 and the bound M-User1 send nothing to the pane, y arrives" (Recorded $rec) "y"
+        if ($Win10) {
+            Write-Host "  [SKIP] Windows 10 inbox pseudo console drops ESC O z and ESC ESC[99~ before psmux reads them: prefix + User3, M-User1 and the pane check are not measurable there" -ForegroundColor Yellow
+        } else {
+            Check "the prefix and the sequence of user-keys[3] run bind User3" (P show -gqv '@hit3') "yes"
+            Check "ESC and the sequence of user-keys[1] run bind -n M-User1" (P show -gqv '@hitm') "yes"
+            Check "the unbound User1 and the bound M-User1 send nothing to the pane, y arrives" (Recorded $rec) "y"
+        }
         $p | Wait-Process -Timeout 15 -EA SilentlyContinue
         Kill-Ns
 
