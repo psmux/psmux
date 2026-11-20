@@ -1333,6 +1333,8 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     // new-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
     for (k, v) in extra_env { shell_cmd.env(k, v); }
+    // The command's own `cd`/`env` run inside sh after all of that (#1077).
+    apply_launch_overrides(&mut shell_cmd, command);
     if crate::startup_trace::on() {
         crate::startup_trace::mark_detail("srv.child.argv", &format!("{:?}", shell_cmd.get_argv()));
     }
@@ -2434,6 +2436,8 @@ pub fn split_active_placed(app: &mut AppState, kind: LayoutKind, command: Option
     // split-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
     for (k, v) in extra_env { shell_cmd.env(k, v); }
+    // The command's own `cd`/`env` run inside sh after all of that (#1077).
+    apply_launch_overrides(&mut shell_cmd, command);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – see create_window() comment.
     drop(pair.slave);
@@ -3371,6 +3375,299 @@ fn split_spawn_tokens(cmd: &str) -> Vec<String> {
     tokens
 }
 
+/// A POSIX launch line read into its parts (#399, #1077).
+///
+/// Tools written for tmux start a pane program with a short sh script:
+/// `cd '<dir>' && exec env VAR=val ... '<prog>' args`, often wrapped in
+/// `/bin/sh -c "..."` (Claude Code 2.1.329 teammate panes). Under tmux, sh
+/// runs it: `cd` moves, `env` sets the variables, and `exec` replaces sh with
+/// the program. psmux has no sh to lean on (the pane shell is usually pwsh,
+/// which has neither `exec` nor `env`), so the line is taken apart here and
+/// each part is applied on the CommandBuilder instead.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaunchLine {
+    /// `cd <dir>` target, quotes removed.
+    pub cwd: Option<String>,
+    /// `unset VAR` from a wrapped script.
+    pub env_removes: Vec<String>,
+    /// `export VAR=val` from a wrapped script, then `env VAR=val` pairs, in
+    /// the order sh would apply them.
+    pub env_sets: Vec<(String, String)>,
+    /// Program and arguments, quotes removed.
+    pub argv: Vec<String>,
+    /// sh would REPLACE itself with the program: the line said `exec`, or it
+    /// came wrapped in `/bin/sh -c` (sh is the program that would have run
+    /// it, so no other shell belongs between the pane and the program).
+    pub replaces_shell: bool,
+}
+
+/// The script of a `<sh> -c <script>` argv: the `--` form respawn-pane and
+/// split-window carry (`respawn-pane -k -- /bin/sh -c "<cmd>"`).
+#[cfg(windows)]
+fn sh_c_script_from_argv(tokens: &[String]) -> Option<&str> {
+    if tokens.len() != 3 || tokens[1] != "-c" {
+        return None;
+    }
+    let lower = tokens[0].to_ascii_lowercase().replace('\\', "/");
+    let is_sh = matches!(
+        lower.as_str(),
+        "/bin/sh" | "/bin/bash" | "/usr/bin/sh" | "/usr/bin/bash"
+    );
+    if is_sh { Some(tokens[2].as_str()) } else { None }
+}
+
+/// Read `[cd <dir> &&] [exec] [env [VAR=val]...] prog args` into a
+/// LaunchLine. With `require_marker`, the line must carry `exec` or `env`
+/// (an unwrapped `cd x && prog` stays with the pane shell, as before).
+#[cfg(windows)]
+fn parse_launch_tail(script: &str, require_marker: bool) -> Option<LaunchLine> {
+    let mut rest = script.trim();
+    let mut cwd: Option<String> = None;
+    if let Some(after_cd) = rest.strip_prefix("cd ") {
+        let amp = find_unquoted_ampamp(after_cd)?;
+        cwd = Some(strip_quotes(after_cd[..amp].trim()).to_string());
+        rest = after_cd[amp + 2..].trim();
+    }
+    let mut exec = false;
+    if let Some(after) = rest.strip_prefix("exec ") {
+        exec = true;
+        rest = after.trim_start();
+    }
+    let mut tokens = split_spawn_tokens(rest);
+    let mut env_sets: Vec<(String, String)> = Vec::new();
+    let mut env = false;
+    if tokens.first().map(|t| t == "env").unwrap_or(false) {
+        env = true;
+        tokens.remove(0);
+        while let Some(tok) = tokens.first() {
+            let Some(eq) = tok.find('=') else { break };
+            let key = &tok[..eq];
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                break;
+            }
+            env_sets.push((key.to_string(), tok[eq + 1..].to_string()));
+            tokens.remove(0);
+        }
+    }
+    if require_marker && !exec && !env {
+        return None;
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(LaunchLine { cwd, env_removes: Vec::new(), env_sets, argv: tokens, replaces_shell: exec })
+}
+
+/// Recognise a POSIX launch line in a pane command, in any of the forms the
+/// spawn paths receive it:
+///   * `/bin/sh -c "<script>"` as one string (split-window with the words
+///     joined, `#{pane_start_command}` shows this),
+///   * `-- /bin/sh -c <script>` (the argv form, respawn-pane),
+///   * an unwrapped `[cd <dir> &&] [exec] env ...` line (#399).
+///
+/// Inside a wrapper, `unset`/`export` steps are honoured, and `cd <dir> &&
+/// prog` alone also counts, since sh would have run it. A wrapped script with
+/// no `cd`, `exec` or `env` (an Overstory style `unset X && prog`) is left to
+/// the older wrapper handling, which keeps its established behaviour.
+#[cfg(windows)]
+pub(crate) fn parse_launch_line(command: &str) -> Option<LaunchLine> {
+    let trimmed = command.trim();
+    let script: Option<String> = if let Some(rest) = trimmed.strip_prefix("--") {
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let toks = decode_argv(rest);
+        if let Some(s) = sh_c_script_from_argv(&toks) {
+            Some(s.to_string())
+        } else {
+            // A single token after `--` keeps string semantics.
+            if toks.len() == 1 {
+                return parse_launch_line(&toks[0]);
+            }
+            // `-- env A=1 prog` style argv: the joined words are the line.
+            let joined = rest.trim();
+            return parse_launch_tail(joined, true);
+        }
+    } else {
+        detect_bash_c_wrapper(trimmed).map(|(inner, _)| inner.to_string())
+    };
+    match script {
+        Some(script) => {
+            let (removes, sets, final_cmd) = parse_bash_env_script(&script);
+            let marked = final_cmd.trim_start().starts_with("cd ")
+                || final_cmd.trim_start().starts_with("exec ")
+                || final_cmd.trim_start().starts_with("env ");
+            if !marked {
+                return None;
+            }
+            let mut line = parse_launch_tail(&final_cmd, false)?;
+            line.env_removes = removes;
+            let mut all_sets = sets;
+            all_sets.append(&mut line.env_sets);
+            line.env_sets = all_sets;
+            line.replaces_shell = true;
+            Some(line)
+        }
+        None => parse_launch_tail(trimmed, true),
+    }
+}
+
+/// True when the argv words hold no shell syntax, so they can be handed to
+/// the program as they are (what `exec` does in sh).
+#[cfg(windows)]
+fn launch_argv_is_plain(argv: &[String]) -> bool {
+    !argv.iter().any(|w| {
+        matches!(w.as_str(), "&&" | "||" | "|" | ";" | "&" | "<" | ">" | ">>" | "2>&1")
+            || w.contains('$')
+            || w.contains('`')
+            || w.starts_with('>')
+            || w.starts_with('<')
+            || w.ends_with(';')
+    })
+}
+
+/// True when CreateProcess (through `build_argv_command`) can start this
+/// program by itself: an existing file path, or a bare name PATH resolves to
+/// an `.exe`, `.com`, `.bat` or `.cmd`. Anything else (a `.ps1`, a PowerShell
+/// alias or function) needs the pane shell.
+#[cfg(windows)]
+fn launch_program_spawnable(prog: &str) -> bool {
+    let p = prog.replace('/', "\\");
+    if p.contains('\\') {
+        let lower = p.to_ascii_lowercase();
+        let runnable_ext = [".exe", ".com", ".bat", ".cmd"].iter().any(|e| lower.ends_with(e));
+        if std::path::Path::new(&p).is_file() {
+            return runnable_ext;
+        }
+        // CreateProcess appends .exe to a path given without an extension.
+        return std::path::Path::new(&format!("{}.exe", p)).is_file();
+    }
+    // A bare name: an image CreateProcess runs alone (bare_program_image also
+    // keeps Store images off this route under SSH), or a batch script that
+    // build_argv_command hands to cmd.exe.
+    bare_program_image(&p).is_some() || batch_script_target(&p).is_some()
+}
+
+/// Write a LaunchLine's program and arguments as a command for the given
+/// pane shell, for the cases that still go through one.
+#[cfg(windows)]
+fn render_launch_for_shell(shell_path: &str, argv: &[String]) -> String {
+    let stem = std::path::Path::new(shell_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if stem == "cmd" {
+        argv.iter()
+            .map(|t| {
+                if t.is_empty() || t.chars().any(|c| c.is_whitespace()) {
+                    format!("\"{}\"", t)
+                } else {
+                    t.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else if matches!(stem.as_str(), "bash" | "sh" | "zsh" | "fish" | "dash" | "ash") {
+        argv.iter()
+            .map(|t| {
+                if !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,\\".contains(c)) {
+                    t.clone()
+                } else {
+                    format!("'{}'", t.replace('\'', "'\\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        // pwsh / powershell: the call operator runs a quoted program path.
+        format!(
+            "& {}",
+            argv.iter().map(|t| quote_for_pwsh(t)).collect::<Vec<_>>().join(" ")
+        )
+    }
+}
+
+/// Build the pane process for a LaunchLine.
+///
+/// When sh would have replaced itself with the program (`exec`, or the line
+/// came wrapped in `/bin/sh -c`) and the words are a plain program call, the
+/// program is started directly, exactly as tmux ends up with it: no shell
+/// stays between the pane and the program, whatever the pane shell is
+/// (pwsh, powershell or cmd), and nothing depends on an `exec` or `env`
+/// command existing. Otherwise the program runs through the pane shell,
+/// written in that shell's syntax, with the `env` and `cd` parts applied on
+/// the builder rather than left in the text for the shell to choke on.
+#[cfg(windows)]
+fn build_launch_command(line: &LaunchLine, env_shim: bool, allow_predictions: bool) -> CommandBuilder {
+    let apply = |builder: &mut CommandBuilder| {
+        if let Some(dir) = line.cwd.as_deref() {
+            if std::path::Path::new(dir).is_dir() {
+                builder.cwd(dir);
+            }
+        }
+        for var in &line.env_removes { builder.env_remove(var); }
+        for (k, v) in &line.env_sets { builder.env(k, v); }
+    };
+    if line.replaces_shell
+        && launch_argv_is_plain(&line.argv)
+        && launch_program_spawnable(&line.argv[0])
+    {
+        let mut builder = build_argv_command(&line.argv, env_shim, allow_predictions);
+        apply(&mut builder);
+        return builder;
+    }
+    let shell = cached_shell().map(|s| s.to_string()).unwrap_or_else(|| "pwsh.exe".to_string());
+    let text = render_launch_for_shell(&shell, &line.argv);
+    let mut builder = CommandBuilder::new(&shell);
+    if let Ok(dir) = std::env::current_dir() { builder.cwd(dir); }
+    apply_bare_env_if_set(&mut builder);
+    builder.env("TERM", "xterm-256color");
+    builder.env("COLORTERM", "truecolor");
+    builder.env("PSMUX_SESSION", "1");
+    apply(&mut builder);
+    let stem = std::path::Path::new(&shell).file_stem()
+        .and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if stem == "pwsh" || stem == "powershell" {
+        builder.args(["-NoLogo", "-Command", &text]);
+    } else if matches!(stem.as_str(), "bash" | "sh" | "zsh" | "fish" | "dash" | "ash") {
+        builder.args(["-c", &text]);
+    } else {
+        // cmd.exe: a quoted program path inside a `/C` argument would reach
+        // cmd with CreateProcess `\"` escapes it cannot read. Carry the line
+        // in a variable cmd expands once, as build_argv_command does for
+        // batch scripts (#794).
+        builder.env(BATCH_LINE_ENV, &text);
+        builder.args(["/d", "/c", &format!("%{}%", BATCH_LINE_ENV)]);
+    }
+    builder
+}
+
+/// Apply a launch line's `cd` and environment on top of everything the spawn
+/// site layered on (the `-c` start directory, the session environment,
+/// `-e`). Under tmux these run inside sh AFTER the pane's directory and
+/// environment are set, so they win; a split-window from a client sitting in
+/// another directory must still start the program in the `cd` target.
+/// A `cd` to a directory that does not exist is skipped (the pane then starts
+/// where the spawn site put it rather than failing to spawn at all).
+pub fn apply_launch_overrides(builder: &mut CommandBuilder, command: Option<&str>) {
+    #[cfg(windows)]
+    {
+        let Some(cmd) = command else { return };
+        let Some(line) = parse_launch_line(cmd) else { return };
+        if let Some(dir) = line.cwd.as_deref() {
+            if std::path::Path::new(dir).is_dir() {
+                builder.cwd(dir);
+            }
+        }
+        for var in &line.env_removes { builder.env_remove(var); }
+        for (k, v) in &line.env_sets { builder.env(k, v); }
+    }
+    #[cfg(not(windows))]
+    let _ = (builder, command);
+}
+
 /// tmux parity for window/pane commands (issues #492, #493): tmux execs a
 /// multi-argument shell-command DIRECTLY (spawn.c: `execvp(argv[0], argv)`)
 /// and only routes single strings through `$SHELL -c`.  psmux wrapped every
@@ -3513,6 +3810,12 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
         }
         other => other,
     };
+    // POSIX launch lines (#399, #1077): `[/bin/sh -c] [cd d &&] [exec] [env
+    // K=V...] prog args`, in the string or the `--` argv form.
+    #[cfg(windows)]
+    if let Some(line) = command.and_then(parse_launch_line) {
+        return build_launch_command(&line, env_shim, allow_predictions);
+    }
     // tmux parity (#582): an explicit `-- prog args...` argv with more than
     // one token is exec'd DIRECTLY (tmux spawn.c execvp), never routed
     // through a shell wrapper. The CLI and server encode the argv form by
@@ -4317,7 +4620,7 @@ pub fn xtversion_reply() -> String {
 //
 // tmux answers all of them from its own parser, so psmux answering them is
 // parity rather than invention.  Citations, tmux next-3.8 `input.c` in
-// C:\Users\godwin\Documents\workspace\tmux:
+// the tmux source tree:
 //
 //   input.c:1581-1595  INPUT_CSI_DA        -> input_reply(ictx, 1, "\033[?1;2c"),
 //                                             "\033[?1;2;4c" when built with
@@ -5208,6 +5511,10 @@ mod test_graphics_attribute_replies;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue399_env_prefix.rs"]
 mod test_issue399_env_prefix;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1077_exec_env_wrapper.rs"]
+mod test_issue1077_exec_env_wrapper;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue634_env_value_spaces.rs"]
