@@ -117,9 +117,11 @@ pub(crate) enum Answer {
 
 /// What `OSC 52 ; ?` is answered with, `Answer::Now(None)` for no reply:
 ///
-/// - Nothing when `set-clipboard` is `off`. tmux reads OSC 52 only on `on`
-///   (input.c:3379); psmux already takes a program's clipboard write on
-///   `external` too, and so takes its query there as well.
+/// - Nothing unless `set-clipboard` is `on`, as tmux reads OSC 52 only on
+///   `on` (input.c:3379). `external`, the default, gives no reply: answering
+///   there would hand the user's copies to any program that prints to a
+///   pane (a file being shown, a remote host over ssh) without the user
+///   having opted in, which tmux never does.
 /// - Nothing when `get-clipboard` is `off`.
 /// - `buffer`, the default: the newest automatic buffer, none without one
 ///   (`paste_get_top`, which skips named buffers).
@@ -132,7 +134,7 @@ pub(crate) fn answer(
     app: &mut AppState,
     read_clipboard: impl FnOnce() -> Result<Option<String>, ClipboardBusy>,
 ) -> Answer {
-    if app.set_clipboard == "off" {
+    if app.set_clipboard != "on" {
         return Answer::Now(None);
     }
     match crate::server::options::get_option_value(app, "get-clipboard").as_str() {

@@ -135,14 +135,18 @@ $cases = @(
     # Measured: paste_get_top skips a named buffer.
     @{ n = 'a named buffer only'; setup = { P set-buffer -b foo named | Out-Null }; q = $Ask; reply = '' }
     @{ n = 'the newest automatic buffer'; setup = { P set-buffer hello | Out-Null }; q = $Ask; reply = (& $oc (Reply 'c' $Hello $ST)) }
-    @{ n = 'asked with BEL'; q = "\e]52;c;?$A"; reply = (& $oc (Reply 'c' $Hello $A)) }
+    # Measured on tmux 3.8: with set-clipboard external, its default, the
+    # query gets no reply (input_osc_52_parse returns unless it is `on`,
+    # input.c:3379). Nothing printed in a pane reads the buffers back unless
+    # the user opts in.
+    @{ n = 'external, the default: no reply even with a buffer'; setup = { P set -s set-clipboard external | Out-Null }; q = $Ask; reply = '' }
+    @{ n = 'asked with BEL'; setup = { P set -s set-clipboard on | Out-Null }; q = "\e]52;c;?$A"; reply = (& $oc (Reply 'c' $Hello $A)) }
     @{ n = 'no selection'; q = "\e]52;;?$ST"; reply = (& $oc (Reply '' $Hello $ST)) }
     @{ n = 'the first selection tmux knows'; q = "\e]52;xp;?$ST"; reply = (& $oc (Reply 'p' $Hello $ST)) }
     @{ n = 'a selection tmux does not know'; q = "\e]52;x;?$ST"; reply = (& $oc (Reply '' $Hello $ST)) }
-    # psmux: tmux reads OSC 52 only with set-clipboard on (input.c:3379).
-    # psmux takes a program's clipboard write on `external`, the default, so
-    # it takes the query there too. A write there makes no buffer, as in tmux.
-    @{ n = 'external: a write makes no buffer, so the query reads the old one'; q = "\e]52;c;d3JpdHRlbg==$ST$Ask"; reply = (& $oc (Reply 'c' $Hello $ST)) }
+    # tmux reads OSC 52, a write or a query, only with set-clipboard on
+    # (input.c:3379): on `external` neither makes a buffer nor gets a reply.
+    @{ n = 'external: a write and a query, no reply'; setup = { P set -s set-clipboard external | Out-Null }; q = "\e]52;c;d3JpdHRlbg==$ST$Ask"; reply = '' }
     # Measured: on `on` a write earlier in the same output is read back.
     @{ n = 'on: a write before the query is read back'; setup = { P set -s set-clipboard on | Out-Null }; q = "\e]52;c;d3JpdHRlbg==$ST$Ask"; reply = (& $oc (Reply 'c' 'd3JpdHRlbg==' $ST)) }
     @{ n = 'set-clipboard off'; setup = { P set -s set-clipboard off | Out-Null }; q = $Ask; reply = '' }
@@ -163,11 +167,14 @@ function Run-Cases($route) {
 
     Write-Host "  -- the option" -ForegroundColor DarkCyan
     Check "${route}: get-clipboard's default" "$(P show -sv get-clipboard)" 'buffer'
+    Check "${route}: set-clipboard's default" "$(P show -sv set-clipboard)" 'external'
     # Measured: tmux says `unknown value: bad` and keeps the old value.
     Check "${route}: a bad value is refused" ("$(P set -s get-clipboard bad)" -like '*unknown value: bad') $true
     Check "${route}: and the value is kept" "$(P show -sv get-clipboard)" 'buffer'
 
     Write-Host "  -- the query" -ForegroundColor DarkCyan
+    # The cases opt in; the ones that say `external` go back to the default.
+    P set -s set-clipboard on | Out-Null
     foreach ($c in $cases) { Case $route $c }
 
     P kill-server | Out-Null
@@ -189,6 +196,7 @@ function Run-Busy {
     for ($i = 0; $i -lt 50 -and "$(P list-clients)" -notmatch 'attached'; $i++) { Start-Sleep -Milliseconds 200 }
     Check "busy clipboard: client attached" ("$(P list-clients)" -match 'attached') $true
     P set -s get-clipboard request | Out-Null
+    P set -s set-clipboard on | Out-Null
     $saved = Get-ClipboardSettled
     try {
         if (-not (Set-ClipboardVerified 'B12BUSY')) {
@@ -197,13 +205,18 @@ function Run-Busy {
         }
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('B12BUSY'))
         foreach ($c in @(
-                @{ hold = 0; n = 'a free clipboard'; reply = (Reply 'c' $b64 $ST) + '\e[0n' }
+                # The default, set-clipboard external, never reads the
+                # Windows clipboard for a pane, even with get-clipboard
+                # request and a client attached, as tmux never asks there.
+                @{ hold = 0; clip = 'external'; n = 'external, the default: the Windows clipboard is not read'; reply = '\e[0n' }
+                @{ hold = 0; clip = 'on'; n = 'a free clipboard'; reply = (Reply 'c' $b64 $ST) + '\e[0n' }
                 @{ hold = 300; n = 'held 300 ms, answered once it is let go'; reply = (Reply 'c' $b64 $ST) + '\e[0n' }
                 # psmux: tmux waits 5 s for its terminal; psmux waits 1 s, as
                 # for a paste, then answers the rest of the batch.
                 @{ hold = 1500; n = 'held 1500 ms, past the wait, so no clipboard reply'; reply = '\e[0n' })) {
             $script:run++
             $window = "w$($script:run)"
+            if ($c.clip) { P set -s set-clipboard $c.clip | Out-Null }
             P new-window -t s -n $window | Out-Null
             Wait-Prompt "s:$window"
             if ($c.hold) {

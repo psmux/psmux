@@ -4,12 +4,15 @@
 
 use super::*;
 
-fn app() -> AppState {
-    AppState::new("clipboard_read".to_string())
-}
-
 fn set(app: &mut AppState, name: &str, value: &str) {
     crate::server::options::apply_set_option(app, name, value, false).expect(name);
+}
+
+/// A server with `set-clipboard on`, the only value tmux reads OSC 52 on.
+fn app() -> AppState {
+    let mut a = AppState::new("clipboard_read".to_string());
+    set(&mut a, "set-clipboard", "on");
+    a
 }
 
 fn no_clipboard() -> Result<Option<String>, ClipboardBusy> {
@@ -52,12 +55,11 @@ fn set_clipboard_off_or_get_clipboard_off_has_no_reply() {
     a.paste_set_stack(&["hello"]);
     // psmux: tmux answers only on `on` (input.c:3379); psmux takes a
     // program's clipboard write on `external` too, so its query as well.
-    for value in ["on", "external"] {
+    assert_eq!(now(answer(&mut a, no_clipboard)).as_deref(), Some("hello"), "on");
+    for value in ["off", "external"] {
         set(&mut a, "set-clipboard", value);
-        assert_eq!(now(answer(&mut a, no_clipboard)).as_deref(), Some("hello"), "{value}");
+        assert_eq!(now(answer(&mut a, no_clipboard)), None, "{value}");
     }
-    set(&mut a, "set-clipboard", "off");
-    assert_eq!(now(answer(&mut a, no_clipboard)), None);
     set(&mut a, "set-clipboard", "on");
     set(&mut a, "get-clipboard", "off");
     assert_eq!(now(answer(&mut a, no_clipboard)), None);
@@ -171,4 +173,23 @@ fn buffer_and_no_client_never_wait() {
     assert_eq!(data_for(&mut a, &mut b, busy, || panic!("no wait")), Some(Some("buffered".into())));
     set(&mut a, "get-clipboard", "request");
     assert_eq!(data_for(&mut a, &mut b, busy, || panic!("no wait")), Some(None), "no client");
+}
+
+#[test]
+fn the_defaults_give_no_reply_and_never_read_the_clipboard() {
+    // tmux 3.8 with its defaults (set-clipboard external, get-clipboard
+    // buffer) gives no reply: input_osc_52_parse returns unless set-clipboard
+    // is on (input.c:3379). A program printing to a pane must not get the
+    // user's copies back without the user opting in.
+    let mut a = AppState::new("clipboard_read".to_string());
+    a.paste_set_stack(&["secret"]);
+    a.attached_clients = 1;
+    assert_eq!(a.set_clipboard, "external");
+    assert_eq!(crate::server::options::get_option_value(&a, "get-clipboard"), "buffer");
+    assert_eq!(now(answer(&mut a, no_clipboard)), None, "buffer");
+    for mode in ["request", "both"] {
+        set(&mut a, "get-clipboard", mode);
+        assert_eq!(now(answer(&mut a, no_clipboard)), None, "{mode} on external");
+    }
+    assert_eq!(a.paste_top(), Some("secret"), "both made no buffer");
 }

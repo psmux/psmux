@@ -470,7 +470,7 @@ Three things differ from tmux:
 
 ### Clipboard Read (OSC 52 ; ?)
 
-A pane program asks for the clipboard with `ESC ] 52 ; c ; ? ESC \`. psmux answers as the `get-clipboard` server option says, as tmux's `input_osc_52_reply` does:
+A pane program asks for the clipboard with `ESC ] 52 ; c ; ? ESC \`. As in tmux, the query is read only with `set-clipboard on`; with `external`, the default, or `off`, it gets no reply, so nothing a program prints can read back what you copied unless you turn this on. With `on`, psmux answers as the `get-clipboard` server option says, as tmux's `input_osc_52_reply` does:
 
 | `get-clipboard` | The reply |
 |---|---|
@@ -481,9 +481,8 @@ A pane program asks for the clipboard with `ESC ] 52 ; c ; ? ESC \`. psmux answe
 
 The reply is `ESC ] 52 ; selection ; base64 data`, ended the way the query was, and names the first selection character tmux knows (`cpqs01234567`) that the query gave, or none. A clipboard write earlier in the same output is read back on `set-clipboard on`, where it makes a buffer. When another window holds the Windows clipboard open, `request` and `both` wait for it for up to a second, as a paste does, and the pane's other replies wait behind it, while other panes go on; past that the query gets no reply. tmux waits up to 5 seconds for its terminal's answer. `request` and `both` let any pane program read what you copied, so leave them off unless you want that.
 
-Two differences:
+One difference:
 
-- **`set-clipboard external`, the default, takes the query too.** tmux reads OSC 52, a write or a query, only on `on`. psmux already takes a program's clipboard write on `external`, so it takes the query there as well; `set-clipboard off` or `get-clipboard off` turns it off.
 - **Not through the inbox conhost of Windows 11.** It drops the query before psmux sees it (builds 26200 and 26300), so a pane there gets no reply whatever the options. The Windows 10 one (build 19045) passes it on when it next draws, and OpenConsole (`PSMUX_CONPTY_DIR`) passes it on.
 
 ## Behavioral Differences from tmux
