@@ -198,7 +198,15 @@ function Invoke-PrefixCheck([string]$route) {
     if (-not $h.WaitForExit(40000)) { Stop-Process -Id $h.Id -Force -EA SilentlyContinue }
     & $PSMUX -L $ns kill-server 2>&1 | Out-Null
     $r = @{}
-    Get-Content $hlog -EA SilentlyContinue | ForEach-Object { if ($_ -match '^\S+ (\w+) => (\d+):(\d+)') { $r[$Matches[1]] = @([int]$Matches[2], [int]$Matches[3]) } }
+    $writes = @()
+    Get-Content $hlog -EA SilentlyContinue | ForEach-Object {
+        if ($_ -match '^\S+ (\w+) => (\d+):(\d+)') {
+            $r[$Matches[1]] = @([int]$Matches[2], [int]$Matches[3])
+            # The two writes just before the "down" reading are the split
+            # Down: ESC, then [B. Their logged times give the gap psmux saw.
+            if ($Matches[1] -eq 'down' -and $writes.Count -ge 2) { $r['downgap'] = [Math]::Round($writes[-1] - $writes[-2], 1) }
+        } elseif ($_ -match '^(\d+\.\d+) k$') { $writes += [double]$Matches[1] }
+    }
     $r
 }
 foreach ($route in 'w32', 'vt') {
@@ -207,8 +215,9 @@ foreach ($route in 'w32', 'vt') {
     if (-not $r['start'] -or -not $r['altup']) { Write-Fail "$route prefix check: no pane readings ($(($r.Keys) -join ','))"; continue }
     if ($r['start'][0] -eq 1 -and $r['up'][0] -eq 0) { Write-Pass "$route prefix Up selected the pane above (1 -> 0)" }
     else { Write-Fail "$route prefix Up: pane $($r['start'][0]) -> $($r['up'][0])" }
-    if ($r['down'][0] -eq 1) { Write-Pass "$route prefix Down came back (0 -> 1)$(if ($route -eq 'vt') { ', written as ESC then [B 4 ms apart' })" }
-    else { Write-Fail "$route prefix Down: pane $($r['up'][0]) -> $($r['down'][0])" }
+    $gapNote = if ($route -eq 'vt') { ", written as ESC then [B $($r['downgap']) ms apart (4 asked, escape-time 10)" } else { '' }
+    if ($r['down'][0] -eq 1) { Write-Pass "$route prefix Down came back (0 -> 1)$gapNote" }
+    else { Write-Fail "$route prefix Down: pane $($r['up'][0]) -> $($r['down'][0])$gapNote" }
     if ($r['altup'][1] -ne $r['down'][1]) { Write-Pass "$route prefix Alt+Up resized the pane (height $($r['down'][1]) -> $($r['altup'][1]))" }
     else { Write-Fail "$route prefix Alt+Up left the height at $($r['altup'][1])" }
 }

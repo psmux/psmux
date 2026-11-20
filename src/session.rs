@@ -1971,6 +1971,14 @@ where
     // Tolerate both `pid` and `pid:creation_filetime` bodies (the latter written
     // so kill-server can verify identity); the anchor only needs the pid.
     let (pid, creation) = parse_pid_file_contents(&std::fs::read_to_string(&pid_path).ok()?)?;
+    // A server that was just terminated is still listed under its image name
+    // until the kernel finishes tearing it down, so the name lookup below would
+    // call it alive and keep its registry. Its handle is already signaled, so
+    // ask that first. Only a positive "exited" counts; an unopenable pid falls
+    // through to the name lookup as before (#650).
+    if crate::platform::process_has_exited(pid) {
+        return Some(false);
+    }
     pid_anchor_verdict_for(&pid_path, pid, creation, name_of, crate::platform::process_kill::process_creation_time)
 }
 
@@ -4122,3 +4130,7 @@ mod tests_halfclose_filter_reply;
 #[cfg(test)]
 #[path = "../tests-rs/test_server_marker_prune_zombie.rs"]
 mod tests_server_marker_prune_zombie;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_stale_registry_exited_pid.rs"]
+mod tests_stale_registry_exited_pid;

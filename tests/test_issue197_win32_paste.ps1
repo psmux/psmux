@@ -8,6 +8,8 @@ $ErrorActionPreference = "Stop"
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $SESSION = "tui_paste_197"
 
+. "$PSScriptRoot\helpers\focus_guard.ps1"
+
 # Win32 keyboard input API + window enumeration for console apps
 Add-Type @"
 using System;
@@ -222,14 +224,18 @@ foreach ($test in $testTexts) {
         if ($hwnd -ne [IntPtr]::Zero) { break }
         Start-Sleep -Milliseconds 200
     }
-    if ($hwnd -ne [IntPtr]::Zero) {
-        [Win32Paste]::ShowWindow($hwnd, 9) | Out-Null
-        [Win32Paste]::SetForegroundWindow($hwnd) | Out-Null
-        Write-Host "  Window focused (hwnd=$hwnd)" -ForegroundColor DarkGray
-    } else {
-        # Console window auto-focuses on launch, proceed anyway
-        Write-Host "  [INFO] Console window auto-focused (conhost owns HWND)" -ForegroundColor DarkGray
+    # Ctrl+V and the typed marker go to whichever window has the
+    # foreground. Confirm it is the psmux window before typing: a refused
+    # SetForegroundWindow used to read as "paste text NOT in pane" and sent
+    # the keys to somebody else's window.
+    $focus = Confirm-TestForeground -Hwnd $hwnd
+    if (-not $focus.Ok) {
+        Write-Host "  [SKIP] $desc not run: $($focus.Why)" -ForegroundColor Yellow
+        try { $proc.Kill() } catch {}
+        Start-Sleep -Milliseconds 500
+        continue
     }
+    Write-Host "  Window focused (hwnd=$hwnd, confirmed foreground)" -ForegroundColor DarkGray
     Start-Sleep -Milliseconds 800
 
     # Step 6: Send REAL Ctrl+V keystroke!
@@ -252,6 +258,9 @@ foreach ($test in $testTexts) {
     Start-Sleep -Milliseconds 200
     [Win32Paste]::SendEnter()
     Start-Sleep -Seconds 1
+
+    $kept = Test-TestForeground -Hwnd $hwnd
+    if (-not $kept) { Write-Host "  [INFO] the psmux window lost the foreground while keys were sent; now $([PsmuxFocusGuard]::Describe([PsmuxFocusGuard]::Foreground()))" -ForegroundColor Yellow }
 
     # Step 9: Capture pane content via CLI
     $capture = & psmux capture-pane -t $SESSION -p
