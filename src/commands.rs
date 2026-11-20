@@ -4612,6 +4612,10 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         if occupied.is_some() && !has("-k") {
                             app.status_message = Some((format!("link-window: index in use: {}", didx.unwrap_or(0)), Instant::now(), None));
                         } else {
+                            // tmux selects the new link when -k removes the
+                            // current window, -d or not (server_link_window,
+                            // server-fn.c: "Force select/redraw if current").
+                            let detach = has("-d") && occupied != Some(app.active_idx);
                             if let Some(pos) = occupied {
                                 crate::copy_mode::remove_keeping_modes(app, |app| {
                                     let mut win = app.windows.remove(pos);
@@ -4651,11 +4655,13 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                                         app.windows.insert(d, win);
                                     }
                                 }
-                                if has("-d") {
+                                if detach {
+                                    // Back to the window that had the focus, with
+                                    // its own mode: create_window parked it.
                                     if let Some(p) = prev_active_id
                                         .and_then(|id| app.windows.iter().position(|w| w.id == id))
                                     {
-                                        app.active_idx = p;
+                                        switch_with_copy_save(app, |app| { app.active_idx = p; });
                                     }
                                 } else if let Some(p) = app.windows.iter().position(|w| w.id == new_id) {
                                     if p != app.active_idx { app.last_window_idx = app.active_idx; }
