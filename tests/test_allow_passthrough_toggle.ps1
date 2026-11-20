@@ -1,13 +1,16 @@
-# allow-passthrough at runtime: off drops a DCS tmux; passthrough unparsed,
-# as tmux does (input.c:2672-2674); on and all keep psmux's old reading,
-# where the parser acts on the wrapped sequence, so a wrapped OSC 52 still
-# copies (an opt in for tools that only write the wrapped form). A change
-# with set -g must apply to a pane that already exists.
+# allow-passthrough at runtime. As in tmux, the pane parser never acts on
+# the body of a DCS tmux; passthrough in any mode: off drops it
+# (input.c:2672-2674), on and all write it raw to the attached clients'
+# outer terminals (screen_write_rawstring), which
+# tests/test_issue1068_passthrough_notify.ps1 checks byte for byte. Before
+# PR #1068 psmux parsed the body with on/all, so a wrapped OSC 52 copied
+# into a paste buffer; it no longer does. A change with set -g must apply
+# to a pane that already exists, and no form may swallow the output after it.
 #
 # One live pane runs a writer per step that writes a wrapped OSC 52 of a tag
 # (closing ST kept or left off, the inbox conhost form) and then a marker.
 # With set-clipboard on a paste buffer holding the tag means the parser acted
-# on the wrapped copy. Steps: off, on, off, all, then set -u (back to off).
+# on the wrapped copy, which must never happen. Steps: off, on, off, all, then set -u (back to off).
 #
 # Runs under a private -L namespace and PSMUX_DATA_DIR; cleans up with
 # `psmux -L <ns> kill-server` only. PSMUX_EXE picks another binary.
@@ -61,8 +64,8 @@ try {
     $step = 0
     $steps = @(
         @('off', $null, $false), @('off', $null, $false, 'lost'),
-        @('on', 'on', $true), @('on', $null, $true, 'lost'),
-        @('off', 'off', $false), @('all', 'all', $true), @('unset', '-u', $false, 'lost')
+        @('on', 'on', $false), @('on', $null, $false, 'lost'),
+        @('off', 'off', $false), @('all', 'all', $false), @('unset', '-u', $false, 'lost')
     )
     foreach ($s in $steps) {
         $step++
@@ -70,6 +73,8 @@ try {
         if ($set -eq '-u') { & $PSMUX -L $ns set -gu allow-passthrough }
         elseif ($set) { & $PSMUX -L $ns set -g allow-passthrough $set }
         $shown = (& $PSMUX -L $ns show -gv allow-passthrough | Out-String).Trim()
+        $wantShown = if ($set -eq '-u') { 'off' } elseif ($set) { $set } else { $null }
+        if ($wantShown -and $shown -ne $wantShown) { Write-Fail "step ${step}: show -gv allow-passthrough = $shown, want $wantShown" }
         $tag = "TAG$step$($label.ToUpper())"
         & $PSMUX -L $ns send-keys -t s "& '$writer' $tag $form" Enter
         if (-not (Wait-Screen "VIS-$tag" 15000)) { Write-Fail "step ${step} ($label): marker VIS-$tag never showed (swallowed?)"; continue }
