@@ -3199,8 +3199,13 @@ impl Screen {
         // XXX really i want to just be able to pass in a default Params
         // instance with a 0 in it, but vte doesn't allow creating new Params
         // instances
+        //
+        // vte hands a bare `CSI m` over as `0` too, so it keeps the OSC 8
+        // link as `CSI 0 m` does. tmux 3.8 takes a shortcut for no
+        // parameters (input.c:2387-2390) that 9e14c1f8 left as it was, and
+        // drops the link there; both console hosts keep it.
         if params.is_empty() {
-            self.attrs = crate::attrs::Attrs::default();
+            self.attrs.reset_rendition();
             return;
         }
 
@@ -3237,7 +3242,7 @@ impl Screen {
 
         loop {
             match next_param!() {
-                [0] => self.attrs = crate::attrs::Attrs::default(),
+                [0] => self.attrs.reset_rendition(),
                 [1] => self.attrs.set_bold(),
                 [2] => self.attrs.set_dim(),
                 [3] => self.attrs.set_italic(true),
