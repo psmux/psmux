@@ -97,6 +97,79 @@ fn asks_palette(params: &[&[u8]]) -> bool {
     }
 }
 
+/// A DECRQSS, `DCS $ q Pt ST`, as tmux reads one (`input_dcs_dispatch`,
+/// input.c:2660-2664, and `input_handle_decrqss`, input.c:2554-2617 at tag
+/// 3.8). Only the start of `Pt` matters: `SP q` asks for the cursor style,
+/// whatever follows it, and anything else is a setting tmux does not know.
+/// A parameter before the `$` changes nothing.
+///
+/// tmux reads everything up to the ST as the string: a CAN, a SUB, an ESC
+/// that does not begin the ST, and the sequences after it (input.c:683-702).
+/// So it answers once, at that ST, and answers nothing the string holds, a
+/// DA1 or another DCS among them. vte ends the DCS at the first of those and
+/// parses the rest, so the string's start is read up to there and the query
+/// waits for the next ST, holding back the queries met meanwhile. tmux gives
+/// up on a DCS 5 seconds after it began (`input_start_ground_timer`,
+/// input.c:826-832, started at input.c:2547), and so does this. A string as
+/// long as `input-buffer-size` is dropped (`INPUT_DISCARD`, input.c:2641).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Decrqss {
+    /// The first two bytes of `Pt` and its length, while vte is in the DCS.
+    reading: Option<([u8; 2], usize)>,
+    /// When the DCS began.
+    since: Option<std::time::Instant>,
+    /// vte has ended the DCS; true when it asked for the cursor style. The
+    /// query is answered at the next ST.
+    open: Option<bool>,
+}
+
+/// tmux's ground timer, after which an unfinished DCS is dropped.
+const GROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl Decrqss {
+    pub(crate) fn hook(&mut self, intermediates: &[u8], action: char) {
+        // A DCS inside the string is part of it.
+        if self.open() {
+            return;
+        }
+        self.open = None;
+        let decrqss = action == 'q' && intermediates == b"$";
+        self.reading = decrqss.then_some(([0; 2], 0));
+        self.since = decrqss.then(std::time::Instant::now);
+    }
+
+    pub(crate) fn put(&mut self, byte: u8) {
+        if let Some((head, len)) = &mut self.reading {
+            if let Some(slot) = head.get_mut(*len) {
+                *slot = byte;
+            }
+            *len += 1;
+            if *len >= crate::perform::input_buffer_size() {
+                self.reading = None;
+            }
+        }
+    }
+
+    pub(crate) fn unhook(&mut self) {
+        if let Some((head, len)) = self.reading.take() {
+            self.open = Some(len >= 2 && head == *b" q");
+        }
+    }
+
+    /// Whether a string is still waiting for its ST, so that what comes is
+    /// part of it.
+    pub(crate) fn open(&self) -> bool {
+        self.open.is_some() && self.since.is_some_and(|t| t.elapsed() < GROUND_TIMEOUT)
+    }
+
+    /// The ST (`ESC \`): whether the string it ends asked for the cursor
+    /// style, or `None` when it ends none.
+    pub(crate) fn st(&mut self) -> Option<bool> {
+        let live = self.open();
+        self.open.take().filter(|_| live)
+    }
+}
+
 /// Detects reply requests before synchronized output reaches the live parser.
 ///
 /// Uses the live parser's query classification without a screen or callbacks.
@@ -126,6 +199,7 @@ impl QueryDetector {
 struct ReplyRequests {
     pending: bool,
     program_status: bool,
+    decrqss: Decrqss,
 }
 
 impl vte::Perform for ReplyRequests {
@@ -136,10 +210,29 @@ impl vte::Perform for ReplyRequests {
         ignore: bool,
         action: char,
     ) {
-        self.pending |= csi_query(params, intermediates, ignore, action).is_some();
+        self.pending |= csi_query(params, intermediates, ignore, action).is_some() && !self.decrqss.open();
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        self.pending |= osc_query(params, self.program_status, bell_terminated).is_some() || asks_palette(params);
+        self.pending |= (osc_query(params, self.program_status, bell_terminated).is_some() || asks_palette(params))
+            && !self.decrqss.open();
+    }
+
+    fn hook(&mut self, _params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+        self.decrqss.hook(intermediates, action);
+    }
+
+    fn put(&mut self, byte: u8) {
+        self.decrqss.put(byte);
+    }
+
+    fn unhook(&mut self) {
+        self.decrqss.unhook();
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates.is_empty() && byte == b'\\' {
+            self.pending |= self.decrqss.st().is_some();
+        }
     }
 }

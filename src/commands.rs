@@ -4205,6 +4205,9 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         fresh.screen_mut().set_pane_colours(parser.screen().pane_colours().cloned());
                         fresh.screen_mut().set_scroll_on_clear(parser.screen().scroll_on_clear());
                         fresh.screen_mut().keep_colours(parser.screen());
+                        // tmux clears only the history, so the cursor style
+                        // the program set stays.
+                        fresh.screen_mut().keep_cursor_style(parser.screen());
                         *parser = fresh;
                     }
                 }

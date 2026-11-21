@@ -424,6 +424,20 @@ The inbox conhost keeps the region and origin mode to itself and hands psmux the
 
 The inbox conhost differs from tmux on purpose: it drops a pane's sixel before psmux sees it, so reporting colour registers there would describe images nothing can draw. A query with more than three parameters gets no reply, as in tmux. psmux reads a parameter as at most 65535, where tmux reads up to `INT_MAX`.
 
+### Cursor Style Query (DECRQSS)
+
+`DCS $ q SP q ST` asks the terminal for the cursor style. psmux answers it as tmux's `input_handle_decrqss` does: the style the program set with DECSCUSR (`CSI n SP q`), 1 to 6, or, when it set none or set 0, the number `cursor-style` gives, 0 for `default`. `CSI ? 12 h` and `l` turn the blink of a shape on and off. RIS and `respawn-pane` keep the shape and drop the blink, and `clear-history` keeps both. Any other setting asked this way (SGR, DECSTBM and the rest) gets `DCS 0 $ r ST`, a setting the terminal does not report, as in tmux.
+
+| Pane's console host | Cursor style | Any other setting |
+|---|---|---|
+| OpenConsole (`PSMUX_CONPTY_DIR`) | `DCS 1 $ r n SP q ST`, from psmux | `DCS 0 $ r ST`, from psmux |
+| Inbox conhost, build 26300 | `DCS 0 $ r ST`, the host's own | the host's own answer: it reports SGR, DECSTBM and DECSCA |
+| Inbox conhost, build 19045 (Windows 10) | no reply | no reply |
+
+The inbox conhost never passes DECRQSS on, so psmux cannot answer there. The Windows 10 one does not know it either: it drops the `DCS` and the `ST` and shows the rest, `$ q SP q`, as text.
+
+The reply differs from tmux's in one place. tmux writes `DCS 1 $ r SP q n SP q ST`, with the query's own `SP q` before the number. The VT510's DECRPSS reply carries "all the characters in the control function, except the CSI", so for `CSI 2 SP q` it is `DCS 1 $ r 2 SP q ST`, and a program that reads it that way, psmux's own client among them, reads tmux's form as an empty number, so as 0. psmux writes the standard form, with the same number tmux picks. `cursor-style` is one value for the whole server in psmux, so a pane's own `set -p cursor-style` is refused rather than answered.
+
 ### Tab Stops (HTS, TBC, CBT, HPA)
 
 Each pane keeps a table of tab stops, every 8 columns to begin with, which `#{pane_tabs}` lists, as tmux keeps `s->tabs`:
