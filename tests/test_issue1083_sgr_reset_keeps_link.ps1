@@ -8,7 +8,9 @@
 # keeps it there too, as both console hosts do.
 #
 #   1. the inbox console host keeps the link itself and redraws the text with
-#      its own OSC 8 and no reset, so psmux shows the link on master too
+#      its own OSC 8 and no reset, so psmux shows the link on master too; the
+#      Windows 10 inbox conhost sends OSC 8 ahead of its text, so there no
+#      letter has a link
 #   2. OpenConsole, with PSMUX_CONPTY_DIR_FOR_TEST (a directory with conpty.dll
 #      and OpenConsole.exe; skipped without it), passes the program's bytes on
 #
@@ -147,12 +149,15 @@ $Cases = @(
     @('alternate screen entered in the link', "${OPEN}x\e[?1049h\e[0m${CLOSE}\e[?1049ly${CLOSE}z", 'LL.')
 )
 
-function Run-Host($label) {
+function Run-Host($label, [switch]$NoLinks) {
     $script:NS = "sgrlink_" + [guid]::NewGuid().ToString('N').Substring(0, 6)
     P new-session -d -s s -x 120 -y 30 | Out-Null
     Start-Sleep -Milliseconds 2500
     foreach ($c in $Cases) {
-        Check "${label}: $($c[0])" (Links $c[1]) $c[2]
+        $want = $c[2]
+        # A host that sends OSC 8 ahead of the text hands psmux the letters with no link.
+        if ($NoLinks) { $want = $want -replace '\([^)]*\)', '.' -replace 'L', '.' }
+        Check "${label}: $($c[0])" (Links $c[1]) $want
     }
     P kill-server | Out-Null
     Start-Sleep -Milliseconds 500
@@ -160,7 +165,18 @@ function Run-Host($label) {
 
 Write-Host "=== SGR 0 inside an OSC 8 link keeps the link ===" -ForegroundColor Cyan
 Write-Host "  -- the inbox console host" -ForegroundColor DarkCyan
-Run-Host 'inbox conhost'
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    # The Windows 10 inbox conhost (build 19045) hands psmux the program's
+    # OSC 8 sequences ahead of the text they wrap, the opening and the
+    # closing one together, so the link has ended before the first letter
+    # and no letter can carry it (test_issue361_osc8_hyperlink.ps1 finds no
+    # link there either). The cases still check that the text arrives and
+    # that no link turns up.
+    Write-Info "Windows 10 inbox conhost: OSC 8 arrives ahead of its text, so every letter is expected without a link"
+    Run-Host 'inbox conhost' -NoLinks
+} else {
+    Run-Host 'inbox conhost'
+}
 
 if ($ConptyDir -and (Test-Path (Join-Path $ConptyDir 'conpty.dll'))) {
     Write-Host "  -- OpenConsole ($ConptyDir)" -ForegroundColor DarkCyan
