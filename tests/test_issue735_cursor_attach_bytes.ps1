@@ -81,13 +81,32 @@ set PSMUX=
     Remove-Item $outBin -Force -EA SilentlyContinue
     $env:CONPTYCAP_DRAIN_MS = "20000"
     $cap = Start-Process -FilePath $capExe -ArgumentList @($outBin, "100", "30", "8", $launch) -WindowStyle Minimized -PassThru
-    Start-Sleep -Milliseconds 2500
+    # Wait for the client to be attached before detaching it. A fixed sleep let
+    # a slow (loaded) client be detached before it registered, so in sweep
+    # 2026-11-21_01-34-45 the detach reset never got written (`held []`).
+    $attached = $false
+    for ($i = 0; $i -lt 100; $i++) {
+        $cl = & $PSMUX -L $SOCK list-clients -t $Name 2>$null
+        if ($cl) { $attached = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $attached) { Write-Host "  (diag) client for $Name never showed in list-clients after 10 s" }
+    Start-Sleep -Milliseconds 1500
     if ($PaneCode) {
-        & $PSMUX -L $SOCK send-keys -t $Name ('Write-Host -NoNewline ([char]27 + "[' + $PaneCode + ' q")') Enter 2>&1 | Out-Null
-        Start-Sleep -Milliseconds 2000
+        # Print a marker after the DECSCUSR and wait for it: under load the pane
+        # shell can take longer than a fixed 2 s to start and run the line.
+        & $PSMUX -L $SOCK send-keys -t $Name ('Write-Host -NoNewline ([char]27 + "[' + $PaneCode + ' q"); Write-Host ("P735" + "DONE")') Enter 2>&1 | Out-Null
+        $seen = $false
+        for ($i = 0; $i -lt 200; $i++) {
+            $pc = (& $PSMUX -L $SOCK capture-pane -p -t $Name 2>$null) -join "`n"
+            if ($pc -match 'P735DONE') { $seen = $true; break }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $seen) { Write-Host "  (diag) pane $Name never printed its marker in 20 s" }
+        Start-Sleep -Milliseconds 500
     }
     & $PSMUX -L $SOCK detach-client -s $Name 2>&1 | Out-Null
-    if (-not $cap.WaitForExit(30000)) { try { Stop-Process -Id $cap.Id -Force } catch {} }
+    if (-not $cap.WaitForExit(30000)) { Write-Host "  (diag) capture for $Name still running 30 s after detach, killed"; try { Stop-Process -Id $cap.Id -Force } catch {} }
     & $PSMUX -L $SOCK kill-session -t $Name 2>&1 | Out-Null
     if (-not (Test-Path $outBin)) { return $null }
     return [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($outBin))
