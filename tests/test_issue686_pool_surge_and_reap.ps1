@@ -129,6 +129,24 @@ function Get-ServerPid {
     return 0
 }
 
+# Children left behind by a server that is now gone. The parent pid alone is not
+# enough: Windows reuses pids, and boot processes such as csrss.exe and
+# wininit.exe keep the pid of an smss.exe instance that exited at boot as their
+# ParentProcessId. Sweep 2026-11-21_15-34-11 handed the server that same pid, so
+# this suite counted csrss and wininit as orphan pane shells and then tried to
+# Stop-Process them. Only a process created after the server started can be its
+# child.
+function Get-ServerStart([int]$ServerPid) {
+    $s = Get-CimInstance Win32_Process -Filter "ProcessId=$ServerPid" -EA SilentlyContinue
+    if ($s) { return $s.CreationDate }
+    return $null
+}
+function Get-Orphans([int]$ServerPid, $ServerStart) {
+    if (-not $ServerStart) { return @() }
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ServerPid" -EA SilentlyContinue |
+             Where-Object { $_.CreationDate -ge $ServerStart })
+}
+
 Cleanup
 
 # ---------------------------------------------------------------- 1. the burst
@@ -270,6 +288,7 @@ for ($r = 1; $r -le $LeakRounds; $r++) {
     Start-Sleep -Milliseconds 900
     $srvPid = Get-ServerPid
     if ($srvPid -eq 0) { Write-Fail "round ${r}: no server"; continue }
+    $srvStart = Get-ServerStart $srvPid
     # Six creations back to back open a surge, then the kill lands in the
     # middle of it: several spares exist whose spawn has not reached the
     # server loop yet.
@@ -279,9 +298,8 @@ for ($r = 1; $r -le $LeakRounds; $r++) {
 
     $stillAlive = @(Get-CimInstance Win32_Process -Filter "ProcessId=$srvPid" -EA SilentlyContinue)
     if ($stillAlive.Count -gt 0) { Write-Fail "round ${r}: server $srvPid survived kill-server" }
-    # Children of a pid that is gone: only this suite's own pane shells can
-    # match, because the parent pid is the server we just started.
-    $orph = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$srvPid" -EA SilentlyContinue)
+    # Children of a pid that is gone, created after that server started.
+    $orph = Get-Orphans $srvPid $srvStart
     if ($orph.Count -gt 0) {
         Write-Info "round ${r}: $($orph.Count) orphan(s): $(($orph | ForEach-Object { "$($_.Name)/$($_.ProcessId)" }) -join ' ')"
         $leaked += $orph.Count
@@ -314,6 +332,7 @@ for ($r = 1; $r -le $LeakRounds; $r++) {
     Start-Sleep -Milliseconds 900
     $srvPid = Get-ServerPid
     if ($srvPid -eq 0) { Write-Fail "slow round ${r}: no server"; continue }
+    $srvStart = Get-ServerStart $srvPid
     for ($i = 1; $i -le 6; $i++) { & $Binary -L $Ns new-window -t "slow${r}:" 2>&1 | Out-Null }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     & $Binary -L $Ns kill-server 2>&1 | Out-Null
@@ -321,7 +340,7 @@ for ($r = 1; $r -le $LeakRounds; $r++) {
     Start-Sleep -Seconds 4
     $stillAlive = @(Get-CimInstance Win32_Process -Filter "ProcessId=$srvPid" -EA SilentlyContinue)
     if ($stillAlive.Count -gt 0) { Write-Fail "slow round ${r}: server $srvPid survived kill-server" }
-    $orph = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$srvPid" -EA SilentlyContinue)
+    $orph = Get-Orphans $srvPid $srvStart
     Write-Info "slow round ${r}: kill-server took ${killMs}ms, $($orph.Count) orphan(s) $(($orph | ForEach-Object { "$($_.Name)/$($_.ProcessId)" }) -join ' ')"
     if ($orph.Count -gt 0) {
         $slowLeaked += $orph.Count

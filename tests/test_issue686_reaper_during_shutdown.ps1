@@ -59,7 +59,13 @@ for ($r = 1; $r -le $Rounds; $r++) {
     $h.WaitForExit(8000) | Out-Null
     Start-Sleep -Seconds 3
     $code = $h.ExitCode
-    $orph = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$srv" -EA SilentlyContinue)
+    # Only processes created after the server started: Windows reuses pids, and
+    # boot processes (csrss.exe, wininit.exe) carry a long dead smss pid as their
+    # parent. A server handed that pid once made test_issue686_pool_surge_and_reap
+    # count them as orphans and try to Stop-Process them (sweep 2026-11-21_15-34-11).
+    $srvStart = $h.StartTime
+    $orph = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$srv" -EA SilentlyContinue |
+              Where-Object { $_.CreationDate -ge $srvStart })
     Write-Info "round ${r}: server $srv exit code $code, $($orph.Count) orphan(s) $(($orph | ForEach-Object { "$($_.Name)/$($_.ProcessId)" }) -join ' ')"
     if ($code -ne 0) { $selfKilled++ }
     if ($orph.Count -gt 0) {

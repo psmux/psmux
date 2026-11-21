@@ -153,8 +153,15 @@ set NO_COLOR=
     $log = Get-Content "$outBin.log" -Raw -EA SilentlyContinue
     if ($log -match 'childPid=(\d+)') {
         $cpid = [int]$Matches[1]
-        Get-CimInstance Win32_Process -Filter "ParentProcessId=$cpid" -EA SilentlyContinue | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-        Stop-Process -Id $cpid -Force -EA SilentlyContinue
+        # $cpid may be gone by now and its pid reused, and boot processes keep a
+        # dead pid as their parent: only touch processes created after the
+        # capture started, so nothing older than this suite can ever match.
+        $capStart = $cap.StartTime
+        Get-CimInstance Win32_Process -Filter "ParentProcessId=$cpid" -EA SilentlyContinue |
+            Where-Object { $_.CreationDate -ge $capStart } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
+        $cp = Get-CimInstance Win32_Process -Filter "ProcessId=$cpid" -EA SilentlyContinue
+        if ($cp -and $cp.CreationDate -ge $capStart) { Stop-Process -Id $cpid -Force -EA SilentlyContinue }
     }
     if (-not (Test-Path $outBin)) { return $null }
     return [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($outBin))
