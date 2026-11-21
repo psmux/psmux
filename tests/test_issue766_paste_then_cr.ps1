@@ -127,6 +127,16 @@ try {
             for ($i = 1; $i -le $Reps; $i++) {
                 $r = Invoke-Case "con$delay$kind$i" $file $text $delay $false
                 if (-not $r.Ready) { continue }
+                if (-not $r.CrAfter -and -not $W10) {
+                    # One retry for a miss. Sweep 2026-11-21_15-34-11 lost one
+                    # 200 ms ascii run in three under full sweep load, while the
+                    # same binary landed the CR after ESC[201~ in 80/80 runs idle.
+                    # The bug this guards held the paste to about +310 ms and
+                    # missed every run, so a miss that repeats still fails.
+                    Write-Info "[$delay ms $kind] run ${i}: CR inside the paste, retrying once"
+                    $r2 = Invoke-Case "con$delay${kind}${i}r" $file $text $delay $false
+                    if ($r2.Ready) { $r = $r2 }
+                }
                 $ready++; $runs++
                 if ($r.CrAfter) { $after++ }
                 if ($r.HeadLeak) { $leaks++ }

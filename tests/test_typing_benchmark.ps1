@@ -64,7 +64,13 @@ param(
     [switch]$SkipDirect,
     # Set PSMUX_PTY_TRACE=<TraceDir>\trace for the client and the server it
     # starts, so a slow key can be followed hop by hop (src/pty_trace.rs).
-    [string]$TraceDir = ""
+    [string]$TraceDir = "",
+    # Type these lines (one per line, UTF-8) instead of the built in sentences,
+    # and file the metrics under another suite name. test_long_paragraph_benchmark
+    # uses this for its ~260 character paragraphs at 15 ms per key.
+    [string]$TextFile = "",
+    [string]$SuiteName = "test_typing_benchmark",
+    [string]$MetricsStem = "typing-benchmark"
 )
 
 $ErrorActionPreference = "Continue"
@@ -118,6 +124,10 @@ $sentences = @(
     "back in june we delivered oxygen equipment of the same size to the city"
     "playing a quiet game of chess with the king requires very careful moves"
 )
+if ($TextFile) {
+    $sentences = @(Get-Content -LiteralPath $TextFile -Encoding UTF8 | Where-Object { $_.Trim() })
+    if ($sentences.Count -eq 0) { Write-Fail "no text in $TextFile"; exit 1 }
+}
 
 $NS = "typbench$PID"
 $S = "bench"
@@ -266,7 +276,7 @@ if ($cStats.n -ge [math]::Ceiling($CtrlCRepeats / 2) -and $cStats.p50 -le $MaxCt
     Write-Fail "first key after Ctrl+C: median $($cStats.p50)ms over $($cStats.n) presses > ${MaxCtrlCFirstMs}ms (the Ctrl+C router holds the server's input thread)"
 }
 
-$jsonPath = Write-PerfMetrics -Suite "test_typing_benchmark" -Binary $Binary -FileStem "typing-benchmark" -Data ([ordered]@{
+$jsonPath = Write-PerfMetrics -Suite $SuiteName -Binary $Binary -FileStem $MetricsStem -Data ([ordered]@{
     interval_ms           = $IntervalMs
     thresholds            = [ordered]@{ max_p99_ms = $MaxP99Ms; max_char_ms = $MaxCharMs; max_ctrlc_first_ms = $MaxCtrlCFirstMs }
     psmux_per_char        = $pStats
