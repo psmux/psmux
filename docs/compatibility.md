@@ -260,6 +260,12 @@ One place follows the console hosts, which agree with each other, rather than tm
 
 The inbox conhost does all of this itself and hands psmux the result. Through OpenConsole (`PSMUX_CONPTY_DIR`) psmux reads the sequences.
 
+### Hyperlinks Through an Attribute Reset (OSC 8)
+
+An OSC 8 hyperlink is not a graphic rendition, so SGR 0 (`ESC [ 0 m`, `ESC [ m`, `ESC [ 1 ; 0 m` and the like) resets the colours and attributes and leaves the link alone. Only OSC 8 itself ends the link, or a full reset (`ESC c`). tmux keeps the link the same way, and so do both console hosts: the inbox conhost even writes its own `ESC [ m` inside a link when the colour goes back to the default.
+
+One form follows the console hosts rather than tmux 3.8: tmux ends the link at an `ESC [ m` with no parameter, which psmux keeps as it keeps `ESC [ 0 m`.
+
 ### Window-scoped Options
 
 Every window carries its own option table, so a window-scoped write reaches one window and nothing else (#648, from the #647 WIN-01 report):
