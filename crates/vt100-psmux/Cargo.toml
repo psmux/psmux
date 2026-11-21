@@ -215,3 +215,7 @@ version = "0.4.4"
 [[test]]
 name = "host_notifications"
 path = "tests/host_notifications.rs"
+
+[[test]]
+name = "sgr_reset_link"
+path = "tests/sgr_reset_link.rs"
