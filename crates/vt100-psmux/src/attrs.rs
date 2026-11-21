@@ -119,6 +119,25 @@ impl Attrs {
         }
     }
 
+    /// SGR 0: every graphic rendition back to the default, but the OSC 8
+    /// link stays. A link is not a rendition: only OSC 8 itself ends it, or
+    /// a full reset (RIS). tmux keeps it the same way (input.c:2415-2418 at
+    /// tag 3.8, from 9e14c1f8 "SGR 0 should not end hyperlink"), and so do
+    /// both console hosts.
+    pub fn reset_rendition(&mut self) {
+        // Without a link, which is nearly every SGR 0, this stays the store
+        // of a constant it was: carrying the link over unconditionally cost
+        // about 2% on an SGR heavy stream.
+        if self.link == 0 {
+            *self = Self::default();
+        } else {
+            *self = Self {
+                link: self.link,
+                ..Self::default()
+            };
+        }
+    }
+
     pub fn bold(&self) -> bool {
         self.mode & TEXT_MODE_BOLD != 0
     }
