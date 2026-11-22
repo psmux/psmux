@@ -235,10 +235,14 @@ Check (Test-XtReply $xt2) "an injection still works from the console-less server
 & $PSMUX -L $NS send-keys -t $sp "clear" Enter
 Start-Sleep -Milliseconds 800
 & $PSMUX -L $NS send-keys -t $sp "ping -t 127.0.0.1" Enter
-$pinging = Wait-Capture $NS $sp 'Reply from 127\.0\.0\.1' 8000
+# ping's text follows the system language (a Japanese Windows prints neither
+# "Reply from" nor "Control-C"), so these look for TTL= on each reply, which
+# the typed command line does not have, and, once ping has stopped, a prompt
+# after the replies.
+$pinging = Wait-Capture $NS $sp 'TTL=\d+' 8000
 Start-Sleep -Milliseconds 1000
 & $PSMUX -L $NS send-keys -t $sp C-c
-$c = Wait-Capture $NS $sp 'Control-C|Ping statistics' 8000
+$c = Wait-Capture $NS $sp 'TTL=\d+[\s\S]*\nPS [A-Z]:\\[^\n]*>' 8000
 Check ($pinging -and $c) "send-keys C-c interrupts ping in a pane" "ping was not interrupted by C-c (pinging=$([bool]$pinging))"
 $rs = (& $PSMUX -L $NS run-shell -t t1 "cmd /c echo RS761" 2>&1) -join ' '
 Check ($rs -match 'RS761') "run-shell output comes back: $rs" "run-shell output missing: $rs"
