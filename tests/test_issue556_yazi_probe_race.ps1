@@ -25,6 +25,10 @@ $psmuxDir = "$env:USERPROFILE\.psmux"
 $PROBE = Join-Path $PSScriptRoot "color_query_timing_probe.js"
 $outDir = Join-Path $env:TEMP "psmux_test_556"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+# The Windows 10 inbox conhost (build 19045) holds a query written on its own
+# until it next draws text, so there the probe writes a "." after its queries
+# (PROBE_PAINT); see color_query_timing_probe.js.
+$PAINT = if ([Environment]::OSVersion.Version.Build -lt 22000) { "1" } else { "" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
@@ -50,7 +54,7 @@ function Wait-Prompt($name) {
 function Invoke-TimingProbe($name, $tag) {
     $outFile = Join-Path $outDir "timing_${name}_${tag}.json"
     Remove-Item $outFile -Force -EA SilentlyContinue
-    & $PSMUX send-keys -t $name "`$env:PROBE_OUT='$outFile'; & '$NODE' '$PROBE'" Enter
+    & $PSMUX send-keys -t $name "`$env:PROBE_OUT='$outFile'; `$env:PROBE_PAINT='$PAINT'; & '$NODE' '$PROBE'" Enter
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Path $outFile) { break }
@@ -143,7 +147,7 @@ if (-not (Wait-Prompt $S3)) { Write-Fail "Part 3: prompt never ready" }
 else {
     $out = Join-Path $outDir "timing_burst_p3.json"
     Remove-Item $out -Force -EA SilentlyContinue
-    & $PSMUX send-keys -t $S3 "`$env:PROBE_OUT='$out'; `$env:PROBE_TERM='st'; `$env:PROBE_BUNDLE='b473'; & '$NODE' '$PROBE'" Enter
+    & $PSMUX send-keys -t $S3 "`$env:PROBE_OUT='$out'; `$env:PROBE_TERM='st'; `$env:PROBE_BUNDLE='b473'; `$env:PROBE_PAINT='$PAINT'; & '$NODE' '$PROBE'" Enter
     for ($i = 0; $i -lt 30; $i++) { Start-Sleep -Milliseconds 500; if (Test-Path $out) { break } }
     Start-Sleep -Milliseconds 300
     if (-not (Test-Path $out)) { Write-Fail "Part 3: probe produced no result" }

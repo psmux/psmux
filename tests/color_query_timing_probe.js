@@ -13,6 +13,11 @@
 //   raceLost - true when OSC 11 arrived AFTER DA1 (outside yazi's window)
 //
 // Env: PROBE_OUT - result JSON path (default probe_timing.json)
+//      PROBE_PAINT=1 - write a "." right after the bundle, in the same write.
+//                      The Windows 10 inbox conhost (build 19045) holds a
+//                      query written on its own and hands it to psmux only
+//                      with the next text it draws, so without text after it
+//                      no answer comes there.
 const fs = require("fs");
 const t0 = process.hrtime.bigint();
 const events = [];
@@ -58,7 +63,7 @@ const bundles = {
   osc1011: osc10q + osc11q,                       // OSC 10 then 11 only
   osc114: osc11q + osc4s,                         // OSC 11 then the OSC 4s
 };
-process.stdout.write(bundles[process.env.PROBE_BUNDLE || "yazi"]);
+process.stdout.write(bundles[process.env.PROBE_BUNDLE || "yazi"] + (process.env.PROBE_PAINT === "1" ? "." : ""));
 
 setTimeout(() => {
   const result = {
