@@ -1534,7 +1534,8 @@ fn expand_client_var(var: &str, app: &AppState) -> Option<String> {
         // tmux lists the feature whatever `Spb` then does with it (measured
         // from tmux 3.8 with `Spb@`), so only `terminal-features` decides here.
         "client_termfeatures" => format_client(app).map(|ci| {
-            let progressbar = crate::terminal_features::progressbar_enabled(
+            let progressbar = crate::terminal_features::progressbar_enabled_for(
+                ci.termfeatures.contains(crate::terminal_features::TerminalFeatures::PROGRESSBAR),
                 app.terminal_features.iter().map(|(_, entry)| entry),
                 &ci.term,
             );

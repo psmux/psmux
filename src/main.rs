@@ -1067,7 +1067,7 @@ pub(crate) fn missing_session_cli_wording(cmd: &str) -> Option<&'static str> {
 fn process_command_index(args: &[String]) -> Option<usize> {
     let mut i = 1;
     while i < args.len() {
-        if matches!(args[i].as_str(), "-t" | "-L" | "-f" | "-S") && i + 1 < args.len() {
+        if matches!(args[i].as_str(), "-t" | "-L" | "-f" | "-S" | "-T") && i + 1 < args.len() {
             i += 2;
         } else if matches!(args[i].as_str(), "-h" | "--help" | "-V" | "-v" | "--version") {
             return Some(i);
@@ -1134,11 +1134,11 @@ mod process_command_arg_tests {
 }
 
 /// Global (pre-subcommand) options that take a value, mirroring the value
-/// letters psmux's own global scanner consumes (`-L`, `-f`, `-S`, `-t`).
+/// letters psmux's own global scanner consumes (`-L`, `-f`, `-S`, `-T`, `-t`).
 /// tmux's own program options go through getopt(3), which reports
 /// `option requires an argument -- L`; psmux uses the same wording as the
 /// per-command check so there is exactly one message for this class of error.
-const GLOBAL_VALUE_FLAGS: &[&str] = &["-t", "-L", "-f", "-S"];
+const GLOBAL_VALUE_FLAGS: &[&str] = &["-t", "-L", "-f", "-S", "-T"];
 
 /// Issue #635: reject `psmux [globals] <command> ... -X` where `-X` is a
 /// value-taking flag with nothing after it, before ANY side effect. Exits the
@@ -1430,7 +1430,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                     args[i + 1] = v;
                 }
             }
-            i += if matches!(args[i].as_str(), "-t" | "-L" | "-f" | "-S") { 2 } else { 1 };
+            i += if matches!(args[i].as_str(), "-t" | "-L" | "-f" | "-S" | "-T") { 2 } else { 1 };
         }
     }
     // A list led by a command that runs alone (`ls \; ...`, `run-shell ...
@@ -1487,6 +1487,8 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
     let mut control_mode: u8 = 0; // 0=off, 1=-C (echo), 2=-CC (no echo)
     // `-f scrollback` on attach-session or new-session (crate::scrollback).
     let mut scrollback: Option<crate::cli::ClientFlags> = None;
+    // `-T features`, as many times as it is given (tmux.c:476 at tag 3.8).
+    let mut client_flag_features = crate::terminal_features::TerminalFeatures::from_bits(0);
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
@@ -1509,6 +1511,9 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             } else if arg == "-S" && i + 1 < args.len() {
                 s_socket_path = Some(args[i + 1].clone());
                 i += 2;
+            } else if arg == "-T" && i + 1 < args.len() {
+                client_flag_features = client_flag_features.with_client_flag(&args[i + 1]);
+                i += 2;
             } else if arg.starts_with('-') {
                 i += 1; // skip single global flags (e.g. -v, -V)
             } else {
@@ -1516,6 +1521,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
             }
         }
     }
+
+    // Issue #1080: what `-T` says the outer terminal does is this client's
+    // to report when it attaches. The value used to be read as the command.
+    crate::terminal_features::set_client_flag_features(client_flag_features);
 
     // A `-L` name starts the file name of every registry entry it holds, so a
     // character Windows cannot keep in a file name (`-L x:y`) wrote the
@@ -2258,6 +2267,10 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                         let exe = env::current_exe()?;
                         let mut child = std::process::Command::new(exe);
                         if let Some(ref l) = l_socket_name { child.arg("-L").arg(l); }
+                        // The child attaches, so it carries this client's `-T`.
+                        if client_flag_features.bits() != 0 {
+                            child.arg("-T").arg(client_flag_features.to_string());
+                        }
                         // This is the config's `new-session`, run for it, so
                         // the session runs only some of the config's commands
                         // (config::made_session_runs): its own `new-session`
@@ -7578,3 +7591,7 @@ mod tests_issue830_show_buffer_newline;
 #[cfg(test)]
 #[path = "../tests-rs/test_cc_debug_log_optin.rs"]
 mod tests_cc_debug_log_optin;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1080_client_features_flag.rs"]
+mod tests_issue1080_client_features_flag;

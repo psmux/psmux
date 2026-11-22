@@ -606,10 +606,11 @@ These are parsed before psmux looks at the command name.
 | `-CC` | Control mode without command echo. |
 | `-t <target>` | Target `session`, `session:window` or `session:window.pane` for the command that follows. |
 | `-S <path>` | Selects the server for that path, and wins over `-L` as in tmux. A path inside the psmux data dir (`<dir>/<label>`, what `#{socket_path}` prints) or the `$TMUX` first field selects that label; any other path selects a private namespace keyed by a hash of the normalized absolute path, so every spelling of one path reaches one server. `#{socket_path}` and the first field of `$TMUX` in its panes report the path as given. |
+| `-T <features>` | Features of the terminal the client runs in, as in tmux: names from the `terminal-features` list split at `,` or `:`, in any case, `name@` to take one back out, and a name tmux does not know ends the list. They are added to the ones the client detects and show in `#{client_termfeatures}`; `terminal-features` is read on top of them. psmux keeps `256`, `RGB`, `hyperlinks`, `title` and `progressbar`, and reads the other names without effect. |
 | `-h`, `--help` | Usage. |
 | `-V`, `-v`, `--version` | Version. |
 
-Glued short flags of the form `-x=VALUE` are normalized to `-x VALUE` before parsing. tmux's attached spellings are accepted too: `-Lwork` is `-L work`, and a command level `-tname` is `-t name`.
+Glued short flags of the form `-x=VALUE` are normalized to `-x VALUE` before parsing. tmux's attached spellings are accepted too: `-Lwork` is `-L work`, `-TRGB` is `-T RGB`, and a command level `-tname` is `-t name`.
 
 When a command carries no `-t` at all, psmux picks the session the way tmux's `cmd_find_best_session` does (#603): a `$TMUX` inherited from the pane you are typing in wins if it belongs to the requested namespace, otherwise the session with the newest activity does, where activity is stamped on attach, on `switch-client`, and on every key an attached client sends. The `last_session` file is only a tie break. See the target syntax section of [scripting.md](scripting.md) for the full rule.
 
