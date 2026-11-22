@@ -20,6 +20,9 @@
 #                            which it does only for a leaf marked wants_mouse
 #   shell prompt             pwsh -NoProfile: the wheel still enters copy mode
 #   mouse off                the reader gets nothing
+#   reader exits             run from a pwsh prompt, then quit: the wheel at
+#                            the prompt enters copy mode again, although the
+#                            reader may leave its console mode behind
 # It expects the same on every build: on 22523 and above the host publishes the
 # reader's mode, so these passed there already.
 #
@@ -74,7 +77,7 @@ function Run-Case([string[]]$cmd, [bool]$mouse, [scriptblock]$act) {
         Start-Sleep -Seconds 4
         $c = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" | Where-Object { $_.Name -eq 'psmux.exe' } | Select-Object -First 1
         if (-not $c) { return $null }
-        & $act ([int]$c.ProcessId)
+        & $act ([int]$c.ProcessId) $ns
         Start-Sleep -Seconds 1
         $mode = ((& $PSMUX -L $ns display-message -p -t w '#{pane_in_mode}') -join '').Trim()
         $log = if (Test-Path $natLog) { @(Get-Content $natLog) } else { @() }
@@ -143,6 +146,25 @@ else {
     $m = @($r.Log | Where-Object { $_ -match '^MOUSE' })
     if ($m.Count -eq 0) { Write-Pass "no records with mouse off" }
     else { Write-Fail "$($m.Count) records with mouse off" }
+}
+
+Write-Host "`n[7] a record reader exits: the wheel at the prompt enters copy mode again" -ForegroundColor Yellow
+$r = Run-Case @('pwsh', '-NoProfile') $true {
+    param($id, $ns)
+    & $PSMUX -L $ns send-keys -t w "& '$nat'" Enter | Out-Null
+    Start-Sleep -Seconds 3
+    & $wheel $id up 1 20 8 | Out-Null; Start-Sleep -Milliseconds 600
+    & $PSMUX -L $ns send-keys -t w C-z | Out-Null    # native_mouse_child quits on Ctrl+Z
+    Start-Sleep -Seconds 4
+    & $wheel $id up 1 20 8 | Out-Null; Start-Sleep -Milliseconds 600
+}
+if ($null -eq $r) { Write-Fail "client did not start" }
+else {
+    $w = @($r.Log | Where-Object { $_ -match '^MOUSE .*flags=0x4 wheel=\d' })
+    if ($w.Count -eq 1 -and ($r.Log -contains 'NATIVE_MOUSE END')) { Write-Pass "the reader got the notch while it ran, then quit" }
+    else { Write-Fail "the reader got $($w.Count) wheel records and $(if ($r.Log -contains 'NATIVE_MOUSE END') { 'quit' } else { 'did not quit' })" }
+    if ($r.InMode -eq '1') { Write-Pass "the wheel at the prompt after it entered copy mode" }
+    else { Write-Fail "the wheel at the prompt after the reader quit did not enter copy mode (pane_in_mode=$($r.InMode))" }
 }
 
 if ($savedConpty) { $env:PSMUX_CONPTY_DIR = $savedConpty }
