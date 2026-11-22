@@ -65,7 +65,11 @@ if (-not (Test-Path $probe)) {
     Write-Fail "could not compile query_probe_child.cs"
 } else {
     $log = Join-Path $work "probe.txt"
-    & $PSMUX -L $NS new-session -d -s p1 -x 100 -y 30 "$probe $log 600" 2>&1 | Out-Null
+    # The Windows 10 inbox conhost (build 19045) hands psmux a query only when
+    # it next draws something, so there the probe writes a letter after each
+    # query (see query_probe_child.cs).
+    $paint = if ([Environment]::OSVersion.Version.Build -lt 22000) { " paint" } else { "" }
+    & $PSMUX -L $NS new-session -d -s p1 -x 100 -y 30 "$probe $log 600$paint" 2>&1 | Out-Null
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline -and -not (Test-Path $log)) { Start-Sleep -Milliseconds 300 }
     Start-Sleep -Milliseconds 300

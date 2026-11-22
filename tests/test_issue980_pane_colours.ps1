@@ -63,6 +63,11 @@ function Lines($text) { ($text -replace "`r", "").TrimEnd("`n") }
 
 $started = @()
 
+# The Windows 10 inbox conhost (build 19045) hands psmux a query only when it
+# next draws something, so there the query panes write a letter after each
+# part of their sequence (see seq_emit980.cs).
+$paint = if ([Environment]::OSVersion.Version.Build -lt 22000) { " paint" } else { "" }
+
 # A pane child that writes `seq` (spelled as seq_emit980.cs reads it) and
 # logs what psmux types back.  Returns the log once the child wrote it.
 function Wait-Log($log, $seconds) {
@@ -123,7 +128,7 @@ Start-Sleep -Seconds 2
 
 Write-Host "`n=== Group 0: a server that never sets pane-colours is as before ===" -ForegroundColor Cyan
 $log0 = "$OUT\q0.log"
-P new-window -d -t base -n q0 "$emit $log0 \e]4\s1\s?\a 2500 10" | Out-Null
+P new-window -d -t base -n q0 "$emit $log0 \e]4\s1\s?\a 2500 10$paint" | Out-Null
 $r0 = Replies (Wait-Log $log0 20)
 if ($r0.Count -eq 1 -and $r0[0] -ne "rgb:0000/ffff/0000") {
     Write-Pass "OSC 4 ; 1 ; ? with no pane-colours reports the terminal's colour ($($r0[0]))"
@@ -218,7 +223,7 @@ P kill-window -t base:d2 | Out-Null
 
 Write-Host "`n=== Group 3: OSC 4 queries report it ===" -ForegroundColor Cyan
 $log1 = "$OUT\q1.log"
-P new-window -d -t base -n q1 "$emit $log1 \e]4\s1\s?\a\p\e]4\s1\srgb:11/22/33\a\p\e]4\s1\s?\a\p\e]104\s1\a\p\e]4\s1\s?\a 2500 10" | Out-Null
+P new-window -d -t base -n q1 "$emit $log1 \e]4\s1\s?\a\p\e]4\s1\srgb:11/22/33\a\p\e]4\s1\s?\a\p\e]104\s1\a\p\e]4\s1\s?\a 2500 10$paint" | Out-Null
 $r1 = Replies (Wait-Log $log1 30)
 if ($r1.Count -ge 1 -and $r1[0] -eq "rgb:0000/ffff/0000") { Write-Pass "OSC 4 ; 1 ; ? reports pane-colours[1] (master: the terminal's red)" }
 else { Write-Fail "first OSC 4 ; 1 ; ? gave '$($r1 -join ',')'" }
@@ -231,7 +236,7 @@ P kill-window -t base:q1 | Out-Null
 Write-Host "`n=== Group 4: the first table that holds it wins whole ===" -ForegroundColor Cyan
 # A window table set while the pane runs (the child pauses three seconds).
 $log2 = "$OUT\q2.log"
-P new-window -d -t base -n q2 "$emit $log2 \p\p\p\e]4\s1\s?\a 2500 10" | Out-Null
+P new-window -d -t base -n q2 "$emit $log2 \p\p\p\e]4\s1\s?\a 2500 10$paint" | Out-Null
 P set -w -t base:q2 "pane-colours[1]" "#0000ff" | Out-Null
 $r2 = Replies (Wait-Log $log2 30)
 if ($r2.Count -eq 1 -and $r2[0] -eq "rgb:0000/0000/ffff") { Write-Pass "a window's own table wins over the global one" }
@@ -239,7 +244,7 @@ else { Write-Fail "with set -w [1] #0000ff the query gave '$($r2 -join ',')'" }
 
 # A pane table set while the pane runs.
 $log3 = "$OUT\q3.log"
-$pid3 = Lines (P new-window -d -P -F "#{pane_id}" -t base -n q3 "$emit $log3 \p\p\p\e]4\s1\s?\a 2500 10")
+$pid3 = Lines (P new-window -d -P -F "#{pane_id}" -t base -n q3 "$emit $log3 \p\p\p\e]4\s1\s?\a 2500 10$paint")
 P set -w -t base:q3 "pane-colours[1]" "#0000ff" | Out-Null
 P set -p -t $pid3 "pane-colours[5]" "#ff0000" | Out-Null
 $r3 = Replies (Wait-Log $log3 30)
@@ -252,7 +257,7 @@ if ($r3.Count -eq 1 -and $r3[0] -ne "rgb:0000/0000/ffff" -and $r3[0] -ne "rgb:00
 $log4 = "$OUT\q4.log"
 P new-window -d -t base -n q4 | Out-Null
 P set -w -t base:q4 "pane-colours[1]" "#0000ff" | Out-Null
-$pid4 = Lines (P split-window -d -P -F "#{pane_id}" -t base:q4 "$emit $log4 \p\p\p\p\e]4\s1\s?\a 2500 10")
+$pid4 = Lines (P split-window -d -P -F "#{pane_id}" -t base:q4 "$emit $log4 \p\p\p\p\e]4\s1\s?\a 2500 10$paint")
 Start-Sleep -Milliseconds 500
 P break-pane -d -s $pid4 | Out-Null
 $r4 = Replies (Wait-Log $log4 30)
@@ -265,7 +270,7 @@ $log5 = "$OUT\q5.log"
 $pid5 = Lines (P new-window -d -P -F "#{pane_id}" -t base -n q5)
 P set -p -t $pid5 "pane-colours[1]" "#ff0000" | Out-Null
 Start-Sleep -Milliseconds 500
-P respawn-pane -k -t $pid5 "$emit $log5 \p\e]4\s1\s? 2500 10" | Out-Null
+P respawn-pane -k -t $pid5 "$emit $log5 \p\e]4\s1\s? 2500 10$paint" | Out-Null
 $r5 = Replies (Wait-Log $log5 30)
 if ($r5.Count -eq 1 -and $r5[0] -eq "rgb:ffff/0000/0000") { Write-Pass "a respawned pane keeps its own table" }
 else { Write-Fail "after respawn-pane the query gave '$($r5 -join ',')'" }
@@ -283,8 +288,8 @@ Remove-Item Env:PSMUX_SERVER_MODE
 Start-Sleep -Seconds 2
 $shPids = Lines (& $PSMUX -L $SHARED list-sessions -F "#{pid}" 2>&1 | Out-String)
 $log6 = "$OUT\q6.log"; $log7 = "$OUT\q7.log"
-& $PSMUX -L $SHARED new-window -d -t s1 -n q6 "$emit $log6 \p\p\p\e]4\s1\s?\a 2500 10" 2>&1 | Out-Null
-& $PSMUX -L $SHARED new-window -d -t s2 -n q7 "$emit $log7 \p\p\p\e]4\s1\s?\a 2500 10" 2>&1 | Out-Null
+& $PSMUX -L $SHARED new-window -d -t s1 -n q6 "$emit $log6 \p\p\p\e]4\s1\s?\a 2500 10$paint" 2>&1 | Out-Null
+& $PSMUX -L $SHARED new-window -d -t s2 -n q7 "$emit $log7 \p\p\p\e]4\s1\s?\a 2500 10$paint" 2>&1 | Out-Null
 & $PSMUX -L $SHARED set -w -t s1:q6 "pane-colours[1]" "#00ff00" 2>&1 | Out-Null
 & $PSMUX -L $SHARED set -w -t s2:q7 "pane-colours[1]" "#0000ff" 2>&1 | Out-Null
 $r6 = Replies (Wait-Log $log6 30)
