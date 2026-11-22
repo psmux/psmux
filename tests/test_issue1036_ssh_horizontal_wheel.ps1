@@ -119,6 +119,25 @@ $m = InMode
 if ($m -eq "0") { Write-Pass "pane_in_mode=0 after 6 sideways notches" }
 else { Write-Fail "pane_in_mode=$m after sideways notches" }
 
+# The Windows 10 inbox conhost (build 19045) drops an SGR mouse report typed
+# into a pane: measured by typing ESC[<64;10;5M, ESC[<66;10;5M and an SGR
+# press and release with send-keys -l, as here, into a pane whose program
+# reads raw VT input, which got only the letters around them. So there the
+# outer pane hands the inner client no wheel at all, and what is left to
+# check is that none of it is decoded and nothing scrolls.
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    Write-Host "`n[Windows 10] the outer pane hands the inner client no SGR report" -ForegroundColor Yellow
+    Send-Sgr $UP 6
+    Start-Sleep -Milliseconds 1200
+    $m = InMode
+    if ($m -eq "0") { Write-Pass "6 wheel up reports did not reach the inner client: pane_in_mode=0" }
+    else { Write-Fail "pane_in_mode=${m}: a wheel report reached the inner client, which this host was measured not to deliver" }
+    $wheels = ([regex]::Matches((SshLog), 'kind: Scroll\w+')).Count
+    if ($wheels -eq 0) { Write-Pass "ssh_input.log decoded no wheel event" }
+    else { Write-Fail "ssh_input.log decoded $wheels wheel events, which this host was measured not to deliver" }
+    Finish
+}
+
 # ---------------------------------------------------------------------
 Write-Host "`n[Test 2] sideways notches inside copy mode keep the scroll position" -ForegroundColor Yellow
 Send-Sgr $UP 6

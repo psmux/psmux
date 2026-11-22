@@ -69,6 +69,12 @@ $SESSION = "i657s"
 $S_OUT   = "i657outer"
 $S_IN    = "i657inner"
 $ESC     = [char]27
+# The Windows 10 inbox conhost (build 19045) drops an SGR mouse report typed
+# into a pane, and hands a VT reading program no wheel either way: measured,
+# SGR wheel, press and release reports typed with send-keys -l into a pane
+# whose program reads raw VT input arrived as nothing while the letters
+# around them arrived.
+$Win10   = [Environment]::OSVersion.Version.Build -lt 22000
 
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -271,7 +277,13 @@ if (-not $clientUp) {
     $altNew = if ($altAll.Count -gt $altBefore) { @($altAll[$altBefore..($altAll.Count-1)]) } else { @() }
     $altGot = @($altNew | Where-Object { $_ -match '<ESC>\[<64;' })
     $altMode = (& $PSMUX -L $NS display-message -t $target -p '#{pane_in_mode}' 2>&1).Trim()
-    if ($altGot.Count -ge 1) {
+    if ($Win10) {
+        # This app reads its mouse as VT bytes, which the Windows 10 inbox
+        # conhost cuts off (Issue #1089, docs/faq.md): the pane keeps the
+        # wheel from copy mode below, but nothing reaches the app.
+        if ($altGot.Count -eq 0) { Write-Pass "on this host the VT reading app got no SGR wheel report, as measured" }
+        else { Write-Fail "the VT reading app got an SGR wheel report, which this host was measured not to deliver ($($altGot[0]))" }
+    } elseif ($altGot.Count -ge 1) {
         Write-Pass "the alt screen mouse app still receives the wheel ($($altGot[0]))"
     } else {
         Write-Fail "the wheel no longer reaches an alt screen mouse app; #598/#548 regressed"
@@ -337,15 +349,22 @@ if (-not $outerUp) {
         $vNew = if ($vAll.Count -gt $vLogBefore) { @($vAll[$vLogBefore..($vAll.Count-1)]) } else { @() }
 
         Write-Info "inner pane_in_mode before=$vBefore after=$vAfter scroll_position=$vScroll"
-        if ($vBefore -ne "1" -and $vAfter -eq "1") {
+        if ($Win10) {
+            # The reports are typed into the outer pane, which this host
+            # drops, so the client under test gets none of them.
+            if ($vAfter -ne "1" -and [int]($vScroll -replace '[^0-9]','0') -eq 0) { Write-Pass "on this host the outer pane handed the client no SGR report (pane_in_mode=$vAfter scroll_position=$vScroll)" }
+            else { Write-Fail "a report reached the client (pane_in_mode=$vAfter scroll_position=$vScroll), which this host was measured not to deliver" }
+        } elseif ($vBefore -ne "1" -and $vAfter -eq "1") {
             Write-Pass "SGR wheel up entered copy mode on the VT path too"
         } else {
             Write-Fail "SGR wheel up did NOT enter copy mode (before=$vBefore after=$vAfter) - #657 on the VT path"
         }
-        if ([int]($vScroll -replace '[^0-9]','0') -gt 0) {
-            Write-Pass "the VT path scrolled back as well (scroll_position=$vScroll)"
-        } else {
-            Write-Fail "the VT path did not move back into the scrollback (scroll_position=$vScroll)"
+        if (-not $Win10) {
+            if ([int]($vScroll -replace '[^0-9]','0') -gt 0) {
+                Write-Pass "the VT path scrolled back as well (scroll_position=$vScroll)"
+            } else {
+                Write-Fail "the VT path did not move back into the scrollback (scroll_position=$vScroll)"
+            }
         }
         $vFwd = @($vNew | Where-Object { $_ -match '<ESC>\[<6[45];' -or $_ -match '<ESC>\[[AB]' })
         if ($vFwd.Count -eq 0) {

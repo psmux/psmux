@@ -136,6 +136,28 @@ if ($sshTxt -match 'MOUSE via VT parser[^\r\n]*ScrollUp') {
 & $PSMUX -L $NS_IN send-keys -t $S_IN -X cancel 2>&1 | Out-Null
 Start-Sleep -Milliseconds 700
 
+# The Windows 10 inbox conhost (build 19045) drops an SGR mouse report typed
+# into a pane: measured by typing ESC[<64;10;5M, ESC[<66;10;5M and an SGR
+# press and release with send-keys -l, as here, into a pane whose program
+# reads raw VT input, which got only the letters around them. So there the
+# outer pane hands the client under test no wheel, and Tests 2 to 5 have
+# nothing to act on: what is left is that none of it is decoded or scrolls.
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    Write-Host "`n[Windows 10] the outer pane hands the client no SGR report" -ForegroundColor Yellow
+    if ($sshTxt -notmatch 'MOUSE via VT parser') { Write-Pass "the wheel up of Test 1 was not decoded: the host dropped it" }
+    else { Write-Fail "the VT parser decoded a mouse report, which this host was measured not to deliver" }
+    Send-Sgr "$ESC[<64;25;10M" 3
+    Start-Sleep -Milliseconds 1500
+    $mode = InnerMode
+    if ($mode -eq "0") { Write-Pass "3 more wheel ups left the client out of copy mode (pane_in_mode=0)" }
+    else { Write-Fail "pane_in_mode=${mode}: a wheel report reached the client, which this host was measured not to deliver" }
+    Cleanup
+    Write-Host "`n=== Results ===" -ForegroundColor Cyan
+    Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
+    Write-Host "  Failed: $($script:TestsFailed)" -ForegroundColor $(if ($script:TestsFailed -gt 0) { "Red" } else { "Green" })
+    exit $script:TestsFailed
+}
+
 # ─────────────────────────────────────────────────────────────────────
 # Test 2: wheel-up on a plain pane enters copy mode AND repaints
 # ─────────────────────────────────────────────────────────────────────

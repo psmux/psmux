@@ -146,6 +146,12 @@ try {
     if ($ready -eq 0) { Write-Fail "the pane never came up" }
     else {
         if ($flagsOk -eq $ready) { Write-Pass "mouse_any_flag and mouse_sgr_flag read 11 in $flagsOk/$ready runs" }
+        elseif ($NoMouseIn -and $flagsOk -eq 0) {
+            # Section 1 shows the same host passing no mouse mode on even when
+            # the request comes after raw mode, so psmux is never told and the
+            # flags stay 00 here.
+            Write-Pass "Windows 10 pseudo console passes the repeated request on to no one: flags stay 00 ($ready runs)"
+        }
         else { Write-Fail "flags read 11 in only $flagsOk/$ready runs" }
         if ($ok -eq $ready) { Write-Pass "all 3 wheel-ups reached the app in $ok/$ready runs" }
         elseif ($NoMouseIn) { Write-Skip "Windows 10 pseudo console hands the client no wheel ($ok/$ready runs)" }

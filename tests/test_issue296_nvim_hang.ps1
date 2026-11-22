@@ -124,6 +124,18 @@ for ($i = 0; $i -lt 5; $i++) {
 }
 Start-Sleep -Seconds 1
 
+# The Windows 10 inbox conhost (build 19045) keeps nvim's ?1049h to itself
+# (measured by writing it in a pane and reading what reached psmux), so psmux
+# sees a plain pane and the scroll-ups enter its copy mode, which then takes
+# the keys below. Leave copy mode first so they reach nvim.
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    $inMode = (& $PSMUX display-message -t $SESSION -p '#{pane_in_mode}' 2>&1 | Out-String).Trim()
+    if ($inMode -eq "1") { Write-Pass "on this host the scroll-ups entered copy mode: psmux cannot see nvim's alternate screen" }
+    else { Write-Fail "pane_in_mode=$inMode after the scroll-ups, but this host was measured to hide nvim's alternate screen" }
+    & $PSMUX send-keys -t $SESSION -X cancel 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+}
+
 # Now try to type in nvim - if hover is flooding, this will fail
 & $PSMUX send-keys -t $SESSION "i" 2>&1 | Out-Null
 Start-Sleep -Milliseconds 500
