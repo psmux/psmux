@@ -55,9 +55,14 @@ foreach ($v in 'PSMUX_SESSION','PSMUX_PANE','TMUX','TMUX_PANE','PSMUX') {
 
 $log = "$env:TEMP\psmux_i597_query_probe.txt"
 
+# The Windows 10 inbox conhost (build 19045) hands psmux a query only when it
+# next draws something, so there the probe writes a letter after each query
+# (see query_probe_child.cs).
+$paint = if ([Environment]::OSVersion.Version.Build -lt 22000) { " paint" } else { "" }
+
 function Invoke-Probe($sessionName) {
     Remove-Item $log -Force -EA SilentlyContinue
-    & $PSMUX -L $NS new-session -d -s $sessionName -x 100 -y 30 "$probe $log 900" 2>&1 | Out-Null
+    & $PSMUX -L $NS new-session -d -s $sessionName -x 100 -y 30 "$probe $log 900$paint" 2>&1 | Out-Null
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline -and -not (Test-Path $log)) { Start-Sleep -Milliseconds 300 }
     if (-not (Test-Path $log)) { return $null }

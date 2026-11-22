@@ -63,11 +63,16 @@ function Wait-Prompt($name) {
     return $false
 }
 
+# The Windows 10 inbox conhost (build 19045) hands psmux a query only when it
+# next draws something, so there the probe writes a letter after its queries
+# (PROBE_PAINT, see color_query_probe.js).
+$paint = if ([Environment]::OSVersion.Version.Build -lt 22000) { "1" } else { "" }
+
 # Runs the probe inside the session's active pane and returns the parsed JSON.
 function Invoke-Probe($name, $queries = "all", $tag = "x") {
     $outFile = Join-Path $outDir "probe_${name}_${tag}.json"
     Remove-Item $outFile -Force -EA SilentlyContinue
-    & $PSMUX send-keys -t $name "`$env:PROBE_OUT='$outFile'; `$env:PROBE_QUERIES='$queries'; & '$NODE' '$PROBE'" Enter
+    & $PSMUX send-keys -t $name "`$env:PROBE_OUT='$outFile'; `$env:PROBE_QUERIES='$queries'; `$env:PROBE_PAINT='$paint'; & '$NODE' '$PROBE'" Enter
     for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Path $outFile) { break }

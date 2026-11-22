@@ -168,12 +168,15 @@ $QUERY = "[Console]::Write([char]27+'[>q')"
 # back.  The pwsh one liner above cannot read its own reply because the
 # console is in cooked mode.  The probe runs as the command of a window of its
 # own: it leaves the console in raw mode, so a shell it ran under would stop
-# taking typed commands.
+# taking typed commands.  The Windows 10 inbox conhost (build 19045) hands
+# psmux a query only when it next draws something, so there the probe writes a
+# letter after each query (see query_probe_child.cs).
+$PAINT = if ([Environment]::OSVersion.Version.Build -lt 22000) { " paint" } else { "" }
 function Invoke-ProbeIn([string]$ns, [string]$session) {
     $log = Join-Path $TMP ("probe_" + [guid]::NewGuid().ToString('N').Substring(0, 6) + ".txt")
     # $TMP has no spaces (a guid under the temp dir), so no quoting, the way
     # tests\test_issue597_xtversion_reply.ps1 starts the same probe.
-    & $PSMUX -L $ns new-window -d -t $session "$PROBE $log 900" 2>&1 | Out-Null
+    & $PSMUX -L $ns new-window -d -t $session "$PROBE $log 900$PAINT" 2>&1 | Out-Null
     $deadline = [DateTime]::Now.AddSeconds(30)
     while ([DateTime]::Now -lt $deadline -and -not (Test-Path $log)) { Start-Sleep -Milliseconds 200 }
     Start-Sleep -Milliseconds 300
