@@ -490,6 +490,113 @@ pub(crate) fn mode_reports_bare_motion(mode: vt100::MouseProtocolMode) -> bool {
     mode == vt100::MouseProtocolMode::AnyMotion
 }
 
+/// On a build below `CONPTY_MOUSE_MIN_BUILD`, has the pane's program asked for
+/// the mouse the Win32 way: `ENABLE_MOUSE_INPUT` on, line input and echo off
+/// (`detect_record_reader`)?  Issue #1089.
+///
+/// On 22523 and above psmux never needs this.  When a program sets
+/// `ENABLE_MOUSE_INPUT` there, the console host publishes it upstream as
+/// `ESC[?1003;1006h`, so the program arrives at the three gates above with a
+/// mouse protocol of its own (measured on 26300: a record reader in `0x01B0`
+/// shows `mouse_any_flag` 1, `mouse_all_flag` 1 and `mouse_sgr_flag` 1).  The
+/// Windows 10 inbox host (19045, conhost 10.0.19041) publishes nothing: not
+/// that, not a program's own DECSET and not `?1049h`.  So a record reader
+/// there failed every gate.  The wheel went to copy mode, and clicks, drags
+/// and motion went nowhere, although the record channel that #597 widened
+/// for these builds delivers them (measured on 19045 with `@mouse-force on`:
+/// 3 notches, 3 wheel records).
+///
+/// The console mode is the Windows form of tmux's `s->mode & ALL_MOUSE_MODES`
+/// (input-keys.c:805): the program's own statement that it reads the mouse.
+/// Measured on 19045 and 26300 alike, nothing a shell or a VT program does
+/// matches it: a pwsh, Windows PowerShell or cmd prompt reads in `0x01E4` or
+/// `0x01E7`, `Read-Host` in `0x01E7`, `[Console]::ReadKey` in `0x01F7`, node
+/// in raw mode and nvim in `0x0208`.  A record reader (Far Manager `0x01B8`,
+/// vim `0x01B8`, crossterm `0x0098`) does.  It is taken as asking for every
+/// event, as `?1003;1006h` is on the newer hosts.
+///
+/// The query costs an AttachConsole round trip (0.22 ms on average and 1 ms
+/// at worst over 500 calls on 19045),
+/// cached by `console_input_mode`, and only these builds make it.  A "yes" is
+/// kept for that cache's 2 seconds.  A "no" is kept for 100 ms here
+/// (`RECORD_READER_NO_TTL`): a program sets its mode as it starts, and a "no"
+/// taken at the shell prompt a moment before would otherwise hold the
+/// program's first wheel notch for psmux (measured on 19045: a suite that
+/// turned the wheel as soon as its record reader was up got copy mode with
+/// the 2 second "no").
+fn legacy_record_reader(pane: &mut Pane) -> bool {
+    legacy_record_reader_within(pane, RECORD_READER_NO_TTL)
+}
+
+/// How long a mouse event trusts a cached "not a record reader".  Pointer
+/// motion comes at the pointer's sampling rate, so this bounds the queries
+/// while it moves over a shell.
+const RECORD_READER_NO_TTL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// `legacy_record_reader`, trusting a cached "no" for `no_ttl` only.
+fn legacy_record_reader_within(pane: &mut Pane, no_ttl: std::time::Duration) -> bool {
+    if !crate::ssh_input::conpty_needs_mouse_record_bypass() {
+        return false;
+    }
+    if let Some((ts, mode)) = pane.mouse_input_cache {
+        if !mode.is_some_and(mode_is_deliberate_record_reader) && ts.elapsed() >= no_ttl {
+            pane.mouse_input_cache = None;
+        }
+    }
+    detect_record_reader(pane)
+}
+
+/// Should this frame mark a record reader's leaf as `wants_mouse`?  The
+/// client reads that flag on a left press to decide whether the drag that
+/// follows is the program's or psmux's own selection, so without it a record
+/// reader on these builds got the press and lost the drag.  Only with the
+/// mouse on and below `CONPTY_MOUSE_MIN_BUILD`, and taken once per frame, so a
+/// frame on a newer build asks nothing more than before.
+pub(crate) fn frame_marks_record_readers(app: &AppState) -> bool {
+    app.mouse_enabled && crate::ssh_input::conpty_needs_mouse_record_bypass()
+}
+
+/// The leaf half of `frame_marks_record_readers`.  Only the active pane asks
+/// its console, and it does not trust a cached "no" at all: the server builds
+/// a frame only when something changed, so the frame that carries a
+/// program's first screen is the one that must see the mode the program set
+/// just before drawing it, however soon after the shell prompt's last frame
+/// it comes.  A program that drew and then waited would otherwise keep the
+/// prompt's "no" until the next frame (measured on 19045: the #597 drag
+/// started right after its record reader came up stayed psmux's selection).
+/// An idle screen builds no frames and asks nothing; a "yes" is kept for 2
+/// seconds.  Any other leaf takes the last answer its pane had, without a
+/// query.  A press on another pane makes it active, so it is asked for the
+/// frame after.
+pub(crate) fn leaf_record_reader(pane: &mut Pane, marks: bool, active: bool) -> bool {
+    if !marks {
+        return false;
+    }
+    if active {
+        return legacy_record_reader_within(pane, std::time::Duration::ZERO);
+    }
+    pane.mouse_input_cache
+        .is_some_and(|(_, mode)| mode.is_some_and(mode_is_deliberate_record_reader))
+}
+
+/// `pane_wheel_forward`, plus a record reader on a build whose host never
+/// publishes one (`legacy_record_reader`).
+pub(crate) fn pane_takes_wheel(pane: &mut Pane) -> bool {
+    pane_wheel_forward(pane) || legacy_record_reader(pane)
+}
+
+/// `pane_wants_click`, plus a record reader on a build whose host never
+/// publishes one (`legacy_record_reader`).
+pub(crate) fn pane_takes_click(pane: &mut Pane) -> bool {
+    pane_wants_click(pane) || legacy_record_reader(pane)
+}
+
+/// `pane_wants_bare_motion`, plus a record reader on a build whose host never
+/// publishes one (`legacy_record_reader`).
+pub(crate) fn pane_takes_bare_motion(pane: &mut Pane) -> bool {
+    pane_wants_bare_motion(pane) || legacy_record_reader(pane)
+}
+
 /// Is this client mouse event a bare pointer move that nothing will act on?
 ///
 /// The client sends `pane-mouse <id> 35 <col> <row> M` for every pointer
@@ -1348,7 +1455,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
             let (col, row) = label.cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                if pane_wants_click(active) {
+                if pane_takes_click(active) {
                     inject_mouse_combined(active, col, row, 0, true,
                         mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, 0, &win_name);
                 }
@@ -1453,7 +1560,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
             let (col, row) = label.cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                if pane_wants_click(active) {
+                if pane_takes_click(active) {
                     inject_mouse_combined(active, col, row, 32, true,
                         mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, mouse_inject::MOUSE_MOVED, &win_name);
                 }
@@ -1563,7 +1670,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         let (col, row) = label.cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_click(active) {
+            if pane_takes_click(active) {
                 inject_mouse_combined(active, col, row, 0, false,
                     0, 0, &win_name);
             }
@@ -1582,7 +1689,7 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
         let (col, row) = label.cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_click(active) {
+            if pane_takes_click(active) {
                 let sgr_btn = match button {
                     1 => 1u8, // middle
                     2 => 2u8, // right
@@ -1643,7 +1750,7 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) -> bool {
         let (col, row) = label.cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_bare_motion(active) {
+            if pane_takes_bare_motion(active) {
                 inject_mouse_combined(active, col, row, 35, true,
                     0, mouse_inject::MOUSE_MOVED, &win_name);
                 return true;
@@ -1769,8 +1876,8 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
                 .map(|(_, area)| *area);
         }
 
-        let alt = active_pane(&win.root, &win.active_path)
-            .map_or(false, |p| pane_wheel_forward(p));
+        let alt = active_pane_mut(&mut win.root, &win.active_path)
+            .map_or(false, pane_takes_wheel);
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
         let bs = ((wheel_delta as i32) << 16) as u32;
@@ -2023,7 +2130,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
     let win = &mut app.windows[app.active_idx];
     let win_name = win.name.clone();
     if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
-        let wants = if button == 35 { pane_wants_bare_motion(pane) } else { pane_wants_click(pane) };
+        let wants = if button == 35 { pane_takes_bare_motion(pane) } else { pane_takes_click(pane) };
         if wants {
             let button_state = match (button, press) {
                 (0, true) => mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
@@ -2175,8 +2282,8 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     // Gating on mouse_protocol_mode (what #360's check kept) routed the wheel
     // into pi's focused input box via PSReadLine's spurious mouse tracking;
     // see pane_in_alt_screen for the full rationale.
-    let alt = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| pane_wheel_forward(p));
+    let alt = active_pane_mut(&mut win.root, &win.active_path)
+        .map_or(false, pane_takes_wheel);
     {
         let p = active_pane(&win.root, &win.active_path);
         mouse_log(&format!(
@@ -2540,7 +2647,7 @@ pub fn forward_mouse_to_pane(app: &mut AppState, pane_id: usize, btn: u8, press:
     }
     let win_name = app.windows.get(app.active_idx).map(|w| w.name.clone()).unwrap_or_default();
     let Some(pane) = crate::tree::find_pane_mut_by_id_global(app, pane_id) else { return };
-    let wants = if btn & 64 != 0 { pane_wheel_forward(pane) } else { pane_wants_click(pane) };
+    let wants = if btn & 64 != 0 { pane_takes_wheel(pane) } else { pane_takes_click(pane) };
     if !wants {
         return;
     }
@@ -2657,7 +2764,7 @@ fn multi_click(app: &mut AppState, double: bool, pane_id: usize, col: i16, row: 
                 if app.pwsh_mouse_selection {
                     return;
                 }
-                let wants = crate::tree::find_pane_mut_by_id_global(app, pane_id).map_or(false, |p| pane_wants_click(p));
+                let wants = crate::tree::find_pane_mut_by_id_global(app, pane_id).map_or(false, |p| pane_takes_click(p));
                 if wants {
                     return;
                 }
@@ -2709,7 +2816,7 @@ pub fn send_mouse_event(app: &mut AppState) {
     let win_name = win.name.clone();
     let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return };
     // tmux input_key_mouse: a report only for a program that asked for one.
-    let wants = if btn & 64 != 0 { pane_wheel_forward(pane) } else { pane_wants_click(pane) };
+    let wants = if btn & 64 != 0 { pane_takes_wheel(pane) } else { pane_takes_click(pane) };
     if !wants {
         return;
     }
@@ -2776,7 +2883,7 @@ fn forward_wheel_to_active_pane(app: &mut AppState, up: bool, at: Option<(i16, i
     let win = &mut app.windows[app.active_idx];
     let win_name = win.name.clone();
     let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return };
-    if !pane_wheel_forward(pane) {
+    if !pane_takes_wheel(pane) {
         mouse_log("  -> unbound wheel key, pane has no mouse reporting: nothing (tmux parity)");
         return;
     }
@@ -2795,7 +2902,7 @@ fn forward_wheel_button_to_active_pane(app: &mut AppState, btn: u8, at: Option<(
     let win = &mut app.windows[app.active_idx];
     let win_name = win.name.clone();
     let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return };
-    if !pane_wheel_forward(pane) {
+    if !pane_takes_wheel(pane) {
         mouse_log("  -> unbound horizontal wheel, pane has no mouse reporting: nothing (tmux parity)");
         return;
     }
@@ -4975,6 +5082,10 @@ mod test_issue604_wsl_nvim_mouse;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue597_legacy_mouse_bypass.rs"]
 mod test_issue597_legacy_mouse_bypass;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1089_record_reader_mouse.rs"]
+mod test_issue1089_record_reader_mouse;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue613_wheel_gate_durability.rs"]
