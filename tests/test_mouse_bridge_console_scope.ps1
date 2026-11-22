@@ -62,7 +62,14 @@ try {
         & $PsmuxExe -L $ns send-keys -t ($case + ':0') Q
         Start-Sleep -Milliseconds 400
         $content = Get-Content $log -Raw
-        if ($case -eq 'bridge') {
+        if ($case -eq 'bridge' -and [Environment]::OSVersion.Version.Build -lt 22000) {
+            # The Windows 10 inbox conhost (build 19045) hands a bridge that
+            # reads bytes no mouse at all: it keeps a pane program's mouse
+            # DECSET to itself, and it drops an SGR report typed into the pane
+            # (measured with send-keys -l into a raw VT reader: the letters
+            # around it arrived, the report did not). The key still arrives.
+            $ok = $content -notmatch 'BYTES .*1B-5B-3C' -and $content -match 'BYTES .*51'
+        } elseif ($case -eq 'bridge') {
             $ok = $content -match 'BYTES .*1B-5B-3C' -and $content -match 'BYTES .*51'
         } else {
             $ok = $content -notmatch 'KEY 001B' -and $content -match 'KEY 0051' -and $content -match '(?m)^MOUSE$'

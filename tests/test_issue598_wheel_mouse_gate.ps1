@@ -30,6 +30,14 @@ $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA Stop).Source }
 $psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $SESSION = "test_i598"
+# The Windows 10 inbox conhost (build 19045) hands a program that reads its
+# mouse as VT bytes no wheel at all: it keeps the program's mouse DECSET to
+# itself and drops an SGR report written to the pane (Issue #1089,
+# docs/faq.md). Measured: SGR wheel, press and release reports typed with
+# send-keys -l into a pane whose program reads raw VT input arrived as
+# nothing while the letters around them arrived. The model app here reads VT
+# bytes, so on that host the checks that it receives the wheel expect none.
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
@@ -155,12 +163,15 @@ if (-not $c) {
         Write-Pass "wheel-up forwarded as SGR 64 at col=$col row=$row"
         if ($col -eq $expCol -and $row -eq $expRow) { Write-Pass "coordinates track the pointer (expected $expCol,$expRow)" }
         else { Write-Fail "coordinates were $col,$row, expected $expCol,$expRow" }
+    } elseif ($Win10 -and -not $recv) {
+        Write-Pass "on this host the VT reading app got no SGR wheel report, as measured"
     } else {
         Write-Fail "no SGR wheel report reached a mouse-registered alt-screen app (got: $($recv -join ' | '))"
     }
 
     $recvDown = Invoke-Wheel $c "down" 1
     if (($recvDown | Select-Object -Last 1) -match '<ESC>\[<65;\d+;\d+M') { Write-Pass "wheel-down forwarded as SGR 65" }
+    elseif ($Win10 -and -not $recvDown) { Write-Pass "on this host the wheel-down did not reach it either, as measured" }
     else { Write-Fail "wheel-down not forwarded (got: $($recvDown -join ' | '))" }
 
     Stop-Case $c
@@ -178,6 +189,7 @@ if (-not $c) {
 } else {
     $recv = Invoke-Wheel $c "up" 1
     if (($recv | Select-Object -Last 1) -match '<ESC>\[<64;\d+;\d+M') { Write-Pass "main-screen mouse consumer received the wheel" }
+    elseif ($Win10 -and -not $recv) { Write-Pass "on this host the VT reading consumer got no SGR wheel report, as measured" }
     else { Write-Fail "main-screen mouse consumer got nothing (got: $($recv -join ' | '))" }
 
     $mode = (& $PSMUX display-message -t $c.Target -p '#{pane_in_mode}' 2>&1).Trim()

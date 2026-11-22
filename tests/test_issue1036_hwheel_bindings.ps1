@@ -28,6 +28,13 @@ $PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE } else { (Get-Command psmux -EA St
 $Tests = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rand  = Get-Random -Maximum 999999
 $ESC   = [char]27
+# The Windows 10 inbox conhost (build 19045) drops an SGR mouse report typed
+# into a pane, and keeps a program's mouse DECSET to itself, so a pane program
+# that reads its mouse as VT bytes gets none from psmux there (Issue #1089 and
+# docs/faq.md). Measured: SGR wheel, press and release reports typed with
+# send-keys -l into a pane whose program reads raw VT input arrived as nothing
+# while the letters around them arrived.
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 
 $ownDataDir = $false
 if (-not $env:PSMUX_DATA_DIR) {
@@ -108,10 +115,17 @@ function Run-Checks([string]$shape, [string]$ns, [string]$t, [scriptblock]$send,
     & $PSMUX -L $ns respawn-pane -k -t $t $echo | Out-Null; Start-Sleep -Seconds 4
     & $send 'left' 0; & $send 'right' 0; & $send 'up' 0; Start-Sleep -Milliseconds 1200
     $recv = EchoRecv $echoLog
-    if ($recv -match '\[<66;\d+;\d+M' -and $recv -match '\[<67;\d+;\d+M') { Write-Pass "app received <66 and <67" }
+    if ($Win10) {
+        # This program reads its mouse as VT bytes, which this host cuts off.
+        if ($recv -notmatch '\[<6[4-7];') { Write-Pass "on this host the VT app got no wheel report, as measured" }
+        else { Write-Fail "the VT app got a wheel report, which this host was measured not to deliver: $recv" }
+    }
+    elseif ($recv -match '\[<66;\d+;\d+M' -and $recv -match '\[<67;\d+;\d+M') { Write-Pass "app received <66 and <67" }
     else { Write-Fail "app did not get the horizontal reports: $recv" }
-    if ($recv -match '\[<64;\d+;\d+M') { Write-Pass "vertical wheel still reaches the app" }
-    else { Write-Fail "vertical wheel report missing: $recv" }
+    if (-not $Win10) {
+        if ($recv -match '\[<64;\d+;\d+M') { Write-Pass "vertical wheel still reaches the app" }
+        else { Write-Fail "vertical wheel report missing: $recv" }
+    }
 
     if ($native) {
         Write-Host "`n[$shape 5] a native record app gets MOUSE_HWHEELED" -ForegroundColor Yellow
@@ -161,7 +175,18 @@ if (-not $up) {
         & $PSMUX -L $NS_OUT send-keys -t outer -l "$ESC[<$($b + $mods);30;10M" | Out-Null
         Start-Sleep -Milliseconds 300
     }
-    Run-Checks 'SSH' $NS_IN 'inner' $sendSsh $echoLogS $false
+    if ($Win10) {
+        # The reports are typed into the outer pane, which this host drops, so
+        # the inner client gets none of them: no binding runs, and the wheel
+        # up does not reach copy mode.
+        & $PSMUX -L $NS_IN bind -n MouseDown6Pane set -g '@hw6' fired | Out-Null
+        & $sendSsh 'left' 0; & $sendSsh 'up' 0; & $sendSsh 'up' 0; Start-Sleep -Milliseconds 900
+        $a = (& $PSMUX -L $NS_IN display -t inner -p '#{@hw6}' | Out-String).Trim()
+        $m = (& $PSMUX -L $NS_IN display -t inner -p '#{pane_in_mode}' | Out-String).Trim()
+        if ($a -eq '' -and $m -eq '0') { Write-Pass "on this host the outer pane handed the inner client no report (@hw6 unset, pane_in_mode=0)" }
+        else { Write-Fail "a report reached the inner client (@hw6='$a' pane_in_mode=$m), which this host was measured not to deliver" }
+    }
+    else { Run-Checks 'SSH' $NS_IN 'inner' $sendSsh $echoLogS $false }
 }
 & $PSMUX -L $NS_IN kill-server 2>&1 | Out-Null
 & $PSMUX -L $NS_OUT kill-server 2>&1 | Out-Null

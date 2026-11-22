@@ -111,6 +111,22 @@ function Get-ForwardedCol([int]$ScreenX, [switch]$UseVT, [int]$ScreenY = 8) {
     return $null
 }
 
+# The child reads its mouse as VT bytes, and so does nvim below. The Windows
+# 10 inbox conhost (build 19045) cuts that off: it keeps a program's mouse
+# DECSET to itself and drops an SGR report written to the pane (Issue #1089,
+# docs/faq.md; measured with SGR reports typed with send-keys -l into a raw VT
+# reader, which got only the letters around them). So there no wheel reaches
+# them at any column and Tests 1 to 6 have nothing to measure; what is left
+# is that none arrives by either input route.
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    Write-Host "`n[Windows 10] no wheel reaches the VT reading child, by either input route" -ForegroundColor Yellow
+    $native = Get-ForwardedCol 60
+    $vt = Get-ForwardedCol 60 -UseVT
+    if ($null -eq $native -and $null -eq $vt) { Write-Pass "on this host neither the console nor the VT route delivered a wheel report, as measured" }
+    else { Write-Fail "a wheel report reached the VT reading child (console: $native, VT: $vt), which this host was measured not to deliver" }
+    Cleanup
+    try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
+} else {
 Write-Host "`n[Test 1] Native wheel reports the real column at several split widths" -ForegroundColor Yellow
 foreach ($leftW in 59, 83, 36) {
     Set-LeftWidth $leftW
@@ -273,6 +289,7 @@ if (-not $nvimExe) {
     Cleanup
     try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
 }
+}   # Tests 1 to 6, on a host that hands a VT reader the wheel
 
 # ─────────────────────────────────────────────────────────────────────
 # PART 4: Win32 TUI verification + old-client wire compatibility
