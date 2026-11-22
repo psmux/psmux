@@ -117,7 +117,16 @@ foreach ($h in $hosts) {
     $elog = Join-Path $dd "echo_$($h -replace ' ','')_$rand.txt"
     $lines = Run-Shape $h @($echo) 'up' $true $elog
     $reports = @($lines | Where-Object { $_ -like 'RECV*' } | ForEach-Object { [regex]::Matches($_, '\[<64;\d+;\d+M').Count } | Measure-Object -Sum).Sum
-    if ($reports -eq $N) { Write-Pass "$N notches -> $reports SGR wheel reports" }
+    if ($h -eq 'inbox conhost' -and [Environment]::OSVersion.Version.Build -lt 22000) {
+        # The Windows 10 inbox conhost (build 19045) keeps a program's mouse
+        # DECSET to itself and drops an SGR report written to the pane, so a
+        # program that reads its mouse as VT bytes gets none there (Issue
+        # #1089, docs/faq.md): measured, SGR reports typed into a pane whose
+        # program reads raw VT input arrived as nothing.
+        if (-not $reports) { Write-Pass "$N notches -> no SGR wheel report on this host, as measured" }
+        else { Write-Fail "$N notches -> $reports SGR wheel reports, which this host was measured not to deliver" }
+    }
+    elseif ($reports -eq $N) { Write-Pass "$N notches -> $reports SGR wheel reports" }
     else { Write-Fail "$N notches -> $reports SGR wheel reports" }
 
     Write-Host "`n[$h] mouse off: the reader gets nothing" -ForegroundColor Yellow

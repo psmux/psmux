@@ -166,7 +166,16 @@ try {
             break
         }
     }
-    if ($pointerParked) {
+    if ([Environment]::OSVersion.Version.Build -lt 22000) {
+        # The child reads its mouse as VT bytes. The Windows 10 inbox conhost
+        # (build 19045) keeps the child's DECSET 1003 to itself and drops an
+        # SGR report written to the pane, so no hover reaches it there (Issue
+        # #1089, docs/faq.md; measured with SGR reports typed with
+        # send-keys -l into a raw VT reader, which got only the letters around
+        # them).
+        $hoverDelivered = @($receiveLines | Where-Object { $_ -match '<ESC>\[<' }).Count -eq 0
+        Test "Attached-client hover: on this host the VT reading child got no report, as measured" $hoverDelivered
+    } elseif ($pointerParked) {
         $hoverDelivered = $receiveLines.Count -eq 1 -and $receiveLines[0] -eq $expectedRecord
         Test "Attached-client hover produces exactly $expectedRecord" $hoverDelivered
     } else {
