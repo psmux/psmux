@@ -163,6 +163,11 @@ class TypingBench {
 
         // Optional: mode=clear to just clear the screen and exit
         bool clearOnly = args.Length > 4 && args[4] == "clear";
+        // Optional: <burst_at> <burst_len> sends characters burst_at+1 to
+        // burst_at+burst_len with no delay after them, the bunch a busy
+        // machine hands the client when keys queued while it was not reading.
+        int burstAt = -1, burstLen = 0;
+        if (args.Length > 5) { burstAt = int.Parse(args[4]); burstLen = int.Parse(args[5]); }
 
         FreeConsole();
         if (!AttachConsole(pid)) {
@@ -259,6 +264,7 @@ class TypingBench {
             InjectChar(hIn, c);
             charsSent++;
             Interlocked.Exchange(ref injectedCount, charsSent);
+            if (burstAt >= 0 && charsSent > burstAt && charsSent <= burstAt + burstLen) continue;
 
             if (c == ' ') {
                 if (interMs > 0) Thread.Sleep(interMs);
@@ -303,6 +309,7 @@ class TypingBench {
             Console.WriteLine("{0},{1},{2},{3}", timestamps[i], positions[i], deltas[i], gaps[i]);
         }
 
+        Console.WriteLine("FIRST_RENDER_AFTER_INJECT_MS={0}", firstChangeMs > 0 ? firstChangeMs - injStart : -1);
         Console.WriteLine("SUMMARY chars={0} inject_ms={1} render_ms={2} samples={3} rendered={4} stalls={5} bursts={6} max_gap={7} avg_gap={8} p50={9} p90={10} p95={11} p99={12}",
             text.Length, injEnd - injStart, renderSpan, timestamps.Count, totalRendered,
             stallCount, burstCount, maxGap, avgGap, p50, p90, p95, p99);

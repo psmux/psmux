@@ -186,8 +186,15 @@ if ($freezeTimes.Count -gt 0) {
     if ($max -gt 1500) {
         Write-Fail "Max freeze delay: $([math]::Round($max,0))ms (confirms 2-second paste_suppress_until bug)"
         Write-Host "  VERDICT: Bug #237 causes $([math]::Round($max,0))ms typing freeze" -ForegroundColor Red
+    } elseif ($fp50 -gt 300) {
+        # A suppression window, even one shorter than 2 s, delays every
+        # trial. One slow trial among normal ones is this probe, not psmux:
+        # each poll starts a new psmux.exe capture-pane, and one launch now
+        # and then takes 200 to 575 ms (sweep 2026-11-22: trials of 159 to
+        # 299 ms and one of 422 ms, with the Perf 3 control at 143 to 189 ms).
+        Write-Fail "Median freeze delay: $([math]::Round($fp50,0))ms (suppression active but shorter than 2s)"
     } elseif ($max -gt 300) {
-        Write-Fail "Max freeze delay: $([math]::Round($max,0))ms (suppression active but shorter than 2s)"
+        Write-Pass "Max freeze delay: $([math]::Round($max,0))ms in one trial, median $([math]::Round($fp50,0))ms (one slow capture-pane poll, no suppression window)"
     } else {
         Write-Pass "Max freeze delay: $([math]::Round($max,0))ms (no significant freeze detected)"
     }

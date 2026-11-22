@@ -4012,6 +4012,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut paste_seen_len: usize = 0;
     #[cfg(windows)]
     let mut paste_last_growth: Option<Instant> = None;
+    // Keys in a row that reached a stage 2 hold one at a time, each at least
+    // PASTE_TYPED_GAP after the one before (see stage2_key_arrived_alone).
+    #[cfg(windows)]
+    let mut paste_typed_streak: u32 = 0;
     // Set when a paste went out because stage 2 ran quiet.  It keeps a late
     // Ctrl+V Release from reading the clipboard back (that would paste the
     // same text twice), and, unlike paste_suppress_until, it never discards
@@ -5708,6 +5712,43 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // Ctrl+V Release must not read the clipboard back,
                                 // and nothing that follows is discarded.
                                 paste_fallback_suppress_until = Some(Instant::now() + Duration::from_millis(200));
+                            }
+                            // Typing that stage 2 mistook for a paste. A busy
+                            // machine can leave keys queued until the client
+                            // reads several at once, and that bunch passes the
+                            // 3 in 20 ms test. Stage 2 then held every later key
+                            // until input went quiet for PASTE_STAGE2_QUIET,
+                            // which steady typing never does: a whole line
+                            // appeared at once when the typist paused (sweep
+                            // 2026-11-22, a 1.4 s freeze at 12 ms per key). A
+                            // paste arrives as many characters together, even
+                            // when sshd hands it over in fragments; keys that
+                            // keep arriving one at a time, each a few ms after
+                            // the last, are a person typing. Those go out as
+                            // the keys they are, before this one.
+                            if paste_stage2 && !paste_pend.is_empty() {
+                                if stage2_key_arrived_alone(quiet) {
+                                    paste_typed_streak += 1;
+                                } else {
+                                    paste_typed_streak = 0;
+                                }
+                                if paste_typed_streak >= PASTE_STAGE2_TYPED_STREAK {
+                                    if input_log_enabled() {
+                                        input_log("paste", &format!(
+                                            "stage2 was typing ({} keys arrived one at a time), sending {} chars as keys",
+                                            paste_typed_streak, paste_pend.len()));
+                                    }
+                                    paste_gesture.record(&paste_pend);
+                                    push_pend_as_keys(&paste_pend, &mut cmd_batch);
+                                    paste_pend.clear();
+                                    paste_pend_start = None;
+                                    paste_stage2 = false;
+                                    paste_seen_len = 0;
+                                    paste_last_growth = None;
+                                    paste_typed_streak = 0;
+                                }
+                            } else {
+                                paste_typed_streak = 0;
                             }
                             // The key that opens a pending group decides whether
                             // its head is a shifted character (issue #766).
@@ -11752,6 +11793,43 @@ fn stage2_paste_is_over(held_for: Duration, since_last_char: Duration) -> bool {
 /// `ESC[201~` is parsed as a key (tty-keys.c `tty_keys_paste`). Fragments
 /// of one paste that sshd's ConPTY hands over 20 to 60 ms apart (#598) stay
 /// below the threshold and keep accumulating as before.
+/// The smallest gap before a key that marks it as arriving on its own. A paste
+/// (or one fragment of it) reaches the client as characters microseconds
+/// apart; the fastest typists and key repeat stay above 8 ms per key.
+#[cfg(windows)]
+const PASTE_TYPED_GAP: Duration = Duration::from_millis(5);
+
+/// How many keys in a row must arrive on their own before a stage 2 hold is
+/// taken for typing. The first character of each sshd paste fragment (#598)
+/// arrives alone after a 20 to 60 ms gap, but the rest of the fragment comes
+/// with it, which resets the count.
+#[cfg(windows)]
+const PASTE_STAGE2_TYPED_STREAK: u32 = 3;
+
+/// True when the key now arriving came `since_last_char` after the previous
+/// one, far enough apart to be a key typed on its own rather than the next
+/// character of a paste.
+#[cfg(windows)]
+fn stage2_key_arrived_alone(since_last_char: Duration) -> bool {
+    since_last_char >= PASTE_TYPED_GAP
+}
+
+/// Send `pend` as the keys it was typed as: Enter, Tab and Space by name,
+/// everything else as quoted text.
+#[cfg(windows)]
+fn push_pend_as_keys(pend: &str, cmd_batch: &mut Vec<String>) {
+    for c in pend.chars() {
+        match c {
+            '\n' => cmd_batch.push("send-key enter\n".into()),
+            '\t' => cmd_batch.push("send-key tab\n".into()),
+            ' ' => cmd_batch.push("send-key space\n".into()),
+            '"' => cmd_batch.push("send-text \"\\\"\"\n".into()),
+            '\\' => cmd_batch.push("send-text \"\\\\\"\n".into()),
+            _ => cmd_batch.push(format!("send-text \"{}\"\n", c)),
+        }
+    }
+}
+
 #[cfg(windows)]
 fn stage2_paste_ended_by_new_key(paste_stage2: bool, pend_non_empty: bool, since_last_char: Duration) -> bool {
     paste_stage2 && pend_non_empty && since_last_char >= PASTE_STAGE2_QUIET
@@ -12597,6 +12675,10 @@ mod test_paste_head_hold_before_read;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue766_paste_then_key.rs"]
 mod test_issue766_paste_then_key;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_stage2_typing_not_paste.rs"]
+mod test_stage2_typing_not_paste;
 
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue1049_held_key_burst.rs"]

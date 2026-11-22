@@ -163,8 +163,12 @@ try {
 
     Write-Host "`n[Test 3] guard: real bracketed pastes from the outer terminal" -ForegroundColor Yellow
     $rule = "-" * 40
+    # The first paste waits 2 s, not 0.5 s: until the client has put its
+    # console on VT input, conhost strips the paste markers and hands over
+    # plain keys, and a run of one character is then a held key (#1049).
+    # A loaded machine (run 2026-11-22_17-07-40) attached later than 0.5 s.
     $r = Invoke-Scenario "paste" @(
-        ("0.5 " + (Hx "$ESC[200~$rule$ESC[201~")),
+        ("2 " + (Hx "$ESC[200~$rule$ESC[201~")),
         ("1 " + (Hx "$ESC[200~jjjjjjjj$ESC[201~")),
         ("1 " + (Hx "$ESC[200~hello world$ESC[201~")))
     $want = "<ESC>[200~$rule<ESC>[201~<ESC>[200~jjjjjjjj<ESC>[201~<ESC>[200~hello world<ESC>[201~"
