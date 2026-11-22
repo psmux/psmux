@@ -746,7 +746,7 @@ fn normalize_argv_flags(args: Vec<String>, equals: bool, attached_t: bool) -> Ve
         out.push(tok.clone());
         // A detached value of a value-taking global option is not the
         // subcommand (`-L ns`).
-        if tok.len() == 2 && matches!(tok.as_bytes()[1], b'L' | b'f' | b'S' | b't') {
+        if tok.len() == 2 && matches!(tok.as_bytes()[1], b'L' | b'f' | b'S' | b'T' | b't') {
             if let Some(v) = args.get(i) {
                 out.push(v.clone());
                 i += 1;
@@ -884,8 +884,8 @@ fn normalize_command_flags(
 ///     not starting with `-` ends the scan, so command flags such as
 ///     `select-pane -L` (no value) are never touched.
 ///   - Only the value-taking global option letters psmux's own scanners
-///     consume are split: L, f, S, and psmux's global `-t`.  Letters psmux
-///     does not handle globally (tmux's `-c`/`-T`) pass through unchanged —
+///     consume are split: L, f, S, T, and psmux's global `-t`.  Letters psmux
+///     does not handle globally (tmux's `-c`) pass through unchanged —
 ///     splitting those would leave a stray value token that the scanner
 ///     mistakes for the subcommand.  `-C`/`-CC` and boolean flags pass
 ///     through unchanged.
@@ -913,13 +913,13 @@ pub fn normalize_attached_global_args(args: Vec<String>) -> Vec<String> {
             let bytes = arg.as_bytes();
             if bytes.len() >= 3
                 && !arg.starts_with("--")
-                && matches!(bytes[1], b'L' | b'f' | b'S' | b't')
+                && matches!(bytes[1], b'L' | b'f' | b'S' | b'T' | b't')
             {
                 out.push(format!("-{}", bytes[1] as char));
                 out.push(arg[2..].to_string());
                 continue;
             }
-            if bytes.len() == 2 && matches!(bytes[1], b'L' | b'f' | b'S' | b't') {
+            if bytes.len() == 2 && matches!(bytes[1], b'L' | b'f' | b'S' | b'T' | b't') {
                 skip_value = true; // detached form: the NEXT token is the value
             }
         }
@@ -1494,6 +1494,8 @@ OPTIONS:
     -f <file>               Use <file> as the configuration file
     -L <name>               Name the server socket (namespace isolation)
     -S <path>               Specify server socket path
+    -T <features>           Features of the terminal this client runs in
+                            (256,RGB,...), added to the ones detected
     -t <target>             Target session, window, or pane
 
 TARGET SYNTAX (-t):

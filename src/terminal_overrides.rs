@@ -329,9 +329,14 @@ pub fn progress_sequence<S: AsRef<str>>(
 ) -> Option<String> {
     let (state, value) = progress.split_once(';')?;
     let (state, value) = (state.parse().ok()?, value.parse().ok()?);
+    // This client's own `-T progressbar`, which `terminal-features` is read
+    // on top of.
+    let reported = crate::terminal_features::client_flag_features()
+        .contains(crate::terminal_features::TerminalFeatures::PROGRESSBAR);
     let progressbar = match features {
-        Some(features) => crate::terminal_features::progressbar_enabled(features, term),
-        None => crate::terminal_features::progressbar_enabled(
+        Some(features) => crate::terminal_features::progressbar_enabled_for(reported, features, term),
+        None => crate::terminal_features::progressbar_enabled_for(
+            reported,
             crate::option_array::default_values("terminal-features"),
             term,
         ),

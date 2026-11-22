@@ -76,10 +76,10 @@ fn control_mode_and_boolean_flags_pass_through() {
 
 #[test]
 fn unhandled_letters_and_edge_shapes_pass_through() {
-    // -c / -T are not consumed as value-taking by psmux's global scanners:
-    // splitting them would fabricate a fake subcommand token.
+    // -c is not consumed as value-taking by psmux's global scanners:
+    // splitting it would fabricate a fake subcommand token. (-T was the
+    // same until #1080, see test_issue1080_client_features_flag.rs.)
     assert_eq!(norm(&["psmux", "-cfoo", "ls"]), vec!["psmux", "-cfoo", "ls"]);
-    assert_eq!(norm(&["psmux", "-Tfoo", "ls"]), vec!["psmux", "-Tfoo", "ls"]);
     // long flags, bare dash, trailing valueless flag
     assert_eq!(norm(&["psmux", "--Lfoo", "ls"]), vec!["psmux", "--Lfoo", "ls"]);
     assert_eq!(norm(&["psmux", "-", "ls"]), vec!["psmux", "-", "ls"]);

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use super::registry::{self, Marker};
 use super::router::{self, NewSessionArgs};
 
-const GLOBAL_VALUE_FLAGS: &[&str] = &["-t", "-L", "-f", "-S"];
+const GLOBAL_VALUE_FLAGS: &[&str] = &["-t", "-L", "-f", "-S", "-T"];
 
 fn fail(msg: &str) -> ! {
     let _ = io::stdout().flush();
@@ -246,6 +246,11 @@ fn attach(ns: Option<&str>, name: &str) -> ! {
     let mut cmd = std::process::Command::new(exe);
     if let Some(n) = ns {
         cmd.arg("-L").arg(n);
+    }
+    // The client is that process, so it is the one to carry this one's `-T`.
+    let features = crate::terminal_features::client_flag_features();
+    if features.bits() != 0 {
+        cmd.arg("-T").arg(features.to_string());
     }
     cmd.arg("attach-session").arg("-t").arg(name);
     match cmd.status() {

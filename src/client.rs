@@ -3292,8 +3292,12 @@ fn establish_connection_with_timeout(
         let line = format!("client-environ {}\n", base64::engine::general_purpose::STANDARD.encode(&block));
         let _ = writer.write_all(line.as_bytes());
     }
-    let features = reported_terminal_features(
-        |name| std::env::var(name).ok(), crate::platform::is_classic_console_output,
+    // What this terminal is known to do, and on top of it what the client's
+    // own `-T features` says it does (tmux.c:476 at tag 3.8).
+    let features = crate::terminal_features::TerminalFeatures::from_bits(
+        reported_terminal_features(
+            |name| std::env::var(name).ok(), crate::platform::is_classic_console_output,
+        ).bits() | crate::terminal_features::client_flag_features().bits(),
     );
     let attach = format!("client-attach features={:#x}\n", features.bits());
     let attach_res = writer.write_all(attach.as_bytes());

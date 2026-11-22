@@ -7,8 +7,9 @@ impl TerminalFeatures {
     pub const RGB: Self = Self(1 << 1);
     pub const HYPERLINKS: Self = Self(1 << 2);
     pub const TITLE: Self = Self(1 << 3);
-    /// Not reported by a client: the server takes it from `terminal-features`
-    /// and the client's TERM, see [`progressbar_enabled`].
+    /// Reported by a client only when its `-T` names it. Otherwise the server
+    /// takes it from `terminal-features` and the client's TERM, see
+    /// [`progressbar_enabled`].
     pub const PROGRESSBAR: Self = Self(1 << 4);
 
     pub const fn from_bits(bits: u64) -> Self { Self(bits) }
@@ -18,6 +19,36 @@ impl TerminalFeatures {
     pub const fn with(self, feature: Self, on: bool) -> Self {
         if on { Self(self.0 | feature.0) } else { Self(self.0 & !feature.0) }
     }
+
+    /// The features a `-T features` client flag names, added to `self` as
+    /// tmux adds them (`tty_parse_features(optarg, ":,", &feat, NULL)`,
+    /// tmux.c:476 and tty-features.c:426 at tag 3.8): names split at `:` or
+    /// `,`, a name in any case, `name@` takes the feature back out, and a
+    /// name tmux does not know ends the list. A feature tmux knows and psmux
+    /// keeps no bit for is read and changes nothing.
+    pub fn with_client_flag(self, value: &str) -> Self {
+        let mut features = self;
+        for name in value.split([':', ',']) {
+            let (name, remove) = match name.strip_suffix('@') {
+                Some(name) => (name, true),
+                None => (name, false),
+            };
+            if !TMUX_FEATURES.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                break;
+            }
+            if let Some((feature, _)) = Self::NAMED.iter().find(|(_, known)| known.eq_ignore_ascii_case(name)) {
+                features = features.with(*feature, !remove);
+            }
+        }
+        features
+    }
+
+    /// The features psmux keeps a bit for, in the order tmux lists them.
+    const NAMED: [(Self, &'static str); 5] = [
+        (Self::COLOR_256, "256"), (Self::RGB, "RGB"),
+        (Self::HYPERLINKS, "hyperlinks"), (Self::TITLE, "title"),
+        (Self::PROGRESSBAR, "progressbar"),
+    ];
 
     pub fn from_hex(report: &str) -> Option<Self> {
         let digits = report.strip_prefix("0x")?;
@@ -31,11 +62,7 @@ impl TerminalFeatures {
 impl std::fmt::Display for TerminalFeatures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut separator = "";
-        for (feature, name) in [
-            (Self::COLOR_256, "256"), (Self::RGB, "RGB"),
-            (Self::HYPERLINKS, "hyperlinks"), (Self::TITLE, "title"),
-            (Self::PROGRESSBAR, "progressbar"),
-        ] {
+        for (feature, name) in Self::NAMED {
             if self.contains(feature) {
                 write!(f, "{separator}{name}")?;
                 separator = ",";
@@ -43,6 +70,20 @@ impl std::fmt::Display for TerminalFeatures {
         }
         Ok(())
     }
+}
+
+/// What this process's `-T features` flags named, for the client it becomes.
+static CLIENT_FLAG_FEATURES: std::sync::OnceLock<TerminalFeatures> = std::sync::OnceLock::new();
+
+/// Record the features of this invocation's `-T` flags. The first call wins:
+/// the flags are read once, before anything attaches.
+pub fn set_client_flag_features(features: TerminalFeatures) {
+    let _ = CLIENT_FLAG_FEATURES.set(features);
+}
+
+/// The features this invocation's `-T` flags named, none when it gave no `-T`.
+pub fn client_flag_features() -> TerminalFeatures {
+    CLIENT_FLAG_FEATURES.get().copied().unwrap_or(TerminalFeatures::from_bits(0))
 }
 
 /// The feature names tmux 3.8 knows (`tty_features`, tty-features.c:391).
@@ -65,7 +106,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let (mut enabled, mut disabled) = (false, false);
+    progressbar_enabled_for(false, entries, term)
+}
+
+/// [`progressbar_enabled`] for a client whose own report, its `-T`, already
+/// holds the feature when `reported` is set. tmux adds the client's features
+/// first (`c->term_features |= feat`, server-client.c:2928 at tag 3.8) and
+/// reads `terminal-features` on top of them, so a `progressbar@` there still
+/// takes the feature away.
+pub fn progressbar_enabled_for<I, S>(reported: bool, entries: I, term: &str) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let (mut enabled, mut disabled) = (reported, false);
     for entry in entries {
         let Some((pattern, features)) = crate::terminal_overrides::split_pattern(entry.as_ref()) else {
             continue;
