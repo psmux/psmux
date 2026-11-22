@@ -320,7 +320,16 @@ else {
     $lines = Invoke-Click $c
     $press   = Select-Mouse $lines '0x0' '0x1'
     $release = Select-Mouse $lines '0x0' '0x0'
-    if ($press.Count -eq 1 -and $release.Count -eq 1) { Write-Pass "one press and one release at 22523, the gate is strictly below the threshold: $($press[0]) | $($release[0])" }
+    if ([Environment]::OSVersion.Version.Build -lt 22000) {
+        # On a real Windows 10 host the faked 22523 takes the newer hosts'
+        # route, and this host has no part of it: it publishes no mouse mode
+        # for the reader, so the click gate stays shut, and it drops an SGR
+        # report written to its input pipe. So nothing can arrive here; the
+        # boundary itself is pinned by the_threshold_itself_does_not_need_the_bypass.
+        if ($press.Count -eq 0 -and $release.Count -eq 0) { Write-Pass "nothing at a faked 22523 on this host, which has neither the published mode nor the pipe" }
+        else { Write-Fail "records at a faked 22523 on this host, which was measured to have no route for them: $($lines -join ' | ')" }
+    }
+    elseif ($press.Count -eq 1 -and $release.Count -eq 1) { Write-Pass "one press and one release at 22523, the gate is strictly below the threshold: $($press[0]) | $($release[0])" }
     elseif ($press.Count -eq 0) { Write-Fail "record reader starved at 22523: conhost conversion should deliver the click: $($lines -join ' | ')" }
     else { Write-Fail "the widening fired at 22523, the comparison is wrong (second copy delivered): $((Select-Mouse $lines '0x0' '') -join ' | ')" }
     Stop-Case $c
