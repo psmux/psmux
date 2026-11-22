@@ -487,14 +487,14 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
     }
     let scroll_offset = app.copy_scroll_offset;
     
-    fn build(node: &mut Node, cur_path: &mut Vec<usize>, active_path: &[usize], include_full_content: bool) -> LayoutJson {
+    fn build(node: &mut Node, cur_path: &mut Vec<usize>, active_path: &[usize], include_full_content: bool, readers: bool) -> LayoutJson {
         match node {
             Node::Split { kind, sizes, children } => {
                 let k = match *kind { LayoutKind::Horizontal => "Horizontal".to_string(), LayoutKind::Vertical => "Vertical".to_string() };
                 let mut ch: Vec<LayoutJson> = Vec::new();
                 for (i, c) in children.iter_mut().enumerate() {
                     cur_path.push(i);
-                    ch.push(build(c, cur_path, active_path, include_full_content));
+                    ch.push(build(c, cur_path, active_path, include_full_content, readers));
                     cur_path.pop();
                 }
                 LayoutJson::Split { kind: k, sizes: sizes.clone(), children: ch }
@@ -508,6 +508,9 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                 const FLAG_BLINK: u8 = 32;
                 const FLAG_HIDDEN: u8 = 64;
                 const FLAG_STRIKETHROUGH: u8 = 128;
+                // Below 22523 a record reader wants the mouse too (see
+                // `window_ops::legacy_record_reader`); asked before the lock.
+                let reader_mouse = crate::window_ops::leaf_record_reader(p, readers, *cur_path == active_path);
 
                 // If the pane is squelched (hiding injected commands),
                 // return a blank leaf so the client never sees the flash.
@@ -595,7 +598,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                     has_content
                 };
                 let wants_mouse =
-                    screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+                    screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None || reader_mouse;
                 let need_full_content = include_full_content && *cur_path == active_path;
                 let mut lines: Vec<Vec<CellJson>> = if need_full_content {
                     Vec::with_capacity(p.last_rows as usize)
@@ -782,9 +785,10 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
         None => app.active_idx,
     };
     let emacs = app.mode_keys == "emacs";
+    let readers = crate::window_ops::frame_marks_record_readers(app);
     let win = &mut app.windows[win_idx];
     let mut path = Vec::new();
-    let mut root = build(&mut win.root, &mut path, &win.active_path, in_copy_mode);
+    let mut root = build(&mut win.root, &mut path, &win.active_path, in_copy_mode, readers);
     // Mark the active pane and set copy mode info
     fn mark_active(
         node: &mut LayoutJson,
@@ -949,6 +953,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     let emacs = app.mode_keys == "emacs";
     // Search match and mark highlights of the focused copy-mode pane (#694).
     let hl = if in_copy { crate::copy_mode::copy_highlights(app) } else { Vec::new() };
+    let readers = crate::window_ops::frame_marks_record_readers(app);
 
     // ── tiny helpers (no captures needed, so plain `fn` items) ───────
 
@@ -1034,6 +1039,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         emacs: bool,
         hl: &[[u16; 4]],
         clocks: ClockMarks<'_>,
+        readers: bool,
         out: &mut String,
     ) {
         match node {
@@ -1052,7 +1058,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 for (i, c) in children.iter_mut().enumerate() {
                     if i > 0 { out.push(','); }
                     cur_path.push(i);
-                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, clocks, out);
+                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, clocks, readers, out);
                     cur_path.pop();
                 }
                 out.push_str("]}");
@@ -1067,6 +1073,9 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 const FLAG_BLINK: u8    = 32;
                 const FLAG_HIDDEN: u8   = 64;
                 const FLAG_STRIKETHROUGH: u8 = 128;
+                // Below 22523 a record reader wants the mouse too (see
+                // `window_ops::legacy_record_reader`); asked before the lock.
+                let reader_mouse = crate::window_ops::leaf_record_reader(p, readers, *cur_path == active_path);
 
                 // If the pane is squelched, emit a blank leaf.
                 if p.squelch_until.is_some() {
@@ -1165,9 +1174,10 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             })
                         })
                     };
-                    // Strict — explicit mouse protocol only (see Leaf field doc).
+                    // Strict: an explicit mouse protocol only (see the Leaf
+                    // field doc), or a record reader below 22523.
                     let wants_mouse =
-                        screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+                        screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None || reader_mouse;
 
                     // Snapshot rows_v2 (run-merged)
                     let mut snap_rows: Vec<RowSnap> = Vec::with_capacity(p.last_rows as usize);
@@ -1560,7 +1570,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     let clocks = ClockMarks { focused: focused_clock, parked: &app.clock_panes };
     write_node(
         &mut win.root, &mut path, &active_path,
-        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, clocks, &mut out,
+        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, clocks, readers, &mut out,
     );
     Ok(out)
 }
