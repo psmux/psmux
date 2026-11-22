@@ -265,14 +265,22 @@ if (-not $p) {
         & $PSMUX send-keys -t $c.Target C-z 2>&1 | Out-Null   # the model app quits on Ctrl+Z
         Start-Sleep -Seconds 5
         $fg = (& $PSMUX display-message -t $c.Target -p '#{pane_current_command}' 2>&1).Trim()
-        $post = Invoke-Wheel $c $childLog "up" 2
-        if ($post.Count -eq 0) { Write-Pass "no reports forwarded after the app exited (foreground is now '$fg')" }
-        else { Write-Fail "the latch outlived its owner: $($post.Count) report(s) went to the bare shell" }
+        if ($Win10 -and $fg -like '*rawmode*') {
+            # Measured on this host: psmux's send-keys C-z reaches a raw VT
+            # reader as nothing, while C-c, Escape and Enter arrive. So the
+            # model app has not quit, and the end of the latch cannot be
+            # watched here.
+            Write-Host "  [SKIP] the model app did not quit: Ctrl+Z does not reach a raw VT reader on this host, as measured" -ForegroundColor DarkYellow
+        } else {
+            $post = Invoke-Wheel $c $childLog "up" 2
+            if ($post.Count -eq 0) { Write-Pass "no reports forwarded after the app exited (foreground is now '$fg')" }
+            else { Write-Fail "the latch outlived its owner: $($post.Count) report(s) went to the bare shell" }
 
-        $mode = (& $PSMUX display-message -t $c.Target -p '#{pane_in_mode}' 2>&1).Trim()
-        if ($mode -eq "1") { Write-Pass "wheel-up at the shell prompt entered copy mode again (#360 parity)" }
-        else { Write-Fail "wheel-up at the shell prompt did not enter copy mode (pane_in_mode=$mode)" }
-        & $PSMUX send-keys -t $c.Target -X cancel 2>&1 | Out-Null
+            $mode = (& $PSMUX display-message -t $c.Target -p '#{pane_in_mode}' 2>&1).Trim()
+            if ($mode -eq "1") { Write-Pass "wheel-up at the shell prompt entered copy mode again (#360 parity)" }
+            else { Write-Fail "wheel-up at the shell prompt did not enter copy mode (pane_in_mode=$mode)" }
+            & $PSMUX send-keys -t $c.Target -X cancel 2>&1 | Out-Null
+        }
     }
     Stop-Client $p
 }
