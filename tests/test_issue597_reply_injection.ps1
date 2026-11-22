@@ -70,6 +70,11 @@ if (-not (Test-Path $probe)) {
     exit 1
 }
 
+# The Windows 10 inbox conhost (build 19045) hands psmux a query only when it
+# next draws something, so there the probe writes a letter after each query
+# (see query_probe_child.cs).
+$paint = if ([Environment]::OSVersion.Version.Build -lt 22000) { " paint" } else { "" }
+
 # Each arm gets its own data dir so the server is cold (PSMUX_MOUSE_DEBUG and
 # PSMUX_FAKE_INJECT_FAIL are read by the SERVER, once, at first use) and so the
 # mouse debug log belongs to that arm alone.
@@ -84,7 +89,7 @@ function Invoke-Arm([string]$name, [bool]$forceFail) {
     $log = Join-Path $dir "probe.txt"
     & $PSMUX -L $NS kill-server 2>&1 | Out-Null
     Start-Sleep -Milliseconds 400
-    & $PSMUX -L $NS new-session -d -s $name -x 100 -y 30 "$probe $log 900" 2>&1 | Out-Null
+    & $PSMUX -L $NS new-session -d -s $name -x 100 -y 30 "$probe $log 900$paint" 2>&1 | Out-Null
     $deadline = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $deadline -and -not (Test-Path $log)) { Start-Sleep -Milliseconds 300 }
     Start-Sleep -Milliseconds 500
@@ -174,8 +179,19 @@ else { Write-Fail "the OSC 4 reply still returned $oscF bytes with injection for
 # it still lands.  This is what makes "ConPTY eats an OSC" a measurement rather
 # than an assumption.
 $csiF = Get-Bytes $failed.Probe "CSI_SCHEME"
-if ($csiF -gt 0) { Write-Pass "the CSI reply still arrives on the pipe ($csiF bytes), so the pipe is not the broken half" }
-else { Write-Fail "the CSI reply stopped arriving too (got=$csiF): the pipe write regressed" }
+if ([Environment]::OSVersion.Version.Build -lt 22000) {
+    # The Windows 10 inbox conhost (build 19045) drops a CSI written to its
+    # input pipe: measured by writing `ESC [ ? 997 ; 1 n`, `ESC [ 0 n`, DA2,
+    # DECRPM and `CSI 6 ; 20 ; 10 t` straight into a pseudoconsole's input,
+    # with a letter between each, under the flags 0, 0x4 and 0x6, and a child
+    # in VT input mode read only the letters. So there the pipe carries no
+    # CSI reply, and the one this arm leaves to it does not arrive.
+    if ($csiF -eq 0) { Write-Pass "the CSI reply does not arrive: this host drops a CSI written to its input pipe" }
+    else { Write-Fail "the CSI reply arrived on the pipe ($csiF bytes), which this host was measured to drop" }
+} else {
+    if ($csiF -gt 0) { Write-Pass "the CSI reply still arrives on the pipe ($csiF bytes), so the pipe is not the broken half" }
+    else { Write-Fail "the CSI reply stopped arriving too (got=$csiF): the pipe write regressed" }
+}
 
 foreach ($field in @(
     'AttachConsole\(\d+\) FAILED err=\d+',

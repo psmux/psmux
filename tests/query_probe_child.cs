@@ -9,7 +9,15 @@
 // arrived on stdin in that window.
 //
 // Build: csc /nologo /out:query_probe_child.exe query_probe_child.cs
-// Usage: query_probe_child.exe <logfile> [wait_ms]
+// Usage: query_probe_child.exe <logfile> [wait_ms] [paint]
+//
+// `paint` writes a `.` right after each query, in the same write. The Windows
+// 10 inbox conhost (build 19045) holds a query the program writes on its own
+// and hands it to psmux only when it next draws something, ahead of that text,
+// so without a letter after it no query reaches psmux in the wait (measured:
+// XTVERSION alone, nothing in 4 s; with a letter after it, the reply in 8 ms;
+// with a letter a second later, the reply right after the letter). Suites pass
+// it on a build before 22000.
 using System;
 using System.IO;
 using System.Text;
@@ -81,12 +89,13 @@ class QueryProbe {
             : Path.Combine(Environment.GetEnvironmentVariable("TEMP"), "psmux_query_probe.txt");
         int wait = 1500;
         if (args.Length > 1) int.TryParse(args[1], out wait);
+        bool paint = args.Length > 2 && args[2] == "paint";
 
         IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
         IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
 
         StringBuilder outp = new StringBuilder();
-        outp.Append("QUERY_PROBE START wait=" + wait + "\n");
+        outp.Append("QUERY_PROBE START wait=" + wait + (paint ? " paint" : "") + "\n");
 
         uint outMode, inMode;
         bool haveOut = GetConsoleMode(hOut, out outMode);
@@ -154,8 +163,9 @@ class QueryProbe {
             int mark;
             lock (gate) { mark = used; }
             byte[] qb = Encoding.ASCII.GetBytes(q[1]);
+            byte[] wb = paint ? Encoding.ASCII.GetBytes(q[1] + ".") : qb;
             uint w;
-            WriteFile(hOut, qb, (uint)qb.Length, out w, IntPtr.Zero);
+            WriteFile(hOut, wb, (uint)wb.Length, out w, IntPtr.Zero);
             Thread.Sleep(wait);
             int now;
             byte[] snap;

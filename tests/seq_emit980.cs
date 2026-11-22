@@ -1,4 +1,4 @@
-// seq_emit980.exe <log file> <sequence> [listen ms] [hold seconds]
+// seq_emit980.exe <log file> <sequence> [listen ms] [hold seconds] [paint]
 //
 // Issue #980 pane child.  Writes <sequence> to its console output, with the
 // two character spellings \e as ESC, \s as ';', \a as BEL and \b as a
@@ -9,6 +9,12 @@
 // <log file>, so an OSC 4 query reply that psmux types into the pane can be
 // read back.  Then it idles [hold seconds] (default 40) so the pane stays
 // alive for a client capture.
+//
+// `paint` writes a `.` after each part of <sequence>. The Windows 10 inbox
+// conhost (build 19045) hands psmux a query the program writes on its own only
+// when it next draws something, so without a letter after it the query does
+// not reach psmux while the child listens. The suite passes it on a build
+// before 22000.
 //
 // The console input mode gets ENABLE_VIRTUAL_TERMINAL_INPUT so a reply that
 // arrives as VT text is delivered as characters.
@@ -48,6 +54,7 @@ class SeqEmit980
             .Replace("\\a", "\u0007").Replace("\\b", "\\");
         int listen = args.Length > 2 ? int.Parse(args[2]) : 3000;
         int hold = args.Length > 3 ? int.Parse(args[3]) : 40;
+        bool paint = args.Length > 4 && args[4] == "paint";
 
         IntPtr hin = GetStdHandle(-10);
         uint mode;
@@ -60,7 +67,7 @@ class SeqEmit980
         foreach (string part in seq.Split(new string[] { "\\p" }, StringSplitOptions.None))
         {
             if (part.Length == 0) { Thread.Sleep(1000); continue; }
-            byte[] b = Encoding.ASCII.GetBytes(part);
+            byte[] b = Encoding.ASCII.GetBytes(paint ? part + "." : part);
             o.Write(b, 0, b.Length);
             o.Flush();
             Thread.Sleep(1000);

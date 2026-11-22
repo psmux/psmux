@@ -6,6 +6,10 @@
 //   PROBE_QUERIES - "all" (default: ?996n + OSC10 + OSC11 + OSC4 0..15),
 //                   "idx5" (single OSC 4;5;? query),
 //                   "scheme" (only CSI ?996n)
+//   PROBE_PAINT   - "1" writes a `.` after the queries, in the same write. The
+//                   Windows 10 inbox conhost (build 19045) hands psmux the
+//                   queries only when it next draws something, so without it
+//                   none reaches psmux; the suite sets it on a build before 22000.
 const fs = require("fs");
 const chunks = [];
 
@@ -29,7 +33,7 @@ if (mode === "idx5") {
     ...Array.from({ length: 16 }, (_, i) => `\x1b]4;${i};?\x1b\\`),
   ];
 }
-process.stdout.write(queries.join(""));
+process.stdout.write(queries.join("") + (process.env.PROBE_PAINT === "1" ? "." : ""));
 
 setTimeout(() => {
   const text = Buffer.concat(chunks).toString("utf8");
