@@ -150,11 +150,26 @@ set PSMUX_NO_WARM=1
 set PSMUX_FAKE_WIN_BUILD=20348
 "$PSMUX" -L $NS -f NUL new-session -s wz
 "@ | Set-Content -Path $launch -Encoding ASCII
-    $w = Start-Process -FilePath $wez -ArgumentList '-n','--config','initial_cols=120','--config','initial_rows=30','start','--always-new-process','--','cmd.exe','/c',$launch -PassThru
+    # As in test_issue508 Part E (ab2c5f6f): -n also drops wezterm.lua's
+    # front_end, and where OpenGL is too old for the default one (a Hyper-V
+    # guest: "The OpenGL implementation is too old to work with glium")
+    # wezterm-gui exits 0 without a window. PSMUX_TEST_WEZTERM_FRONT_END
+    # (WebGpu there) picks one without reading wezterm.lua.
+    $wezArgs = @('-n')
+    if ($env:PSMUX_TEST_WEZTERM_FRONT_END) { $wezArgs += @('--config', "front_end='$($env:PSMUX_TEST_WEZTERM_FRONT_END)'") }
+    $wezArgs += @('--config','initial_cols=120','--config','initial_rows=30','start','--always-new-process','--','cmd.exe','/c',$launch)
+    $w = Start-Process -FilePath $wez -ArgumentList $wezArgs -PassThru
     $script:Started += $w.Id
     for ($i = 0; $i -lt 60; $i++) { P has-session -t wz | Out-Null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep -Milliseconds 500 }
+    $up = $LASTEXITCODE -eq 0
     Start-Sleep -Seconds 4
-    if ($LASTEXITCODE -ne 0) {
+    # The same skip as test_issue508 Part E: wezterm-gui opened no window (its
+    # log says why), so no wheel can be rolled at it. It exits at once then,
+    # sometimes before it started psmux.
+    $noWindow = "WezTerm wheel: wezterm-gui opened no window, no wheel was rolled (set PSMUX_TEST_WEZTERM_FRONT_END, e.g. WebGpu)"
+    if (-not $up -and $w.HasExited) {
+        Write-Skip $noWindow
+    } elseif (-not $up) {
         Write-Fail "psmux did not come up inside WezTerm"
     } else {
         P set -g mouse on | Out-Null
@@ -167,7 +182,9 @@ set PSMUX_FAKE_WIN_BUILD=20348
         $after = ((P display-message -p -t wz '#{pane_in_mode}') -join '').Trim()
         $pos = ((P display-message -p -t wz '#{scroll_position}') -join '').Trim()
         Write-Info "pane_in_mode $before -> $after, scroll_position=$pos"
-        if ($before -ne '1' -and $after -eq '1' -and [int]("0$pos" -replace '\D','') -gt 0) {
+        if ("$o" -match 'NOWINDOW') {
+            Write-Skip $noWindow
+        } elseif ($before -ne '1' -and $after -eq '1' -and [int]("0$pos" -replace '\D','') -gt 0) {
             Write-Pass "a real WezTerm wheel scrolls psmux with the build faked to 20348"
         } else {
             Write-Fail "WezTerm wheel on faked 20348: in_mode $before -> $after, scroll_position=$pos"
