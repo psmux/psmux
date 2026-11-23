@@ -874,6 +874,15 @@ pub(crate) fn dispatch(
                                 }
                             }
 
+                            // Issue #1095: the record of a key whose legacy byte
+                            // the host would misread (see server/mod.rs).
+                            #[cfg(windows)]
+                            if matches!(app.mode, Mode::Passthrough)
+                                && crate::input::write_key_record_to_active(&mut app, key)
+                            {
+                                continue;
+                            }
+
                             match key_upper.as_str() {
                                 "ENTER" => send_text_to_active(&mut app, "\r")?,
                                 "TAB" => send_text_to_active(&mut app, "\t")?,
