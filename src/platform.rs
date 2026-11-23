@@ -5005,7 +5005,27 @@ pub mod process_info {
 
     /// Get the CWD of the foreground process in the pane.
     pub fn get_foreground_cwd(pid: u32) -> Option<String> {
-        if let Some(target) = find_foreground_child_pid(pid) {
+        foreground_cwd_from(pid, find_foreground_child_pid(pid))
+    }
+
+    /// `get_foreground_cwd` for a one-shot query (`display-message -p`,
+    /// `list-panes -F`, `split-window -c '#{pane_current_path}'`), which has
+    /// no next frame to correct a stale answer.  Same walk, but the process
+    /// table is never served past `RENDER_PATH_TTL`: the render-path table can
+    /// predate a child the shell started moments ago (`pwsh -Command cmd.exe`
+    /// for `split-window cmd.exe`), and with no child in it the walk read the
+    /// wrapper's directory, so the reply was the folder the user had just left
+    /// until a background refresh landed.  The same split
+    /// `get_deepest_foreground_process_name_fresh` makes for
+    /// `#{pane_current_command}`.
+    pub fn get_foreground_cwd_fresh(pid: u32) -> Option<String> {
+        let target = process_table_bounded(RENDER_PATH_TTL)
+            .and_then(|entries| foreground_child_in(&entries, pid, &mut |p| entries.creation_of(p)));
+        foreground_cwd_from(pid, target)
+    }
+
+    fn foreground_cwd_from(pid: u32, foreground: Option<u32>) -> Option<String> {
+        if let Some(target) = foreground {
             if target != pid {
                 if let Some(cwd) = get_process_cwd(target) {
                     return Some(cwd);
@@ -5999,6 +6019,7 @@ pub mod process_info {
     pub fn get_deepest_foreground_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_deepest_foreground_process_name_fresh(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
+    pub fn get_foreground_cwd_fresh(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
     pub fn vt_bridge_on_pane_console(
         _root_pid: u32,

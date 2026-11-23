@@ -612,8 +612,14 @@ if (Test-Path $injectorExe) {
         if ($maxDelay -gt 1500) {
             Write-Fail "Max typing delay after burst: $([math]::Round($maxDelay,0))ms (confirms ~2s freeze)"
             Write-Host "  ^^^ BUG TIMING CONFIRMED: $([math]::Round($maxDelay,0))ms freeze matches paste_suppress_until = 2s" -ForegroundColor Red
+        } elseif ((@($burstDelays | Sort-Object))[[int][math]::Floor($burstDelays.Count / 2)] -gt 300) {
+            # A suppression window delays every trial. One slow trial among
+            # normal ones is the probe: each trial starts an injector and each
+            # poll a new psmux.exe capture-pane, and one launch now and then
+            # takes 200 to 575 ms (sweep 2026-11-22_18-31-05: 146, 551, 157 ms).
+            Write-Fail "Median typing delay over 300ms: $($burstDelays -join ', ') ms (suppression active but <2s)"
         } elseif ($maxDelay -gt 300) {
-            Write-Fail "Max typing delay: $([math]::Round($maxDelay,0))ms (suppression active but <2s)"
+            Write-Pass "Typing delay $($burstDelays -join ', ') ms: one slow probe launch, the median is normal (no suppression window)"
         } else {
             Write-Pass "Max typing delay: $([math]::Round($maxDelay,0))ms (no significant freeze)"
         }

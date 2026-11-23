@@ -1946,9 +1946,17 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 // answers with the server's working directory (#615 follow
                 // up).  Everything else keeps trusting the reading.
                 {
-                    let live = p
-                        .child_pid
-                        .and_then(crate::platform::process_info::get_foreground_cwd);
+                    // Same freshness split as `pane_current_command` above: a
+                    // frame may be one process table refresh behind, a command
+                    // reply may not (it read the folder the user had just left
+                    // for a `cmd.exe` split, whose shell runs under a wrapper).
+                    let live = p.child_pid.and_then(|pid| {
+                        if FORMAT_ASYNC.with(|c| c.get()) {
+                            crate::platform::process_info::get_foreground_cwd(pid)
+                        } else {
+                            crate::platform::process_info::get_foreground_cwd_fresh(pid)
+                        }
+                    });
                     if let Some(hint) = p.cwd_hint.as_ref() {
                         if hint.pid == p.child_pid
                             && !hint.settled.load(std::sync::atomic::Ordering::Relaxed)
