@@ -10,8 +10,17 @@
 # This script proves the hypothesis with raw escape sequences (no
 # external TUI app needed).
 
+# Windows 10 (a build before 22000, the inbox conhost): that host keeps a
+# program's CSI ?1049h and ?1049l to itself. It draws its alternate buffer to
+# psmux as ordinary output, a full repaint from the top, and on leaving
+# repaints its main buffer over it (measured with PSMUX_PANE_RAW: no ?1049 at
+# all). So psmux never enters the alternate screen there, #{alternate_on}
+# stays 0, and alternate-screen off has nothing to drop. With PSMUX_CONPTY_DIR
+# (OpenConsole) the switch reaches psmux as on Windows 11.
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -126,6 +135,7 @@ Start-Sleep -Milliseconds 500
 $altOn = (& $PSMUX display-message -t $SESSION -p '#{alternate_on}' 2>&1).Trim()
 Write-Info "PART B: #{alternate_on} after enter = $altOn"
 if ($altOn -eq "1") { Write-Pass "PART B: alt screen is active" }
+elseif ($Win10 -and $altOn -eq "0") { Write-Pass "PART B: this host kept ?1049h to itself, #{alternate_on} stays 0" }
 else { Write-Fail "PART B: alt screen not detected (#{alternate_on}=$altOn)" }
 
 # Write 30 lines while in alt screen
@@ -169,7 +179,13 @@ $postAltCount = ([regex]::Matches($capPost, '(?m)^alt (\d+)\b')).Count
 $postMainCount = ([regex]::Matches($capPost, '(?m)^main (\d+)\b')).Count
 Write-Info "PART C: post-exit -S -2000: alt N retained=$postAltCount, main N retained=$postMainCount"
 
-if ($postMainCount -ge 48 -and $postAltCount -eq 0) {
+if ($Win10) {
+    # The host drew its alternate buffer as ordinary output, so the 'alt N'
+    # lines that scrolled off meanwhile stay in the history; the rest were
+    # repainted over by the main buffer.
+    if ($postMainCount -ge 48 -and $postAltCount -lt 30) { Write-Pass "PART C: the main lines remain ($postMainCount of 50); of the alt lines only the $postAltCount that scrolled off while this host drew its alternate buffer stay" }
+    else { Write-Fail "PART C: on Windows 10, alt=$postAltCount main=$postMainCount" }
+} elseif ($postMainCount -ge 48 -and $postAltCount -eq 0) {
     Write-Pass "PART C: BUG ROOT CAUSE CONFIRMED — alt screen content (30 'alt N' lines) is NOT preserved in scrollback after exit. Only the 50 main-screen lines remain ($postMainCount of 50). This is correct vt100 behaviour but is exactly what users see as 'capture-pane misses my codex output' (#88)."
 } elseif ($postAltCount -gt 0 -and $postMainCount -ge 48) {
     Write-Fail "PART C: alt screen content WAS preserved ($postAltCount 'alt N' lines) — not the root cause then"

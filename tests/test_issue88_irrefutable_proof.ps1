@@ -18,8 +18,17 @@
 #   5. Trailing-blank trimming: a TUI that didn't fill the screen
 #      doesn't leave dozens of empty rows in scrollback.
 
+# Windows 10 (a build before 22000, the inbox conhost): that host keeps a
+# program's CSI ?1049h and ?1049l to itself. It draws its alternate buffer to
+# psmux as ordinary output, a full repaint from the top, and on leaving
+# repaints its main buffer over it (measured with PSMUX_PANE_RAW: no ?1049 at
+# all). So psmux never enters the alternate screen there, #{alternate_on}
+# stays 0, and alternate-screen off has nothing to drop. With PSMUX_CONPTY_DIR
+# (OpenConsole) the switch reaches psmux as on Windows 11.
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -93,7 +102,8 @@ Start-Sleep -Seconds 6
 $cap = & $PSMUX capture-pane -t $SESSION -S -1000 -p 2>&1 | Out-String
 $inner = ([regex]::Matches($cap, '(?m)^INNER (\d+)\b')).Count
 Info "2: INNER lines retained = $inner (expected 5)"
-if ($inner -ge 4) { Pass "2: fix is effective — alt-screen content visible in scrollback ($inner of 5)" }
+if ($Win10 -and $inner -eq 0) { Pass "2: on this host alternate-screen off keeps nothing: psmux never sees the switch, and the host repaints over the INNER lines" }
+elseif ($inner -ge 4) { Pass "2: fix is effective — alt-screen content visible in scrollback ($inner of 5)" }
 else { Fail "2: fix not effective — only $inner lines retained" }
 & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
 Reset
@@ -122,7 +132,9 @@ $cap = & $PSMUX capture-pane -t $SESSION -S -1000 -p 2>&1 | Out-String
 $second = ([regex]::Matches($cap, '(?m)^INNER (\d+)\b')).Count
 Info "3b: after toggle, run 2 INNER count = $second (expected 5)"
 
-if ($first -eq 0 -and $second -ge 4) {
+if ($Win10 -and $first -eq 0 -and $second -eq 0) {
+    Pass "3: on this host neither run keeps the INNER lines, whatever the option"
+} elseif ($first -eq 0 -and $second -ge 4) {
     Pass "3: runtime toggle takes effect on next alt-screen invocation"
 } else {
     Fail "3: runtime toggle ineffective (first=$first, second=$second)"
@@ -164,6 +176,7 @@ foreach ($w in 0,1,2) {
     if ($n -ge 4) { $winsOk++ }
 }
 if ($winsOk -ge 3) { Pass "4: option propagated to all $winsOk existing panes" }
+elseif ($Win10 -and $winsOk -eq 0) { Pass "4: on this host no pane keeps the INNER lines, whatever the option" }
 else { Fail "4: only $winsOk of 3 panes received the option update" }
 & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
 Reset
@@ -192,7 +205,9 @@ Info "5: post-TUI history_size = $afterFilled (delta = $delta rows)"
 # The TUI emitted 3 lines.  Allowing 1-2 extra rows for the prompt
 # echo / command line, anything more than ~10 means trailing blanks
 # slipped through.
-if ($delta -lt 10 -and $afterFilled -gt $baselineFilled) {
+if ($Win10 -and $delta -lt 10) {
+    Pass "5: no blank rows reached the history ($delta); on this host the short program's lines are repainted over, not scrolled"
+} elseif ($delta -lt 10 -and $afterFilled -gt $baselineFilled) {
     Pass "5: scrollback grew by $delta rows (trim is working)"
 } else {
     Fail "5: scrollback grew by $delta rows (trim is NOT working)"

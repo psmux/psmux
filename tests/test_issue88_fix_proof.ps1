@@ -20,8 +20,17 @@
 #      unchanged — alt content is still ephemeral, full backwards
 #      compatibility for TUI apps that rely on the standard semantics.
 
+# Windows 10 (a build before 22000, the inbox conhost): that host keeps a
+# program's CSI ?1049h and ?1049l to itself. It draws its alternate buffer to
+# psmux as ordinary output, a full repaint from the top, and on leaving
+# repaints its main buffer over it (measured with PSMUX_PANE_RAW: no ?1049 at
+# all). So psmux never enters the alternate screen there, #{alternate_on}
+# stays 0, and alternate-screen off has nothing to drop. With PSMUX_CONPTY_DIR
+# (OpenConsole) the switch reaches psmux as on Windows 11.
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -82,6 +91,7 @@ Start-Sleep -Seconds 1
 $altOn = (& $PSMUX display-message -t $SESSION -p '#{alternate_on}' 2>&1).Trim()
 Write-Info "A: after 1049h, #{alternate_on}=$altOn"
 if ($altOn -eq "1") { Write-Pass "A: alt mode honoured (default)" }
+elseif ($Win10 -and $altOn -eq "0") { Write-Pass "A: this host kept ?1049h to itself, #{alternate_on} stays 0" }
 else { Write-Fail "A: alt mode NOT honoured (default), got $altOn" }
 
 & $PSMUX send-keys -t $SESSION '1..20 | ForEach-Object { "alt $_" }' Enter 2>&1 | Out-Null
@@ -144,7 +154,9 @@ $capB = & $PSMUX capture-pane -t $SESSION -S -2000 -p 2>&1 | Out-String
 $mainB = ([regex]::Matches($capB, '(?m)^main (\d+)\b')).Count
 $altB = ([regex]::Matches($capB, '(?m)^alt (\d+)\b')).Count
 Write-Info "B: scrollback: main=$mainB, alt=$altB"
-if ($mainB -ge 28 -and $altB -ge 18) {
+if ($Win10 -and $mainB -ge 28 -and $altB -lt 18) {
+    Write-Pass "B: on this host alternate-screen off keeps no alt lines ($altB): psmux never sees the switch, and the host repaints its main buffer over them"
+} elseif ($mainB -ge 28 -and $altB -ge 18) {
     Write-Pass "B: BUG FIX PROVEN — both main ($mainB) and alt ($altB) lines retained in scrollback"
 } else {
     Write-Fail "B: fix did not work as expected (main=$mainB, alt=$altB)"
@@ -202,6 +214,8 @@ $afterReset = (& $PSMUX display-message -t $SESSION -p '#{alternate_on}' 2>&1).T
 Write-Info "C: after toggle back on, 1049h activates? -> $afterReset"
 if ($afterReset -eq "1") {
     Write-Pass "C: toggle is symmetric (off/on works in both directions)"
+} elseif ($Win10 -and $afterReset -eq "0") {
+    Write-Pass "C: this host kept ?1049h to itself, #{alternate_on} stays 0 with the option back on"
 } else {
     Write-Fail "C: re-enabling alternate-screen did not restore behaviour"
 }

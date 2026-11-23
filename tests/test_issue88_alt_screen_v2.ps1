@@ -2,8 +2,17 @@
 # Uses [Console]::Out.Write to inject DEC private mode 1049 escapes
 # reliably through PowerShell.
 
+# Windows 10 (a build before 22000, the inbox conhost): that host keeps a
+# program's CSI ?1049h and ?1049l to itself. It draws its alternate buffer to
+# psmux as ordinary output, a full repaint from the top, and on leaving
+# repaints its main buffer over it (measured with PSMUX_PANE_RAW: no ?1049 at
+# all). So psmux never enters the alternate screen there, #{alternate_on}
+# stays 0, and alternate-screen off has nothing to drop. With PSMUX_CONPTY_DIR
+# (OpenConsole) the switch reaches psmux as on Windows 11.
+
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -82,7 +91,11 @@ Write-Host "`n=== Step 2: enter alt screen ===" -ForegroundColor Cyan
 & $PSMUX send-keys -t $SESSION '[Console]::Out.Write([char]27 + "[?1049h")' Enter 2>&1 | Out-Null
 Start-Sleep -Seconds 1
 
-if (Wait-AltState -Target $SESSION -Want "1") {
+if ($Win10) {
+    $av = (& $PSMUX display-message -t $SESSION -p '#{alternate_on}' 2>&1).Trim()
+    if ($av -eq "0") { Write-Pass "Step 2: this host kept ?1049h to itself, #{alternate_on} stays 0" }
+    else { Write-Fail "Step 2: on Windows 10, #{alternate_on}=$av" }
+} elseif (Wait-AltState -Target $SESSION -Want "1") {
     Write-Pass "Step 2: alt screen activated (#{alternate_on}=1)"
 } else {
     $av = (& $PSMUX display-message -t $SESSION -p '#{alternate_on}' 2>&1).Trim()
@@ -125,7 +138,12 @@ $altAfter = ([regex]::Matches($capPost, '(?m)^alt (\d+)\b')).Count
 Write-Info "Step 4: post-exit capture-pane -S -2000: main=$mainAfter, alt=$altAfter"
 
 Write-Host "`n=== ANALYSIS ===" -ForegroundColor Yellow
-if ($altAfter -eq 0 -and $mainAfter -ge 48) {
+if ($Win10) {
+    # The host drew its alternate buffer as ordinary output: the alt lines
+    # that scrolled off meanwhile stay, the rest were repainted over.
+    if ($mainAfter -ge 48 -and $altAfter -lt 30) { Write-Pass "Windows 10: the main lines remain ($mainAfter); of the alt lines only the $altAfter that scrolled off while this host drew its alternate buffer stay" }
+    else { Write-Fail "Windows 10: main=$mainAfter, alt=$altAfter" }
+} elseif ($altAfter -eq 0 -and $mainAfter -ge 48) {
     Write-Host "  ROOT CAUSE: alt-screen content is not preserved in scrollback after exit." -ForegroundColor Yellow
     Write-Host "  This is correct vt100 semantics, but matches the user's #88 symptom:" -ForegroundColor Yellow
     Write-Host "  codex's TUI emits text into the alt screen; capture-pane and copy mode" -ForegroundColor Yellow

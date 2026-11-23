@@ -16,6 +16,7 @@
 
 $ErrorActionPreference = 'Continue'
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
@@ -123,18 +124,23 @@ try {
     & $PSMUX -L $ns send-keys -t $pane -l "powershell -NoProfile -ExecutionPolicy Bypass -File `"$alt`""
     & $PSMUX -L $ns send-keys -t $pane Enter
     $onAlt = Wait-Until { ((Invoke-CC "display-message -p -t '$pane' '#{alternate_on}'")[0].Body -join '') -eq '1' } 15000
-    if ($onAlt) { Write-Pass "alternate_on=1" } else { Write-Fail "pane never reported alternate_on=1" }
+    # The Windows 10 inbox conhost keeps ?1049h to itself and draws its
+    # alternate buffer as ordinary output, so there psmux never enters the
+    # alternate screen and [4] reads like [3].
+    if ($onAlt) { Write-Pass "alternate_on=1" } elseif ($Win10) { Write-Pass "this host kept ?1049h to itself, alternate_on stays 0" } else { Write-Fail "pane never reported alternate_on=1" }
     Wait-Until { (Pane-Text) -match 'ALTSCREEN810' } 5000 | Out-Null
     $r = Invoke-CC "capture-pane -p -e -N -a -q -t '$pane'"
     $txt = $r[0].Body -join "`n"
     if ($r[0].End -eq 'end' -and $txt -match 'NORMAL810' -and $txt -notmatch 'ALTSCREEN810') { Write-Pass "capture-pane -a returns the saved normal screen (NORMAL810, no ALTSCREEN810)" }
+    elseif ($Win10 -and $r[0].End -eq 'end' -and $txt.Trim() -eq '') { Write-Pass "capture-pane -a -q -> one empty line, as with no alternate screen" }
     else { Write-Fail "capture-pane -a on the alternate screen -> $($r[0].End): '$($txt.Trim() -replace "`n", ' / ')'" }
     $r = Invoke-CC "capture-pane -p -t '$pane'"
     $txt = $r[0].Body -join "`n"
     if ($txt -match 'ALTSCREEN810') { Write-Pass "capture-pane without -a returns the alternate screen" } else { Write-Fail "capture-pane without -a -> '$($txt.Trim())'" }
     $r = Invoke-CC "display-message -p -t '$pane' '#{alternate_saved_x},#{alternate_saved_y}'"
     $body = $r[0].Body -join ''
-    if ($body -match '^(\d+),(\d+)$' -and [int64]$Matches[2] -ge 1 -and [int64]$Matches[2] -lt 1000) { Write-Pass "alternate_saved_x/y hold the saved cursor below the first row ($body)" } else { Write-Fail "alternate_saved_x/y on the alternate screen: '$body'" }
+    if ($body -match '^(\d+),(\d+)$' -and [int64]$Matches[2] -ge 1 -and [int64]$Matches[2] -lt 1000) { Write-Pass "alternate_saved_x/y hold the saved cursor below the first row ($body)" }
+    elseif ($Win10 -and $body -eq '4294967295,4294967295') { Write-Pass "alternate_saved_x/y are UINT_MAX, as with nothing saved" } else { Write-Fail "alternate_saved_x/y on the alternate screen: '$body'" }
 } catch {
     if ("$_" -ne 'no session') { Write-Fail "exception: $_" }
 } finally {
