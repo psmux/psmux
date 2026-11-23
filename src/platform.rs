@@ -3429,10 +3429,36 @@ pub mod mouse_inject {
     /// `u_char` = the plain char; for Ctrl+Alt: `u_char` = control character.
     /// Sends both key-down and key-up events for proper event pairing.
     pub fn send_modified_key_event(child_pid: u32, ch: char, ctrl: bool, alt: bool, shift: bool) -> bool {
+        const LEFT_ALT_PRESSED: u32 = 0x0002;
+        const LEFT_CTRL_PRESSED: u32 = 0x0008;
+        const SHIFT_PRESSED: u32 = 0x0010;
+
+        // Build control_key_state flags (matching Windows Terminal convention)
+        let mut flags: u32 = 0;
+        if ctrl { flags |= LEFT_CTRL_PRESSED; }
+        if alt  { flags |= LEFT_ALT_PRESSED; }
+        if shift { flags |= SHIFT_PRESSED; }
+
+        let base_char = if shift && !ctrl { ch.to_ascii_uppercase() } else { ch };
+        let u_char_value: u16 = if ctrl {
+            (base_char.to_ascii_lowercase() as u16) & 0x1F
+        } else {
+            let mut buf = [0u16; 2];
+            base_char.encode_utf16(&mut buf)[0]
+        };
+
+        debug_log(&format!("send_modified_key_event: pid={} char='{}' ctrl={} alt={} shift={}",
+            child_pid, ch, ctrl, alt, shift));
+        send_key_record(child_pid, char_to_vk(ch), u_char_value, flags)
+    }
+
+    /// Write one key press and its release, exactly as given, into the console
+    /// input buffer of `child_pid`'s console with WriteConsoleInputW.
+    pub fn send_key_record(child_pid: u32, vk: u16, u_char_value: u16, flags: u32) -> bool {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            if !free_and_attach(child_pid, "send_modified_key_event") {
+            if !free_and_attach(child_pid, "send_key_record") {
                 if had_console { reattach_parent_console(); }
                 return false;
             }
@@ -3452,16 +3478,13 @@ pub mod mouse_inject {
             );
 
             if handle == INVALID_HANDLE || handle == 0 {
-                debug_log(&format!("send_modified_key_event: CreateFileW(CONIN$) FAILED"));
+                debug_log(&format!("send_key_record: CreateFileW(CONIN$) FAILED"));
                 detach_console();
                 if had_console { reattach_parent_console(); }
                 return false;
             }
 
             const KEY_EVENT: u16 = 0x0001;
-            const LEFT_ALT_PRESSED: u32 = 0x0002;
-            const LEFT_CTRL_PRESSED: u32 = 0x0008;
-            const SHIFT_PRESSED: u32 = 0x0010;
 
             #[repr(C)]
             #[derive(Copy, Clone)]
@@ -3481,21 +3504,6 @@ pub mod mouse_inject {
                 event: KEY_EVENT_RECORD,
             }
 
-            // Build control_key_state flags (matching Windows Terminal convention)
-            let mut flags: u32 = 0;
-            if ctrl { flags |= LEFT_CTRL_PRESSED; }
-            if alt  { flags |= LEFT_ALT_PRESSED; }
-            if shift { flags |= SHIFT_PRESSED; }
-
-            let base_char = if shift && !ctrl { ch.to_ascii_uppercase() } else { ch };
-            let u_char_value: u16 = if ctrl {
-                (base_char.to_ascii_lowercase() as u16) & 0x1F
-            } else {
-                let mut buf = [0u16; 2];
-                base_char.encode_utf16(&mut buf)[0]
-            };
-
-            let vk = char_to_vk(ch);
             let scan = vk_to_scan(vk);
 
             let records = [
@@ -3533,8 +3541,8 @@ pub mod mouse_inject {
                 &mut written,
             );
 
-            debug_log(&format!("send_modified_key_event: pid={} char='{}' ctrl={} alt={} shift={} vk=0x{:02X} scan=0x{:02X} u_char=0x{:04X} flags=0x{:04X} => ok={} written={}",
-                child_pid, ch, ctrl, alt, shift, vk, scan, u_char_value, flags, result != 0, written));
+            debug_log(&format!("send_key_record: pid={} vk=0x{:02X} scan=0x{:02X} u_char=0x{:04X} flags=0x{:04X} => ok={} written={}",
+                child_pid, vk, scan, u_char_value, flags, result != 0, written));
 
             CloseHandle(handle);
             detach_console();
@@ -3710,6 +3718,7 @@ pub mod mouse_inject {
     pub fn log_lost_reply(_pid: Option<u32>, _kind: &str, _len: usize) {}
     pub fn log_query_bound(_pane_id: usize, _bound: usize) {}
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
+    pub fn send_key_record(_pid: u32, _vk: u16, _u_char: u16, _flags: u32) -> bool { false }
     pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }
     pub fn send_modified_enter_event(_pid: u32, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
     pub fn char_to_vk(_ch: char) -> u16 { 0 }

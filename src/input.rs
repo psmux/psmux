@@ -2565,6 +2565,119 @@ pub(crate) fn write_ctrl_key_as_record(p: &mut crate::types::Pane, c: char, shif
     true
 }
 
+/// The console record (virtual key, character, control key state) that a key
+/// must reach a record reader as on a console host that does not parse win32
+/// input mode, for the keys whose legacy byte that host turns into another key.
+/// `None` for every other key.
+///
+/// Issue #1095.  Such a host (the inbox conhost of Windows 10 19045 never asks
+/// for `CSI ?9001h`) parses tmux's bytes into records itself, and for these
+/// keys it builds the wrong one, measured with a record reader in PSReadLine's
+/// mode (`0x01E4`):
+///
+/// ```text
+///   C-1, C-0        31 / 30      -> a plain 1 / 0, no Ctrl
+///   C-Space         00           -> Ctrl+Shift+2
+///   C-i             09           -> Tab, no Ctrl
+///   C-j             0a           -> Ctrl+Enter
+///   C-m             0d           -> Enter, no Ctrl
+///   C-BSpace        08           -> Ctrl+H
+///   S-Enter         1b 0d        -> Alt+Enter
+/// ```
+///
+/// On a host that does parse win32 input mode these keys already go as a
+/// record ([`write_ctrl_key_as_record`], the `send-keys` C-letter arm and the
+/// Shift+Enter arm of [`write_enter_to_pane`]), and this table gives the same
+/// record those write.
+#[cfg(windows)]
+pub(crate) fn legacy_host_key_record(name: &str) -> Option<(u16, u16, u32)> {
+    if name.trim() != name {
+        return None;
+    }
+    let (code, mods) = crate::config::parse_key_string(name)?;
+    let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+    match code {
+        KeyCode::Char(c) if (mods == KeyModifiers::CONTROL || mods == ctrl_shift)
+            && ctrl_modifier_is_lost_in_vt(c) =>
+        {
+            let vk = crate::platform::mouse_inject::char_to_vk(c);
+            if vk == 0 {
+                return None;
+            }
+            let shift = if mods.contains(KeyModifiers::SHIFT) { SHIFT_PRESSED } else { 0 };
+            Some((vk, 0, LEFT_CTRL_PRESSED | shift))
+        }
+        KeyCode::Char(c) if mods == KeyModifiers::CONTROL && legacy_host_misreads_ctrl_letter(c) => {
+            let c = c.to_ascii_lowercase();
+            Some((c.to_ascii_uppercase() as u16, (c as u16) & 0x1F, LEFT_CTRL_PRESSED))
+        }
+        // VK_BACK with the character a real Ctrl+Backspace carries.
+        KeyCode::Backspace if mods == KeyModifiers::CONTROL => Some((0x08, 0x7F, LEFT_CTRL_PRESSED)),
+        KeyCode::Enter if mods == KeyModifiers::SHIFT => Some((0x0D, 0x0D, SHIFT_PRESSED)),
+        _ => None,
+    }
+}
+
+/// The Ctrl+letters whose control byte the inbox conhost of 19045 parses into
+/// another key for a record reader (see [`legacy_host_key_record`]).  Measured
+/// for every letter but C-c: the other 22, C-h among them, arrive as their own
+/// Ctrl+letter.
+#[cfg(windows)]
+fn legacy_host_misreads_ctrl_letter(c: char) -> bool {
+    matches!(c.to_ascii_lowercase(), 'i' | 'j' | 'm')
+}
+
+/// Write `rec` ([`legacy_host_key_record`]) straight into `p`'s console with
+/// `WriteConsoleInput`, when `p` reads key records and its host does not parse
+/// win32 input mode.  Returns true when the key was written here, so the caller
+/// skips its legacy byte.
+///
+/// Issue #1095.  This is the channel psmux already uses for the mouse records
+/// of #597 and the paste of #684 on the same host, and a record written there
+/// reaches the reader intact: measured on 19045 with the reader in Far's
+/// (`0x01B8`) and PSReadLine's (`0x01E4`) mode, every key of the table above
+/// arrived with its virtual key and modifiers.
+#[cfg(windows)]
+pub(crate) fn write_key_record_to_console(p: &mut crate::types::Pane, rec: (u16, u16, u32)) -> bool {
+    if pane_host_parses_win32_input(p) || !crate::window_ops::detect_key_record_reader(p) {
+        return false;
+    }
+    if p.child_pid.is_none() {
+        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+    }
+    let Some(pid) = p.child_pid else { return false };
+    let (vk, uchar, ctrl_state) = rec;
+    let ok = crate::platform::mouse_inject::send_key_record(pid, vk, uchar, ctrl_state);
+    crate::debug_log::input_log(
+        "console-key-record",
+        &format!("#1095 vk=0x{:02X} ch=0x{:04X} cs=0x{:X} into the console, pid={} ok={}", vk, uchar, ctrl_state, pid, ok),
+    );
+    ok
+}
+
+/// [`write_key_record_to_console`] for the key `name`, into the pane that
+/// `send_text_to_active` would write to (a focused floating pane first).  The
+/// scriptable `send-keys` arms call it before they write a legacy byte.
+/// Synchronized input keeps the bytes: they go to every pane, and this writes
+/// to one.
+#[cfg(windows)]
+pub fn write_key_record_to_active(app: &mut AppState, name: &str) -> bool {
+    let Some(rec) = legacy_host_key_record(name) else { return false };
+    if app.sync_input || !input_target_accepts_input(app) {
+        return false;
+    }
+    let win = &mut app.windows[app.active_idx];
+    if let Some(fi) = win.floating_focus {
+        if let Some(fp) = win.floating.get_mut(fi) {
+            return write_key_record_to_console(&mut fp.pane, rec);
+        }
+    }
+    match active_pane_mut(&mut win.root, &win.active_path) {
+        Some(p) if !p.dead => write_key_record_to_console(p, rec),
+        _ => false,
+    }
+}
+
 /// Recognize named Enter keys before their modifiers become legacy bytes.
 pub(crate) fn enter_key_modifiers(name: &str) -> Option<KeyModifiers> {
     // Quoted send-keys tokens containing surrounding whitespace are text (#490).
@@ -2599,6 +2712,11 @@ fn write_enter_to_pane(p: &mut Pane, mods: KeyModifiers, xterm: bool) {
             p.win32_input_latched = true;
             crate::debug_log::input_log("enter-record",
                 &format!("Shift+Enter as Win32 record, pid={:?}", p.child_pid));
+            return;
+        }
+        // Issue #1095: a host without win32 input mode makes Alt+Enter of the
+        // legacy ESC CR, so a record reader gets the record itself.
+        if mods == KeyModifiers::SHIFT && write_key_record_to_console(p, (0x0D, 0x0D, SHIFT_PRESSED)) {
             return;
         }
         // Preserve native Ctrl+Enter delivery, including its LF payload (#409).
@@ -4649,6 +4767,14 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 &format!("#860 {} as {:?} pid={:?}", k, String::from_utf8_lossy(&bytes), p.child_pid));
             return;
         }
+        // Issue #1095: a key whose legacy byte this pane's host would turn into
+        // another key goes to a record reader as its own record.
+        #[cfg(windows)]
+        if let Some(rec) = legacy_host_key_record(k) {
+            if write_key_record_to_console(p, rec) {
+                return;
+            }
+        }
         use std::io::Write as _;
         match k {
             "tab" => write_key_seq(p, b"\t"),
@@ -4970,6 +5096,10 @@ mod tests_issue681_copy_key_table;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue610_ctrl_backspace.rs"]
 mod tests_issue610_ctrl_backspace;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_win10_record_reader_keys.rs"]
+mod tests_win10_record_reader_keys;
 
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue588_win32_input_escape.rs"]
