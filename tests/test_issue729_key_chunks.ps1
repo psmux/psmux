@@ -24,6 +24,11 @@
 # Part 4  a real attached client under a pseudoconsole (tests\conpty697.cs)
 #         typing Up into a win32 input mode pane: split count must be 0.
 #
+# Windows 10 (a build before 22000, the inbox host): that conhost does not
+# parse win32 input mode, so a pane that asked for it cannot get a record of
+# the key from psmux; psmux writes tmux's bytes there (Issue #1097), and the
+# pane reads them as one read each, as a pane that did not ask does.
+#
 # Run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_issue729_key_chunks.ps1
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
@@ -58,6 +63,8 @@ foreach ($exe in @($probe, $conpty)) {
 Write-Info ("psmux: {0}  ({1})" -f $PSMUX, ((& $PSMUX -V) -join ' '))
 
 $ESC = [char]27
+# Issue #1097: the Windows 10 inbox host, which never parses win32 input mode.
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 function Show([string]$s) { return $s.Replace([string]$ESC, '^[') }
 
 # One string per ReadFile the probe logged.
@@ -142,6 +149,11 @@ try {
     foreach ($k in $keys) {
         $got = Send-One $p $k[1]
         $joined = $got -join ''
+        if ($Win10) {
+            if ($got.Count -eq 1 -and $got[0] -eq $k[4]) { Write-Pass ("{0}: one read {1} (this host has no win32 input mode)" -f $k[0], (Show $k[4])) }
+            else { Write-Fail ("{0}: Windows 10: expected one read {1}, got {2} reads: {3}" -f $k[0], (Show $k[4]), $got.Count, (Show $joined)) }
+            continue
+        }
         $recs = Parse-Records $joined
         $charRecs = @($recs | Where-Object { $_.Vk -eq 0 })
         if ($recs.Count -eq 2 -and $charRecs.Count -eq 0 -and $recs[0].Vk -eq $k[2] -and $recs[0].Cs -eq $k[3] -and $recs[0].Kd -eq 1 -and $recs[1].Kd -eq 0) {
@@ -152,7 +164,10 @@ try {
     }
     $got = (Send-One $p @('Escape')) -join ''
     $recs = Parse-Records $got
-    if ($recs.Count -ge 1 -and $recs[0].Vk -eq 27) { Write-Pass "Escape arrives as the Escape key record" }
+    if ($Win10) {
+        if ($got -eq "$ESC") { Write-Pass "Escape arrives as a lone ESC (this host has no win32 input mode)" } else { Write-Fail "Windows 10 Escape: read $(Show $got)" }
+    }
+    elseif ($recs.Count -ge 1 -and $recs[0].Vk -eq 27) { Write-Pass "Escape arrives as the Escape key record" }
     else { Write-Fail "Escape: read $(Show $got)" }
     Stop-Probe $p
 
