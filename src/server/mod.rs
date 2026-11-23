@@ -5053,6 +5053,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                             }
 
+                            // Issue #1095: on a host without win32 input mode a
+                            // record reader gets the keys whose legacy byte
+                            // that host turns into another key as their record.
+                            #[cfg(windows)]
+                            if matches!(app.mode, Mode::Passthrough)
+                                && crate::input::write_key_record_to_active(&mut app, key)
+                            {
+                                continue;
+                            }
+
                             // tmux reads modifiers in any order and case
                             // (key-string.c key_string_get_modifiers); the arms
                             // below match fixed prefixes, so a modified
