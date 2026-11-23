@@ -37,6 +37,12 @@
 #
 # Layers: E2E over real consoles, native INPUT_RECORD injection, VT input path
 #         over a real ConPTY, key bindings, paste regression guard.
+#
+# Windows 10 (a build before 22000): in Part D the outer pane's inbox conhost
+# 19045 hands the client inside no CSI 13;2u at all (the inner pane's child
+# got nothing in 3 of 3 runs, while the control's plain bytes arrive), as it
+# passes a VT reader no key sequence it does not know. So there Part D expects
+# nothing to arrive.
 
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE }
@@ -364,6 +370,9 @@ if (-not $bash) {
     }
     if ($done -eq 0) {
         Write-Skip "no ConPTY link came up, so the VT path went untested"
+    } elseif ([Environment]::OSVersion.Version.Build -lt 22000) {
+        if ($hit -eq 0) { Write-Pass "0/$done runs: the outer pane's inbox conhost hands the client inside no CSI 13;2u on this host" }
+        else { Write-Fail "$hit/$done runs got CSI 13;2u through the inbox conhost of Windows 10, which passed none when measured" }
     } elseif ($hit -eq $done) {
         Write-Pass "$hit/$done runs: the VT path decoded CSI 13;2u  <-- the #654 silent half"
     } else {

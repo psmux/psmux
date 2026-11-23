@@ -26,6 +26,16 @@
 # touches the default namespace: a user creating or renaming a session during the
 # run trips it too.
 #
+# Windows 10 (a build before 22000): the recorder cannot read non-ASCII text
+# there. Its ReadFile after SetConsoleCP(65001) returns one wrong byte, often
+# NUL, for each UTF-16 unit of non-ASCII input on the inbox conhost 19045, in a
+# plain console window without psmux too (Discussion #1074), and with the pane
+# on OpenConsole the same paste arrives byte for byte. In [2b], which starts
+# with a non-ASCII letter, the start marker also came after the first words.
+# So on that host [1] and [2b] check what this suite is about and the reader
+# can still show: every pasted `i` arrives, and the paste has one start and
+# one end marker.
+#
 # Run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_altgr_letter_paste.ps1
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_EXE) { $env:PSMUX_TEST_EXE } elseif ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
@@ -90,6 +100,21 @@ if (-not (Test-Path $inj) -or -not (Test-Path $rec)) { Write-Host "FATAL: could 
 function P { & $PSMUX -L $NS @args 2>&1 }
 $ESC = [char]27
 function HexOf([string]$s) { ([Text.Encoding]::UTF8.GetBytes($s) | ForEach-Object { $_.ToString("x2") }) -join "" }
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
+# How many times the byte sequence $pat (hex) starts on a byte boundary of $hex.
+function Count-At([string]$hex, [string]$pat) {
+    $n = 0
+    for ($i = 0; $i -le $hex.Length - $pat.Length; $i += 2) { if ($hex.Substring($i, $pat.Length) -ceq $pat) { $n++ } }
+    $n
+}
+# Windows 10: every `i` of $text arrived, and one start and one end marker.
+function Check-Win10Paste([string]$hex, [string]$text) {
+    $want = @($text.ToCharArray() | Where-Object { $_ -ceq 'i' }).Count
+    $got = Count-At $hex '69'
+    $starts = Count-At $hex '1b5b3230307e'; $ends = Count-At $hex '1b5b3230317e'
+    if ($got -eq $want -and $starts -eq 1 -and $ends -eq 1) { Write-Pass "all $want i arrived, with one start and one end marker (this host's reader garbles the non-ASCII letters)" }
+    else { Write-Fail "Windows 10: $got of $want i, $starts start and $ends end markers: '$hex'" }
+}
 
 # What a node raw mode reader with bracketed paste on received from the same
 # Ctrl+V in Windows Terminal with no psmux in between (26200, Turkish Q):
@@ -169,7 +194,8 @@ try {
     if ($r.rc -ne 0) { Write-Fail "the injector failed (exit $($r.rc))" }
     else {
         Write-Info "pane received: $($r.hex)"
-        if ($r.hex -ceq $measuredA) { Write-Pass "one bracketed paste, byte for byte what the pane gets without psmux" }
+        if ($Win10) { Check-Win10Paste $r.hex $textA }
+        elseif ($r.hex -ceq $measuredA) { Write-Pass "one bracketed paste, byte for byte what the pane gets without psmux" }
         else { Write-Fail "pane got '$($r.hex)', expected '$measuredA'" }
         if ($r.hex -cnotmatch '^(..)*09') { Write-Pass "no Tab reached the pane" } else { Write-Fail "a Tab (C-M-i) reached the pane" }
     }
@@ -199,7 +225,8 @@ try {
     if ($r.rc -ne 0) { Write-Fail "the injector failed (exit $($r.rc))" }
     else {
         Write-Info "pane received: $($r.hex)"
-        if ($r.hex -ceq $bracketedC) { Write-Pass "one bracketed paste, every doubled letter kept" } else { Write-Fail "pane got '$($r.hex)', expected '$bracketedC'" }
+        if ($Win10) { Check-Win10Paste $r.hex $textC }
+        elseif ($r.hex -ceq $bracketedC) { Write-Pass "one bracketed paste, every doubled letter kept" } else { Write-Fail "pane got '$($r.hex)', expected '$bracketedC'" }
     }
     Wait-OneWindow
 
