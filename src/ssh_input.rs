@@ -523,6 +523,39 @@ pub fn conpty_needs_mouse_record_bypass() -> bool {
     windows_build_number().map_or(false, |b| b < CONPTY_MOUSE_MIN_BUILD)
 }
 
+/// Does the pane's console host drop the SGR mouse report psmux writes into
+/// the pane's input pipe? (#1092)
+///
+/// [`conpty_needs_mouse_record_bypass`] answers from the build number, which
+/// describes the inbox conhost only. A pane opened on the console host the
+/// user pointed `PSMUX_CONPTY_DIR` at (OpenConsole) gets the pipe report on any
+/// build, and with the app's VT input off that host turns it into a record
+/// itself, as a current inbox conhost does. The record psmux injects on those
+/// builds is then a second copy: on 19045 with OpenConsole 1.24, a record
+/// reader got 3 notches as 6 wheel records, 1 click as 2 presses and 2
+/// releases, and 1 drag as 2 presses and 16 moves for 8 steps. With VT input
+/// on the host hands the report over as text, so the record stays the app's
+/// only copy there, and the channel itself is unchanged.
+pub fn pane_host_drops_mouse_report() -> bool {
+    host_drops_mouse_report(windows_build_number(), pane_host_is_supplied())
+}
+
+/// [`pane_host_drops_mouse_report`] with its two facts supplied, so the table
+/// can be pinned by unit tests on any host.
+pub fn host_drops_mouse_report(build: Option<u32>, supplied_host: bool) -> bool {
+    !supplied_host && build.is_some_and(|b| b < CONPTY_MOUSE_MIN_BUILD)
+}
+
+#[cfg(windows)]
+fn pane_host_is_supplied() -> bool {
+    crate::input::pane_host_is_supplied()
+}
+
+#[cfg(not(windows))]
+fn pane_host_is_supplied() -> bool {
+    false
+}
+
 /// Server-wide last-resort override for the #598 wheel gate (issue #613,
 /// the shape proposed by PR #614).
 ///

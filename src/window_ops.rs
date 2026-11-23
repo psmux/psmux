@@ -1059,13 +1059,38 @@ pub(crate) fn hwheel_record(btn: u8) -> Option<(u32, u32)> {
 /// delta 128 from the host and 5 with delta 120 from psmux.
 ///
 /// Only the vertical wheel: the host converts no SGR 66/67, so the horizontal
-/// record (MOUSE_HWHEELED) is the only copy. Below the build the pipe report
-/// never arrives (#597), and an unknown VTI or console mode keeps the record,
-/// as before.
+/// record (MOUSE_HWHEELED) is the only copy. Below the build the inbox host
+/// never delivers the pipe report (#597), and an unknown VTI or console mode
+/// keeps the record, as before. `legacy_build` is
+/// `ssh_input::pane_host_drops_mouse_report`, so a pane on the OpenConsole of
+/// `PSMUX_CONPTY_DIR`, which converts the report on any build, is not legacy.
 pub(crate) fn wheel_record_is_duplicate(event_flags: u32, legacy_build: bool, vti_on: Option<bool>, console_mode: Option<u32>) -> bool {
     event_flags & mouse_inject::MOUSE_WHEELED != 0
         && !legacy_build
-        && vti_on == Some(false)
+        && host_converts_report(vti_on, console_mode)
+}
+
+/// Would the #597 record for a press, release, drag or motion be a SECOND
+/// copy? (#1092)
+///
+/// Those records go in only on a build below CONPTY_MOUSE_MIN_BUILD
+/// (`record_bypass_applies`), where the inbox conhost drops the pipe report.
+/// A pane on the OpenConsole of `PSMUX_CONPTY_DIR` does not drop it, and with
+/// the app's VT input off that host makes the record itself, as it does for
+/// the wheel above: measured on 19045 with OpenConsole 1.24, a record reader
+/// got 1 click as 2 presses and 2 releases, and 1 drag of 8 steps as 2
+/// presses and 16 moves. With VT input on (Bubble Tea) the host passes the
+/// report on as text, and the record is the app's only copy.
+pub(crate) fn mouse_record_is_duplicate(event_flags: u32, host_drops_report: bool, vti_on: Option<bool>, console_mode: Option<u32>) -> bool {
+    event_flags & WHEEL_FLAGS == 0
+        && !host_drops_report
+        && host_converts_report(vti_on, console_mode)
+}
+
+/// With the app's VT input off and mouse input on, the console host turns the
+/// pipe's SGR report into a record by itself. Unknown state keeps the record.
+fn host_converts_report(vti_on: Option<bool>, console_mode: Option<u32>) -> bool {
+    vti_on == Some(false)
         && console_mode.map_or(false, |m| m & ENABLE_MOUSE_INPUT != 0 && m & ENABLE_VIRTUAL_TERMINAL_INPUT == 0)
 }
 
@@ -1274,13 +1299,16 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // tmux parity: tmux writes SGR bytes and has no record channel at
         // all.  The MOUSE_EVENT bypass is a Windows only extension that
         // exists because conhost sits between psmux and the pane child.
-        if record_bypass_applies(_event_flags) && wheel_record_is_duplicate(
-            _event_flags,
-            crate::ssh_input::conpty_needs_mouse_record_bypass(),
-            pane.vti_mode_cache.map(|(_, on)| on),
-            console_input_mode(pane),
-        ) {
-            mouse_log("  -> Win32 MOUSE_EVENT NOT injected: VTI is off and mouse input is on, so the                        console host already turned the pipe report into a wheel record (double notch fix)");
+        let duplicate = record_bypass_applies(_event_flags) && {
+            let drops = crate::ssh_input::pane_host_drops_mouse_report();
+            let vti = pane.vti_mode_cache.map(|(_, on)| on);
+            let mode = console_input_mode(pane);
+            wheel_record_is_duplicate(_event_flags, drops, vti, mode)
+                || mouse_record_is_duplicate(_event_flags, drops, vti, mode)
+        };
+        if duplicate {
+            mouse_log("  -> Win32 MOUSE_EVENT NOT injected: VTI is off and mouse input is on, so the \
+                       console host already turned the pipe report into a record (double event fix)");
         } else if record_bypass_applies(_event_flags) {
             let reason = if _event_flags & WHEEL_FLAGS != 0 {
                 "wheel, fixes #277"
@@ -5110,6 +5138,10 @@ mod test_issue1036_hwheel_mouse_keys;
 #[cfg(test)]
 #[path = "../tests-rs/test_wheel_record_once.rs"]
 mod test_wheel_record_once;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1092_openconsole_mouse_record.rs"]
+mod test_issue1092_openconsole_mouse_record;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_respawn_pane_refusal_survives.rs"]
