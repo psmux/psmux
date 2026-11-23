@@ -2450,13 +2450,55 @@ pub(crate) fn win32_key_record_allowed(host_requested: bool, wanted: bool) -> bo
 ///
 /// Read from the LIVE parser (copy mode swaps a frozen snapshot into `term`),
 /// where `vt100::Screen` records the request from the host's startup output.
-/// Issue #845: see [`win32_key_record_allowed`].
+/// Issue #845: see [`win32_key_record_allowed`].  Issue #1097: see
+/// [`host_parses_win32_input`] for the request that is not the host's.
 #[cfg(windows)]
 pub(crate) fn pane_host_parses_win32_input(p: &crate::types::Pane) -> bool {
-    p.live_parser()
+    let requested = p.live_parser()
         .lock()
         .map(|parser| parser.screen().win32_input_requested())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    host_parses_win32_input(requested, win32_input_host_build(), pane_host_is_supplied())
+}
+
+/// The Windows build [`pane_host_parses_win32_input`] judges the host by.
+/// Unit tests model their host by its output alone, whatever machine runs
+/// them, so there the build is unknown unless a test sets one for its thread.
+#[cfg(all(windows, not(test)))]
+fn win32_input_host_build() -> Option<u32> {
+    crate::ssh_input::windows_build_number()
+}
+#[cfg(all(windows, test))]
+thread_local! {
+    pub(crate) static TEST_WIN32_INPUT_HOST_BUILD: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(all(windows, test))]
+fn win32_input_host_build() -> Option<u32> {
+    TEST_WIN32_INPUT_HOST_BUILD.with(|b| b.get())
+}
+
+/// The first Windows build whose inbox console host can parse win32 input
+/// mode.  Windows 10's inbox conhost (the 19041 code base, 10.0.19041.320 on
+/// 19045) predates the mode: it never asks for it, and it drops a record
+/// written in that form (#845).  Builds from 22000 on keep the stream's word.
+#[cfg(windows)]
+pub(crate) const WIN32_INPUT_INBOX_MIN_BUILD: u32 = 22000;
+
+/// May a `CSI ?9001h` in this pane's output be taken as its console host's?
+///
+/// Issue #1097.  The Windows 10 inbox conhost passes a program's own request
+/// through to psmux unparsed, and at the very start of the stream, where a
+/// host that does parse the mode writes its own: measured on 19045 with a raw
+/// mode node child that asks for it (as Ink based TUIs do on Windows), the
+/// pane's stream began `ESC[?9001h ESC[2J ESC[m ESC[H`, and without that
+/// child `ESC[2J ESC[m ESC[H`.  psmux then wrote the #729 records, which that
+/// host drops, so the child read nothing for Up, F5 or C-Right.  So on that
+/// host the request is never the host's.  A host supplied with
+/// `PSMUX_CONPTY_DIR` (OpenConsole) parses the mode and asks for it itself,
+/// and keeps the stream's word.
+#[cfg(windows)]
+pub(crate) fn host_parses_win32_input(requested: bool, build: Option<u32>, supplied_host: bool) -> bool {
+    requested && (supplied_host || !build.is_some_and(|b| b < WIN32_INPUT_INBOX_MIN_BUILD))
 }
 
 /// `LEFT_CTRL_PRESSED` in a console `KEY_EVENT_RECORD`'s control key state.
@@ -4918,6 +4960,10 @@ pub(crate) mod pane_input_fixture;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_enter_delivery.rs"]
 mod tests_enter_delivery;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_win10_child_win32_input.rs"]
+mod tests_win10_child_win32_input;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_input.rs"]

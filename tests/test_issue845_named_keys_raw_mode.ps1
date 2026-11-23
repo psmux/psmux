@@ -29,6 +29,11 @@
 #         with WriteConsoleInput (tests\injector_timed.cs), into the same child.
 # Part 6  (optional) the old host measurement.
 #
+# Windows 10 (a build before 22000, the inbox host): that conhost does not
+# parse win32 input mode, so the Part 2 child that asked for it cannot get a
+# record of the key from psmux; psmux writes tmux's bytes there
+# (Issue #1097), and the child reads them as the Part 1 child does.
+#
 # Run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_issue845_named_keys_raw_mode.ps1
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_BIN) { $env:PSMUX_BIN } elseif ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
@@ -67,6 +72,8 @@ $injector = Join-Path $root "injector_timed.exe"
 Write-Info ("psmux: {0}  ({1})  ns={2}  build={3}" -f $PSMUX, ((& $PSMUX -V) -join ' '), $NS, [Environment]::OSVersion.Version.Build)
 
 $ESC = [char]27
+# Issue #1097: the Windows 10 inbox host, which never parses win32 input mode.
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 function Show([string]$s) { return $s.Replace([string]$ESC, '^[') }
 
 # Hex of every 'data' event the node recorder logged after line $from.
@@ -135,7 +142,7 @@ try {
     Write-Host "`n=== Part 2: a Claude Code like child (raw mode + CSI ?9001h) keeps #729's records ===" -ForegroundColor Yellow
     $log = Start-Keyrec "w" "w32"
     $w32cases = @(
-        @('Up', @('Up'), 38, 256), @('Left', @('Left'), 37, 256), @('Home', @('Home'), 36, 256), @('F5', @('F5'), 116, 0)
+        @('Up', @('Up'), 38, 256, "$ESC[A"), @('Left', @('Left'), 37, 256, "$ESC[D"), @('Home', @('Home'), 36, 256, "$ESC[H"), @('F5', @('F5'), 116, 0, "$ESC[15~")
     )
     foreach ($c in $w32cases) {
         $before = Count-Lines $log
@@ -146,7 +153,11 @@ try {
         $recs = [regex]::Matches($s, "\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_")
         $vkRecs = @($recs | Where-Object { [int]$_.Groups[1].Value -eq $c[2] -and [int]$_.Groups[5].Value -eq $c[3] })
         $charRecs = @($recs | Where-Object { [int]$_.Groups[1].Value -eq 0 })
-        if ($vkRecs.Count -eq 2 -and $charRecs.Count -eq 0) { Write-Pass ("{0}: one vk={1} press and release" -f $c[0], $c[2]) }
+        if ($Win10) {
+            if ($s -eq $c[4]) { Write-Pass ("{0}: {1} (this host has no win32 input mode)" -f $c[0], (Show $c[4])) }
+            else { Write-Fail ("{0}: Windows 10: want {1}, read {2}" -f $c[0], (Show $c[4]), (Show $s)) }
+        }
+        elseif ($vkRecs.Count -eq 2 -and $charRecs.Count -eq 0) { Write-Pass ("{0}: one vk={1} press and release" -f $c[0], $c[2]) }
         else { Write-Fail ("{0}: read {1}" -f $c[0], (Show $s)) }
     }
     & $PSMUX -L $NS kill-session -t w 2>&1 | Out-Null
