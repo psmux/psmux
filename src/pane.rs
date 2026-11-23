@@ -1102,6 +1102,7 @@ pub(crate) fn silent_rehome(pane: &mut Pane, dir: &str, syntax: RehomeSyntax) {
         requested: crate::util::normalize_dir_for_display(dir),
         stale,
         settled: std::sync::atomic::AtomicBool::new(false),
+        reading_follows_cd: matches!(syntax, RehomeSyntax::PowerShell | RehomeSyntax::Cmd),
     });
     // Tell the vt100 parser to watch for the next screen-clear (CSI 2J/3J);
     // its arrival tells the layout serialiser the clear finished (event-driven).

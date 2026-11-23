@@ -2007,6 +2007,16 @@ impl Screen {
         self.squelch_clear_pending = v;
     }
 
+    /// True while the squelch detector is armed and no CSI 2J/3J has arrived
+    /// since.  Read only: unlike [`take_squelch_cleared`], asking does not
+    /// disturb the layout serialiser's signal.  The server arms it just before
+    /// injecting `cd <dir>; cls`, so once it reads false again the injected
+    /// `cd` has run.
+    #[must_use]
+    pub fn squelch_clear_armed(&self) -> bool {
+        self.squelch_clear_pending
+    }
+
     /// Internal: fire the squelch signal if armed.
     fn check_squelch_signal(&mut self) {
         if self.squelch_clear_pending {

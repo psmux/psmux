@@ -1900,11 +1900,14 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                 // What the shell last said about itself over OSC 7 / OSC 9;9,
                 // if anything.  Read once: the PEB walk below must not hold the
                 // parser lock.
-                let announced = p
+                // Same lock: whether the warm claim's injected `cd <dir>; cls`
+                // is still in flight (see the cwd_hint block below).
+                let (announced, rehome_in_flight) = p
                     .term
                     .lock()
                     .ok()
-                    .and_then(|t| t.screen().path().map(str::to_owned));
+                    .map(|t| (t.screen().path().map(str::to_owned), t.screen().squelch_clear_armed()))
+                    .unwrap_or((None, true));
 
                 // Layer 0 (issue #615): a pane running `wsl` or `ssh` has no
                 // Win32 process that knows where the shell is.  wsl.exe keeps
@@ -1958,6 +1961,22 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                         }
                     });
                     if let Some(hint) = p.cwd_hint.as_ref() {
+                        // The injected line ends in `cls`/`clear`, and the
+                        // parser disarms its detector on that clear, so a
+                        // disarmed detector means the `cd` has RUN: from then on
+                        // the reading is the truth even when it names the
+                        // pool's own directory.  Latching only on "a reading
+                        // other than the pool's directory" left the hint alive
+                        // when no query happened to land while the shell sat in
+                        // the requested directory, so a later `cd` back into the
+                        // pool's directory kept answering with the request
+                        // forever (test_issue630 two splits: the shell's prompt
+                        // said `neutral`, the format said `X`).  Only for shells
+                        // whose `cd` moves the Win32 directory: Git Bash's does
+                        // not, and there the request stays the answer.
+                        if hint.reading_follows_cd && !rehome_in_flight {
+                            hint.settled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         if hint.pid == p.child_pid
                             && !hint.settled.load(std::sync::atomic::Ordering::Relaxed)
                         {

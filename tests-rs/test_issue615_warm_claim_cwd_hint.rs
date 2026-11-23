@@ -7,7 +7,7 @@
 //   PASS  pwsh split-window -c 'C:\Users' -> new pane_current_path='C:\Users'
 //                                            real cwd='C:\Users'
 //   FAIL  pwsh split-window -c 'C:\Users' -> new pane_current_path=
-//             'C:\Users\godwin\Documents\workspace\psmux'  real cwd='C:\Users'
+//             'C:\Users\dev\src\psmux'  real cwd='C:\Users'
 //
 // The child always landed in the right directory.  Only the REPORTED one was
 // wrong, and the wrong value was the directory the server was started from.
@@ -105,11 +105,16 @@ impl portable_pty::MasterPty for DummyMaster {
 
 fn make_pane(child_pid: Option<u32>) -> crate::types::Pane {
     let epoch = Instant::now() - Duration::from_secs(2);
+    // As `silent_rehome` leaves a claimed pane: the injected `cd <dir>; cls`
+    // is in flight, so the clear detector is armed.  A hint only ever exists
+    // together with an armed detector in production.
+    let mut parser = vt100::Parser::new(ROWS, COLS, 0);
+    parser.screen_mut().set_squelch_clear_pending(true);
     crate::types::Pane {
         master: Box::new(DummyMaster),
         writer: Box::new(DummyWriter),
         child: Box::new(DummyChild),
-        term: Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 0))),
+        term: Arc::new(Mutex::new(parser)),
         last_rows: ROWS,
         last_cols: COLS,
         id: 0,
@@ -238,6 +243,7 @@ fn hint(pid: Option<u32>, requested: &str, stale: Option<&str>) -> crate::types:
         requested: requested.to_string(),
         stale: stale.map(|s| s.to_string()),
         settled: AtomicBool::new(false),
+        reading_follows_cd: true,
     }
 }
 
@@ -349,6 +355,64 @@ fn a_settled_hint_never_comes_back() {
     );
 }
 
+/// The injected line is `cd <dir>; ...; cls`.  Once its clear has reached the
+/// parser the `cd` has run, so the reading is the truth even when it names the
+/// pool's own directory: the user went back there.  Before this, only a query
+/// that happened to land while the shell sat in the requested directory could
+/// retire the hint, and test_issue630 (two `split-window -c X`, then
+/// `Set-Location` back to the session's directory, which is also where the pool
+/// spawns) kept reporting `X` under a prompt that plainly said otherwise.
+#[test]
+#[cfg(windows)]
+fn the_rehome_clear_retires_the_hint_even_back_in_the_pool_dir() {
+    let pool_dir = std::env::temp_dir();
+    let parked = park_process_in(&pool_dir);
+    let pid = parked.0.id();
+    let pane = make_pane(Some(pid));
+    let term = pane.term.clone();
+    let mut pane = pane;
+    pane.cwd_hint = Some(hint(Some(pid), r"C:\Users", Some(&pool_dir.to_string_lossy())));
+    let app = app_with(pane);
+
+    // Clear not seen yet: the shell may not have run the `cd`, so the request.
+    assert!(
+        crate::util::same_dir(&current_path(&app), r"C:\Users"),
+        "while the injected cd is in flight the request must be reported"
+    );
+    // The `cls` at the end of the injected line arrives.
+    term.lock().unwrap().process(b"\x1b[2J");
+    let got = current_path(&app);
+    assert!(
+        crate::util::same_dir(&got, &pool_dir.to_string_lossy()),
+        "reported {got:?} after the rehome clear; expected the live reading {pool_dir:?}"
+    );
+}
+
+/// Git Bash's `cd` never moves the Win32 directory, so after its rehome clear
+/// the PEB still names the pool's directory and the request is still the only
+/// right answer (test_issue672).  The clear must not retire such a hint.
+#[test]
+#[cfg(windows)]
+fn the_rehome_clear_keeps_the_hint_for_a_shell_whose_cd_is_invisible() {
+    let pool_dir = std::env::temp_dir();
+    let parked = park_process_in(&pool_dir);
+    let pid = parked.0.id();
+    let pane = make_pane(Some(pid));
+    let term = pane.term.clone();
+    let mut pane = pane;
+    let mut h = hint(Some(pid), r"C:\Users", Some(&pool_dir.to_string_lossy()));
+    h.reading_follows_cd = false;
+    pane.cwd_hint = Some(h);
+    let app = app_with(pane);
+
+    term.lock().unwrap().process(b"\x1b[2J");
+    let got = current_path(&app);
+    assert!(
+        crate::util::same_dir(&got, r"C:\Users"),
+        "reported {got:?}; a POSIX shell's rehome clear must not hand the answer to a PEB that never moves"
+    );
+}
+
 /// A hint belongs to the process it was taken for. `respawn-pane` and friends
 /// put a different child behind the pane; the hint must not follow.
 #[test]
@@ -430,6 +494,6 @@ fn same_dir_ignores_separator_case_and_trailing_slash_on_windows() {
     assert!(crate::util::same_dir(r"C:\Users", r"c:\users\"));
     assert!(crate::util::same_dir(r"C:\Users", "C:/Users"));
     assert!(crate::util::same_dir(r"C:\", r"C:\"));
-    assert!(!crate::util::same_dir(r"C:\Users", r"C:\Users\godwin"));
+    assert!(!crate::util::same_dir(r"C:\Users", r"C:\Users\dev"));
     assert!(!crate::util::same_dir(r"C:\Users", r"C:\Windows"));
 }

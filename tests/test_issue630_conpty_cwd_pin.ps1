@@ -238,7 +238,12 @@ foreach ($mode in @('warm', 'cold')) {
             Write-Fail "$mode : X still pinned with two panes that started there. $($r.err)"
         }
     } else {
-        Write-Fail "$mode : could not move both split shells out of X"
+        $why = foreach ($t in "${s}:0.1", "${s}:0.2") {
+            $pp = ((P display-message -p -t $t '#{pane_pid}') -join '').Trim()
+            $kids = if ($pp -match '^\d+$') { (Get-CimInstance Win32_Process -Filter "ParentProcessId=$pp" | ForEach-Object { "$($_.ProcessId):$($_.Name)" }) -join ' ' }
+            "$t pid=$pp kids=[$kids] path='$(Get-PanePath $t)' screen='$(((P capture-pane -p -t $t) -join ' / ').Trim())'"
+        }
+        Write-Fail "$mode : could not move both split shells out of X ($($why -join ' ;; '))"
     }
     Kill-Sess $s
 }

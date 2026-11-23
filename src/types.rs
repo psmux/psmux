@@ -638,6 +638,13 @@ pub struct CwdHint {
     /// Latched once a reading other than `stale` is seen, so a later `cd` back
     /// into `stale` cannot resurrect the hint.
     pub settled: std::sync::atomic::AtomicBool,
+    /// The injected `cd` moves the WIN32 working directory too, so once its
+    /// trailing clear has reached the parser the PEB reading is the truth.
+    /// True for PowerShell (the rehome line calls `SetCurrentDirectory`) and
+    /// cmd.exe.  False for POSIX shells: Git Bash's `cd` moves only its own
+    /// cwd, the PEB keeps the pool's directory forever, and the request is the
+    /// only right answer (test_issue672).
+    pub reading_follows_cd: bool,
 }
 
 /// Pre-spawned shell ready to be transplanted into a new window instantly.
