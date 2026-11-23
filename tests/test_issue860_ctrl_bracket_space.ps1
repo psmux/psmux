@@ -19,6 +19,12 @@
 # and nvim on Windows never reports NUL as <C-Space>, in conhost and in Windows
 # Terminal alike.  That part is checked here only as the NUL byte.
 #
+# Windows 10 (a build before 22000): the inbox conhost 19045 hands a program
+# that reads VT input no NUL at all. psmux writes 00 for C-Space there as
+# everywhere, and a Ctrl+Space record written straight into the program's
+# console gives nothing either, where 26300 gives 00 both ways. So on that
+# host the NUL checks expect the bytes on either side and nothing between.
+#
 # Every runtime check uses its own -L namespace and PSMUX_DATA_DIR, and every
 # process this script starts is stopped by PID.
 
@@ -31,6 +37,7 @@ New-Item -ItemType Directory -Force $TMP | Out-Null
 if (-not $env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR = Join-Path $TMP "data" }
 New-Item -ItemType Directory -Force $env:PSMUX_DATA_DIR | Out-Null
 $env:PSMUX_RUN_NOPAUSE = "1"
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
 
 $script:Pass = 0
 $script:Fail = 0
@@ -137,7 +144,9 @@ foreach ($k in @('1', 'C-[', '2', 'C-Space', '3', 'Up', '4', 'C-[', 'BSpace', '5
 Start-Sleep -Milliseconds 700
 $s = Stream $log
 if ($s -match '31 1B 32') { Write-Pass "send-keys C-[ -> 1B" } else { Write-Fail "send-keys C-[ wrong: [$s]" }
-if ($s -match '32 00 33') { Write-Pass "send-keys C-Space -> 00 (tmux standard_map NUL)" } else { Write-Fail "send-keys C-Space wrong, want 00 between 32 and 33: [$s]" }
+if ($Win10) {
+    if ($s -match '32 33') { Write-Pass "send-keys C-Space: no byte, as this host hands a VT reader no NUL" } else { Write-Fail "send-keys C-Space on Windows 10, want nothing between 32 and 33: [$s]" }
+} elseif ($s -match '32 00 33') { Write-Pass "send-keys C-Space -> 00 (tmux standard_map NUL)" } else { Write-Fail "send-keys C-Space wrong, want 00 between 32 and 33: [$s]" }
 if ($s -match '34 1B 7F 35') { Write-Pass "send-keys C-[ BSpace after Up -> 1B 7F" } else { Write-Fail "send-keys C-[ BSpace after Up wrong: [$s]" }
 Kill-Ns
 
@@ -185,7 +194,9 @@ if (-not $a.client -or -not (Wait-Pump $a.client $log 'hex=\[ 30 \]')) {
     Start-Sleep -Milliseconds 1200
     $s = Stream $log
     if ($s -match '31 1B 32') { Write-Pass "sendInput \u001b -> 1B" } else { Write-Fail "sendInput \u001b lost, want 31 1B 32: [$s]" }
-    if ($s -match '32 00 33') { Write-Pass "sendInput CSI 32;5u decodes to C-Space -> 00, no stray ESC or text" } else { Write-Fail "sendInput CSI 32;5u wrong, want 32 00 33: [$s]" }
+    if ($Win10) {
+        if ($s -match '32 33') { Write-Pass "sendInput CSI 32;5u decodes to C-Space: no byte, no stray ESC or text on this host" } else { Write-Fail "sendInput CSI 32;5u on Windows 10, want 32 33: [$s]" }
+    } elseif ($s -match '32 00 33') { Write-Pass "sendInput CSI 32;5u decodes to C-Space -> 00, no stray ESC or text" } else { Write-Fail "sendInput CSI 32;5u wrong, want 32 00 33: [$s]" }
     if ($s -match '33 1B 7F 34') { Write-Pass "sendInput \u001b then Backspace -> 1B 7F" } else { Write-Fail "sendInput \u001b then Backspace wrong: [$s]" }
     if ($s -match '34 1B 0D 35') { Write-Pass "sendInput CSI 13;2u is still Shift+Enter -> 1B 0D (#611 guard)" } else { Write-Fail "sendInput CSI 13;2u wrong, want 34 1B 0D 35: [$s]" }
 }
