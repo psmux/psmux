@@ -729,6 +729,8 @@ set -g alternate-screen off
 
 The flag lives in each pane's terminal parser, and psmux patches live panes and the warm pane when you change it, so the new value applies immediately without restarting anything.
 
+On Windows 10 (builds before 22000) the inbox `conhost.exe` keeps the switch to itself: it never passes DEC private mode 1049 on to psmux, it draws the program's alternate screen as an ordinary repaint, and it repaints the normal screen over it when the program leaves. psmux never sees the alternate screen there, so `#{alternate_on}` stays 0 and `alternate-screen off` has nothing to ignore: what the program drew does not stay in the scrollback either way. A console host that passes the switch on, an OpenConsole through `PSMUX_CONPTY_DIR`, behaves as on Windows 11 (see [The Console Host Seam](diagnostics.md#the-console-host-seam)).
+
 ### Session Groups
 
 A session group is a name shared by several sessions. psmux exposes the membership through format variables so a status bar or a script can tell grouped sessions apart:
