@@ -261,6 +261,35 @@ Px @('new-session', '-d', '-s', $SG, '-n', 'g1') | Out-Null
 Start-Sleep -Milliseconds 700
 $owners = Px @('list-panes', '-a', '-F', '#{session_name} #{pane_id}')
 Write-Info "owners now:`n$($owners.stdout)"
+
+# The recency fallback is also insufficient when it happens to hold the id
+# along with other sessions (issue #1078). A current pane in that same session
+# provides real context and may still use those ids.
+foreach ($pair in @(@('%1', 'pane'), @('@1', 'window'))) {
+    $id, $kind = $pair
+    $r = Split-Streams @('-L', $NS, '-f', $conf, 'display-message', '-p', '-t', $id, $FMT)
+    if ($r.rc -eq 1 -and -not $r.stdout.Trim() -and $r.stderr -match "ambiguous $kind id $id") {
+        Write-Pass "bare $id refused without current pane context"
+    } else {
+        Write-Fail "bare $id -> stdout='$($r.stdout)' stderr='$($r.stderr)' rc=$($r.rc)"
+    }
+}
+
+$port = (Get-Content -LiteralPath (Join-Path $root "${NS}__${SG}.port") -Raw).Trim()
+$env:TMUX = "fixture,$port,0"
+try {
+    foreach ($id in @('%1', '@1')) {
+        $r = Disp $id
+        if ($r.rc -eq 0 -and $r.stdout -eq "$SG/@1/%1") {
+            Write-Pass "bare $id addresses the current pane's session"
+        } else {
+            Write-Fail "bare $id with current pane context -> '$($r.all)' rc=$($r.rc)"
+        }
+    }
+} finally {
+    $env:TMUX = $null
+}
+
 $r = Disp '%2'
 if ($r.rc -eq 1 -and $r.all -match 'ambiguous pane id %2' -and $r.all -match 'qualify as session:window.pane') {
     Write-Pass "-t %2 refused: $($r.all)"
