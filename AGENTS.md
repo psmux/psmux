@@ -8,7 +8,12 @@
   Do not run `cargo test --all-targets` locally unless the process is inside a
   disposable Windows account, VM, or CI environment.
 - Prefer safe targeted unit tests that do not start psmux servers, together
-  with `cargo check`.
+  with `cargo check`. Most `tests-rs/*.rs` files are modules of the binary
+  (`#[cfg(test)] #[path = "../tests-rs/..."]`), so run one with
+  `cargo test --bin psmux <module path filter>`, for example
+  `cargo test --bin psmux choose_tree::tests_issue1065_chooser_search`.
+  `--bin psmux` builds the tests once instead of for each of the three
+  binaries (`psmux`, `pmux`, `tmux`) that share `src/main.rs`.
 - Run runtime and integration checks with a unique namespace:
   `psmux -L <unique-test-namespace> ...`.
 - Snapshot the default session list before and after runtime checks. Stop and
@@ -21,6 +26,14 @@
   which is the deliberate every-namespace sweep.
 - Run the full test suite only in CI or another disposable Windows environment
   where user sessions cannot be affected.
+- `tests/run_all_tests.ps1` kills every psmux process by image name and
+  deletes `~/.psmux\*.port`, `*.key`, `~/.psmux.conf` and `~/.psmuxrc`
+  between suites. It refuses to start unless `PSMUX_TEST_SANDBOX=1`, which
+  the Docker dev image sets. Never set it yourself on a machine with real
+  sessions.
+- `scripts/build.ps1` runs `psmux kill-server -a` and stops every `psmux`,
+  `pmux` and `tmux` process before it installs. Do not run it while the user
+  has sessions open; build with `cargo build --release` instead.
 
 ## Live Title Regression Tests
 
