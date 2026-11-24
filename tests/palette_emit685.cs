@@ -4,8 +4,8 @@
 // console) and emits, in order:
 //
 //   ESC ] 4 ; 4 ; rgb:00/00/80 ESC \     set palette index 4 to #000080
-//   MARK_A  ESC[44m "   " ESC[0m         a cell painted with the legacy index 4 bg
-//   MARK_B  ESC[48;5;4m "   " ESC[0m     the same colour through indexed SGR
+//   MARK_A  ESC[44m "   " ESC[0m "|"     a cell painted with the legacy index 4 bg
+//   MARK_B  ESC[48;5;4m "   " ESC[0m "|" the same colour through indexed SGR
 //   MARK_C  ESC[38;5;14m "XXX" ESC[0m    indexed fg, index 14
 //
 // then idles so the pane stays alive for a capture.  With OSC 4 honoured, the
@@ -69,10 +69,15 @@ class PaletteEmit685
             Thread.Sleep(150);
         }
 
-        W("MARK_A" + esc + "[44m" + "   " + esc + "[0m\r\n");
-        W("MARK_B" + esc + "[48;5;4m" + "   " + esc + "[0m\r\n");
+        // Each coloured run of blanks is followed by a visible "|". The inbox
+        // console host of Windows 10 (build 19045) repaints its buffer when
+        // the pane is resized, and it writes the blanks at the end of a line
+        // as ESC[K in the default colours, so blanks left last on the line
+        // lose their background before psmux reads them.
+        W("MARK_A" + esc + "[44m" + "   " + esc + "[0m|\r\n");
+        W("MARK_B" + esc + "[48;5;4m" + "   " + esc + "[0m|\r\n");
         W("MARK_C" + esc + "[38;5;14m" + "XXX" + esc + "[0m\r\n");
-        W("MARK_E" + esc + "[48;5;6m" + "   " + esc + "[0m\r\n");
+        W("MARK_E" + esc + "[48;5;6m" + "   " + esc + "[0m|\r\n");
         o.Flush();
         Thread.Sleep(300);
 
@@ -80,7 +85,7 @@ class PaletteEmit685
         {
             W(esc + "]" + (resetall ? "104" : "104;4") + st);
             Thread.Sleep(150);
-            W("MARK_D" + esc + "[48;5;4m" + "   " + esc + "[0m\r\n");
+            W("MARK_D" + esc + "[48;5;4m" + "   " + esc + "[0m|\r\n");
             o.Flush();
         }
 

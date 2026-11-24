@@ -299,6 +299,34 @@ whichever console host is under it.
 The keystroke win is real and large. Set this when you want it, knowing you are also taking on a
 console host that Windows Update does not patch for you.
 
+#### Colours and attributes on Windows 10
+
+The inbox `conhost.exe` of Windows 10 19045 keeps what a program writes in its own buffer and
+sends psmux a repaint of it in its own spelling, so some colours and attributes change or are gone
+before psmux reads the pane. psmux shows what reaches it. Measured on 19045.6466 (inbox conhost
+10.0.19041.320), a program writing each SGR and then text:
+
+```
+the program writes                     psmux reads
+37, 38;5;7, 40                         nothing (the host's default colours)
+1, 1;37, 1;31                          bold and the bright colour: 1;97, 1;97, 1;91
+38;5;0 to 15, 48;5;4                   the 16 colour codes: 38;5;9 as 91, 48;5;4 as 44
+38;5;16 to 255, 48;5;16 to 255         the RGB of the index: 38;5;240 as 38;2;88;88;88
+7 (reverse)                            the two colours swapped: 30;47 for the defaults
+4:0                                    24
+2, 4:1 to 4:5, 21, 53, 58, 38:2::r:g:b nothing
+3, 4, 5, 8, 9, 38;2, 48;2              unchanged
+```
+
+So a pane there has no faint text, no underline styles or underline colour and no overline, and
+a 256 colour index is drawn as its RGB. The same host also writes blank cells at the end of a line
+as `ESC[K` in the default colours when it repaints, which it does when the pane is resized, so a
+background colour on trailing blanks is lost then. The OpenConsole named by `PSMUX_CONPTY_DIR`
+(1.25.2609.30003) passes every one of these unchanged, as the inbox host of Windows 11 does.
+
+A psmux client attached in a console window on that build draws through the same host, so its
+status line shows no overline either.
+
 #### Sixel images need this host
 
 A sixel image is a DCS sequence (`ESC P ... q ... ESC \`) that a program writes to the terminal.

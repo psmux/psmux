@@ -82,6 +82,23 @@ Write-Host "AFTER_ALL"
 Start-Sleep -Seconds 600
 '@ | Set-Content -Path $payload -Encoding UTF8
 
+# NOTE on Windows 10: the inbox conhost of build 19045 that backs a pane has
+# no underline styles. It drops 4:1 to 4:5, 21 and both forms of SGR 58 on
+# the way to psmux (measured there; 4:0 comes out as 24 and a plain 4 stays),
+# so psmux has nothing to keep. On that host the styled lines below arrive
+# with no underline at all, and the checks expect that. An OpenConsole
+# through PSMUX_CONPTY_DIR passes them, and the checks are as on Windows 11.
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+# True when no SGR in $s sets an underline (4, 4:N) or an underline colour (58).
+function Test-NoUnderline([string]$s) {
+    foreach ($m in [regex]::Matches($s, "\x1b\[([0-9;:]*)m")) {
+        foreach ($p in $m.Groups[1].Value -split ';') {
+            if ($p -eq '4' -or $p -like '4:*' -or $p -like '58*') { return $false }
+        }
+    }
+    return $true
+}
+
 function Cleanup {
     & $PSMUX -L $SOCK kill-session -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
@@ -136,7 +153,11 @@ foreach ($case in @(
     $line = Get-LineFor $cap $case.Label
     if ($null -eq $line) { Write-Fail "$($case.Label): line missing from capture"; continue }
     $vis = $line -replace "`e", '<ESC>'
-    if ($line -match [regex]::Escape($case.Want)) { Write-Pass "$($case.Label) -> $($case.Want)   $vis" }
+    if ($Win10Inbox) {
+        if (Test-NoUnderline $line) { Write-Pass "$($case.Label) arrived plain, the inbox host drops $($case.Want): $vis" }
+        else { Write-Fail "$($case.Label) carries an underline the inbox host never passes: $vis" }
+    }
+    elseif ($line -match [regex]::Escape($case.Want)) { Write-Pass "$($case.Label) -> $($case.Want)   $vis" }
     else { Write-Fail "$($case.Label) lost its style, expected $($case.Want): $vis" }
 }
 
@@ -146,7 +167,11 @@ foreach ($label in @("STD_UL", "EXT_SINGLE")) {
     $line = Get-LineFor $cap $label
     $vis = $line -replace "`e", '<ESC>'
     if ($null -eq $line) { Write-Fail "${label}: line missing"; continue }
-    if ($line -match '4(;|m)' -and $line -notmatch '4:') { Write-Pass "$label stayed plain: $vis" }
+    if ($Win10Inbox -and $label -eq "EXT_SINGLE") {
+        if (Test-NoUnderline $line) { Write-Pass "EXT_SINGLE arrived plain, the inbox host drops 4:1: $vis" }
+        else { Write-Fail "EXT_SINGLE carries an underline the inbox host never passes: $vis" }
+    }
+    elseif ($line -match '4(;|m)' -and $line -notmatch '4:') { Write-Pass "$label stayed plain: $vis" }
     else { Write-Fail "$label is not a plain underline: $vis" }
 }
 # `4;1` is underline PLUS bold, never undercurl.
@@ -156,6 +181,14 @@ else { Write-Fail "4;1 semantics changed: $($std -replace "`e", '<ESC>')" }
 
 # === TEST 3: underline colour survives, both forms ===
 Write-Host "`n[Test 3] SGR 58 underline colour reaches capture-pane -e" -ForegroundColor Yellow
+if ($Win10Inbox) {
+    foreach ($label in @("COLOR_CURLY", "IDX_CURLY")) {
+        $line = Get-LineFor $cap $label
+        $vis = $line -replace "`e", '<ESC>'
+        if ($line -and (Test-NoUnderline $line)) { Write-Pass "$label arrived plain, the inbox host drops 4:3 and SGR 58: $vis" }
+        else { Write-Fail "$label is missing or carries what the inbox host never passes: $vis" }
+    }
+} else {
 $line = Get-LineFor $cap "COLOR_CURLY"
 $vis = $line -replace "`e", '<ESC>'
 if ($line -match '4:3' -and $line -match '58;2;255;0;0') { Write-Pass "truecolour undercurl: $vis" }
@@ -164,6 +197,7 @@ $line = Get-LineFor $cap "IDX_CURLY"
 $vis = $line -replace "`e", '<ESC>'
 if ($line -match '4:3' -and $line -match '58;5;9') { Write-Pass "indexed undercurl: $vis" }
 else { Write-Fail "indexed undercurl lost: $vis" }
+}
 
 # === TEST 4: no bleed past SGR 24, SGR 4:0 or SGR 0 ===
 Write-Host "`n[Test 4] the style never bleeds into the text that follows" -ForegroundColor Yellow
@@ -174,6 +208,7 @@ $vis = $line -replace "`e", '<ESC>'
 $tail = $line -replace '^.*BLEED_OFF', ''
 $head = $line -replace 'BLEED_OFF.*$', ''
 if ($head -match '4:3') { Write-Pass "BLEED_ON kept its curl: $vis" }
+elseif ($Win10Inbox -and $line -and (Test-NoUnderline $head)) { Write-Pass "BLEED_ON arrived plain, the inbox host drops 4:3: $vis" }
 else { Write-Fail "BLEED_ON lost its curl: $vis" }
 if ($tail -notmatch '4:') { Write-Pass "SGR 24 stopped the curl before BLEED_OFF" }
 else { Write-Fail "curl bled past SGR 24: $vis" }
@@ -205,15 +240,27 @@ foreach ($case in @(
     @{ Label = "DASHED_UL"; Want = '"ul":5' }
 )) {
     $run = [regex]::Match($dump, '\{"text":"' + $case.Label + '[^}]*\}').Value
-    if ($run -and $run.Contains($case.Want)) { Write-Pass "$($case.Label): $run" }
+    if ($Win10Inbox) {
+        if ($run -and $run -notmatch '"ul":') { Write-Pass "$($case.Label) run has no ul, as the inbox host gave it: $run" }
+        else { Write-Fail "$($case.Label) run is missing or has a ul the inbox host never passes: $run" }
+    }
+    elseif ($run -and $run.Contains($case.Want)) { Write-Pass "$($case.Label): $run" }
     else { Write-Fail "$($case.Label) run missing $($case.Want): $run" }
 }
+if ($Win10Inbox) {
+    foreach ($label in @("COLOR_CURLY", "IDX_CURLY")) {
+        $run = [regex]::Match($dump, '\{"text":"' + $label + '[^}]*\}').Value
+        if ($run -and $run -notmatch '"ul":' -and $run -notmatch '"ulc":') { Write-Pass "$label run has no ul or ulc, as the inbox host gave it: $run" }
+        else { Write-Fail "$label run is missing or has a ul/ulc the inbox host never passes: $run" }
+    }
+} else {
 $run = [regex]::Match($dump, '\{"text":"COLOR_CURLY[^}]*\}').Value
 if ($run -match '"ul":3' -and $run -match '"ulc":"rgb:255,0,0"') { Write-Pass "COLOR_CURLY: $run" }
 else { Write-Fail "COLOR_CURLY run missing ul/ulc: $run" }
 $run = [regex]::Match($dump, '\{"text":"IDX_CURLY[^}]*\}').Value
 if ($run -match '"ul":3' -and $run -match '"ulc":"idx:9"') { Write-Pass "IDX_CURLY: $run" }
 else { Write-Fail "IDX_CURLY run missing ul/ulc: $run" }
+}
 $run = [regex]::Match($dump, '\{"text":"AFTER_ALL[^}]*\}').Value
 # See the note above: "ulc" is deliberately not asserted here.
 if ($run -and $run -notmatch '"ul":') { Write-Pass "AFTER_ALL run has no underline style" }
@@ -225,11 +272,19 @@ $ok = $true
 foreach ($label in @("DOUBLE_UL", "CURLY_UL", "DOTTED_UL", "DASHED_UL")) {
     $run = [regex]::Match($dump, '\{"text":"' + $label + '[^}]*\}').Value
     $m = [regex]::Match($run, '"flags":(\d+)')
+    if ($Win10Inbox) {
+        # No underline reached psmux there, so no run may claim one.
+        if (-not $m.Success -or (([int]$m.Groups[1].Value) -band 8) -ne 0) {
+            Write-Fail "${label} sets FLAG_UNDERLINE the inbox host never passed: $run"; $ok = $false
+        }
+        continue
+    }
     if (-not $m.Success -or (([int]$m.Groups[1].Value) -band 8) -eq 0) {
         Write-Fail "${label} lost FLAG_UNDERLINE: $run"; $ok = $false
     }
 }
-if ($ok) { Write-Pass "every styled run still sets FLAG_UNDERLINE" }
+if ($ok -and $Win10Inbox) { Write-Pass "no styled run sets FLAG_UNDERLINE, as the inbox host gave them" }
+elseif ($ok) { Write-Pass "every styled run still sets FLAG_UNDERLINE" }
 
 # ============================================================
 # Win32 TUI VISUAL VERIFICATION (attached client)
@@ -251,6 +306,7 @@ $capTui = Get-StyledCapture $TUISESS
 $line = Get-LineFor $capTui "CURLY_UL"
 $vis = $line -replace "`e", '<ESC>'
 if ($line -match '4:3') { Write-Pass "TUI: attached client, pane still carries 4:3   $vis" }
+elseif ($Win10Inbox -and $line -and (Test-NoUnderline $line)) { Write-Pass "TUI: attached client, CURLY_UL still plain as the inbox host gave it   $vis" }
 else { Write-Fail "TUI: style lost while attached: $vis" }
 $line = Get-LineFor $capTui "AFTER_ALL"
 if ($line -and $line -notmatch '4:') { Write-Pass "TUI: AFTER_ALL still clean while attached" }
