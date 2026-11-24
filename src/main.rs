@@ -332,7 +332,7 @@ enum UnqualifiedId {
     Unknown,
     /// Exactly one session owns the id, and routing now points at it.
     Routed,
-    /// The routed session owns the id (possibly among others): leave routing be.
+    /// The session named by the command context owns the id: leave routing be.
     RoutedOwns,
 }
 
@@ -351,9 +351,15 @@ enum UnqualifiedId {
 ///
 /// The contract now: a unique owner wins and routing is repointed at it, zero
 /// owners is `can't find`, and several owners is refused as ambiguous unless
-/// the session we are already routed to is one of them (the #569 carve-out that
-/// keeps the ordinary "grab a %id from this session and use it" idiom working).
-fn cli_resolve_unqualified_id(ns: Option<&str>, id: &str, kind: &str) -> UnqualifiedId {
+/// the command context names an owner. The #569 carve-out keeps the ordinary
+/// "grab a %id from this session and use it" idiom working. Routing by recency
+/// provides no such context (issue #1078).
+fn cli_resolve_unqualified_id(
+    ns: Option<&str>,
+    id: &str,
+    kind: &str,
+    target_from_context: bool,
+) -> UnqualifiedId {
     let owners = if id.starts_with('@') {
         cli_sessions_with_window_id(ns, id)
     } else {
@@ -362,9 +368,11 @@ fn cli_resolve_unqualified_id(ns: Option<&str>, id: &str, kind: &str) -> Unquali
     if owners.is_empty() {
         return UnqualifiedId::Unknown;
     }
-    let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
-    if !routed.is_empty() && owners.iter().any(|o| *o == routed) {
-        return UnqualifiedId::RoutedOwns;
+    if target_from_context {
+        let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+        if owners.contains(&routed) {
+            return UnqualifiedId::RoutedOwns;
+        }
     }
     if owners.len() == 1 {
         // Unique owner: repoint routing at it. send_control{,_with_response}
@@ -430,7 +438,7 @@ fn split_bare_window_id(full: &str) -> Option<(&str, Option<&str>)> {
     Some((win_part, pane_part.filter(|p| !p.is_empty())))
 }
 
-fn cli_validate_window_pane_target(ns: Option<&str>) {
+fn cli_validate_window_pane_target(ns: Option<&str>, target_from_context: bool) {
     let full = match std::env::var("PSMUX_TARGET_FULL") {
         Ok(f) if !f.is_empty() => f,
         _ => return,
@@ -441,17 +449,13 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
     // cli_sessions_with_pane_id), so an unqualified one can be genuinely
     // unanswerable. But it is only unanswerable when NOTHING decides which
     // session is meant: if exactly one session owns the id that session IS the
-    // answer (issue #627), and if the session this command is already routed to
-    // owns the id, that is the answer too — refusing there would break the
-    // ordinary "grab a %id from this session and use it" idiom (issue #569
-    // first shipped an unconditional refusal, which broke exactly that and
-    // failed test_named_session_parity).
-    //
-    // So the refusal is scoped to the case the report was actually about: the
-    // routed session does NOT hold the id, several others do, and resolving
-    // would fall back to picking one by recency.
+    // answer (issue #627). A current pane inside an owner session also resolves
+    // it (issue #569). From outside, picking an owner by recency could send the
+    // command to a session the caller never named (issue #1078).
     if full.starts_with('%') {
-        if let UnqualifiedId::Unknown = cli_resolve_unqualified_id(ns, &full, "pane") {
+        if let UnqualifiedId::Unknown =
+            cli_resolve_unqualified_id(ns, &full, "pane", target_from_context)
+        {
             if cli_pane_id_exists(&full) == Some(false) {
                 eprintln!("psmux: can't find pane: {}", full);
                 std::process::exit(1);
@@ -467,7 +471,9 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
     // ("ERROR: can't find window: @2") was printed by the caller as ordinary
     // output at exit 0.
     if let Some((win_part, pane_part)) = split_bare_window_id(&full) {
-        if let UnqualifiedId::Unknown = cli_resolve_unqualified_id(ns, win_part, "window") {
+        if let UnqualifiedId::Unknown =
+            cli_resolve_unqualified_id(ns, win_part, "window", target_from_context)
+        {
             if cli_window_exists(win_part) == Some(false) {
                 eprintln!("psmux: can't find window: {}", win_part);
                 std::process::exit(1);
@@ -1726,6 +1732,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 }
             }
     }
+    let mut target_from_context = explicit_session_target;
     if !explicit_session_target {
         // No explicit `-t session` on this command line: `$TMUX` (set inside
         // every psmux pane and kept pointing at the live server) is the authority
@@ -1734,20 +1741,27 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
         // that variable at `__warm__` (it names the server the pane was born in,
         // not the session it was transplanted into). Guarding on `is_err()` here
         // let that stale value win and routed queries like `display-message -p
-        // '#S'` to the wrong session (issue #485). The `-L` namespace and the
-        // most-recent-session fallback are applied inside resolve_routing_target.
+        // '#S'` to the wrong session (issue #485).
         let psmux_dir = std::path::PathBuf::from(crate::paths::psmux_dir());
         let tmux_env = env::var("TMUX").ok();
+        let pane_session = crate::session::pane_session_in_namespace(
+            l_socket_name.as_deref(),
+            tmux_env.as_deref(),
+            &psmux_dir,
+        );
+        target_from_context = pane_session.is_some();
         // A command queued after `start-server` (issue #734) carries the
         // standby that start-server brought up, so it reaches that server
         // even before anything has made it the namespace's held one.
         let route_warm = env::var(crate::session::ROUTE_WARM_ENV).ok();
-        if let Some(name) = crate::session::resolve_routing_target_with(
-            l_socket_name.as_deref(),
-            tmux_env.as_deref(),
-            &psmux_dir,
-            route_warm.as_deref(),
-        ) {
+        if let Some(name) = pane_session.or_else(|| {
+            crate::session::resolve_routing_target_with(
+                l_socket_name.as_deref(),
+                None,
+                &psmux_dir,
+                route_warm.as_deref(),
+            )
+        }) {
             env::set_var("PSMUX_TARGET_SESSION", &name);
         }
     }
@@ -1810,7 +1824,7 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
         | "choose-buffer" | "chooseb" | "choose-client"
         | "find-window" | "findw")
     {
-        cli_validate_window_pane_target(l_socket_name.as_deref());
+        cli_validate_window_pane_target(l_socket_name.as_deref(), target_from_context);
     }
 
     // A command list goes to the server whole, past the first command's arm,
