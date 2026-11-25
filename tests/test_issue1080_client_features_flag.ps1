@@ -9,7 +9,7 @@
 # out `hyperlinks` (see test_issue763_client_feature_detection.ps1) and what
 # `-T` adds can be told from what was there already.
 param(
-    [string]$Exe = $env:PSMUX_EXE
+    [string]$Exe = $(if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { $env:PSMUX_EXE })
 )
 $ErrorActionPreference = 'Stop'
 if ($env:PSMUX_DISPOSABLE_GUEST -ne '1' -and $env:PSMUX_TEST_SANDBOX -ne '1' -and $env:GITHUB_ACTIONS -ne 'true') {
