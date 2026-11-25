@@ -154,6 +154,33 @@ if ($env:PSMUX_TEST_DECLARED_PIDS) {
 } else {
     F "runner did not provide PSMUX_TEST_DECLARED_PIDS, so it cannot end the escaped console"
 }
+# ── Cases C and D: Windows Terminal windows ──────────────────────────────────
+# The runner used to protect every window owned by the WindowsTerminal.exe it
+# was launched from, which is every Terminal window on a normal desktop, so a
+# sweep could add Terminal windows full of "[process exited with code ...]" tabs
+# and report nothing. C leaves a window whose tabs have all exited; D leaves a
+# window with one live tab this suite started (a parked `cmd /k`). The runner
+# must close C tab by tab, end D's cmd and then close D, with no keystrokes.
+$wtExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+if (-not (Test-Path $wtExe)) { $c = Get-Command wt.exe -ErrorAction SilentlyContinue; $wtExe = if ($c) { $c.Source } else { $null } }
+if (-not $wtExe) {
+    S "[Case C/D] wt.exe not installed; the Terminal window cases need Windows Terminal"
+} else {
+    $tagC = 'r17auditC' + (Get-Random -Maximum 99999)
+    $tagD = 'r17auditD' + (Get-Random -Maximum 99999)
+    Write-Host "`n[Case C] Terminal window, every tab exited ($tagC)" -ForegroundColor Yellow
+    & $wtExe -w new cmd /c "title $tagC-1 & exit 3" `; nt cmd /c "title $tagC-2 & exit 3"
+    Write-Host "[Case D] Terminal window, one live tab started by this suite ($tagD)" -ForegroundColor Yellow
+    & $wtExe -w new cmd /k "title $tagD"
+    Start-Sleep -Seconds 4
+    $dLive = @(Get-CimInstance -Query "SELECT ProcessId,CommandLine FROM Win32_Process WHERE Name='cmd.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match [regex]::Escape($tagD) })
+    if ($dLive.Count -ge 1) { P "Case D's live tab process is running (pid=$($dLive[0].ProcessId))" }
+    else { F "Case D's cmd /k is not running; the live tab case did not start" }
+    Write-Host "  EXPECTATION: LEFTOVER-WINDOW lines for both windows, Case D's cmd ended" -ForegroundColor DarkGray
+    Write-Host "  (why=in-leftover-terminal-window), both closed tab by tab." -ForegroundColor DarkGray
+}
+
 Write-Host ""
 Write-Host "  leaked pids recorded in: $pidFile" -ForegroundColor DarkGray
 Write-Host "  EXPECTATION: the runner reports this suite in LEFTOVER lines, ends both" -ForegroundColor DarkGray
