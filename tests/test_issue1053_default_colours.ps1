@@ -154,8 +154,8 @@ $cases = @(
     @{ n = 'the alternate screen keeps it'; q = "$Red\e[?1049h\e]11;?$ST\e[?1049l"; reply = (& $by (Rgb 11 'ffff/0000/0000' $ST) (& $bg $ST)) }
     # psmux: tmux takes red; psmux has no table of X11 names.
     @{ n = 'an X11 name'; q = "\e]11;red$ST\e]11;?$ST"; reply = (& $by (& $bg $ST) (& $bg $ST)) }
-    # psmux's clear-history starts the pane's screen again; tmux clears only
-    # the history (cmd-capture-pane.c:424) and keeps the colours.
+    # clear-history frees only the history, as tmux does
+    # (cmd-capture-pane.c:424), so the colours stay.
     @{ n = 'clear-history keeps it'; setup = { param($w) Probe "s:$w" $Red; P clear-history | Out-Null }; q = "\e]11;?$ST"; reply = (& $by (Rgb 11 'ffff/0000/0000' $ST) (& $bg $ST)) }
     @{ n = 'window-style alone'; setup = { param($w) P set -g window-style bg=green | Out-Null }; q = "\e]11;?$ST"; reply = (& $by (Rgb 11 '0000/8080/0000' $ST) (Rgb 11 '0000/8080/0000' $ST)) }
     @{ n = 'the program over window-style on the active pane'; q = "$Red\e]11;?$ST"; reply = (& $by (Rgb 11 'ffff/0000/0000' $ST) (Rgb 11 '0000/8080/0000' $ST)) }

@@ -124,8 +124,8 @@ $cases = @(
     @{ n = 'the option'; setup = { param($w) P set -g cursor-colour blue | Out-Null }; q = "\e]12;?$ST"; reply = (& $oc "\e]12;rgb:0000/0000/8080$ST"); fmt = 'blue'; told = (Tell '00/00/80') }
     @{ n = 'a program colour over the option'; q = "$Red\e]12;?$ST"; reply = (& $oc "\e]12;rgb:ffff/0000/0000$ST"); fmt = @{ inbox = 'blue'; oc = '#ff0000' }; told = @{ inbox = (Tell '00/00/80'); oc = (Tell 'ff/00/00') } }
     @{ n = 'back to the option by OSC 112'; q = "$Red\e]112$ST\e]12;?$ST"; reply = (& $oc "\e]12;rgb:0000/0000/8080$ST"); fmt = 'blue'; told = (Tell '00/00/80') }
-    # psmux's clear-history starts the pane's screen again; tmux clears only
-    # the history (cmd-capture-pane.c:424) and keeps both colours.
+    # clear-history frees only the history, as tmux does
+    # (cmd-capture-pane.c:424), so both colours stay.
     @{ n = 'clear-history keeps the option colour'; setup = { param($w) P clear-history | Out-Null }; q = "\e]12;?$ST"; reply = (& $oc "\e]12;rgb:0000/0000/8080$ST"); fmt = 'blue'; told = (Tell '00/00/80') }
     @{ n = 'clear-history keeps the program colour'; setup = { param($w) Probe $w $Red; P clear-history | Out-Null }; q = "\e]12;?$ST"; reply = (& $oc "\e]12;rgb:ffff/0000/0000$ST"); fmt = @{ inbox = 'blue'; oc = '#ff0000' }; told = @{ inbox = (Tell '00/00/80'); oc = (Tell 'ff/00/00') } }
     @{ n = 'a number names its colour'; setup = { param($w) P set -w -t "s:$w" cursor-colour 3 | Out-Null }; q = "\e]12;?$ST"; reply = (& $oc "\e]12;rgb:8080/8080/0000$ST"); fmt = 'yellow'; told = (Tell '80/80/00') }

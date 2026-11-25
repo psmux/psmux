@@ -327,7 +327,7 @@ fn clear_history_leaves_copy_mode_and_clears_the_live_screen() {
     assert!(matches!(app.mode, Mode::CopyMode), "must be in copy mode");
     assert!(parked_live_term(&app).is_some(), "a snapshot must be installed");
 
-    crate::window_ops::clear_active_pane_history(&mut app);
+    crate::window_ops::clear_active_pane_history(&mut app, false);
 
     assert!(
         !matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }),

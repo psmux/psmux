@@ -231,7 +231,7 @@ fn clear_history_keeps_the_host_answer() {
         floating_focus: None,
     });
     app.active_idx = 0;
-    crate::window_ops::clear_active_pane_history(&mut app);
+    crate::window_ops::clear_active_pane_history(&mut app, false);
     let crate::types::Node::Leaf(ref lp) = app.windows[0].root else { panic!() };
     assert!(crate::input::pane_host_parses_win32_input(lp));
 }

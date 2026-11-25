@@ -3271,8 +3271,8 @@ pub(crate) fn dispatch(
                     }
                 }
                 // copied from server/mod.rs run_server (lines 7935 to 7955 at f6611646)
-                CtrlReq::ClearHistory => {
-                    crate::window_ops::clear_active_pane_history(&mut app);
+                CtrlReq::ClearHistory(reset_hyperlinks) => {
+                    crate::window_ops::clear_active_pane_history(&mut app, reset_hyperlinks);
                 }
                 CtrlReq::SaveBuffer(path) => {
                     if let Some(content) = app.paste_top() {

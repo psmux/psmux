@@ -4799,7 +4799,8 @@ pub enum CtrlReq {
     },
     SuspendClient,
     CopyModePageUp,
-    ClearHistory,
+    /// `clear-history`; true with `-H`, which also forgets the hyperlinks.
+    ClearHistory(bool),
     /// `send-keys -R`: reset the target pane's terminal state as RIS does
     /// (tmux colour_palette_clear plus input_reset(wp->ictx, 1)), sending
     /// the program nothing.
@@ -4993,8 +4994,7 @@ pub enum CtrlReq {
 pub static PTY_DATA_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The `program-status` option, read by every pane's parser thread before each
-/// batch so panes created later, warm panes, and a parser swapped in by
-/// clear-history all follow the one switch.
+/// batch so panes created later and warm panes all follow the one switch.
 pub static PROGRAM_STATUS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tests that need `PROGRAM_STATUS_ENABLED` in a given state hold this for

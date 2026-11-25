@@ -135,13 +135,12 @@ fn the_detector_sees_the_query() {
 }
 
 #[test]
-fn a_new_screen_can_keep_both_colours() {
-    // clear-history starts the screen again; tmux keeps both colours there.
-    let mut old = parse("\x1b]12;#010203\x1b\\");
-    old.screen_mut().set_default_cursor_colour(Some((4, 5, 6)));
-    let mut fresh = vt100::Parser::new(10, 40, 0);
-    fresh.screen_mut().keep_colours(old.screen());
-    assert_eq!(fresh.screen().program_cursor_colour(), Some((1, 2, 3)));
-    fresh.process(b"\x1b]112\x1b\\");
-    assert_eq!(fresh.screen().cursor_colour(), Some((4, 5, 6)));
+fn clear_history_keeps_both_colours() {
+    // tmux's clear-history frees only the history and keeps both colours.
+    let mut p = parse("\x1b]12;#010203\x1b\\");
+    p.screen_mut().set_default_cursor_colour(Some((4, 5, 6)));
+    p.screen_mut().clear_history();
+    assert_eq!(p.screen().program_cursor_colour(), Some((1, 2, 3)));
+    p.process(b"\x1b]112\x1b\\");
+    assert_eq!(p.screen().cursor_colour(), Some((4, 5, 6)));
 }

@@ -622,6 +622,34 @@ impl Screen {
         self.grid.history_bytes()
     }
 
+    /// `clear-history`: free the main grid's history and nothing else, as
+    /// tmux's `grid_clear_history(wp->base.grid)` does (cmd-capture-pane.c and
+    /// grid.c at tag 3.8).  The visible rows, the cursor, the scroll region,
+    /// the modes and the alternate screen all stay.  The history is the main
+    /// grid's even while the alternate screen is up, as it is in tmux, where
+    /// entering the alternate screen sets only the visible lines aside
+    /// (screen.c `screen_alternate_on`).  A main grid image whose rows were all
+    /// in the freed history goes with them.
+    pub fn clear_history(&mut self) {
+        self.grid.clear_scrollback();
+        let first_line = self.grid.first_line();
+        self.sixel_images.retain(|img| {
+            img.on_alt || img.anchor_line + u64::from(img.cell_height) > first_line
+        });
+    }
+
+    /// `clear-history -H`: forget every hyperlink, as tmux's
+    /// `screen_reset_hyperlinks` does (screen.c, `hyperlinks_reset` in
+    /// hyperlinks.c at tag 3.8).  Cells keep their ids, which no longer
+    /// resolve.  An id is never handed out again (tmux's `next_inner` keeps
+    /// counting), so a URI that is set again later gets a new id and does not
+    /// bring the old cells' links back.
+    pub fn reset_hyperlinks(&mut self) {
+        for uri in &mut self.hyperlinks {
+            *uri = String::new();
+        }
+    }
+
     /// Reset the screen for a new process while KEEPING the main grid's
     /// history, the way tmux's `screen_reinit` (screen.c) does when
     /// `respawn-pane` / `respawn-window` reuse a pane (spawn.c, psmux issue
@@ -705,15 +733,6 @@ impl Screen {
         }
     }
 
-    /// Take the colours a program and the pane's options set, the two cursor
-    /// colours and the default colours, from the screen this one replaces.
-    /// psmux's `clear-history` starts the screen again, where tmux clears
-    /// only the history and keeps them (cmd-capture-pane.c:424 at tag 3.8).
-    pub fn keep_colours(&mut self, from: &Self) {
-        self.cursor_colour = from.cursor_colour;
-        self.default_colours = from.default_colours;
-    }
-
     /// Set or reset the program's cursor colour, unless that is turned off.
     pub(crate) fn set_program_cursor_colour(&mut self, colour: Option<(u8, u8, u8)>) {
         if self.cursor_colour.program_enabled {
@@ -783,14 +802,6 @@ impl Screen {
             0 => 0,
             shape => shape * 2 - u8::from(self.cursor_style.blinking),
         }
-    }
-
-    /// Take the cursor style a program set from the screen this one
-    /// replaces. psmux's `clear-history` starts the screen again, where tmux
-    /// clears only the history and keeps it (cmd-capture-pane.c:424 at tag
-    /// 3.8).
-    pub fn keep_cursor_style(&mut self, from: &Self) {
-        self.cursor_style = from.cursor_style;
     }
 
     /// DECSCUSR, `CSI Ps SP q`, as tmux's `screen_set_cursor_style`
@@ -1363,8 +1374,7 @@ impl Screen {
         self.extended_keys_mode
     }
 
-    /// Carry [`Self::extended_keys_mode`] into a fresh screen that replaces
-    /// this one for the same application (clear-history swaps the parser).
+    /// Set [`Self::extended_keys_mode`], 0 to 2.
     pub fn set_extended_keys_mode(&mut self, mode: u8) {
         self.extended_keys_mode = mode.min(2);
     }
@@ -1384,13 +1394,6 @@ impl Screen {
     pub(crate) fn xtmodkeys_off(&mut self, resource: u16) {
         self.extended_keys_mode =
             xtmodkeys_off_mode(self.extended_keys_mode, extended_keys_option(), resource);
-    }
-
-    /// Carry [`Self::win32_input_requested`] into a fresh screen that replaces
-    /// this one for the same output stream (clear-history swaps the parser
-    /// while the console host behind it stays the same).
-    pub fn set_win32_input_requested(&mut self, requested: bool) {
-        self.win32_input_requested = requested;
     }
 
     /// Returns the currently active [`MouseProtocolMode`].
@@ -1998,7 +2001,11 @@ impl Screen {
         if id == 0 {
             return None;
         }
-        self.hyperlinks.get((id - 1) as usize).map(String::as_str)
+        // An empty entry is one `reset_hyperlinks` freed.
+        self.hyperlinks
+            .get((id - 1) as usize)
+            .map(String::as_str)
+            .filter(|uri| !uri.is_empty())
     }
 
     /// Peek at the pending OSC 52 clipboard payload without consuming it.

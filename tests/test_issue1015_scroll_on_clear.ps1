@@ -324,7 +324,7 @@ function Run-Options($route) {
     Start-Sleep -Milliseconds 300
     Check "${route}: set -p wins over set -w" (Grew 'd' 's:a.1') 0
 
-    # clear-history gives the pane a new parser, and the option stays.
+    # clear-history frees only the history, and the option stays.
     P select-window -t s:a | Out-Null
     P select-pane -t s:a.1 | Out-Null
     P clear-history | Out-Null
