@@ -1897,9 +1897,12 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
         | "find-window" | "findw")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref(), target_from_context);
-    } else if let Some(full) = env::var("PSMUX_TARGET_FULL").ok().filter(|_| {
-        !bare_id_target_is_client(cmd)
-    }) {
+    } else if let Some(full) = env::var("PSMUX_TARGET_FULL")
+        .ok()
+        // Only a -t on this command line: an inherited PSMUX_TARGET_FULL is
+        // not a target the caller typed.
+        .filter(|_| explicit_target.is_some() && !bare_id_target_is_client(cmd))
+    {
         // Issue #1078: every other command that takes a pane or window `-t`
         // (set-option -p, run-shell, kill-window, respawn-pane, ...) went by
         // recency for a bare id several sessions own, and acted on whichever
