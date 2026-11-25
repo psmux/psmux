@@ -99,6 +99,27 @@ function Run-Cc([string]$line) {
     }
     return @{ ok = $false; text = '<no reply>' }
 }
+# An if-shell over -CC answers its own empty block, then one block per
+# command of the chosen branch (tmux cmd-if-shell.c:99-100, #1088). This
+# reads the if-shell block and the one branch command's block after it:
+# ok when the if-shell block is an empty %end and the branch one is %end,
+# text the branch block's body.
+function Run-CcIf([string]$line) {
+    if (-not $script:cc -or $script:cc.HasExited) { Cc-Start }
+    $start = (Cc-Text).Length
+    $script:cc.StandardInput.Write("$line`n"); $script:cc.StandardInput.Flush()
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $t = (Cc-Text).Substring($start)
+        $m = [regex]::Matches($t, '(?s)%begin[^\n]*\n(.*?)\r?\n?(%end|%error)')
+        if ($m.Count -ge 2) {
+            $ifOk = $m[0].Groups[2].Value -eq '%end' -and $m[0].Groups[1].Value.Trim() -eq ''
+            return @{ ok = ($ifOk -and $m[1].Groups[2].Value -eq '%end'); text = $m[1].Groups[1].Value.Trim() }
+        }
+    }
+    return @{ ok = $false; text = '<no reply>' }
+}
 function PaneRow([string]$id, [string]$fmt) {
     $row = @(P list-panes -a -F "#{pane_id}|$fmt") | Where-Object { "$_" -like "$id|*" } | Select-Object -First 1
     if ($row) { return ("$row" -replace '^[^|]*\|', '') } else { return $null }
@@ -220,7 +241,7 @@ foreach ($route in 'cli', 'tcp', 'cc') {
                 @{ ok = ($LASTEXITCODE -eq 0); text = $o }
             }
             'tcp' { Run-Tcp $c[0] }
-            'cc' { Run-Cc $c[0] }
+            'cc' { Run-CcIf $c[0] }
         }
         Check ($res.ok -and $res.text -match $c[1] -and $res.text -notmatch ($(if ($c[1] -eq 'yes793') { 'no793' } else { 'yes793' }))) "$route [$($c[0])] -> $($c[1])" "$route [$($c[0])] ok=$($res.ok) [$($res.text)]"
     }
@@ -236,12 +257,12 @@ $res = Run-Cc "run-shell 'echo cc793run'"
 Check ($res.ok -and $res.text -match 'cc793run') "run-shell prints its output in the block" "ok=$($res.ok) [$($res.text)]"
 $res = Run-Cc "run-shell -t %99 'echo cc793canfail'"
 Check ($res.ok -and $res.text -match 'cc793canfail') "run-shell -t %99 runs (CANFAIL)" "ok=$($res.ok) [$($res.text)]"
-$res = Run-Cc "if-shell -F 1 'display -p yes793' 'display -p no793'"
+$res = Run-CcIf "if-shell -F 1 'display -p yes793' 'display -p no793'"
 Check ($res.ok -and $res.text -eq 'yes793') "if-shell -F 1 runs its true branch" "ok=$($res.ok) [$($res.text)]"
-$res = Run-Cc "if-shell 'exit 1' 'display -p yes793' 'display -p no793'"
+$res = Run-CcIf "if-shell 'exit 1' 'display -p yes793' 'display -p no793'"
 Check ($res.ok -and $res.text -eq 'no793') "if-shell with a failing shell condition runs its else branch" "ok=$($res.ok) [$($res.text)]"
-$res = Run-Cc "if-shell -F 1 'display -p -t %99 x'"
-Check ((-not $res.ok) -and $res.text -match "can't find pane: %99") "a branch that fails ends the block with %error" "ok=$($res.ok) [$($res.text)]"
+$res = Run-CcIf "if-shell -F 1 'display -p -t %99 x'"
+Check ((-not $res.ok) -and $res.text -match "can't find pane: %99") "a branch command that fails answers %error in its own block" "ok=$($res.ok) [$($res.text)]"
 $before = (P list-windows -t s -F '#{window_index}:#{window_id}') -join ' '
 $res = Run-Cc "swap-window -s s:0 -t s:1"
 Start-Sleep -Milliseconds 600
@@ -276,9 +297,9 @@ Check ($v -eq '3') "TCP { set -gF @o '#{e|+:1,2}' } stores 3" "stored [$v]"
 Run-Tcp "if-shell -F 0 { set -g @t3 yes } { set -g @t3 no }" | Out-Null
 $v = ((P show -gv '@t3') -join '').Trim()
 Check ($v -eq 'no') "TCP -F 0 { yes } { no } runs the else block" "stored [$v]"
-$res = Run-Cc "if-shell true { display -p ccbrace793 }"
+$res = Run-CcIf "if-shell true { display -p ccbrace793 }"
 Check ($res.ok -and $res.text -eq 'ccbrace793') "-CC { display -p x } prints x in the block" "ok=$($res.ok) [$($res.text)]"
-$res = Run-Cc "if-shell true { set -gF @c2 '#{e|+:2,2}' }"
+$res = Run-CcIf "if-shell true { set -gF @c2 '#{e|+:2,2}' }"
 $v = ((P show -gv '@c2') -join '').Trim()
 Check ($res.ok -and $v -eq '4') "-CC { set -gF ... } stores 4" "ok=$($res.ok) [$($res.text)] stored [$v]"
 
