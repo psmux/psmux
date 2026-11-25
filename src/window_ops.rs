@@ -556,15 +556,63 @@ pub(crate) fn frame_marks_record_readers(app: &AppState) -> bool {
     app.mouse_enabled && crate::ssh_input::conpty_needs_mouse_record_bypass()
 }
 
+/// How long a frame trusts the active pane's cached "not a record reader".
+const FRAME_READER_NO_TTL: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Set only by `leaf_record_reader`, so only below `CONPTY_MOUSE_MIN_BUILD`
+/// with the mouse on; on every other host the server loop reads one false
+/// atomic per iteration and nothing else.
+static READER_RECHECK_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static READER_RECHECK_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn schedule_reader_recheck(at: std::time::Instant) {
+    if let Ok(mut slot) = READER_RECHECK_AT.lock() {
+        *slot = Some(slot.map_or(at, |old| old.min(at)));
+        READER_RECHECK_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Does a frame that used a cached "no" for the active pane's record reader
+/// mark now need rebuilding?  The server loop asks once per iteration and
+/// marks its state dirty on a yes, so the next frame queries the console
+/// again (see `leaf_record_reader`).  True once per scheduled recheck.
+pub(crate) fn take_reader_recheck_due() -> bool {
+    use std::sync::atomic::Ordering;
+    if !READER_RECHECK_PENDING.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Ok(mut slot) = READER_RECHECK_AT.lock() else { return false };
+    match *slot {
+        Some(at) if std::time::Instant::now() >= at => {
+            *slot = None;
+            READER_RECHECK_PENDING.store(false, Ordering::Relaxed);
+            true
+        }
+        Some(_) => false,
+        None => {
+            READER_RECHECK_PENDING.store(false, Ordering::Relaxed);
+            false
+        }
+    }
+}
+
 /// The leaf half of `frame_marks_record_readers`.  Only the active pane asks
-/// its console, and it does not trust a cached "no" at all: the server builds
-/// a frame only when something changed, so the frame that carries a
-/// program's first screen is the one that must see the mode the program set
-/// just before drawing it, however soon after the shell prompt's last frame
-/// it comes.  A program that drew and then waited would otherwise keep the
-/// prompt's "no" until the next frame (measured on 19045: the #597 drag
-/// started right after its record reader came up stayed psmux's selection).
-/// An idle screen builds no frames and asks nothing; a "yes" is kept for 2
+/// its console.  The server builds a frame only when something changed, so
+/// the frame that carries a program's first screen must not keep the shell
+/// prompt's "no" for long: a program that drew and then waited would keep it
+/// until the next frame (measured on 19045: the #597 drag started right after
+/// its record reader came up stayed psmux's selection).
+///
+/// It does not query on every frame either.  The server pushes a frame per
+/// pty batch, and a pane printing fast asked its console about a thousand
+/// times a second (4160 queries in a 4.4 s burst, each an AttachConsole
+/// round trip on the server's main loop).  So a "no" younger than
+/// `FRAME_READER_NO_TTL` is used as it is, and the frame asks the server loop
+/// for one more frame once that "no" is stale (`take_reader_recheck_due`),
+/// which queries again.  The last frame before a pane goes quiet is therefore
+/// corrected within that TTL plus one loop tick, and a burst asks at most
+/// about 30 times a second.  A "no" this frame has just queried needs no
+/// recheck, so an idle prompt builds no extra frames.  A "yes" is kept for 2
 /// seconds.  Any other leaf takes the last answer its pane had, without a
 /// query.  A press on another pane makes it active, so it is asked for the
 /// frame after.
@@ -573,7 +621,16 @@ pub(crate) fn leaf_record_reader(pane: &mut Pane, marks: bool, active: bool) -> 
         return false;
     }
     if active {
-        return legacy_record_reader_within(pane, std::time::Duration::ZERO);
+        let before = pane.mouse_input_cache.map(|(ts, _)| ts);
+        let yes = legacy_record_reader_within(pane, FRAME_READER_NO_TTL);
+        if !yes {
+            if let Some((ts, _)) = pane.mouse_input_cache {
+                if before == Some(ts) {
+                    schedule_reader_recheck(ts + FRAME_READER_NO_TTL);
+                }
+            }
+        }
+        return yes;
     }
     pane.mouse_input_cache
         .is_some_and(|(_, mode)| mode.is_some_and(mode_is_deliberate_record_reader))
