@@ -2882,15 +2882,32 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
         // A flag must start with '-' AND be longer than 1 char (e.g. "-r", "-n", "-T").
         // A bare "-" is a valid key name, not a flag.
         if tok.starts_with('-') && tok.len() > 1 && tok != "--" {
+            // Read the cluster as getopt does ("nrN:T:"): a value flag takes
+            // the rest of its cluster as the value when there is one
+            // (`-Troot`, `-rTroot`), the next argument otherwise (`-T root`,
+            // `-rN note`). `-Troot` used to set -r from the `r` in `root` and
+            // bind into the prefix table.
             let flags = &tok[1..];
-            if flags.contains('r') { _repeatable = true; }
-            if flags.contains('n') { _key_table = "root".to_string(); }
-            // A value flag ends its cluster and takes the next argument
-            // (getopt), so `-rN note` and `-T tbl` both work.
-            if flags.ends_with('T') || flags.ends_with('N') {
-                if let Some((_, vend, val)) = next_quoted_token(line, pos) {
-                    pos = vend;
-                    if flags.ends_with('T') { _key_table = val; } else { note = Some(val); }
+            for (at, c) in flags.char_indices() {
+                match c {
+                    'r' => _repeatable = true,
+                    'n' => _key_table = "root".to_string(),
+                    'T' | 'N' => {
+                        let rest = &flags[at + 1..];
+                        let val = if !rest.is_empty() {
+                            Some(rest.to_string())
+                        } else if let Some((_, vend, val)) = next_quoted_token(line, pos) {
+                            pos = vend;
+                            Some(val)
+                        } else {
+                            None
+                        };
+                        if let Some(val) = val {
+                            if c == 'T' { _key_table = val; } else { note = Some(val); }
+                        }
+                        break;
+                    }
+                    _ => {}
                 }
             }
             continue;

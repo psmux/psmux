@@ -5475,3 +5475,7 @@ mod tests_run_shell_store_fallback;
 #[cfg(test)]
 #[path = "../tests-rs/test_clipboard_paste_hold.rs"]
 mod tests_clipboard_paste_hold;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1080_bind_key_attached_table.rs"]
+mod tests_issue1080_bind_key_attached_table;

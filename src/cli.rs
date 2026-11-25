@@ -629,6 +629,9 @@ pub fn splits_flag_clusters(command: &str) -> bool {
             | "new-window" | "neww" | "split-window" | "splitw"
             | "select-window" | "selectw" | "kill-window" | "killw"
             | "list-windows" | "lsw" | "kill-pane" | "killp"
+            // Their arms read `-T table` as two exact tokens, so the attached
+            // `-Troot` bound nothing and `-rT root` lost its table.
+            | "bind-key" | "bind" | "unbind-key" | "unbind" | "list-keys" | "lsk"
     )
 }
 
