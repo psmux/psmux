@@ -296,13 +296,23 @@ fn only_the_active_leaf_asks_its_console() {
         assert!(!leaf_record_reader(&mut unasked, true, true));
         assert!(unasked.mouse_input_cache.is_some(), "the active leaf does");
 
-        // The active leaf asks again even for a "no" taken a moment ago: the
-        // frame carrying a program's first screen must see its new mode.
+        // A "no" taken a moment ago is used as it is, so a pane printing fast
+        // does not ask its console on every frame, but the frame owes one
+        // more frame once that "no" is stale: the frame carrying a program's
+        // first screen must come to see its new mode.
+        let _ = take_reader_recheck_due();
         let mut just_said_no = pane_with_mode(b"", Some(0x01E4));
         let at = Instant::now() - Duration::from_millis(5);
         just_said_no.mouse_input_cache = Some((at, Some(0x01E4)));
         assert!(!leaf_record_reader(&mut just_said_no, true, true));
-        assert_ne!(just_said_no.mouse_input_cache.map(|(t, _)| t), Some(at), "a 5 ms old no was asked again");
+        assert_eq!(just_said_no.mouse_input_cache.map(|(t, _)| t), Some(at), "a 5 ms old no is not asked again");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(take_reader_recheck_due(), "the stale no asks the server loop for one more frame");
+        assert!(!take_reader_recheck_due(), "once");
+        assert!(!leaf_record_reader(&mut just_said_no, true, true));
+        assert_ne!(just_said_no.mouse_input_cache.map(|(t, _)| t), Some(at), "the recheck frame asked again");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(!take_reader_recheck_due(), "a no the frame just asked owes nothing more, so an idle prompt builds no frames");
 
         let mut known = pane_with_mode(b"", Some(0x01B0));
         known.mouse_input_cache = Some((Instant::now() - Duration::from_secs(30), Some(0x01B0)));

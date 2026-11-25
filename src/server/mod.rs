@@ -9269,6 +9269,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             meta_dirty = true;
             state_dirty = true;
         }
+        // #1089, below build 22523 only: a frame that marked the active pane
+        // from a cached "not a record reader" owes one more frame once that
+        // answer is stale (window_ops::leaf_record_reader).  Elsewhere this is
+        // one false atomic load.
+        if crate::window_ops::take_reader_recheck_due() {
+            state_dirty = true;
+        }
         if state_dirty {
             crate::copy_mode::tick_auto_refresh(&mut app);
         }
