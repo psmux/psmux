@@ -276,7 +276,7 @@ fn cli_pane_index_exists_in_window(window_spec: &str, idx_spec: &str) -> Option<
 fn cli_sessions_with_pane_id(ns: Option<&str>, pane_id: &str) -> Vec<String> {
     // -s scopes to the whole session rather than the active window, so a pane
     // in a background window still counts.
-    cli_sessions_owning_id(ns, b"list-panes -s -F #{pane_id}\n", pane_id)
+    cli_sessions_owning_id(ns, cli_id_probe(pane_id), pane_id)
 }
 
 /// The window-id counterpart of `cli_sessions_with_pane_id`: the sessions in
@@ -286,33 +286,68 @@ fn cli_sessions_with_pane_id(ns: Option<&str>, pane_id: &str) -> Vec<String> {
 /// every session at once and an unqualified `-t @N` is only answerable by
 /// asking who actually owns it (issue #627).
 fn cli_sessions_with_window_id(ns: Option<&str>, window_id: &str) -> Vec<String> {
-    cli_sessions_owning_id(ns, b"list-windows -F #{window_id}\n", window_id)
+    cli_sessions_owning_id(ns, cli_id_probe(window_id), window_id)
 }
 
 /// Ask every session in `ns` to list its ids with `probe` and collect the
 /// registry base names whose reply contains `id`.
 fn cli_sessions_owning_id(ns: Option<&str>, probe: &[u8], id: &str) -> Vec<String> {
+    // Every session is asked at once (a bounded batch at a time), so the
+    // cost is one round trip rather than one per session: agent-manager style
+    // callers spawn a send-keys per key, and the serial walk added a few ms
+    // per extra session. The owners keep the registry's order.
+    const BATCH: usize = 16;
+    let bases = crate::session::list_session_names_ns(ns);
     let mut found = Vec::new();
-    for base in crate::session::list_session_names_ns(ns) {
-        let port = match std::fs::read_to_string(crate::paths::port_file(&base))
-            .ok()
-            .and_then(|s| s.trim().parse::<u16>().ok())
-        {
-            Some(p) => p,
-            None => continue,
-        };
-        let key = match std::fs::read_to_string(crate::paths::key_file(&base)) {
-            Ok(k) => k.trim().to_string(),
-            Err(_) => continue,
-        };
-        let addr = format!("127.0.0.1:{}", port);
-        if let Ok(resp) = crate::session::send_auth_cmd_response(&addr, &key, probe) {
-            if resp.lines().any(|l| l.trim() == id) {
-                found.push(base);
-            }
-        }
+    for chunk in bases.chunks(BATCH) {
+        let owns: Vec<bool> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|base| scope.spawn(move || cli_session_owns_id(base, probe, id)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or(false)).collect()
+        });
+        found.extend(chunk.iter().zip(owns).filter(|(_, o)| *o).map(|(b, _)| b.clone()));
     }
     found
+}
+
+/// Does the session registered as `base` list `id` in its reply to `probe`?
+/// False when it has no port or key file or cannot be reached.
+fn cli_session_owns_id(base: &str, probe: &[u8], id: &str) -> bool {
+    let Some(port) = std::fs::read_to_string(crate::paths::port_file(base))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+    else {
+        return false;
+    };
+    let Ok(key) = std::fs::read_to_string(crate::paths::key_file(base)) else {
+        return false;
+    };
+    let addr = format!("127.0.0.1:{}", port);
+    crate::session::send_auth_cmd_response(&addr, key.trim(), probe)
+        .map(|resp| resp.lines().any(|l| l.trim() == id))
+        .unwrap_or(false)
+}
+
+/// The probe that lists a session's `%` pane ids or `@` window ids.
+fn cli_id_probe(id: &str) -> &'static [u8] {
+    if id.starts_with('@') {
+        b"list-windows -F #{window_id}\n"
+    } else {
+        b"list-panes -s -F #{pane_id}\n"
+    }
+}
+
+/// When the command has a context session (`-t session`, or the caller's
+/// pane) and that session owns `id`, it is the answer whoever else owns the
+/// id too, so ask it alone first and skip asking the rest of the namespace.
+fn cli_context_owns_id(id: &str, target_from_context: bool) -> bool {
+    if !target_from_context {
+        return false;
+    }
+    let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+    !routed.is_empty() && cli_session_owns_id(&routed, cli_id_probe(id), id)
 }
 
 /// Strip the `-L` namespace prefix off a registry base name so the message
@@ -360,6 +395,9 @@ fn cli_resolve_unqualified_id(
     kind: &str,
     target_from_context: bool,
 ) -> UnqualifiedId {
+    if cli_context_owns_id(id, target_from_context) {
+        return UnqualifiedId::RoutedOwns;
+    }
     let owners = if id.starts_with('@') {
         cli_sessions_with_window_id(ns, id)
     } else {
@@ -484,6 +522,9 @@ fn source_id_command(cmd: &str) -> bool {
 /// command is routed to by context (`-t session`, or the caller's pane) owns
 /// it. One or no owner is left to the server, which reports a miss itself.
 fn cli_refuse_ambiguous_source(ns: Option<&str>, id: &str, target_from_context: bool) {
+    if cli_context_owns_id(id, target_from_context) {
+        return;
+    }
     let owners = if id.starts_with('@') {
         cli_sessions_with_window_id(ns, id)
     } else {
