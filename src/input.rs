@@ -2464,9 +2464,14 @@ pub(crate) fn pane_host_parses_win32_input(p: &crate::types::Pane) -> bool {
 /// The Windows build [`pane_host_parses_win32_input`] judges the host by.
 /// Unit tests model their host by its output alone, whatever machine runs
 /// them, so there the build is unknown unless a test sets one for its thread.
+///
+/// Asked on every key written to a pane, so it is read once per process: the
+/// build does not change while the server runs, and neither does the
+/// `PSMUX_FAKE_WIN_BUILD` it was started with.
 #[cfg(all(windows, not(test)))]
 fn win32_input_host_build() -> Option<u32> {
-    crate::ssh_input::windows_build_number()
+    static BUILD: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *BUILD.get_or_init(crate::ssh_input::windows_build_number)
 }
 #[cfg(all(windows, test))]
 thread_local! {
@@ -2669,6 +2674,16 @@ fn legacy_host_misreads_ctrl_letter(c: char) -> bool {
     matches!(c.to_ascii_lowercase(), 'i' | 'j' | 'm')
 }
 
+/// Is this the host measured to misread the legacy byte of the keys in
+/// [`legacy_host_key_record`]: the inbox conhost of a build before
+/// [`WIN32_INPUT_INBOX_MIN_BUILD`]?  Issue #1095.  An unknown build, every
+/// build from Windows 11 on and a host supplied with `PSMUX_CONPTY_DIR` keep
+/// the bytes or records they had, whatever the pane's stream carried.
+#[cfg(windows)]
+pub(crate) fn legacy_host_misreads_key_bytes(build: Option<u32>, supplied_host: bool) -> bool {
+    !supplied_host && build.is_some_and(|b| b < WIN32_INPUT_INBOX_MIN_BUILD)
+}
+
 /// Write `rec` ([`legacy_host_key_record`]) straight into `p`'s console with
 /// `WriteConsoleInput`, when `p` reads key records and its host does not parse
 /// win32 input mode.  Returns true when the key was written here, so the caller
@@ -2681,7 +2696,10 @@ fn legacy_host_misreads_ctrl_letter(c: char) -> bool {
 /// arrived with its virtual key and modifiers.
 #[cfg(windows)]
 pub(crate) fn write_key_record_to_console(p: &mut crate::types::Pane, rec: (u16, u16, u32)) -> bool {
-    if pane_host_parses_win32_input(p) || !crate::window_ops::detect_key_record_reader(p) {
+    if !legacy_host_misreads_key_bytes(win32_input_host_build(), pane_host_is_supplied())
+        || pane_host_parses_win32_input(p)
+        || !crate::window_ops::detect_key_record_reader(p)
+    {
         return false;
     }
     if p.child_pid.is_none() {

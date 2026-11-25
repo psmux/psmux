@@ -100,7 +100,7 @@ if (-not (Test-Path $inj) -or -not (Test-Path $rec)) { Write-Host "FATAL: could 
 function P { & $PSMUX -L $NS @args 2>&1 }
 $ESC = [char]27
 function HexOf([string]$s) { ([Text.Encoding]::UTF8.GetBytes($s) | ForEach-Object { $_.ToString("x2") }) -join "" }
-$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 # How many times the byte sequence $pat (hex) starts on a byte boundary of $hex.
 function Count-At([string]$hex, [string]$pat) {
     $n = 0
