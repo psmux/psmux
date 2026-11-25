@@ -826,11 +826,22 @@ function Stop-OurPsmux {
 # never arrived, a psmux client. The path contains this suite's own PID, so
 # nothing outside this run can match. See mechanism 2 in the header.
 function Stop-RunDirProcesses {
-    foreach ($ci in (Get-ProcInfosByName @("cmd","pwsh",$PsmuxImage))) {
-        $who = [int]$ci.ProcessId
-        if ($who -eq $PID) { continue }
-        if ($script:Protected.Contains($who)) { continue }
-        if ($ci.CommandLine -and $ci.CommandLine.Contains($RunDir)) { Kill-Pid $who }
+    # Children first, wrapper cmd last: a wrapper whose child is gone runs its
+    # `exit /b 0` (see New-Wrapper) and its Terminal tab closes. Killing the
+    # wrapper itself is what leaves a dead tab, so it is only the fallback.
+    foreach ($pass in 'children', 'wrappers') {
+        $hit = $false
+        foreach ($ci in (Get-ProcInfosByName @("cmd","pwsh",$PsmuxImage))) {
+            $who = [int]$ci.ProcessId
+            if ($who -eq $PID) { continue }
+            if ($script:Protected.Contains($who)) { continue }
+            if (-not ($ci.CommandLine -and $ci.CommandLine.Contains($RunDir))) { continue }
+            $isWrapper = $ci.Name -eq 'cmd.exe'
+            if (($pass -eq 'wrappers') -ne $isWrapper) { continue }
+            Kill-Pid $who
+            $hit = $true
+        }
+        if ($pass -eq 'children' -and $hit) { Start-Sleep -Milliseconds 500 }
     }
 }
 
@@ -1022,7 +1033,13 @@ function New-Wrapper {
             "set PSMUX_SESSION_NAME=`r`n" +
             $(if ($Trace) { "set PSMUX_PTY_TRACE=$Trace`r`n" } else { "" }) +
             $(if ($StartupTrace) { "set PSMUX_STARTUP_TRACE=$StartupTrace`r`n" } else { "" }) +
-            "$Line`r`n"
+            "$Line`r`n" +
+            # The cell's shell or psmux client is killed by pid once measured.
+            # Without this line the wrapper then exits with the killed child's
+            # 0xffffffff and Windows Terminal keeps the tab open on "[process
+            # exited with code 4294967295]": every run left a "Administrator:
+            # cmd" window of dead tabs while T5 passed. Exit 0 closes the tab.
+            "exit /b 0`r`n"
     Set-Content -Path $f -Value $body -Encoding ASCII
     return $f
 }
