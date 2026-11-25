@@ -11,7 +11,9 @@
   with `cargo check`. Most `tests-rs/*.rs` files are modules of the binary
   (`#[cfg(test)] #[path = "../tests-rs/..."]`), so run one with
   `cargo test --bin psmux <module path filter>`, for example
-  `cargo test --bin psmux choose_tree::tests_issue1065_chooser_search`.
+  `cargo test --bin psmux choose_tree::tests_issue1065_chooser_search`,
+  with `PSMUX_DATA_DIR` pointing at an empty temporary directory so a test
+  that does reach a server cannot touch the user's own data directory.
   `--bin psmux` builds the tests once instead of for each of the three
   binaries (`psmux`, `pmux`, `tmux`) that share `src/main.rs`.
 - Run runtime and integration checks with a unique namespace:
@@ -34,6 +36,9 @@
 - `scripts/build.ps1` runs `psmux kill-server -a` and stops every `psmux`,
   `pmux` and `tmux` process before it installs. Do not run it while the user
   has sessions open; build with `cargo build --release` instead.
+- Many single suites under `tests/` also stop psmux by image name or run a
+  bare `kill-server` in the default namespace. Read a suite before running it
+  and skip it on a machine with real sessions if it does either.
 
 ## Live Title Regression Tests
 
