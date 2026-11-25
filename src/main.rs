@@ -381,6 +381,12 @@ fn cli_resolve_unqualified_id(
         std::env::set_var("PSMUX_TARGET_SESSION", &owners[0]);
         return UnqualifiedId::Routed;
     }
+    cli_exit_ambiguous(ns, kind, id, &owners);
+}
+
+/// The refusal for an id several sessions own: exit 1 naming them, so the
+/// caller learns to qualify it instead of acting on one picked by recency.
+fn cli_exit_ambiguous(ns: Option<&str>, kind: &str, id: &str, owners: &[String]) -> ! {
     let names = owners
         .iter()
         .map(|b| cli_display_session_name(ns, b))
@@ -436,6 +442,63 @@ fn split_bare_window_id(full: &str) -> Option<(&str, Option<&str>)> {
         return None;
     }
     Some((win_part, pane_part.filter(|p| !p.is_empty())))
+}
+
+/// The bare `%N` or `@N` a target names with no session part: `%3`, `@2`,
+/// `@2.1` and `@2.%3` (the window id, which is what decides the session).
+/// Anything else (qualified, relative, a name) is None (issue #1078).
+fn bare_id_of_target(target: &str) -> Option<&str> {
+    if let Some(digits) = target.strip_prefix('%') {
+        return (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(target);
+    }
+    split_bare_window_id(target).map(|(win, _)| win)
+}
+
+fn bare_id_kind(id: &str) -> &'static str {
+    if id.starts_with('@') { "window" } else { "pane" }
+}
+
+/// Commands whose `-t` names a CLIENT (a tty, or `%N` for a control client),
+/// which is never a pane id: they keep their own routing (issue #1078).
+fn bare_id_target_is_client(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "switch-client" | "switchc" | "detach-client" | "detach" | "command-prompt"
+            | "show-messages" | "showmsgs" | "refresh-client" | "refresh"
+            | "suspend-client" | "suspendc" | "lock-client" | "lockc" | "set-buffer"
+            | "setb" | "confirm-before" | "confirm" | "display-panes" | "displayp"
+    )
+}
+
+/// Commands whose `-s` names an existing source pane or window.
+fn source_id_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "join-pane" | "joinp" | "move-pane" | "movep" | "swap-pane" | "swapp"
+            | "break-pane" | "breakp" | "move-window" | "movew" | "link-window"
+            | "linkw" | "swap-window" | "swapw"
+    )
+}
+
+/// Refuse a bare `-s` id that several sessions own unless the session this
+/// command is routed to by context (`-t session`, or the caller's pane) owns
+/// it. One or no owner is left to the server, which reports a miss itself.
+fn cli_refuse_ambiguous_source(ns: Option<&str>, id: &str, target_from_context: bool) {
+    let owners = if id.starts_with('@') {
+        cli_sessions_with_window_id(ns, id)
+    } else {
+        cli_sessions_with_pane_id(ns, id)
+    };
+    if owners.len() < 2 {
+        return;
+    }
+    if target_from_context {
+        let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+        if owners.contains(&routed) {
+            return;
+        }
+    }
+    cli_exit_ambiguous(ns, bare_id_kind(id), id, &owners);
 }
 
 fn cli_validate_window_pane_target(ns: Option<&str>, target_from_context: bool) {
@@ -1834,6 +1897,30 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
         | "find-window" | "findw")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref(), target_from_context);
+    } else if let Some(full) = env::var("PSMUX_TARGET_FULL").ok().filter(|_| {
+        !bare_id_target_is_client(cmd)
+    }) {
+        // Issue #1078: every other command that takes a pane or window `-t`
+        // (set-option -p, run-shell, kill-window, respawn-pane, ...) went by
+        // recency for a bare id several sessions own, and acted on whichever
+        // session was newest at exit 0. Only the owner question is asked here;
+        // a missing id is left to the command as before.
+        if let Some(id) = bare_id_of_target(&full) {
+            cli_resolve_unqualified_id(l_socket_name.as_deref(), id, bare_id_kind(id), target_from_context);
+        }
+    }
+    // The same for a source `-s` (break-pane -s %1, join-pane -s %1): the
+    // command goes to the routed session, which acted on its own `%1` whatever
+    // the caller meant. Routing follows `-t` or the caller's pane, so a
+    // source is only checked for ambiguity, never rerouted.
+    if let Some(index) = command_index.filter(|i| source_id_command(&args[*i])) {
+        let tail = &args[index + 1..];
+        let end = crate::cli::outer_target_scan_end(&args[index], tail);
+        if let Some(src) = tail[..end].iter().position(|a| a == "-s").and_then(|p| tail.get(p + 1)) {
+            if let Some(id) = bare_id_of_target(src) {
+                cli_refuse_ambiguous_source(l_socket_name.as_deref(), id, target_from_context);
+            }
+        }
     }
 
     // A command list goes to the server whole, past the first command's arm,
@@ -7593,6 +7680,10 @@ mod sbai_7120_tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue627_unqualified_targets.rs"]
 mod tests_issue627_unqualified_targets;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1078_ambiguous_bare_ids.rs"]
+mod tests_issue1078_ambiguous_bare_ids;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_ready_poll_backoff.rs"]
