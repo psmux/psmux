@@ -474,6 +474,29 @@ public static class PsmuxWinAudit {
         return IsWindow(h) && IsWindowVisible(h);
     }
 
+    // Visible hard error popups: "<image> - Application Error: The instruction
+    // at ... referenced memory at ...". They are #32770 dialogs owned by csrss,
+    // not by the process that crashed, so they are found by owner pid (the
+    // caller passes the csrss pids) and never by the console filter above.
+    public static List<Win> ListDialogs(int[] ownerPids) {
+        var owners = new HashSet<int>(ownerPids);
+        var res = new List<Win>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) { return true; }
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (!owners.Contains((int)pid)) { return true; }
+            var cn = new StringBuilder(256);
+            GetClassNameW(h, cn, cn.Capacity);
+            if (cn.ToString() != "#32770") { return true; }
+            var tb = new StringBuilder(512);
+            GetWindowTextW(h, tb, tb.Capacity);
+            res.Add(new Win { Handle = h.ToInt64(), Pid = (int)pid, Class = "#32770", Title = tb.ToString() });
+            return true;
+        }, IntPtr.Zero);
+        return res;
+    }
+
     // NOT sufficient on its own to identify the runner's own window, see
     // FindByTitle. Kept because it is the right answer for a classic conhost.
     public static long OwnConsoleWindow() { return GetConsoleWindow().ToInt64(); }
@@ -670,13 +693,35 @@ function Get-ForeignConsoleWindows {
                 if ($script:AuditOwnPids.ContainsKey($cur)) { break }
                 if ($script:AuditTerminalHosts -contains $pp.Name) { break }
                 if ($script:AuditForeignRoots -contains $pp.Name) { $root = "$($pp.Name) pid=$cur"; break }
+                # A live ancestor that was already running before the suite began
+                # belongs to someone else: another agent session's shell that
+                # opened a window during this suite, say. A suite's own processes
+                # descend from the suite's pwsh, which is gone by audit time.
+                try {
+                    if ($pp.CreationDate -and $pp.CreationDate -lt $SuiteStart.AddSeconds(-2)) {
+                        $root = "pre-existing $($pp.Name) pid=$cur"; break
+                    }
+                } catch { }
                 $cur = [int]$pp.ParentProcessId
             }
             if ($root) { $cands[$procId] = "{0} pid={1} started by {2}" -f $p.Name, $procId, $root }
         }
         $script:AuditForeignPids = $cands
-        if ($cands.Count -eq 0 -or -not $script:ConsoleWindowOfExe) { return $result }
-        $psi = [Diagnostics.ProcessStartInfo]::new($script:ConsoleWindowOfExe, (($cands.Keys | ForEach-Object { "$_" }) -join ' '))
+        if ($cands.Count -eq 0) { return $result }
+        $map = Get-ConsoleWindowOf -Pids @($cands.Keys)
+        foreach ($q in $map.Keys) { $result[[long]$map[$q]] = $cands[$q] }
+    } catch { }
+    return $result
+}
+
+# pid -> top level window showing that pid's console (0s dropped), via
+# console_window_of.exe. For a Windows Terminal tab this is the Terminal window.
+function Get-ConsoleWindowOf {
+    param([int[]]$Pids)
+    $map = @{}
+    if (-not $Pids -or $Pids.Count -eq 0 -or -not $script:ConsoleWindowOfExe) { return $map }
+    try {
+        $psi = [Diagnostics.ProcessStartInfo]::new($script:ConsoleWindowOfExe, (($Pids | ForEach-Object { "$_" }) -join ' '))
         $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
         $pr = [Diagnostics.Process]::Start($psi)
         $out = $pr.StandardOutput.ReadToEnd()
@@ -685,14 +730,168 @@ function Get-ForeignConsoleWindows {
             $f = $line.Trim().Split(' ')
             if ($f.Count -ne 2) { continue }
             $h = 0L; $q = 0
-            if ([long]::TryParse($f[1], [ref]$h) -and [int]::TryParse($f[0], [ref]$q) -and $h -ne 0) { $result[$h] = $cands[$q] }
+            if ([long]::TryParse($f[1], [ref]$h) -and [int]::TryParse($f[0], [ref]$q) -and $h -ne 0) { $map[$q] = $h }
         }
     } catch { }
-    return $result
+    return $map
+}
+
+# ── Windows Terminal tabs, through UI Automation (no keystrokes) ─────────────
+# A Terminal window a suite leaves behind is usually full of tabs that read
+# "[process exited with code 4294967295 (0xffffffff)]": the suite (or the
+# runner's psmux cleanup) force killed what ran in them, and Terminal keeps a
+# tab open after a failing exit. Two traps make the obvious cleanups wrong:
+#   - pressing Enter in such a tab RESTARTS its command line, and
+#   - WM_CLOSE on a window with several tabs raises "Close all tabs?", which
+#     needs a click or a keystroke into whatever has focus at that moment.
+# Every tab has a "Close Tab" button (AutomationId CloseButton) that UIA can
+# invoke, and closing one tab never asks anything; closing the last tab closes
+# the window. A tab is judged dead from its own text: selecting a tab through
+# SelectionItemPattern makes its terminal control the visible one, and a dead
+# one ends with Terminal's own exit banner.
+$script:WtUiaReady = $false
+try {
+    Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+    Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    $script:WtUiaReady = $true
+} catch { }
+$script:WtDeadTail = '\[process exited with code [^\]]*\]\s*You can now close this terminal[^\r\n]*\s*$'
+
+function Get-WtTabs {
+    param([long]$Handle)
+    $tabs = @()
+    if (-not $script:WtUiaReady) { return $tabs }
+    try {
+        $A = [System.Windows.Automation.AutomationElement]
+        $w = $A::FromHandle([IntPtr]$Handle)
+        $cond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
+        foreach ($t in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+            $tabs += [pscustomobject]@{ Id = (($t.GetRuntimeId()) -join '.'); Name = $t.Current.Name; El = $t }
+        }
+    } catch { }
+    return $tabs
+}
+
+# Text currently visible in every terminal control (pane) of the window's
+# selected tab.
+function Get-WtVisibleTexts {
+    param($WinEl)
+    $texts = @()
+    $A = [System.Windows.Automation.AutomationElement]
+    $cond = New-Object System.Windows.Automation.PropertyCondition($A::ClassNameProperty, 'TermControl')
+    foreach ($tc in $WinEl.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+        try {
+            $tp = $tc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+            $s = ''
+            foreach ($r in $tp.GetVisibleRanges()) { $s += $r.GetText(-1) }
+            if (-not $s) { $s = $tp.DocumentRange.GetText(-1) }
+            $texts += $s
+        } catch { $texts += $null }
+    }
+    return $texts
+}
+
+# Live/dead verdict for every tab of a Terminal window. A tab is Dead only when
+# every pane in it ends with the exit banner; anything unreadable is Unknown,
+# and Unknown is treated like Live by every caller (never closed).
+function Get-WtWindowState {
+    param([long]$Handle)
+    $state = [pscustomobject]@{ Tabs = @(); Dead = 0; Live = 0; Unknown = 0 }
+    if (-not $script:WtUiaReady) { return $state }
+    try {
+        $A = [System.Windows.Automation.AutomationElement]
+        $w = $A::FromHandle([IntPtr]$Handle)
+        $tabs = @(Get-WtTabs -Handle $Handle)
+        $sel = $null
+        foreach ($t in $tabs) {
+            $verdict = 'Unknown'
+            try {
+                $sp = $t.El.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+                if ($sp.Current.IsSelected -and -not $sel) { $sel = $sp }
+                if (-not $sp.Current.IsSelected) { $sp.Select(); Start-Sleep -Milliseconds 250 }
+                $texts = @(Get-WtVisibleTexts -WinEl $w)
+                if ($texts.Count -gt 0 -and -not ($texts | Where-Object { $null -eq $_ })) {
+                    $verdict = if (@($texts | Where-Object { $_ -notmatch $script:WtDeadTail }).Count -eq 0) { 'Dead' } else { 'Live' }
+                }
+            } catch { }
+            $t | Add-Member -NotePropertyName State -NotePropertyValue $verdict -Force
+            switch ($verdict) { 'Dead' { $state.Dead++ } 'Live' { $state.Live++ } default { $state.Unknown++ } }
+        }
+        if ($sel) { try { $sel.Select() } catch { } }
+        $state.Tabs = $tabs
+    } catch { }
+    return $state
+}
+
+# Close every tab of a window through its Close Tab button, last first. Only
+# ever called for a window whose tabs were all judged Dead.
+function Close-WtWindowTabs {
+    param([long]$Handle)
+    try {
+        $A = [System.Windows.Automation.AutomationElement]
+        $byId = New-Object System.Windows.Automation.PropertyCondition($A::AutomationIdProperty, 'CloseButton')
+        $tabs = @(Get-WtTabs -Handle $Handle)
+        [array]::Reverse($tabs)
+        foreach ($t in $tabs) {
+            $b = $t.El.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byId)
+            if (-not $b) { return $false }
+            $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            Start-Sleep -Milliseconds 150
+        }
+        for ($i = 0; $i -lt 15; $i++) {
+            if (-not [PsmuxWinAudit]::Alive($Handle)) { return $true }
+            Start-Sleep -Milliseconds 200
+        }
+    } catch { }
+    return (-not [PsmuxWinAudit]::Alive($Handle))
+}
+
+# Tabs of every Terminal window that is NOT a candidate for closing (baseline
+# and pinned windows), so a suite that adds a dead tab to someone's existing
+# window is at least named. Those tabs are reported only: judging them would
+# mean switching tabs in a window a human may be looking at.
+function Get-WtTabSnapshot {
+    $snap = @{}
+    if (-not $script:WtUiaReady) { return $snap }
+    foreach ($w in [PsmuxWinAudit]::List()) {
+        if ($w.Class -ne 'CASCADIA_HOSTING_WINDOW_CLASS') { continue }
+        foreach ($t in (Get-WtTabs -Handle $w.Handle)) { $snap[$t.Id] = [pscustomobject]@{ Handle = $w.Handle; Title = $w.Title; Name = $t.Name } }
+    }
+    return $snap
+}
+
+# Hard error popups and crashes. csrss owns the popups; its pids never change.
+$script:CsrssPids = @(Get-Process csrss -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+function Get-HardErrorDialogs {
+    if (-not $script:CsrssPids -or $script:CsrssPids.Count -eq 0) { return @() }
+    try { return @([PsmuxWinAudit]::ListDialogs([int[]]$script:CsrssPids)) } catch { return @() }
+}
+
+# Application log 1000 ("Faulting application") since the suite started. A
+# crashed process stays alive, frozen, while Windows Error Reporting collects
+# its report, and for ever if that report fails (then csrss shows the popup).
+function Get-SuiteCrashes {
+    param([datetime]$SuiteStart)
+    $out = @()
+    try {
+        $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = $SuiteStart } -ErrorAction SilentlyContinue
+        foreach ($e in @($ev)) {
+            try {
+                $pr = $e.Properties
+                $fstart = [datetime]::FromFileTimeUtc([long]$pr[9].Value).ToLocalTime()
+                $out += [pscustomobject]@{
+                    Image = [string]$pr[0].Value; Pid = [int]$pr[8].Value; Start = $fstart
+                    Code = [string]$pr[6].Value; Offset = [string]$pr[7].Value; Time = $e.TimeCreated
+                }
+            } catch { }
+        }
+    } catch { }
+    return $out
 }
 
 $script:AuditTotalLeftovers = 0
 $script:AuditSuitesWithLeftovers = 0
+$script:AuditNewTabs = 0
 $script:AuditLog = Join-Path $script:RunDir "leftovers.log"
 
 function New-AuditSnapshot {
@@ -704,7 +903,9 @@ function New-AuditSnapshot {
     } catch { }
     $wins = @{}
     try { foreach ($w in [PsmuxWinAudit]::List()) { $wins[$w.Handle] = $w.Title } } catch { }
-    return @{ Procs = $procs; Wins = $wins }
+    $dlgs = @{}
+    foreach ($d in (Get-HardErrorDialogs)) { $dlgs[[long]$d.Handle] = $d.Title }
+    return @{ Procs = $procs; Wins = $wins; Dialogs = $dlgs; Tabs = (Get-WtTabSnapshot) }
 }
 
 function Test-AuditWindowProtected {
@@ -724,7 +925,19 @@ function Test-AuditWindowProtected {
     # the run, and pass 2 posted WM_CLOSE to it and then went looking for the
     # "Close all" confirmation. Closing the terminal a sweep was launched from is
     # exactly the incident this audit exists to prevent.
-    if ($script:AuditOwnPids.ContainsKey([int]$W.Pid)) { return $true }
+    #
+    # BUT NOT FOR WINDOWS TERMINAL WINDOWS (sweep 2026-11-23_21-49-55). One
+    # WindowsTerminal.exe owns every window it opens, and the runner is normally
+    # started from inside it, so this rule made EVERY Terminal window invisible
+    # to the audit: the run began with eleven "Administrator: cmd/pwsh" windows
+    # full of "[process exited with code 4294967295]" tabs already on the desktop
+    # (all pid 22016, the terminal hosting the launching session), finished with
+    # thirteen, and reported nothing. A Terminal window is protected by what it
+    # shows instead: the baseline, the title marker pin above, and, in
+    # Invoke-LeftoverAudit, the rule that a window with ANY live tab the suite
+    # did not provably start is never closed (Get-WtWindowState). The window
+    # this runner prints into always has a live tab: this runner.
+    if ($W.Class -ne 'CASCADIA_HOSTING_WINDOW_CLASS' -and $script:AuditOwnPids.ContainsKey([int]$W.Pid)) { return $true }
     foreach ($t in $script:AuditProtectTitles) {
         if ($W.Title -and $W.Title.Contains($t)) { return $true }
     }
@@ -768,6 +981,60 @@ function Write-AuditLine {
     [System.IO.File]::AppendAllText($script:AuditLog, "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')] $Line`r`n")
 }
 
+# A NEW Windows Terminal window found after a suite. Returns leftovers counted.
+#   1. Every tab dead: close the tabs one by one (no prompt, no keystroke).
+#   2. Some tab live: end the processes in it that the suite started (created
+#      during the suite, not descended from a process that predates it, not
+#      started by Task Scheduler/explorer/services), then look again.
+#   3. Still a live or unreadable tab: report and leave the window alone. A
+#      window hosting anything the suite did not provably start is never closed.
+function Invoke-WtWindowAudit {
+    param([string]$Suite, $W, [datetime]$SuiteStart)
+    $st = Get-WtWindowState -Handle $W.Handle
+    $tabNames = ($st.Tabs | ForEach-Object { "[$($_.Name)]=$($_.State)" }) -join ' '
+    Write-AuditLine ("LEFTOVER-WINDOW {0} hwnd={1} pid={2} class={3} title=[{4}] tabs={5} dead={6} live={7} unknown={8} {9}" -f `
+        $Suite, $W.Handle, $W.Pid, $W.Class, $W.Title, $st.Tabs.Count, $st.Dead, $st.Live, $st.Unknown, $tabNames)
+    if ($st.Tabs.Count -eq 0) {
+        Write-AuditLine ("  no tabs readable through UI Automation; left on the desktop")
+        return 1
+    }
+    if ($st.Live -gt 0 -or $st.Unknown -gt 0) {
+        $cands = @()
+        try {
+            $all = @{}
+            foreach ($p in (Get-CimInstance -Query "SELECT ProcessId,ParentProcessId,Name,CreationDate,CommandLine FROM Win32_Process" -ErrorAction SilentlyContinue)) { $all[[int]$p.ProcessId] = $p }
+            foreach ($p in $all.Values) {
+                $q = [int]$p.ProcessId
+                if ($script:AuditOwnPids.ContainsKey($q) -or $script:AuditForeignPids.ContainsKey($q)) { continue }
+                if ($script:AuditNeverKill -contains $p.Name -or $script:AuditTerminalHosts -contains $p.Name) { continue }
+                try { if (-not $p.CreationDate -or $p.CreationDate -lt $SuiteStart.AddSeconds(-2)) { continue } } catch { continue }
+                $cands += $q
+            }
+        } catch { }
+        $map = Get-ConsoleWindowOf -Pids $cands
+        $inWin = @($map.Keys | Where-Object { [long]$map[$_] -eq [long]$W.Handle })
+        foreach ($q in $inWin) {
+            $p = $all[[int]$q]
+            Write-AuditLine ("LEFTOVER {0} pid={1} image={2} why=in-leftover-terminal-window hwnd={3} cmd=[{4}]" -f `
+                $Suite, $q, $p.Name, $W.Handle, ((([string]$p.CommandLine) -replace '\s+', ' ').Trim()))
+            if (-not (Test-KillTargetSafe -TargetPid $q -Reason "leftover audit, $Suite, process in leftover Terminal window")) { continue }
+            try { Stop-Process -Id $q -Force -ErrorAction Stop } catch { }
+        }
+        if ($inWin.Count -gt 0) {
+            Start-Sleep -Milliseconds 1200
+            $st = Get-WtWindowState -Handle $W.Handle
+            Write-AuditLine ("  after ending {0} suite process(es): dead={1} live={2} unknown={3}" -f $inWin.Count, $st.Dead, $st.Live, $st.Unknown)
+        }
+        if ($st.Live -gt 0 -or $st.Unknown -gt 0) {
+            Write-AuditLine ("  LIVE-WINDOW hwnd={0} still shows a tab that is not provably the suite's; left on the desktop" -f $W.Handle)
+            return 1 + $inWin.Count
+        }
+    }
+    if (Close-WtWindowTabs -Handle $W.Handle) { Write-AuditLine ("  closed hwnd={0} tab by tab" -f $W.Handle) }
+    else { Write-AuditLine ("  STUCK-WINDOW hwnd={0} would not close; left on the desktop" -f $W.Handle) }
+    return 1
+}
+
 # Diff the desktop against $Before, attribute what is new to $Suite, end it and
 # close its window. Returns the number of leftovers found (0 when clean).
 #
@@ -785,6 +1052,34 @@ function Invoke-LeftoverAudit {
     Start-Sleep -Milliseconds 600
 
     $found = 0
+
+    # ── pass 0: crashes, and crashed processes still frozen on the desktop ───
+    # test_issue382_crash_repro provokes the inbox conhost use-after-free on
+    # purpose. Sweep 2026-11-23_21-49-55 ended with a crashed conhost frozen
+    # behind a "conhost.exe - Application Error" popup and its "Claude Code"
+    # window hung, reported only as an anonymous STUCK-WINDOW. Every fault is
+    # now named, and a faulting process the suite created that is STILL alive
+    # (WER still busy, or WER failed and csrss is holding it at the popup) is
+    # ended by pid: WER is not waited for any longer than the suite already did.
+    $crashImages = @{}
+    foreach ($c in (Get-SuiteCrashes -SuiteStart $SuiteStart)) {
+        $ours = $c.Start -ge $SuiteStart.AddSeconds(-2)
+        Write-AuditLine ("CRASH {0} image={1} pid={2} code=0x{3} offset=0x{4} at {5:HH:mm:ss}{6}" -f `
+            $Suite, $c.Image, $c.Pid, $c.Code, $c.Offset, $c.Time, $(if ($ours) { '' } else { ' (process predates the suite; not ours)' }))
+        if (-not $ours) { continue }
+        $crashImages[$c.Image.ToLowerInvariant()] = $true
+        $p = Get-Process -Id $c.Pid -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        $same = $false
+        try { $same = [math]::Abs(($p.StartTime - $c.Start).TotalSeconds) -lt 1 } catch { }
+        if (-not $same) { continue }                                   # pid reused since
+        if ($script:AuditOwnPids.ContainsKey($c.Pid)) { continue }
+        Write-AuditLine ("LEFTOVER {0} pid={1} image={2} why=crashed-and-still-frozen" -f $Suite, $c.Pid, $c.Image)
+        $found++
+        if (-not (Test-KillTargetSafe -TargetPid $c.Pid -Reason "leftover audit, $Suite, crashed process still alive")) { continue }
+        try { Stop-Process -Id $c.Pid -Force -ErrorAction Stop; Write-AuditLine ("  ended crashed pid={0}" -f $c.Pid) }
+        catch { Write-AuditLine ("  could not end crashed pid={0}: {1}" -f $c.Pid, $_.Exception.Message) }
+    }
 
     # Which handles are new? Their owning pids are the candidates that hold a
     # visible console, including ones whose command line looks innocent.
@@ -876,6 +1171,10 @@ function Invoke-LeftoverAudit {
     # ── pass 2: windows still standing (dead tabs, or hosts we refused to kill) ──
     foreach ($w in $newWins) {
         if (-not [PsmuxWinAudit]::Alive($w.Handle)) { continue }   # went with its process
+        if ($w.Class -eq 'CASCADIA_HOSTING_WINDOW_CLASS') {
+            $found += Invoke-WtWindowAudit -Suite $Suite -W $w -SuiteStart $SuiteStart
+            continue
+        }
         Write-AuditLine ("LEFTOVER-WINDOW {0} hwnd={1} pid={2} class={3} title=[{4}]" -f `
             $Suite, $w.Handle, $w.Pid, $w.Class, $w.Title)
         $found++
@@ -897,6 +1196,50 @@ function Invoke-LeftoverAudit {
         }
         if ($gone) { Write-AuditLine ("  closed hwnd={0}" -f $w.Handle) }
         else       { Write-AuditLine ("  STUCK-WINDOW hwnd={0} would not close; left on the desktop" -f $w.Handle) }
+    }
+
+    # ── pass 3: hard error popups ────────────────────────────────────────────
+    # Ending the crashed process does NOT take down a popup csrss is already
+    # showing (measured), so the popup is closed too: WM_CLOSE on a single OK
+    # button message box is its OK, which only "terminates the program" that
+    # crashed. csrss shows queued popups one at a time, hence the rounds. Only
+    # a popup naming an image that crashed during this suite, in a process the
+    # suite created, is closed; any other new popup is reported and left.
+    $dlgSeen = @{}
+    for ($round = 0; $round -lt 6; $round++) {
+        $fresh = @(Get-HardErrorDialogs | Where-Object {
+            -not ($Before.Dialogs -and $Before.Dialogs.ContainsKey([long]$_.Handle)) -and -not $dlgSeen.ContainsKey([long]$_.Handle)
+        })
+        if ($fresh.Count -eq 0) {
+            if ($round -gt 0 -or $crashImages.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 700; continue                     # a popup may still be on its way
+        }
+        foreach ($d in $fresh) {
+            $dlgSeen[[long]$d.Handle] = $true
+            $img = if ($d.Title -match '^(.+?) - ') { $Matches[1].Trim().ToLowerInvariant() } else { '' }
+            if ($img -and $crashImages.ContainsKey($img)) {
+                Write-AuditLine ("LEFTOVER-DIALOG {0} hwnd={1} title=[{2}]" -f $Suite, $d.Handle, $d.Title)
+                $found++
+                [void][PsmuxWinAudit]::Close($d.Handle)
+                Start-Sleep -Milliseconds 300
+                Write-AuditLine ("  {0} hwnd={1}" -f $(if ([PsmuxWinAudit]::Alive($d.Handle)) { 'STUCK-DIALOG' } else { 'closed' }), $d.Handle)
+            } else {
+                Write-AuditLine ("UNATTRIBUTED-DIALOG {0} hwnd={1} title=[{2}]: no crash of a suite process matches it; left alone" -f $Suite, $d.Handle, $d.Title)
+            }
+        }
+        Start-Sleep -Milliseconds 700
+    }
+
+    # ── pass 4: new tabs in Terminal windows that are not ours to close ──────
+    if ($Before.Tabs) {
+        $now = Get-WtTabSnapshot
+        foreach ($id in $now.Keys) {
+            if ($Before.Tabs.ContainsKey($id)) { continue }
+            $t = $now[$id]
+            if (-not ($script:AuditBaselineWins.ContainsKey([long]$t.Handle) -or $script:AuditProtectHwnd.ContainsKey([long]$t.Handle) -or $Before.Wins.ContainsKey([long]$t.Handle))) { continue }
+            Write-AuditLine ("LEFTOVER-TAB {0} window hwnd={1} title=[{2}] gained tab [{3}]; reported only, never closed in a window that predates the suite" -f $Suite, $t.Handle, $t.Title, $t.Name)
+            $script:AuditNewTabs++
+        }
     }
 
     if ($found -gt 0) {
@@ -1034,6 +1377,13 @@ foreach ($pass in 1, 2) {
     } catch { }
     if ($pass -eq 1) { Start-Sleep -Milliseconds 700 }
 }
+$script:AuditBaselineDialogs = @{}
+foreach ($d in (Get-HardErrorDialogs)) {
+    $script:AuditBaselineDialogs[[long]$d.Handle] = $d.Title
+    Write-Log ("BASELINE-DIALOG hwnd={0} title=[{1}]" -f $d.Handle, $d.Title)
+}
+$script:AuditBaselineTabs = Get-WtTabSnapshot
+Write-Log ("BASELINE-TABS {0} Windows Terminal tab(s) open at run start" -f $script:AuditBaselineTabs.Count)
 Write-Host ("  Desktop baseline: {0} console window(s) present; they are never touched." -f $script:AuditBaselineWins.Count) -ForegroundColor DarkGray
 if ($script:AuditProtectHwnd.Count -gt 0) {
     Write-Host ("  Pinned window handles (never closed): {0}" -f (($script:AuditProtectHwnd.Keys | Sort-Object) -join ', ')) -ForegroundColor DarkGray
@@ -1911,6 +2261,23 @@ try {
         Write-AuditLine ("RUN-END-STRAY hwnd={0} pid={1} class={2} title=[{3}]" -f $w.Handle, $w.Pid, $w.Class, $w.Title)
     }
 } catch { }
+foreach ($d in (Get-HardErrorDialogs)) {
+    if ($script:AuditBaselineDialogs.ContainsKey([long]$d.Handle)) { continue }
+    $script:AuditStrayWindows += $d
+    Write-AuditLine ("RUN-END-STRAY hwnd={0} pid={1} class={2} title=[{3}] (hard error popup)" -f $d.Handle, $d.Pid, $d.Class, $d.Title)
+}
+# Tabs added to Terminal windows that were already open when the run started.
+$script:AuditStrayTabs = @()
+try {
+    $endTabs = Get-WtTabSnapshot
+    foreach ($id in $endTabs.Keys) {
+        if ($script:AuditBaselineTabs.ContainsKey($id)) { continue }
+        $t = $endTabs[$id]
+        if (-not $script:AuditBaselineWins.ContainsKey([long]$t.Handle)) { continue }
+        $script:AuditStrayTabs += $t
+        Write-AuditLine ("RUN-END-NEW-TAB window hwnd={0} title=[{1}] tab=[{2}]" -f $t.Handle, $t.Title, $t.Name)
+    }
+} catch { }
 
 # ── Generate Report ──
 $endTime = Get-Date
@@ -2043,6 +2410,11 @@ if ($script:AuditStrayWindows.Count -gt 0) {
         Write-Host ("    hwnd={0} pid={1} class={2} title=[{3}]" -f $w.Handle, $w.Pid, $w.Class, $w.Title) -ForegroundColor Red
     }
 }
+if ($script:AuditStrayTabs.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("  WARNING: {0} tab(s) were added to Terminal windows that were open before the run (reported only, see RUN-END-NEW-TAB in {1}):" -f $script:AuditStrayTabs.Count, $script:AuditLog) -ForegroundColor Red
+    foreach ($t in $script:AuditStrayTabs) { Write-Host ("    window hwnd={0} [{1}] tab [{2}]" -f $t.Handle, $t.Title, $t.Name) -ForegroundColor Red }
+}
 
 # ── Performance chart (top 15 slowest, visual bar) ──
 Write-Host "`n"
@@ -2101,6 +2473,9 @@ if ($leftoverSuites.Count -gt 0) {
 }
 if ($script:AuditStrayWindows.Count -gt 0) {
     [void]$summaryLines.Add("STILL ON DESKTOP: $($script:AuditStrayWindows.Count) window(s) would not close")
+}
+if ($script:AuditStrayTabs.Count -gt 0) {
+    [void]$summaryLines.Add("NEW TABS IN PRE-EXISTING TERMINAL WINDOWS: $($script:AuditStrayTabs.Count) (reported only)")
 }
 [void]$summaryLines.Add("")
 [void]$summaryLines.Add("=" * 70)
