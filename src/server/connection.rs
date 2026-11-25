@@ -302,6 +302,86 @@ fn write_split_reply(write_stream: &mut ReplyStream, reply: &str, persistent: bo
 /// CLI, and none of them can hold a NUL.
 pub(crate) const LIST_END: &str = "\0list-end";
 
+/// The control route's if-shell (dispatch_control_command) answers with this
+/// before a shell condition runs: the if-shell's own block ends now, and the
+/// branch follows on the same channel once the shell exits (#1088).
+const IF_SHELL_BLOCK_DONE: &str = "\u{0001}IFSHELL-DONE\u{0001}";
+
+/// The control route's if-shell answers its chosen branch as this prefix, a
+/// `b` (if-shell -b) or `w`, and the branch text. The control loop ends the
+/// if-shell's block empty and queues the branch's commands, each answering
+/// its own block as in tmux (cmd-if-shell.c:99-100 and :169-170, #1088).
+const IF_SHELL_BRANCH: &str = "\u{0001}IFSHELL-BRANCH\u{0001}";
+
+/// Whether if-shell's flags (before its first operand) include `-b`.
+fn if_shell_background(args: &[&str]) -> bool {
+    for a in args {
+        if *a == "--" {
+            return false;
+        }
+        if a.starts_with('-') && a.len() > 1 {
+            if a[1..].contains('b') {
+                return true;
+            }
+            continue;
+        }
+        break;
+    }
+    false
+}
+
+/// A command queued on the control route: the rest of a line read from the
+/// client, the further commands of an alias, or the commands of an if-shell
+/// branch (#1088).
+struct ControlQueued {
+    line: String,
+    /// The command list it belongs to: a failure drops the rest of its own
+    /// list only (cmd-queue.c cmdq_remove_group). Each line read is one list
+    /// and each if-shell branch another.
+    group: u64,
+    /// Echoed under `-C`: only text the client sent, never a branch.
+    echo: bool,
+    /// The guard flags: 1 for a command the client sent and for a branch it
+    /// waits for, 0 for an `if-shell -b` branch, which tmux appends with a
+    /// fresh state (cmd-if-shell.c:166, cmdq_get_command(cmdlist, NULL)).
+    flags: u8,
+}
+
+/// The queue entries for an if-shell branch, one per command in it.
+fn control_branch_items(text: &str, group: u64, flags: u8) -> Vec<ControlQueued> {
+    crate::config::split_chained_commands_pub(text)
+        .into_iter()
+        .map(|line| ControlQueued { line, group, echo: false, flags })
+        .collect()
+}
+
+/// Queue the branch an if-shell answered (an [`IF_SHELL_BRANCH`] reply) as a
+/// command list of its own. A branch the if-shell waited for runs next, ahead
+/// of the rest of the line, with the if-shell's flags (cmd-if-shell.c:100 and
+/// :169, cmdq_insert_after with the item's state). An `if-shell -b` branch is
+/// appended after everything queued, with flags 0 (cmd-if-shell.c:165-166,
+/// cmdq_append with no state).
+fn queue_if_shell_branch(
+    pending: &mut std::collections::VecDeque<ControlQueued>,
+    next_group: &mut u64,
+    reply: Option<String>,
+    flags: u8,
+) {
+    let Some(rest) = reply.as_deref().and_then(|r| r.strip_prefix(IF_SHELL_BRANCH)) else { return };
+    let (background, text) = match rest.strip_prefix('b') {
+        Some(text) => (true, text),
+        None => (false, rest.strip_prefix('w').unwrap_or(rest)),
+    };
+    *next_group += 1;
+    if background {
+        pending.extend(control_branch_items(text, *next_group, 0));
+    } else {
+        for item in control_branch_items(text, *next_group, flags).into_iter().rev() {
+            pending.push_front(item);
+        }
+    }
+}
+
 /// Drops what is left of the failing command's list (#954), as tmux's
 /// cmdq_remove_group removes the items after a failed one that share its
 /// group (cmd-queue.c:443-456, called at :750-754). A line read from the
@@ -854,28 +934,37 @@ use super::helpers::TMUX_COMMANDS;
 /// separator on the same line; iTerm2's `sendCommandList` joins many commands
 /// with "; " into one wire line and expects one %begin/%end pair per command.
 fn split_top_level_semicolons(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    // A `;` inside a brace block belongs to the block: `if -F 1 { a ; b }`
+    // is one command whose branch holds two (cmd-parse.y argument_statements).
+    // Unbalanced braces are read as before, with no blocks.
+    let depths = crate::config::block_depth_map(&chars);
+    let at_top = |i: usize| depths.as_ref().map_or(true, |d| d[i] == 0);
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut in_single = false;
     let mut in_double = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
         if c == '\\' && !in_single {
             // Escape: copy the backslash and the next char (if any) verbatim.
             cur.push(c);
-            if let Some(nc) = chars.next() { cur.push(nc); }
+            if let Some(&nc) = chars.get(i + 1) { cur.push(nc); }
+            i += 2;
             continue;
         }
         match c {
             '\'' if !in_double => { in_single = !in_single; cur.push(c); }
             '"'  if !in_single => { in_double = !in_double; cur.push(c); }
-            ';'  if !in_single && !in_double => {
+            ';'  if !in_single && !in_double && at_top(i) => {
                 let trimmed = cur.trim().to_string();
                 if !trimmed.is_empty() { out.push(trimmed); }
                 cur.clear();
             }
             _ => cur.push(c),
         }
+        i += 1;
     }
     let trimmed = cur.trim().to_string();
     if !trimmed.is_empty() { out.push(trimmed); }
@@ -2702,11 +2791,13 @@ if control_echo || control_quiet || control_noecho {
     // line on top-level `;` (real tmux does this in its command parser). iTerm2's
     // sendCommandList joins many commands with "; " into one wire line and
     // expects one %begin/%end pair per sub-command.
-    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut pending: std::collections::VecDeque<ControlQueued> = std::collections::VecDeque::new();
+    // The command list of each line read and of each if-shell branch.
+    let mut next_group: u64 = 0;
 
     loop {
-        let trimmed_owned: String = if let Some(s) = pending.pop_front() {
-            s
+        let (trimmed_owned, cur_group, cur_echo, cur_flags) = if let Some(q) = pending.pop_front() {
+            (q.line, q.group, q.echo, q.flags)
         } else {
             line.clear();
             match r.read_line(&mut line) {
@@ -2768,11 +2859,16 @@ if control_echo || control_quiet || control_noecho {
             // %error, so they are not merged into one write.
             let parts = if ctrl_readonly.get() { parts } else { coalesce_send_commands(parts) };
             if parts.is_empty() { continue; }
+            next_group += 1;
             let mut iter = parts.into_iter();
             let first = iter.next().unwrap();
-            for rest in iter { pending.push_back(rest); }
-            first
+            for rest in iter {
+                pending.push_back(ControlQueued { line: rest, group: next_group, echo: true, flags: 1 });
+            }
+            (first, next_group, true, 1u8)
         };
+        // Branch commands are not echoed: only text the client sent is.
+        let control_echo = control_echo && cur_echo;
         let trimmed: &str = trimmed_owned.trim();
         if trimmed.is_empty() { continue; }
 
@@ -2787,9 +2883,9 @@ if control_echo || control_quiet || control_noecho {
                 out.push_str(original);
                 out.push('\n');
             }
-            out.push_str(&control::format_begin(ts, cmd_counter));
+            out.push_str(&control::format_begin_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
-            out.push_str(&control::format_end(ts, cmd_counter));
+            out.push_str(&control::format_end_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
             let mut ws = write_lock.lock().unwrap();
             let _ = ws.write_all(out.as_bytes());
@@ -2816,7 +2912,12 @@ if control_echo || control_quiet || control_noecho {
                 let first = commands.next().unwrap_or_default();
                 let rest: Vec<Vec<String>> = commands.collect();
                 for words in rest.iter().rev() {
-                    pending.push_front(crate::command_alias::queued_line(words));
+                    pending.push_front(ControlQueued {
+                        line: crate::command_alias::queued_line(words),
+                        group: cur_group,
+                        echo: cur_echo,
+                        flags: cur_flags,
+                    });
                 }
                 parsed = crate::cli::normalize_command_words(first, true);
             }
@@ -2829,9 +2930,9 @@ if control_echo || control_quiet || control_noecho {
                 out.push_str(trimmed);
                 out.push('\n');
             }
-            out.push_str(&control::format_begin(ts, cmd_counter));
+            out.push_str(&control::format_begin_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
-            out.push_str(&control::format_end(ts, cmd_counter));
+            out.push_str(&control::format_end_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
             let mut ws = write_lock.lock().unwrap();
             let _ = ws.write_all(out.as_bytes());
@@ -2858,10 +2959,10 @@ if control_echo || control_quiet || control_noecho {
                 out.push_str(trimmed);
                 out.push('\n');
             }
-            out.push_str(&control::format_begin(ts, cmd_counter));
+            out.push_str(&control::format_begin_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
             out.push_str("client is read-only\n");
-            out.push_str(&control::format_error(ts, cmd_counter));
+            out.push_str(&control::format_error_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
             let mut ws = write_lock.lock().unwrap();
             let _ = ws.write_all(out.as_bytes());
@@ -3127,7 +3228,8 @@ if control_echo || control_quiet || control_noecho {
         // item. Built after the job, a 7 s run-shell showed nothing at all
         // for 7 s and then `%begin` and `%end` together (issue #793 follow
         // up). Notifications may arrive between the two lines, as in tmux.
-        // From here to the written reply no `continue` leaves the iteration.
+        // From here to the written reply no `continue` leaves the iteration
+        // without clearing cmd_busy.
         cmd_busy.store(true, std::sync::atomic::Ordering::Release);
         let early_begin = focus_err.is_none()
             && matches!(cmd_name, "run-shell" | "run" | "if-shell" | "if");
@@ -3137,7 +3239,7 @@ if control_echo || control_quiet || control_noecho {
                 head.push_str(trimmed);
                 head.push('\n');
             }
-            head.push_str(&control::format_begin(ts, cmd_counter));
+            head.push_str(&control::format_begin_flags(ts, cmd_counter, cur_flags));
             head.push('\n');
             let mut ws = write_lock.lock().unwrap();
             let _ = ws.write_all(head.as_bytes());
@@ -3172,6 +3274,37 @@ if control_echo || control_quiet || control_noecho {
             }
         };
 
+        // if-shell answers its own block and hands its branch back to be
+        // queued here, each command of it answering its own block (#1088).
+        let mut if_branch: Option<String> = None;
+        let response_result = match response_result {
+            Some(Ok(reply)) if reply == IF_SHELL_BLOCK_DONE => {
+                // A shell condition: the block ends before the shell runs.
+                let end = format!("{}\n", control::format_end_flags(ts, cmd_counter, cur_flags));
+                let mut ws = write_lock.lock().unwrap();
+                let _ = ws.write_all(end.as_bytes());
+                let _ = ws.flush();
+                drop(ws);
+                let next = resp_r.recv().unwrap_or_default();
+                if let Some(err) = next.strip_prefix("\u{0001}ERR\u{0001}") {
+                    // Its block is over, so the error is a line of its own.
+                    let mut ws = write_lock.lock().unwrap();
+                    let _ = ws.write_all(format!("{}\n", err).as_bytes());
+                    let _ = ws.flush();
+                } else if next.starts_with(IF_SHELL_BRANCH) {
+                    if_branch = Some(next);
+                }
+                cmd_busy.store(false, std::sync::atomic::Ordering::Release);
+                queue_if_shell_branch(&mut pending, &mut next_group, if_branch, cur_flags);
+                continue;
+            }
+            Some(Ok(reply)) if reply.starts_with(IF_SHELL_BRANCH) => {
+                if_branch = Some(reply);
+                Some(Ok(String::new()))
+            }
+            other => other,
+        };
+
         // Acquire write lock for the ENTIRE %begin … %end sequence so
         // notifications from the notification thread never interleave
         // with command responses.  This matches real tmux's single-
@@ -3191,7 +3324,7 @@ if control_echo || control_quiet || control_noecho {
             }
 
             // Send %begin
-            out.push_str(&control::format_begin(ts, cmd_counter));
+            out.push_str(&control::format_begin_flags(ts, cmd_counter, cur_flags));
             out.push('\n');
         }
 
@@ -3212,9 +3345,9 @@ if control_echo || control_quiet || control_noecho {
                     }
                 }
                 let footer = if is_error {
-                    control::format_error(ts, cmd_counter)
+                    control::format_error_flags(ts, cmd_counter, cur_flags)
                 } else {
-                    control::format_end(ts, cmd_counter)
+                    control::format_end_flags(ts, cmd_counter, cur_flags)
                 };
                 out.push_str(&footer);
                 out.push('\n');
@@ -3230,13 +3363,13 @@ if control_echo || control_quiet || control_noecho {
             }
             Some(Err(_)) => {
                 out.push_str("command timed out\n");
-                out.push_str(&control::format_error(ts, cmd_counter));
+                out.push_str(&control::format_error_flags(ts, cmd_counter, cur_flags));
                 out.push('\n');
                 failed = true;
             }
             None => {
                 // Command dispatched without response channel (fire and forget)
-                out.push_str(&control::format_end(ts, cmd_counter));
+                out.push_str(&control::format_end_flags(ts, cmd_counter, cur_flags));
                 out.push('\n');
             }
         }
@@ -3250,9 +3383,12 @@ if control_echo || control_quiet || control_noecho {
         // cmdq_remove_group after CMD_RETURN_ERROR), so `set-buffer ... ;
         // paste-buffer ...` never pastes when set-buffer fails (issue #813).
         // `pending` only ever holds the rest of the current line.
+        // An if-shell branch is a list of its own: its failure drops the rest
+        // of the branch and the outer line goes on.
         if failed {
-            pending.clear();
+            pending.retain(|q| q.group != cur_group);
         }
+        queue_if_shell_branch(&mut pending, &mut next_group, if_branch, cur_flags);
     }
 
     // Deregister and clean up.
@@ -9020,71 +9156,69 @@ fn dispatch_control_command(
                 let _ = resp_tx.send("\u{0001}ERR\u{0001}usage: if-shell [-bF] [-t target-pane] shell-command command [command]".to_string());
                 return true;
             }
-            let client = Some(crate::types::ClientSel::Id(client_id));
-            let success = if_shell_condition(tx, &positional[0], format_mode, target_failed, client);
-            let chosen = if success { positional.get(1) } else { positional.get(2) };
-            let Some(chosen) = chosen else {
-                let _ = resp_tx.send(String::new());
-                return true;
+            let background = if_shell_background(args);
+            // tmux answers the if-shell item with its own block and queues the
+            // chosen branch as new items after it (cmd-if-shell.c:99-100 and
+            // :169-170), each command of which answers its own block
+            // (cmd-queue.c:592 and :652). The branch goes back to the control
+            // loop as IF_SHELL_BRANCH, which queues it. Running it here put the
+            // if-shell and its whole branch in one block (#1088).
+            let branch_reply = |chosen: Option<&String>| -> String {
+                match chosen {
+                    Some(text) => format!("{}{}{}", IF_SHELL_BRANCH, if background { 'b' } else { 'w' }, text),
+                    None => String::new(),
+                }
             };
-            // tmux inserts the branch right after the if-shell item
-            // (cmd-if-shell.c cmdq_insert_after), and a control client sees
-            // its output inside the same guard. Each command of the branch
-            // runs through this dispatcher, its output collected in order; the
-            // first error ends the branch and becomes the block's %error.
-            let mut body = String::new();
-            // A `command-alias` in the branch runs what it stands for, as
-            // anywhere else (cmd_parse_expand_alias), and is not expanded again.
-            let mut branch: Vec<Vec<String>> = Vec::new();
-            for sub in crate::config::split_chained_commands_pub(chosen) {
-                let toks = parse_command_line(&sub);
-                match crate::command_alias::read(aliases).expand(&toks) {
-                    Some(commands) => branch.extend(commands),
-                    None => branch.push(toks),
-                }
-            }
-            for toks in branch {
-                let Some(name) = toks.first().map(|s| s.as_str()) else { continue };
-                let sub_args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
-                let sub_raw = sub_args.windows(2).find(|w| w[0] == "-t").map(|w| w[1]);
-                let pt = sub_raw.map(parse_target).unwrap_or_default();
-                let filtered = without_outer_target(name, &sub_args);
-                // The branch's own -t is resolved like any command's: a target
-                // naming nothing is its error, and a good one is what its
-                // requests run against.
-                let mut sub_target: Option<crate::types::TempTarget> = None;
-                let mut sub_failed = false;
-                if sub_raw.is_some() {
-                    let mut spec = crate::types::TempTarget::from_parsed(&pt);
-                    spec.session = explicit_target_session(name, sub_raw);
-                    spec.pane_check_only = pt.pane.is_some() && pane_checked_not_focused(name, pt.pane_is_id);
-                    match validate_target(tx.inner, spec) {
-                        Ok(r) if r.win.is_some() || r.pane.is_some() => sub_target = Some(r),
-                        Ok(_) => {}
-                        Err(_) if target_can_fail(name) => sub_failed = true,
-                        Err(e) => {
-                            body.push_str(&e);
-                            let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", body));
-                            return true;
-                        }
-                    }
-                }
-                let sub_tx = TargetedSender::new(tx.inner, sub_target);
-                let (stx, srx) = mpsc::channel::<String>();
-                let answered = dispatch_control_command(
-                    name, &filtered, &sub_tx, stx, pt.pane, pt.pane_is_id, sub_raw, client_id, readonly, sub_failed, aliases,
-                );
-                if !answered { continue; }
-                let text = srx.recv_timeout(Duration::from_secs(15)).unwrap_or_default();
-                if let Some(err) = text.strip_prefix("\u{0001}ERR\u{0001}") {
-                    body.push_str(err);
-                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", body));
+            let unknown_in = |text: &str| -> Option<String> {
+                crate::config::split_chained_commands_pub(text).iter().find_map(|sub| {
+                    let name = parse_command_line(sub).into_iter().next()?;
+                    let known = is_catalog_command(&name)
+                        || is_control_extension_command(&name)
+                        || crate::command_alias::read(aliases).contains_key(&name);
+                    (!known).then_some(name)
+                })
+            };
+            let client = Some(crate::types::ClientSel::Id(client_id));
+            if format_mode {
+                // -F decides and parses the branch inside the if-shell item: a
+                // branch that does not parse is the if-shell's own error, and
+                // none of it runs (cmd-if-shell.c:88-97, args_make_commands_now).
+                let success = if_shell_condition(tx, &positional[0], true, target_failed, client);
+                let chosen = if success { positional.get(1) } else { positional.get(2) };
+                if let Some(name) = chosen.and_then(|text| unknown_in(text)) {
+                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}unknown command: {}", name));
                     return true;
                 }
-                body.push_str(&text);
-                if !text.is_empty() && !text.ends_with('\n') { body.push('\n'); }
+                let _ = resp_tx.send(branch_reply(chosen));
+                return true;
             }
-            let _ = resp_tx.send(body.trim_end_matches('\n').to_string());
+            // A shell condition: the if-shell item's block ends before the
+            // shell runs (cmd_if_shell_exec returns CMD_RETURN_WAIT and
+            // cmdq_fire_command prints the `end` guard on return), and the
+            // job's callback queues the branch once the shell exits.
+            // The shell runs on a thread of its own so the control loop can
+            // write the `%end` while it runs.
+            let _ = resp_tx.send(IF_SHELL_BLOCK_DONE.to_string());
+            // A branch that does not parse is reported on a line of its own,
+            // its block long ended, and nothing of it runs
+            // (cmd_if_shell_callback, cmdq_error on the waiting item).
+            let replies: Vec<String> = (1..=2)
+                .map(|i| match positional.get(i) {
+                    Some(text) => match unknown_in(text) {
+                        Some(name) => format!("\u{0001}ERR\u{0001}unknown command: {}", name),
+                        None => branch_reply(Some(text)),
+                    },
+                    None => String::new(),
+                })
+                .collect();
+            let condition = positional[0].clone();
+            let inner = tx.inner.clone();
+            let target = tx.target.clone();
+            std::thread::spawn(move || {
+                let tx = TargetedSender::new(&inner, target);
+                let success = if_shell_condition(&tx, &condition, false, target_failed, client);
+                let _ = resp_tx.send(replies[if success { 0 } else { 1 }].clone());
+            });
             true
         }
         "swap-window" | "swapw" => {
@@ -9341,3 +9475,7 @@ mod tests_list_trailing_newline;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue1051_spawn_operands.rs"]
 mod tests_issue1051_spawn_operands;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue1088_cc_if_shell_blocks.rs"]
+mod tests_issue1088_cc_if_shell_blocks;

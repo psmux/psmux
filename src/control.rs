@@ -342,6 +342,23 @@ pub fn format_error(timestamp: i64, cmd_number: u64) -> String {
     format!("%error {} {} 1", timestamp, cmd_number)
 }
 
+/// The guard lines with tmux's flags field (cmd-queue.c cmdq_guard): 1 for a
+/// command the control client sent, 0 for one it did not wait for, such as
+/// the branch of an `if-shell -b` (#1088).
+pub fn format_begin_flags(timestamp: i64, cmd_number: u64, flags: u8) -> String {
+    format!("%begin {} {} {}", timestamp, cmd_number, flags)
+}
+
+/// `%end` with the guard flags (see [`format_begin_flags`]).
+pub fn format_end_flags(timestamp: i64, cmd_number: u64, flags: u8) -> String {
+    format!("%end {} {} {}", timestamp, cmd_number, flags)
+}
+
+/// `%error` with the guard flags (see [`format_begin_flags`]).
+pub fn format_error_flags(timestamp: i64, cmd_number: u64, flags: u8) -> String {
+    format!("%error {} {} {}", timestamp, cmd_number, flags)
+}
+
 // The reply to the command on the control client's own command line
 // (`-C attach`, `-C new-session -A`) is flagged 0, because the item did not
 // come from the client's stdin: tmux sets the flag from CMDQ_STATE_CONTROL,
