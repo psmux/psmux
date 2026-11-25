@@ -65,3 +65,16 @@ fn every_other_key_keeps_its_legacy_bytes() {
         assert_eq!(legacy_host_key_record(name), None, "{:?}", name);
     }
 }
+
+#[test]
+fn only_the_windows_10_inbox_host_gets_the_records() {
+    // The host measured to misread the bytes: the inbox conhost before 22000.
+    assert!(legacy_host_misreads_key_bytes(Some(19045), false));
+    assert!(legacy_host_misreads_key_bytes(Some(WIN32_INPUT_INBOX_MIN_BUILD - 1), false));
+    // Windows 11 keeps what it had whatever the stream carried, and so do an
+    // unknown build and a host supplied with PSMUX_CONPTY_DIR.
+    for build in [Some(WIN32_INPUT_INBOX_MIN_BUILD), Some(22523), Some(26100), Some(26300), None] {
+        assert!(!legacy_host_misreads_key_bytes(build, false), "{:?}", build);
+    }
+    assert!(!legacy_host_misreads_key_bytes(Some(19045), true), "OpenConsole on Windows 10");
+}
