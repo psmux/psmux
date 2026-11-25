@@ -62,6 +62,47 @@ function Stop-Bench {
     $script:Procs = @()
 }
 
+# Close the Windows Terminal window this suite opened, found by the unique tab
+# title it was given (the window title is the active tab's, possibly prefixed
+# "Administrator: "). Waits for Terminal to close it by itself first. WM_CLOSE
+# on a one tab window asks nothing, and nothing is ever typed into it.
+function Close-OwnWtWindow([string]$title) {
+    if (-not ('KeylatWt' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class KeylatWt {
+    delegate bool P(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(P cb, IntPtr l);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    public static List<IntPtr> Find(string title) {
+        var r = new List<IntPtr>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) return true;
+            var c = new StringBuilder(256); GetClassNameW(h, c, 256);
+            if (c.ToString() != "CASCADIA_HOSTING_WINDOW_CLASS") return true;
+            var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
+            string s = t.ToString();
+            if (s == title || s.EndsWith(" " + title)) r.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return r;
+    }
+}
+'@
+    }
+    for ($i = 0; $i -lt 15; $i++) {
+        if ([KeylatWt]::Find($title).Count -eq 0) { return }
+        Start-Sleep -Milliseconds 200
+    }
+    foreach ($h in [KeylatWt]::Find($title)) {
+        [void][KeylatWt]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        Write-Host "  closed the Windows Terminal window this suite opened ($title)" -ForegroundColor DarkGray
+    }
+}
+
 # Launch an ATTACHED psmux client in its own console window and return the
 # process. The client's pid is the console the injector attaches to.
 function Start-PsmuxClient([string]$session, [string]$command) {
@@ -201,7 +242,15 @@ if (& $want "baselines") {
     $before = @(Get-Process pwsh -EA SilentlyContinue | Select-Object -ExpandProperty Id)
     $wt = Get-Command wt.exe -EA SilentlyContinue
     if ($wt) {
-        Start-Process -FilePath $wt.Source -ArgumentList @("new-tab","--","pwsh","-NoLogo","-NoProfile") | Out-Null
+        # This used to leave one Windows Terminal window behind per run, titled
+        # "Administrator: pwsh" and reading "[process exited with code
+        # 4294967295 (0xffffffff)]": the pwsh below is force killed, and
+        # Terminal keeps a tab whose process failed. Every full sweep added one.
+        # So pwsh runs under `cmd /c ... & exit /b 0`, which turns the kill into
+        # a clean exit Terminal closes the tab for, and the window carries a
+        # title of our own so it can be closed by handle if it is still there.
+        $wtTitle = "psmux_keylat_baseline_$PID"
+        Start-Process -FilePath $wt.Source -ArgumentList @("-w","new","new-tab","--title",$wtTitle,"--suppressApplicationTitle","--","cmd","/c","pwsh -NoLogo -NoProfile & exit /b 0") | Out-Null
         Start-Sleep -Seconds 6
         $after = @(Get-Process pwsh -EA SilentlyContinue | Select-Object -ExpandProperty Id)
         $new = $after | Where-Object { $before -notcontains $_ }
@@ -211,6 +260,7 @@ if (& $want "baselines") {
             Invoke-KeyLat $wtPid "wt_pwsh" @("--mode","single","--n","$N","--warmup","5","--gap","120")
             Stop-Process -Id $wtPid -Force -EA SilentlyContinue
         } else { Write-Host "  could not identify the wt pwsh process" -ForegroundColor Yellow }
+        Close-OwnWtWindow $wtTitle
     } else { Write-Host "  wt.exe not found, skipping" -ForegroundColor Yellow }
     Stop-Bench
 }
