@@ -212,7 +212,9 @@ if ($tuiOk) {
 
     # TUI Test 3: Long-running popup dismissed via CLI
     Write-Test "TUI: Long popup dismissed via send-keys Escape"
-    & $script:TUI_PSMUX display-popup -t $TUI_SESSION_P110 -E "pwsh -NoProfile -NoLogo -Command Start-Sleep 30" 2>&1 | Out-Null
+    # display-popup waits for the popup to close while a client is attached
+    # (tmux parity), so it runs in a job while the test works on the popup.
+    Start-Job -ScriptBlock { param($p,$s) & $p display-popup -t $s -E "pwsh -NoProfile -NoLogo -Command Start-Sleep 30" 2>&1 } -ArgumentList $script:TUI_PSMUX,$TUI_SESSION_P110 | Out-Null
     Start-Sleep -Seconds 1
 
     $popActive = Safe-TuiQuery "#{popup_active}" -Session $TUI_SESSION_P110

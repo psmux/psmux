@@ -117,7 +117,9 @@ Info "baseline cursor = ($baseX,$baseY)"
 
 # ── Test 2: open the exact command from the report ──
 Write-Host "`n[Test 2] display-popup -E pwsh reaches a live prompt" -ForegroundColor Yellow
-& $PsmuxExe display-popup -t $S -E "pwsh" 2>&1 | Out-Null
+# display-popup waits for the popup to close while a client is attached
+# (tmux parity), so it runs in a job while the test works on the popup.
+Start-Job -ScriptBlock { param($p,$s) & $p display-popup -t $s -E "pwsh" 2>&1 } -ArgumentList $PsmuxExe,$S | Out-Null
 $ready=$false
 for($t=0;$t -lt 30;$t++){
     Start-Sleep -Milliseconds 500

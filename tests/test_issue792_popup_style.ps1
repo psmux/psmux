@@ -146,7 +146,9 @@ set NO_COLOR=
     $cap = Start-Process -FilePath $capExe -ArgumentList @($outBin, "100", "30", "0", $launch) -WindowStyle Minimized -PassThru
     $started.Add($cap.Id)
     Start-Sleep -Seconds 3
-    & $PSMUX -L $NS display-popup -t $Session @PopupArgs 2>&1 | Out-Null
+    # display-popup waits for the popup to close while a client is attached
+    # (tmux parity), so it runs in a job while the test works on the popup.
+    Start-Job -ScriptBlock { param($p,$n,$s,$a) & $p -L $n display-popup -t $s @a 2>&1 } -ArgumentList $PSMUX,$NS,$Session,$PopupArgs | Out-Null
     $cap.WaitForExit(20000) | Out-Null
     # The capture's child (cmd running the client) loses its pseudoconsole
     # when the capture exits; stop it by its recorded PID if it lingers.
@@ -265,7 +267,9 @@ if (-not (Test-Path $srExe)) {
         Write-Skip "no attached client under conhost $($con.Id)"
     } else {
         $started.Add([int]$client.ProcessId)
-        & $PSMUX -L $NS display-popup -t vis -T VisTitle -w 40 -h 10 $SIZECMD 2>&1 | Out-Null
+        # display-popup waits for the popup to close while a client is attached
+        # (tmux parity), so it runs in a job while the test works on the popup.
+        Start-Job -ScriptBlock { param($p,$n,$c) & $p -L $n display-popup -t vis -T VisTitle -w 40 -h 10 $c 2>&1 } -ArgumentList $PSMUX,$NS,$SIZECMD | Out-Null
         Start-Sleep -Seconds 3
         $scr = Read-ClientScreen ([int]$client.ProcessId)
         if (-not $scr) { Write-Skip "screen read failed" } else {
@@ -286,7 +290,9 @@ if (-not (Test-Path $srExe)) {
                 else { Write-Fail "visible frame is yellow (attr $($cells[$col - 1]))" }
             }
         }
-        & $PSMUX -L $NS display-popup -t vis -B -w 40 -h 10 $SIZECMD 2>&1 | Out-Null
+        # display-popup waits for the popup to close while a client is attached
+        # (tmux parity), so it runs in a job while the test works on the popup.
+        Start-Job -ScriptBlock { param($p,$n,$c) & $p -L $n display-popup -t vis -B -w 40 -h 10 $c 2>&1 } -ArgumentList $PSMUX,$NS,$SIZECMD | Out-Null
         Start-Sleep -Seconds 3
         $scr = Read-ClientScreen ([int]$client.ProcessId)
         if ($scr) {

@@ -37,7 +37,9 @@ if ($LASTEXITCODE -ne 0){ Write-Fail "session did not start"; exit 1 }
 
 # Baseline: standalone display-popup
 Write-Host "`n[Baseline] standalone display-popup -E" -ForegroundColor Yellow
-& $PsmuxExe display-popup -t $S -E "ping -n 20 127.0.0.1" 2>&1 | Out-Null
+# display-popup waits for the popup to close while a client is attached
+# (tmux parity), so it runs in a job while the test works on the popup.
+Start-Job -ScriptBlock { param($p,$s) & $p display-popup -t $s -E "ping -n 20 127.0.0.1" 2>&1 } -ArgumentList $PsmuxExe,$S | Out-Null
 $baseActive=$false
 for($t=0;$t -lt 10;$t++){ Start-Sleep -Milliseconds 400; $d=Dump|ConvertFrom-Json; if($d.popup_active){$baseActive=$true;break} }
 Write-Info "standalone popup_active=$baseActive"
