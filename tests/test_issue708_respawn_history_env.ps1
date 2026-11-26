@@ -296,7 +296,9 @@ try {
     if (-not $ok) { Write-Fail "attached client session never came up" }
     else {
         Start-Sleep -Milliseconds 2500
-        $tp = ((P display-message -p -t "${tuiSess}:" '#{pane_id}') -join '').Trim()
+        # Pane ids repeat per session and $SESS owns the same %N, so a bare id
+        # from outside a pane is refused as ambiguous since #1078.
+        $tp = ((P display-message -p -t "${tuiSess}:" '#{session_name}:#{window_index}.#{pane_index}') -join '').Trim()
         P set-option -p -t $tp remain-on-exit on | Out-Null
         P respawn-pane -k -t $tp "$MARK T" | Out-Null
         $null = Wait-Dead $tp

@@ -180,7 +180,9 @@ function New-JoinSession([string]$Name, [int]$Windows, [int]$Base = 5) {
     if ($Windows -ge 2) { $Want += @("1|$Base", "1|$($Base + 1)") }
     $Layout = @($Panes | ForEach-Object { ($_.Split("|"))[0..1] -join "|" })
     if (($Layout -join ",") -ne ($Want -join ",")) { throw "unexpected layout in ${Name}: $($Panes -join ',')" }
-    Expect-Step @("select-pane", "-t", (Get-JoinPaneId $Panes 0 $Base)) | Out-Null
+    # Pane ids repeat per session and X owns the same %N, so a bare id from
+    # outside a pane is refused as ambiguous since #1078: name it by index.
+    Expect-Step @("select-pane", "-t", "${Name}:0.$Base") | Out-Null
     return $Panes
 }
 
@@ -374,14 +376,14 @@ try {
     Test-Join "join-pane -s <window 1>.6 moves pane 6 of window 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:1.6", "-t", "${J}:0") } 5 $false "0.5=0.5 0.6=1.6 0.7=0.6 1.5=1.5" "" $false
     Test-Join "move-pane -s <window 1>.6 moves pane 6 of window 1" { param($J, $K, $JP, $KP) @("move-pane", "-s", "${J}:1.6", "-t", "${J}:0") } 5 $false "0.5=0.5 0.6=1.6 0.7=0.6 1.5=1.5" "" $false
     Test-Join "join-pane -s <window 1>.1 is refused" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:1.1", "-t", "${J}:0") } 5 $false $Unmoved "" $true
-    Test-Join "join-pane -t <window 0>.6 puts the pane after pane 6" { param($J, $K, $JP, $KP) @("join-pane", "-s", (Get-JoinPaneId $JP 1 6), "-t", "${J}:0.6") } 5 $false "0.5=0.5 0.6=0.6 0.7=1.6 1.5=1.5" "" $false
-    Test-Join "join-pane -t <window 0>.1 is refused" { param($J, $K, $JP, $KP) @("join-pane", "-s", (Get-JoinPaneId $JP 1 6), "-t", "${J}:0.1") } 5 $false $Unmoved "" $true
+    Test-Join "join-pane -t <window 0>.6 puts the pane after pane 6" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:$(Get-JoinPaneId $JP 1 6)", "-t", "${J}:0.6") } 5 $false "0.5=0.5 0.6=0.6 0.7=1.6 1.5=1.5" "" $false
+    Test-Join "join-pane -t <window 0>.1 is refused" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:$(Get-JoinPaneId $JP 1 6)", "-t", "${J}:0.1") } 5 $false $Unmoved "" $true
     Test-Join "across sessions, -s <other>:0.6 moves that pane" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${K}:0.6", "-t", "${J}:0") } 5 $true "0.5=0.5 0.6=new 0.7=0.6 1.5=1.5 1.6=1.6" "0.5=0.5" $false
     Test-Join "across sessions, -t <window 0>.6 puts the pane after pane 6" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${K}:$(Get-JoinPaneId $KP 0 6)", "-t", "${J}:0.6") } 5 $true "0.5=0.5 0.6=0.6 0.7=new 1.5=1.5 1.6=1.6" "0.5=0.5" $false
 
     Write-Host "`n--- pane-base-index 0: join-pane with the same panes as 0 and 1 ---" -ForegroundColor Yellow
     Test-Join "join-pane -s <window 1>.1 moves pane 1 of window 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:1.1", "-t", "${J}:0") } 0 $false "0.0=0.0 0.1=1.1 0.2=0.1 1.0=1.0" "" $false
-    Test-Join "join-pane -t <window 0>.1 puts the pane after pane 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", (Get-JoinPaneId $JP 1 1), "-t", "${J}:0.1") } 0 $false "0.0=0.0 0.1=0.1 0.2=1.1 1.0=1.0" "" $false
+    Test-Join "join-pane -t <window 0>.1 puts the pane after pane 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${J}:$(Get-JoinPaneId $JP 1 1)", "-t", "${J}:0.1") } 0 $false "0.0=0.0 0.1=0.1 0.2=1.1 1.0=1.0" "" $false
     Test-Join "across sessions, -t <window 0>.1 puts the pane after pane 1" { param($J, $K, $JP, $KP) @("join-pane", "-s", "${K}:$(Get-JoinPaneId $KP 0 1)", "-t", "${J}:0.1") } 0 $true "0.0=0.0 0.1=0.1 0.2=new 1.0=1.0 1.1=1.1" "0.0=0.0" $false
 }
 catch {

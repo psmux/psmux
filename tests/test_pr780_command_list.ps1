@@ -87,7 +87,10 @@ try {
     P send-keys -t x 'echo A780X' Enter $SEP send-keys -t y 'echo A780Y' Enter | Out-Null
     Start-Sleep -Milliseconds 1500
     Check ((Cap y).Contains('A780Y') -and -not (Cap x).Contains('A780Y')) "send-keys -t y types into y, not x" "y has it: $((Cap y).Contains('A780Y')), x has it: $((Cap x).Contains('A780Y'))"
-    $ypane = ((P display-message -t y -p '#{pane_id}') -join '').Trim()
+    # Pane ids repeat per session: x and y both own their first pane's id, and
+    # since #1078 a bare id two sessions own is refused as ambiguous. A second
+    # pane in y has an id only y owns, so the bare id still routes to y.
+    $ypane = ((P split-window -d -t y -P -F '#{pane_id}') -join '').Trim()
     P select-pane -t $ypane $SEP set-option -t y '@own' yes | Out-Null
     Check ((Opt y '@own') -eq 'yes') "select-pane -t $ypane (owned by y, #627) then set" "@own='$(Opt y '@own')'"
 

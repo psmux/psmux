@@ -226,7 +226,10 @@ Start-Sleep -Milliseconds 500
 $proc = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$SESSION_TUI -PassThru
 Start-Sleep -Seconds 4
 
-$tuiPane = (& $PSMUX list-panes -t $SESSION_TUI -F '#{pane_id}' 2>&1 | Select-Object -First 1).Trim()
+# Pane ids repeat per session (tmux numbers them per server), and i559main
+# still owns the same %N, so a bare id from outside a pane is refused as
+# ambiguous since #1078. Qualify it as session:window.pane.
+$tuiPane = (& $PSMUX list-panes -t $SESSION_TUI -F '#{session_name}:#{window_index}.#{pane_index}' 2>&1 | Select-Object -First 1).Trim()
 $tuiNew = (& $PSMUX split-window -t $tuiPane -P -F '#{pane_id}' 2>&1 | Out-String).Trim()
 Start-Sleep -Seconds 2
 $tuiPanes = @(& $PSMUX list-panes -t $SESSION_TUI -F '#{pane_id}' 2>&1 | ForEach-Object { $_.Trim() })

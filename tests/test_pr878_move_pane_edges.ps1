@@ -115,6 +115,9 @@ try {
     P has-session -t one | Out-Null
     $hs = $LASTEXITCODE
     Check ((Ids 'one').Count -eq 1 -and $hs -eq 0) "only pane survives"
+    # Pane ids repeat per session, and since #1078 a bare id that two sessions
+    # own is refused as ambiguous, so 'one' goes before the id cases below.
+    P kill-session -t one | Out-Null
     $ids = Base 'm'
     $out = P join-pane -s $ids[2] -t $ids[0] -h
     Write-Info "join-pane in one window: rc=$LASTEXITCODE <$($out -join ' ')> (tmux 3.2+ allows it, psmux refuses)"

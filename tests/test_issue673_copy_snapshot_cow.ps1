@@ -317,20 +317,28 @@ Start-Sleep -Seconds 2
 $ids = @(Pmux list-panes -t $SCOPE -F '#{pane_id}')
 $activeId = ((Pmux display-message -p -t $SCOPE '#{pane_id}') -join '').Trim()
 $inactiveId = @($ids | Where-Object { $_ -ne $activeId })[0]
+# Pane ids repeat per session and $MEM still owns the same %N, so a bare id
+# from outside a pane is refused as ambiguous since #1078. Commands get the
+# pane as session:window.pane; the id stays the key into dump-state.
+$script:Tgt = @{}
+foreach ($l in @(Pmux list-panes -t $SCOPE -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index}')) {
+    $f = "$l".Trim() -split ' ', 2
+    if ($f.Count -eq 2) { $script:Tgt[$f[0]] = $f[1] }
+}
 foreach ($p in $ids) {
-    Pmux send-keys -t $p '1..100000 | ForEach-Object { Write-Host "P LINE $_"; Start-Sleep -Milliseconds 120 }' Enter | Out-Null
+    Pmux send-keys -t $script:Tgt[$p] '1..100000 | ForEach-Object { Write-Host "P LINE $_"; Start-Sleep -Milliseconds 120 }' Enter | Out-Null
 }
 Start-Sleep -Seconds 3
 
 function Test-PaneFrozen([string]$PaneId, [string]$Label) {
-    Pmux copy-mode -t $PaneId | Out-Null
+    Pmux copy-mode -t $script:Tgt[$PaneId] | Out-Null
     Start-Sleep -Seconds 1
     $null = Get-PaneView $SCOPE $PaneId
     Start-Sleep -Seconds 1
     $a = Get-PaneView $SCOPE $PaneId
     Start-Sleep -Seconds 4
     $b = Get-PaneView $SCOPE $PaneId
-    $mode = ((Pmux display-message -p -t $PaneId '#{pane_in_mode}') -join '').Trim()
+    $mode = ((Pmux display-message -p -t $script:Tgt[$PaneId] '#{pane_in_mode}') -join '').Trim()
     if ($null -eq $a -or $null -eq $b) {
         Write-Skip "$Label : could not read the rendered view for $PaneId"
     } elseif ($mode -ne "1") {
@@ -344,7 +352,7 @@ function Test-PaneFrozen([string]$PaneId, [string]$Label) {
             Write-Fail "$Label : the view MOVED while in copy mode ('$la' then '$lb'): the pane has no snapshot"
         }
     }
-    Pmux send-keys -t $PaneId -X cancel | Out-Null
+    Pmux send-keys -t $script:Tgt[$PaneId] -X cancel | Out-Null
     Start-Sleep -Milliseconds 600
 }
 
