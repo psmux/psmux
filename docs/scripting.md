@@ -190,6 +190,15 @@ psmux display-popup -T "Logs" -b rounded -S "fg=#3b434d" -s "bg=colour235" "Get-
 psmux display-popup -B -E -w 80 -h 24 "lazygit"
 ```
 
+As in tmux, `display-popup` run from a shell or a script waits until the popup closes and exits with the exit code of the command in it, so a script can use a popup as a step:
+
+```powershell
+psmux display-popup -E -w 90% -h 90% "vim notes.txt"
+if ($LASTEXITCODE -ne 0) { "vim exited with $LASTEXITCODE" }
+```
+
+A popup closed before its command ends (by `display-popup -C`, or by opening another popup over it) gives 129, tmux's code for it. With no client attached to the session nobody could close the popup, so the call returns at once there with exit code 0. A popup opened by a key binding or from the command prompt never holds anything up. To open a popup from a script without waiting, start the call in the background, for example with `Start-Process`.
+
 ## Menus
 
 ```powershell

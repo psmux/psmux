@@ -6265,8 +6265,18 @@ fn run_main_with(argv: Vec<String>, alias_expanded: bool) -> io::Result<()> {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
                     crate::util::quote_arg_if_needed(s)
                 }).collect();
-                send_control(format!("{}\n", parts.join(" ")))?;
-                return Ok(());
+                // The reply comes when the popup closes, however long that
+                // takes, and carries its command's exit status, as tmux's
+                // client waits for the popup and exits with its status.
+                let resp = crate::session::send_control_with_response_wait(format!("{}\n", parts.join(" ")))?;
+                match crate::popup::command_line_outcome(&resp) {
+                    Ok(0) => return Ok(()),
+                    Ok(code) => std::process::exit(code),
+                    Err(msg) => {
+                        eprintln!("psmux: {}", msg);
+                        std::process::exit(1);
+                    }
+                }
             }
             "new-pane" | "newp" => {
                 // The floating pane gets this client's PATH (#829).

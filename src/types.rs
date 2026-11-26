@@ -2103,6 +2103,16 @@ pub struct AppState {
     /// The command lines waiting for their prompt (no `-b`), by request id:
     /// each gets its reply when the prompt closes, as tmux's client waits.
     pub prompt_waiters: Vec<(u64, std::sync::mpsc::Sender<String>)>,
+    /// The command lines waiting for the popup they opened to go away, by
+    /// that popup's serial. Each gets the exit status of the popup's command,
+    /// as tmux's client waits (cmd-display-menu.c returns CMD_RETURN_WAIT and
+    /// popup_free_cb hands the status to the client).
+    pub popup_waiters: Vec<(u64, std::sync::mpsc::Sender<String>)>,
+    /// Counts the display-popup popups opened, so a waiter can tell its own
+    /// popup from one opened over it.
+    pub popup_serial: u64,
+    /// The exit status of the open popup's command, once it has exited.
+    pub popup_exit: Option<u32>,
     pub created_at: jiff::ZonedDateTime,
     pub next_win_id: usize,
     pub next_pane_id: usize,
@@ -3605,6 +3615,9 @@ impl AppState {
             prompt_request: None,
             prompt_request_seq: 0,
             prompt_waiters: Vec::new(),
+            popup_waiters: Vec::new(),
+            popup_serial: 0,
+            popup_exit: None,
             created_at: crate::strftime::now(),
             next_win_id: 1,
             next_pane_id: 1,
@@ -4835,9 +4848,11 @@ pub enum CtrlReq {
     WaitFor(String, WaitForOp),
     DisplayMenu(String, Option<i16>, Option<i16>),
     DisplayMenuDirect(Menu),
-    /// Parsed `display-popup` arguments and whether the popup closes when its
-    /// command exits.
-    DisplayPopup(crate::popup::DisplayPopupArgs, bool),
+    /// Parsed `display-popup` arguments, whether the popup closes when its
+    /// command exits, and for a command line, where its reply goes: the exit
+    /// status of the popup's command once the popup has closed, or nothing
+    /// at once when it does not wait.
+    DisplayPopup(crate::popup::DisplayPopupArgs, bool, Option<std::sync::mpsc::Sender<String>>),
     /// `confirm-before`'s flags, the command it guards, and where to say
     /// `ERROR: no current client` when no client is attached to show it.
     ConfirmBefore(crate::confirm::ConfirmSpec, String, Option<mpsc::Sender<String>>),

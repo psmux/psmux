@@ -8296,7 +8296,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                     }
                 }
-                CtrlReq::DisplayPopup(req, close_on_exit) => {
+                CtrlReq::DisplayPopup(req, close_on_exit, reply) => {
                     // Percentages resolve against the terminal area (#154), -T
                     // and -d expand as formats (e.g. #{pane_current_path}), and
                     // the PTY child is sized to the content area of the frame
@@ -8305,7 +8305,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // An EMPTY command runs an interactive shell (#351).
                     let area = (app.last_window_area.width, app.last_window_area.height);
                     let session_name = app.session_name.clone();
+                    let closing = req.close_existing;
                     crate::popup::open_display_popup(&mut app, req, area, close_on_exit, true, &session_name);
+                    // A command line waits until this popup closes, as tmux's
+                    // does (cmd-display-menu.c:696-703); -C closes and returns.
+                    if let Some(reply) = reply {
+                        if !closing && crate::popup::command_line_waits(&app) {
+                            crate::popup::wait_for_popup(&mut app, reply);
+                        } else {
+                            let _ = reply.send(String::new());
+                        }
+                    }
                     state_dirty = true;
                 }
                 CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, empty, resp, extra } => {
@@ -9549,6 +9559,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         // ── Popup child exit detection ──
         // Check if popup PTY's child process has exited; if so, auto-close.
+        // A command line waiting on the popup keeps its command's status.
+        if !app.popup_waiters.is_empty() {
+            crate::popup::note_popup_exit(&mut app);
+        }
         if let Mode::PopupMode { ref mut popup_pane, close_on_exit, .. } = app.mode {
             let should_close = if let Some(ref mut pane) = popup_pane {
                 matches!(pane.child.try_wait(), Ok(Some(_)))
@@ -9558,6 +9572,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 state_dirty = true;
             }
         }
+        // However the popup went away this round (its command's exit above, a
+        // key, -C, another overlay), the command lines waiting on it return.
+        crate::popup::settle_popup_waiters(&mut app);
         // Reap exited floating panes (tmux new-pane) across all windows: a float
         // whose child process has exited is removed, and the focus index is
         // fixed up so it never dangles past the end of the vec.

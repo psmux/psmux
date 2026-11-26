@@ -379,6 +379,9 @@ pub fn open_display_popup(
     shell_when_empty: bool,
     session_name: &str,
 ) {
+    // Whatever this call does, the popup open now goes away: closed by -C or
+    // replaced by the new one.
+    release_popup_waiters(app);
     if req.close_existing {
         if matches!(app.mode, Mode::PopupMode { .. }) {
             app.mode = Mode::Passthrough;
@@ -429,6 +432,8 @@ pub fn open_display_popup(
         style: req.style,
     };
     let failed = shell_when_empty && pane.is_none();
+    app.popup_serial = app.popup_serial.wrapping_add(1);
+    app.popup_exit = None;
     app.mode = Mode::PopupMode {
         command: req.command,
         // PTY spawn failed: a static, closable popup so the user is never
@@ -442,6 +447,94 @@ pub fn open_display_popup(
         scroll_offset: 0,
         look,
     };
+}
+
+/// The status a waiting command line gets when the popup goes away before its
+/// command has exited: tmux starts every popup at 128 + SIGHUP (popup.c:609)
+/// and only the command's exit replaces it.
+pub const POPUP_CLOSED_STATUS: u32 = 129;
+
+/// Whether the command line that opened the popup now open on `app` waits
+/// for it to close. tmux waits whenever it opens one (cmd-display-menu.c:
+/// 696-703); here only while a client is attached that can show it, since
+/// nobody could close the popup of a detached session (tmux refuses those
+/// with `no current client`). A popup whose command failed to start does not
+/// wait either, as tmux returns at once when popup_display fails.
+pub fn command_line_waits(app: &AppState) -> bool {
+    app.attached_clients > 0 && matches!(app.mode, Mode::PopupMode { popup_pane: Some(_), .. })
+}
+
+/// Starts a command line waiting for the popup just opened on `app`.
+pub fn wait_for_popup(app: &mut AppState, reply: std::sync::mpsc::Sender<String>) {
+    app.popup_waiters.push((app.popup_serial, reply));
+}
+
+/// What a waiting command line is sent for `status`: nothing for 0, so a
+/// popup that ends well answers as display-popup always did, else the
+/// number, which the command line exits with.
+pub fn popup_status_reply(status: u32) -> String {
+    if status == 0 { String::new() } else { status.to_string() }
+}
+
+/// How a command line's display-popup ends for the server's `reply`: the
+/// code to exit with, or an error to print (exit 1). An empty reply is 0:
+/// the popup's command ended well, or the call did not wait.
+pub fn command_line_outcome(reply: &str) -> Result<i32, String> {
+    let reply = reply.trim();
+    if let Some(msg) = reply.strip_prefix("ERROR: ") {
+        return Err(msg.to_string());
+    }
+    // Windows exit codes are u32 (0xC000013A for a Ctrl+C); exit takes them
+    // back unchanged from the i32.
+    Ok(reply.parse::<u32>().map(|n| n as i32).unwrap_or(0))
+}
+
+/// Notes the exit status of the open popup's command once it has exited, so
+/// the popup still reports it when it is closed later.
+pub fn note_popup_exit(app: &mut AppState) {
+    if app.popup_exit.is_some() {
+        return;
+    }
+    if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
+        if let Ok(Some(status)) = pane.child.try_wait() {
+            app.popup_exit = Some(status.exit_code());
+        }
+    }
+}
+
+/// The reply for the popup open now, or the one that just went away.
+fn current_popup_reply(app: &mut AppState) -> String {
+    note_popup_exit(app);
+    popup_status_reply(app.popup_exit.unwrap_or(POPUP_CLOSED_STATUS))
+}
+
+/// Answers every waiting command line: the popup open now is about to go.
+fn release_popup_waiters(app: &mut AppState) {
+    if app.popup_waiters.is_empty() {
+        return;
+    }
+    let reply = current_popup_reply(app);
+    for (_, tx) in app.popup_waiters.drain(..) {
+        let _ = tx.send(reply.clone());
+    }
+}
+
+/// Answers the command lines whose popup has gone away (closed by a key, by
+/// its command's exit, or covered by another overlay). Called on every server
+/// loop; a no-op while nothing waits.
+pub fn settle_popup_waiters(app: &mut AppState) {
+    if app.popup_waiters.is_empty() {
+        return;
+    }
+    let reply = current_popup_reply(app);
+    let open = matches!(app.mode, Mode::PopupMode { popup_pane: Some(_), .. }).then_some(app.popup_serial);
+    app.popup_waiters.retain(|(serial, tx)| {
+        if Some(*serial) == open {
+            return true;
+        }
+        let _ = tx.send(reply.clone());
+        false
+    });
 }
 
 /// The frame of the popup open on `app`, with the options read now (tmux
@@ -1169,3 +1262,7 @@ pub fn render_popup_overlay(
 #[cfg(test)]
 #[path = "../tests-rs/test_issue792_popup_style.rs"]
 mod test_issue792_popup_style;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_display_popup_wait.rs"]
+mod test_display_popup_wait;
