@@ -2752,7 +2752,7 @@ pub(crate) fn dispatch(
                         process: None,
                         width: width.min(120),
                         height,
-                        close_on_exit: false,
+                        close: Default::default(),
                         popup_pane: None,
                         scroll_offset: 0,
                     };

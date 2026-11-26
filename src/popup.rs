@@ -89,8 +89,8 @@ impl PopupLook {
 /// [-c target-client] [-d start-directory] [-e environment] [-h height]
 /// [-s style] [-S border-style] [-t target-pane] [-T title] [-w width]
 /// [-x position] [-y position] [shell-command]`, plus psmux's `-K` (keep the
-/// popup open after the command exits). psmux reads `-c` as a start directory,
-/// as it always has.
+/// popup open after the command exits, even with `-E`). psmux reads `-c` as a
+/// start directory, as it always has.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayPopupArgs {
     pub width: Option<String>,
@@ -100,6 +100,8 @@ pub struct DisplayPopupArgs {
     pub close_on_exit: u8,
     /// psmux `-K`.
     pub keep_open: bool,
+    /// `-k`: any key closes the popup once its command has exited.
+    pub close_any_key: bool,
     /// `-C`: close the popup that is open.
     pub close_existing: bool,
     /// `-B`: no border at all.
@@ -112,6 +114,52 @@ pub struct DisplayPopupArgs {
     pub env: Vec<(String, String)>,
     /// The shell command, its words joined with single spaces.
     pub command: String,
+}
+
+/// When a popup closes, as tmux's `POPUP_CLOSEEXIT`, `POPUP_CLOSEEXITZERO`
+/// and `POPUP_CLOSEANYKEY` decide it (cmd-display-menu.c:676-690, popup.c:
+/// 430-436 and 500-501 at tag 3.8), plus psmux's `-K`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PopupClose {
+    /// Number of `-E`: with none the popup stays open when its command
+    /// exits, with one it closes, with two only when the exit status is 0.
+    pub exit_flags: u8,
+    /// `-k`: any key closes the popup once its command has exited.
+    pub any_key: bool,
+    /// psmux's `-K`: the popup stays open when its command exits, whatever
+    /// `-E` says.
+    pub keep_open: bool,
+}
+
+impl PopupClose {
+    pub fn from_args(req: &DisplayPopupArgs) -> Self {
+        Self { exit_flags: req.close_on_exit.min(2), any_key: req.close_any_key, keep_open: req.keep_open }
+    }
+
+    /// Whether the popup closes when its command exits with `status`
+    /// (popup_job_complete_cb).
+    pub fn closes_on_exit(&self, status: u32) -> bool {
+        !self.keep_open
+            && match self.exit_flags {
+                0 => false,
+                1 => true,
+                _ => status == 0,
+            }
+    }
+
+    /// Whether a key a client sent to the popup closes it, `key` being the
+    /// bytes it forwards. As popup_key_cb: Escape and C-c close a popup with
+    /// no `-E` at once and any popup once its command has exited, where they
+    /// go to the command while it runs under `-E`; with `-k` any key closes
+    /// it once the command has exited. `q` after the exit is psmux's own,
+    /// which it always had.
+    pub fn closes_on_key(&self, key: &[u8], exited: bool) -> bool {
+        let escape_or_ctrl_c = key == b"\x1b" || key == b"\x03";
+        if escape_or_ctrl_c && (self.exit_flags == 0 || exited) {
+            return true;
+        }
+        exited && !key.is_empty() && (self.any_key || key == b"q")
+    }
 }
 
 /// Parse `display-popup` arguments (the words after the command name).
@@ -144,7 +192,8 @@ pub fn parse_display_popup_args<S: AsRef<str>>(args: &[S]) -> Result<DisplayPopu
                     'C' => out.close_existing = true,
                     'E' => out.close_on_exit = out.close_on_exit.saturating_add(1),
                     'K' => out.keep_open = true,
-                    'k' | 'N' => {}
+                    'k' => out.close_any_key = true,
+                    'N' => {}
                     _ => return Err(format!("unknown flag -{}", flag)),
                 }
                 continue;
@@ -375,10 +424,10 @@ pub fn open_display_popup(
     app: &mut AppState,
     req: DisplayPopupArgs,
     area: (u16, u16),
-    close_on_exit: bool,
     shell_when_empty: bool,
     session_name: &str,
 ) {
+    let close = PopupClose::from_args(&req);
     // Whatever this call does, the popup open now goes away: closed by -C or
     // replaced by the new one.
     release_popup_waiters(app);
@@ -442,7 +491,7 @@ pub fn open_display_popup(
         process: None,
         width,
         height,
-        close_on_exit: close_on_exit || failed,
+        close,
         popup_pane: pane,
         scroll_offset: 0,
         look,
@@ -1266,3 +1315,7 @@ mod test_issue792_popup_style;
 #[cfg(test)]
 #[path = "../tests-rs/test_display_popup_wait.rs"]
 mod test_display_popup_wait;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_display_popup_close.rs"]
+mod test_display_popup_close;

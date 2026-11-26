@@ -1346,7 +1346,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             }
             Ok(false)
         }
-        Mode::PopupMode { ref mut output, ref mut process, close_on_exit, ref mut popup_pane, ref mut scroll_offset, .. } => {
+        Mode::PopupMode { ref mut output, ref mut process, close, ref mut popup_pane, ref mut scroll_offset, .. } => {
             let mut should_close = false;
             let mut exit_status: Option<std::process::ExitStatus> = None;
             
@@ -1388,8 +1388,8 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     _ => {}
                 }
                 // Check if child exited
-                if let Ok(Some(_status)) = pty.child.try_wait() {
-                    if close_on_exit {
+                if let Ok(Some(status)) = pty.child.try_wait() {
+                    if close.closes_on_exit(status.exit_code()) {
                         should_close = true;
                     }
                 }
@@ -1429,14 +1429,14 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 if let Some(ref mut proc) = process {
                     if let Ok(Some(status)) = proc.try_wait() {
                         exit_status = Some(status);
-                        if close_on_exit {
+                        if close.closes_on_exit(status.code().unwrap_or(1) as u32) {
                             should_close = true;
                         }
                     }
                 }
                 
                 if let Some(status) = exit_status {
-                    if !close_on_exit {
+                    if !should_close {
                         output.push_str(&format!("\n[Process exited with status: {}]", status));
                     }
                 }

@@ -534,9 +534,9 @@ psmux show-options -w -A -t s:one    # remain-on-exit* off
 - Menu items follow as `<label> <key> <command>` triples.
 
 **display-popup** (`popup`)
-- Boolean: `-E` (close when the command exits, which is already the default), `-K` (keep the popup open after the command exits), `-B` (no border: the command gets the whole `-w` by `-h` area), `-C` (close the open popup)
+- Boolean: `-E` (close when the command exits; given twice, `-EE`, only when it exits with 0; without it the popup stays open, and Escape or C-c closes it, at once without `-E` and after the command ends with it), `-k` (any key closes the popup once its command has exited), `-K` (psmux: keep the popup open after the command exits, even with `-E`), `-B` (no border: the command gets the whole `-w` by `-h` area), `-C` (close the open popup)
 - Value: `-w` (width, cells or a percentage), `-h` (height), `-d` or `-c` (start directory), `-T` (frame title, expanded as a format; without it the frame has no title), `-b` (border lines, any `popup-border-lines` value), `-S` (border style, over `popup-border-style`), `-s` (content style, over `popup-style`), `-e VAR=value` (environment for the popup command)
-- Consumed and ignored: `-t`, `-x`, `-y`, `-k`, `-N`. The flags end at the first argument that is not a flag (or at `--`), so the command keeps its own flags, and one token may carry several flags (`-BE`).
+- Consumed and ignored: `-t`, `-x`, `-y`, `-N`. The flags end at the first argument that is not a flag (or at `--`), so the command keeps its own flags, and one token may carry several flags (`-BE`).
 
 **confirm-before** (`confirm`)
 - Value: `-p` (prompt text)

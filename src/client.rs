@@ -5848,12 +5848,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // PTY popup: forward all keys to server
                                 match key.code {
                                     KeyCode::Esc => {
-                                        // Forward Esc to the popup PTY, not to the overlay (#471).
-                                        // A PTY popup runs a real interactive app (nvim, fzf, a
-                                        // shell); Esc belongs to that app. tmux forwards it too and
-                                        // only closes the popup when its child process exits (e.g.
-                                        // `:q` in nvim), which close-on-exit already handles. The
-                                        // previous overlay-close swallowed Esc and killed the popup.
+                                        // Forward Esc to the server, not to the overlay (#471): the
+                                        // server decides as tmux does (popup::PopupClose). Under -E
+                                        // it goes to the app in the popup (nvim, fzf, a shell) while
+                                        // that runs; without -E, or once the app has exited, it
+                                        // closes the popup. The previous overlay-close swallowed Esc
+                                        // and killed a popup opened with -E.
                                         let encoded = crate::util::base64_encode("\x1b");
                                         cmd_batch.push(format!("popup-input {}\n", encoded));
                                     }

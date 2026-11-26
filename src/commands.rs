@@ -800,7 +800,7 @@ fn show_output_popup(app: &mut AppState, title: &str, output: String) {
         process: None,
         width: width.min(120),
         height,
-        close_on_exit: false,
+        close: Default::default(),
         popup_pane: None,
         scroll_offset: 0,
     };
@@ -3731,7 +3731,6 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     return Ok(());
                 }
             };
-            let close_on_exit = req.close_on_exit > 0;
             // Resolve percentage dimensions against the window area the
             // server knows, else the local terminal (#154).
             let area = if app.last_window_area.width > 0 && app.last_window_area.height > 0 {
@@ -3740,7 +3739,7 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 crossterm::terminal::size().unwrap_or((120, 40))
             };
             let session_name = if app.session_name.is_empty() { "1".to_string() } else { app.session_name.clone() };
-            crate::popup::open_display_popup(app, req, area, close_on_exit, false, &session_name);
+            crate::popup::open_display_popup(app, req, area, false, &session_name);
         }
         "resize-pane" | "resizep" => {
             if parts.iter().any(|p| *p == "-Z") {

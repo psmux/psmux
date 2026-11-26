@@ -67,7 +67,7 @@ fn display_popup_e_flag_sets_close_on_exit() {
     let mut app = mock_app();
     execute_command_string(&mut app, "display-popup -E 'whoami'").unwrap();
     match &app.mode {
-        Mode::PopupMode { close_on_exit, .. } => assert!(*close_on_exit, "-E must set close_on_exit"),
+        Mode::PopupMode { close, .. } => assert!(close.closes_on_exit(0), "-E must close the popup when its command exits"),
         _ => panic!("expected PopupMode"),
     }
 }

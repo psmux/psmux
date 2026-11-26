@@ -123,7 +123,7 @@ fn a_popup_with_its_command_running_keeps_its_waiter_then_reports_the_status() {
         process: None,
         width: 30,
         height: 8,
-        close_on_exit: true,
+        close: crate::popup::PopupClose { exit_flags: 1, ..Default::default() },
         popup_pane: Some(pane),
         scroll_offset: 0,
         look: PopupLook::titled(""),
