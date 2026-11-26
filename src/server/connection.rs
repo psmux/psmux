@@ -6689,7 +6689,23 @@ match cmd {
             Ok(req) => {
                 // Default close-on-exit = true (tmux parity: popup closes when command finishes)
                 let close_on_exit = !req.keep_open;
-                let _ = tx.send(CtrlReq::DisplayPopup(req, close_on_exit));
+                if persistent {
+                    // An attached client's binding or prompt: nothing waits.
+                    let _ = tx.send(CtrlReq::DisplayPopup(req, close_on_exit, None));
+                } else {
+                    // A command line waits until the popup closes and exits
+                    // with its command's status, as tmux's does
+                    // (cmd-display-menu.c:696-703, popup.c:266-283). The
+                    // reply is empty when it does not wait or the status is 0.
+                    let (rtx, rrx) = mpsc::channel::<String>();
+                    let _ = tx.send(CtrlReq::DisplayPopup(req, close_on_exit, Some(rtx)));
+                    if let Ok(reply) = rrx.recv() {
+                        if !reply.is_empty() {
+                            let _ = writeln!(write_stream, "{}", reply);
+                            let _ = write_stream.flush();
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let _ = writeln!(write_stream, "ERROR: display-popup: {}", e);
