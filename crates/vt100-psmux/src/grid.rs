@@ -731,6 +731,10 @@ impl Grid {
     pub fn insert_cells(&mut self, count: u16, fill: crate::attrs::Attrs) {
         let size = self.size;
         let pos = self.pos;
+        // No more than reach the right edge, as tmux (screen-write.c:1365 at
+        // tag 3.8): each insert below moves the rest of the row, so a count
+        // past the edge only cost time, about two seconds for `CSI 65535 @`.
+        let count = count.min(size.cols.saturating_sub(pos.col));
         let mut blank = crate::Cell::new();
         blank.clear(fill);
         let row = self.current_row_mut();
