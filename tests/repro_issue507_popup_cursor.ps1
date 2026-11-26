@@ -61,7 +61,9 @@ Info "screen line at cursor row: '$($base.screen[$base.cursorY])'"
 
 # --- STEP 2: open the EXACT command from the issue: display-popup -E pwsh ---
 Write-Host "`n[Step 2] Opening: psmux display-popup -E pwsh" -ForegroundColor Yellow
-& $PsmuxExe display-popup -t $S -E "pwsh" 2>&1 | Out-Null
+# display-popup waits for the popup to close while a client is attached
+# (tmux parity), so it runs in a job while the test works on the popup.
+Start-Job -ScriptBlock { param($p,$s) & $p display-popup -t $s -E "pwsh" 2>&1 } -ArgumentList $PsmuxExe,$S | Out-Null
 $ready=$false
 for($t=0;$t -lt 30;$t++){
     Start-Sleep -Milliseconds 500

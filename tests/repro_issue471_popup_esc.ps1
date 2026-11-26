@@ -41,7 +41,9 @@ Start-Sleep -Seconds 4
 if ($LASTEXITCODE -ne 0){ Fail "session did not start"; exit 1 }
 
 Write-Host "`n[Step 1] Open display-popup -E nvim" -ForegroundColor Yellow
-& $PsmuxExe display-popup -t $S -E "nvim" 2>&1 | Out-Null
+# display-popup waits for the popup to close while a client is attached
+# (tmux parity), so it runs in a job while the test works on the popup.
+Start-Job -ScriptBlock { param($p,$s) & $p display-popup -t $s -E "nvim" 2>&1 } -ArgumentList $PsmuxExe,$S | Out-Null
 # Wait for nvim to load inside the popup
 $loaded=$false
 for($t=0;$t -lt 20;$t++){
