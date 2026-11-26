@@ -16,6 +16,9 @@
 # PSMUX_TEST_BIN overrides the binary under test.
 
 $ErrorActionPreference = 'Continue'
+# psmux writes UTF-8; under the runner the console is on the OEM code page, so
+# the box drawing read back from capture-pane would arrive mangled.
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:SHELL = $null
 Remove-Item Env:PSMUX_CONPTY_DIR -ErrorAction SilentlyContinue
 $ExePath = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -ErrorAction Stop).Source }
