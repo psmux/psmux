@@ -168,7 +168,8 @@ set -g pane-border-format " #{pane_index}: #{pane_title} "
 ## Popups
 
 ```powershell
-# Open a popup running a command
+# Open a popup running a command; it stays open when the command ends,
+# Escape or C-c closes it
 psmux display-popup "Get-Process"
 
 # Set width and height (absolute or percentage)
@@ -177,11 +178,15 @@ psmux display-popup -w 80% -h 50% "htop"
 # Set the starting directory
 psmux display-popup -d "C:\Projects" -w 100 -h 30
 
-# Close popup on command exit (default behavior, -E inverts it)
+# Close the popup when the command exits
 psmux display-popup -E "git log --oneline -20"
 
-# Keep popup open after command finishes
-psmux display-popup -K "echo done"
+# Close it only when the command exits with 0; otherwise it stays open
+# with the command's output until Escape or C-c (-k: any key)
+psmux display-popup -EE "cargo build"
+
+# psmux: keep the popup open after the command finishes, even with -E
+psmux display-popup -K -E "echo done"
 
 # Title the frame, pick its lines and colours (tmux flags)
 psmux display-popup -T "Logs" -b rounded -S "fg=#3b434d" -s "bg=colour235" "Get-Content app.log -Wait"
@@ -197,7 +202,7 @@ psmux display-popup -E -w 90% -h 90% "vim notes.txt"
 if ($LASTEXITCODE -ne 0) { "vim exited with $LASTEXITCODE" }
 ```
 
-A popup closed before its command ends (by `display-popup -C`, or by opening another popup over it) gives 129, tmux's code for it. With no client attached to the session nobody could close the popup, so the call returns at once there with exit code 0. A popup opened by a key binding or from the command prompt never holds anything up. To open a popup from a script without waiting, start the call in the background, for example with `Start-Process`.
+Without `-E`, or with `-EE` and a command that fails, the popup stays open after its command ends, so the call returns when it is closed with Escape or C-c, still with the command's exit code. A popup closed before its command ends (by Escape or C-c without `-E`, by `display-popup -C`, or by opening another popup over it) gives 129, tmux's code for it. With no client attached to the session nobody could close the popup, so the call returns at once there with exit code 0. A popup opened by a key binding or from the command prompt never holds anything up. To open a popup from a script without waiting, start the call in the background, for example with `Start-Process`.
 
 ## Menus
 

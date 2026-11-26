@@ -8296,7 +8296,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                     }
                 }
-                CtrlReq::DisplayPopup(req, close_on_exit, reply) => {
+                CtrlReq::DisplayPopup(req, reply) => {
                     // Percentages resolve against the terminal area (#154), -T
                     // and -d expand as formats (e.g. #{pane_current_path}), and
                     // the PTY child is sized to the content area of the frame
@@ -8306,7 +8306,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let area = (app.last_window_area.width, app.last_window_area.height);
                     let session_name = app.session_name.clone();
                     let closing = req.close_existing;
-                    crate::popup::open_display_popup(&mut app, req, area, close_on_exit, true, &session_name);
+                    crate::popup::open_display_popup(&mut app, req, area, true, &session_name);
                     // A command line waits until this popup closes, as tmux's
                     // does (cmd-display-menu.c:696-703); -C closes and returns.
                     if let Some(reply) = reply {
@@ -8679,11 +8679,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::PopupInput(data) => {
-                    if let Mode::PopupMode { ref mut popup_pane, .. } = app.mode {
+                    if let Mode::PopupMode { ref mut popup_pane, close, .. } = app.mode {
                         if let Some(ref mut pty) = popup_pane {
-                            // If child has exited, 'q' closes the popup
+                            // Escape and C-c close it with no -E, and once its
+                            // command has exited; -k lets any key close it
+                            // then, and q always did (PopupClose).
                             let child_exited = matches!(pty.child.try_wait(), Ok(Some(_)));
-                            if child_exited && data == b"q" {
+                            if close.closes_on_key(&data, child_exited) {
                                 app.mode = Mode::Passthrough;
                             } else if !child_exited {
                                 let _ = pty.writer.write_all(&data);
@@ -8775,7 +8777,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         process: None,
                         width: width.min(120),
                         height,
-                        close_on_exit: false,
+                        close: Default::default(),
                         popup_pane: None,
                         scroll_offset: 0,
                     };
@@ -8811,7 +8813,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             process: None,
                             width: width.min(120),
                             height: height.min(40),
-                            close_on_exit: false,
+                            close: Default::default(),
                             popup_pane: None,
                             scroll_offset: 0,
                         };
@@ -9230,7 +9232,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         process: None,
                         width: width.min(120),
                         height,
-                        close_on_exit: false,
+                        close: Default::default(),
                         popup_pane: None,
                         scroll_offset: 0,
                     };
@@ -9563,11 +9565,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         if !app.popup_waiters.is_empty() {
             crate::popup::note_popup_exit(&mut app);
         }
-        if let Mode::PopupMode { ref mut popup_pane, close_on_exit, .. } = app.mode {
-            let should_close = if let Some(ref mut pane) = popup_pane {
-                matches!(pane.child.try_wait(), Ok(Some(_)))
-            } else { false };
-            if should_close && close_on_exit {
+        // Whether it closes then is -E's, -EE's (exit status 0 only) or -K's.
+        if let Mode::PopupMode { ref mut popup_pane, close, .. } = app.mode {
+            let should_close = match popup_pane {
+                Some(ref mut pane) => matches!(pane.child.try_wait(), Ok(Some(status)) if close.closes_on_exit(status.exit_code())),
+                None => false,
+            };
+            if should_close {
                 app.mode = Mode::Passthrough;
                 state_dirty = true;
             }

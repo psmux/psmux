@@ -1635,7 +1635,8 @@ pub enum Mode {
         process: Option<std::process::Child>,
         width: u16,
         height: u16,
-        close_on_exit: bool,
+        /// When the popup closes: `-E`, `-EE`, `-k` and `-K`.
+        close: crate::popup::PopupClose,
         /// Optional: full Pane powering the popup (for interactive programs)
         popup_pane: Option<Pane>,
         /// Scroll offset for static text popups (lines from top)
@@ -4848,11 +4849,10 @@ pub enum CtrlReq {
     WaitFor(String, WaitForOp),
     DisplayMenu(String, Option<i16>, Option<i16>),
     DisplayMenuDirect(Menu),
-    /// Parsed `display-popup` arguments, whether the popup closes when its
-    /// command exits, and for a command line, where its reply goes: the exit
-    /// status of the popup's command once the popup has closed, or nothing
-    /// at once when it does not wait.
-    DisplayPopup(crate::popup::DisplayPopupArgs, bool, Option<std::sync::mpsc::Sender<String>>),
+    /// Parsed `display-popup` arguments, and for a command line, where its
+    /// reply goes: the exit status of the popup's command once the popup has
+    /// closed, or nothing at once when it does not wait.
+    DisplayPopup(crate::popup::DisplayPopupArgs, Option<std::sync::mpsc::Sender<String>>),
     /// `confirm-before`'s flags, the command it guards, and where to say
     /// `ERROR: no current client` when no client is attached to show it.
     ConfirmBefore(crate::confirm::ConfirmSpec, String, Option<mpsc::Sender<String>>),

@@ -818,10 +818,10 @@ fn display_popup_default_dimensions() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "display-popup").unwrap();
     match &app.mode {
-        Mode::PopupMode { width, height, close_on_exit, .. } => {
+        Mode::PopupMode { width, height, close, .. } => {
             assert_eq!(*width, 80, "default width should be 80");
             assert_eq!(*height, 24, "default height should be 24");
-            assert!(!close_on_exit, "close_on_exit should default to false");
+            assert_eq!(close.exit_flags, 0, "no -E: the popup stays open when its command exits");
         }
         other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
     }
@@ -845,8 +845,8 @@ fn display_popup_close_on_exit_flag() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "display-popup -E echo hello").unwrap();
     match &app.mode {
-        Mode::PopupMode { close_on_exit, .. } => {
-            assert!(*close_on_exit, "-E flag should set close_on_exit=true");
+        Mode::PopupMode { close, .. } => {
+            assert!(close.closes_on_exit(1), "-E closes the popup however its command exits");
         }
         other => panic!("expected PopupMode, got {:?}", std::mem::discriminant(other)),
     }
