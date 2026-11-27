@@ -545,11 +545,16 @@ try {
 
     # Use split-window to open bash, then send-keys to echo
     & $PSMUX -L $NS split-window -h -t $SCOMPAT "$gitBash" 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+
+    # A Git Bash login can take several seconds where MSYS forks are slow, so
+    # wait for its prompt before typing and poll for the marker afterwards
+    # instead of fixed sleeps.
+    $deadline = (Get-Date).AddSeconds(20)
+    do { Start-Sleep -Milliseconds 300; $cap = Capture-Pane $SCOMPAT } while ($cap -notmatch '\$\s*$' -and (Get-Date) -lt $deadline)
 
     & $PSMUX -L $NS send-keys -t $SCOMPAT "echo BASH_ALIVE" Enter
-    Start-Sleep -Seconds 2
-    $cap = Capture-Pane $SCOMPAT
+    $deadline = (Get-Date).AddSeconds(20)
+    do { Start-Sleep -Milliseconds 300; $cap = Capture-Pane $SCOMPAT } while ($cap -notmatch "BASH_ALIVE" -and (Get-Date) -lt $deadline)
     if ($cap -match "BASH_ALIVE") {
         Write-Pass "COMPAT.2: Git Bash pane works"
     } else {
