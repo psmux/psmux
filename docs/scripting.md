@@ -1303,8 +1303,17 @@ psmux new-session -s work -n "editor"
 ### new-pane (floating panes)
 
 `new-pane` (alias `newp`) creates a pane that floats **above** the tiled layout instead of taking
-space from it. It has its own border and title, and with `mouse` on it can be dragged to move and
-dragged by its edge to resize.
+space from it. It has its own border and title. With `mouse` on it takes the mouse as in tmux:
+
+| Where | Press | Drag |
+|-------|-------|------|
+| Inside | Makes it the active pane and brings it to the front; a program in it that asked for the mouse gets the click | Goes to that program |
+| Top border | Makes it the active pane and brings it to the front | Moves the pane |
+| Left, right or bottom border | The same | Resizes that side only |
+| A corner (a left one also from the top or bottom border cell next to it) | The same | Resizes both ways |
+
+A press where floating panes overlap goes to the front one. A pane with `-B none` has no border,
+so it cannot be moved or resized with the mouse.
 
 ```powershell
 # A 60x20 floating pane at column 10, row 5
@@ -1334,8 +1343,9 @@ psmux new-pane -E -x 40 -y 10
 | `-P` | Print the new pane id |
 | `-E` | Create the pane empty, with no shell |
 
-A floating pane is not part of the window's layout tree, so it does not appear in `list-panes`
-output and layout commands such as `select-layout` leave it alone.
+A floating pane is not part of the window's layout tree, so layout commands such as
+`select-layout` leave it alone. `list-panes` lists it after the tiled panes, with
+`#{pane_floating_flag}` set to 1, the front one last.
 
 ## Copy Mode Commands (`send-keys -X`)
 

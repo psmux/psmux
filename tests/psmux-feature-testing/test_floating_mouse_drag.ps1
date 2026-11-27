@@ -2,8 +2,9 @@
 #
 # tmux moves/resizes floating panes by dragging them with the mouse. This proves,
 # via dump-state, that:
-#  - dragging the float BODY moves it (x/y follow the cursor by the grab offset)
-#  - dragging the float bottom-right EDGE resizes it (w/h grow)
+#  - dragging the float's TOP border moves it (x/y follow the cursor)
+#  - dragging its bottom-right corner resizes it (w/h grow), as tmux 3.8
+#    cmd_resize_pane_mouse_resize_move_floating (cmd-resize-pane.c) does
 # driven through the mouse-down/mouse-drag/mouse-up control commands.
 #
 # Exit 0 = both pass.
@@ -35,26 +36,27 @@ Stop-All
 Start-Sleep -Seconds 2
 & $PSMUX set-option -g mouse on 2>&1 | Out-Null
 
-# Float at position (10,5), size 30x10. Body spans x 10..39, y 5..14.
+# Float at position (10,5), size 30x10. Its border spans x 10..39, y 5..14.
 & $PSMUX new-pane -X 10 -Y 5 -x 30 -y 10 2>&1 | Out-Null
 Start-Sleep -Milliseconds 700
 $x0 = FloatField (DS) "x"; $y0 = FloatField (DS) "y"
 Check "create" ($x0 -eq 10 -and $y0 -eq 5) "float at ($x0,$y0)"
 
-# MOVE: grab the body at (15,7) [offset (5,2) from top-left] and drag to (30,15).
-# New top-left = (30-5, 15-2) = (25,13).
-& $PSMUX mouse-down 15 7 2>&1 | Out-Null
+# MOVE: grab the top border at (15,5) and drag to (30,13): x moves by 15, and
+# the top border follows the pointer to row 13.
+# New top-left = (10+15, 13) = (25,13).
+& $PSMUX mouse-down 15 5 2>&1 | Out-Null
 Start-Sleep -Milliseconds 150
-& $PSMUX mouse-drag 30 15 2>&1 | Out-Null
+& $PSMUX mouse-drag 30 13 2>&1 | Out-Null
 Start-Sleep -Milliseconds 250
-& $PSMUX mouse-up 30 15 2>&1 | Out-Null
+& $PSMUX mouse-up 30 13 2>&1 | Out-Null
 Start-Sleep -Milliseconds 250
 $x1 = FloatField (DS) "x"; $y1 = FloatField (DS) "y"
 Check "drag-move" ($x1 -eq 25 -and $y1 -eq 13) "float moved to ($x1,$y1), expected (25,13)"
 
 # RESIZE: float is now at (25,13) size 30x10 -> right/bottom edge at x=54,y=22.
 # Grab the bottom-right corner (54,22) and drag to (64,25):
-# new w = 64-25+1 = 40, new h = 25-13+1 = 13.
+# the content (from 26,14) ends at the pointer: w = 64-26+2 = 40, h = 25-14+2 = 13.
 & $PSMUX mouse-down 54 22 2>&1 | Out-Null
 Start-Sleep -Milliseconds 150
 & $PSMUX mouse-drag 64 25 2>&1 | Out-Null
