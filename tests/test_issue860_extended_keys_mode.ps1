@@ -21,6 +21,14 @@
 #      ConPTY into win32 input mode
 #   5. nvim itself: <C-Space> through send-keys and through the client
 #
+# Windows 10 (a build before 22000, the inbox conhost): that host drops both
+# extended forms from its input, so psmux writes every key there as its legacy
+# bytes (#1116), and it hands a VT reader no NUL, so C-Space and ESC NUL arrive
+# as nothing.  It also holds a request written on its own, as it does the
+# queries of #1086, so there the recorder writes text after the request.
+# And it acts on a RIS (ESC c) itself, repainting the screen, so psmux never
+# sees one there and the mode the request set stays.
+#
 # Every runtime check uses its own -L namespace and PSMUX_DATA_DIR, and every
 # process this script starts is stopped by PID.
 
@@ -87,11 +95,21 @@ $table = [ordered]@{
     'BSpace'   = @{ L = '7F';       '1' = '7F';                        '2' = '7F' }
 }
 $keys = @($table.Keys)
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+if ($Win10) {
+    foreach ($k in $keys) { $table[$k]['1'] = $table[$k]['L']; $table[$k]['2'] = $table[$k]['L'] }
+    $table['C-Space'] = @{ L = ''; '1' = ''; '2' = '' }
+}
+# The recorder's request, with text after it on Windows 10.
+function Emit($e) { if ($e -and $Win10) { "${e}ready" } else { $e } }
+# Bytes joined with single spaces, leaving out the empty ones.
+function Seq { ($args | Where-Object { $_ }) -join ' ' }
 
 # Start a detached session whose pane is the recorder; $emit is written by
 # the recorder before it reads (\e = ESC).  Returns the log path.
 function Start-Rec($sess, $conf, $emit) {
     $log = Join-Path $TMP "$sess.txt"
+    $emit = Emit $emit
     if ($emit) { & $PSMUX -L $NS -f $conf new-session -d -s $sess -x 100 -y 30 -- $REC vt $log $emit 2>&1 | Out-Null }
     else { & $PSMUX -L $NS -f $conf new-session -d -s $sess -x 100 -y 30 -- $REC vt $log 2>&1 | Out-Null }
     for ($i = 0; $i -lt 40 -and -not ((Get-Content $log -EA SilentlyContinue) -match 'READY'); $i++) { Start-Sleep -Milliseconds 250 }
@@ -152,7 +170,8 @@ foreach ($c in $cases) {
     $conf = Conf $c.n $c.conf
     $log = Start-Rec $c.n $conf $c.emit
     $km = Key-Mode $c.n
-    if ($km -eq $c.km) { Write-Pass "#{pane_key_mode} is $km" } else { Write-Fail "#{pane_key_mode} is [$km], want [$($c.km)]" }
+    $wantKm = if ($Win10 -and $c.emit -match '\\ec$') { 'Ext 2' } else { $c.km }
+    if ($km -eq $wantKm) { Write-Pass "#{pane_key_mode} is $km" } else { Write-Fail "#{pane_key_mode} is [$km], want [$wantKm]" }
     Check-Mode "send-keys $($c.n)" (SendAll $c.n $log) $c.col
     & $PSMUX -L $NS kill-session -t $c.n 2>&1 | Out-Null
 }
@@ -163,6 +182,7 @@ $conf = Conf 'csiu' "set -g extended-keys on`nset -g extended-keys-format csi-u"
 $log = Start-Rec 'csiu' $conf '\e[>4;2m'
 $got = SendAll 'csiu' $log
 $want = @{ 'C-Space' = (Hex "$E[32;5u"); 'C-[' = (Hex "$E[91;5u"); 'M-a' = (Hex "$E[97;3u"); 'S-Enter' = (Hex "$E[13;2u"); 'Tab' = '09'; 'C-F5' = (Hex "$E[15;5~") }
+if ($Win10) { foreach ($k in @($want.Keys)) { $want[$k] = $table[$k]['L'] } }
 foreach ($k in $want.Keys) {
     if ($got[$k] -eq $want[$k]) { Write-Pass "csi-u $k -> $($want[$k])" } else { Write-Fail "csi-u $k got [$($got[$k])] want [$($want[$k])]" }
 }
@@ -178,14 +198,18 @@ $log = Start-Rec 'live' $conf ''
 $v = (& $PSMUX -L $NS show -gv extended-keys 2>&1 | Out-String).Trim()
 if ($v -eq 'on') { Write-Pass "show -gv extended-keys reads on" } else { Write-Fail "show -gv extended-keys read [$v]" }
 $log2 = Join-Path $TMP "live2.txt"
-& $PSMUX -L $NS new-window -t live -- $REC vt $log2 '\e[>4;2m' 2>&1 | Out-Null
+& $PSMUX -L $NS new-window -t live -- $REC vt $log2 (Emit '\e[>4;2m') 2>&1 | Out-Null
 for ($i = 0; $i -lt 40 -and -not ((Get-Content $log2 -EA SilentlyContinue) -match 'READY'); $i++) { Start-Sleep -Milliseconds 250 }
 Start-Sleep -Milliseconds 700
 $km = Key-Mode 'live'
 if ($km -eq 'Ext 2') { Write-Pass "a pane started after set -g extended-keys on takes mode 2" } else { Write-Fail "pane_key_mode [$km] after set at run time" }
 & $PSMUX -L $NS set -g extended-keys off 2>&1 | Out-Null
 $got = SendAll 'live' $log2
-if ($got['C-Space'] -eq $table['C-Space']['2']) { Write-Pass "extended-keys off later keeps the mode the pane already has (tmux)" } else { Write-Fail "C-Space after option off: [$($got['C-Space'])]" }
+if ($Win10) {
+    # Every key is legacy on this host, so the mode shows only in the format.
+    $km = Key-Mode 'live'
+    if ($km -eq 'Ext 2') { Write-Pass "extended-keys off later keeps the mode the pane already has (tmux), #{pane_key_mode} Ext 2" } else { Write-Fail "pane_key_mode [$km] after option off" }
+} elseif ($got['C-Space'] -eq $table['C-Space']['2']) { Write-Pass "extended-keys off later keeps the mode the pane already has (tmux)" } else { Write-Fail "C-Space after option off: [$($got['C-Space'])]" }
 & $PSMUX -L $NS kill-session -t live 2>&1 | Out-Null
 Kill-Ns
 
@@ -261,7 +285,8 @@ foreach ($oc in @(@{ n = 'ordL'; conf = ''; emit = ''; col = 'L' }, @{ n = 'ordX
     $i = 1
     foreach ($ok in $orderKeys) {
         $k = $ok[0]
-        $want = if ($oc.col -eq 'L') { $ok[1] } else { $ok[2] }
+        $want = if ($oc.col -eq 'L' -or $Win10) { $ok[1] } else { $ok[2] }
+        if ($Win10 -and $want -eq '1B 00') { $want = '' }
         if ($parts[$i] -eq $want) { Write-Pass "$($oc.n) $k -> [$want]" } else { Write-Fail "$($oc.n) $k got [$($parts[$i])] want [$want]" }
         $i++
     }
@@ -328,7 +353,7 @@ foreach ($c in $attCases) {
     $conf = Conf "att$($c.n)" $c.conf
     $log = Join-Path $TMP "att$($c.n).txt"
     $pane = "`"$REC`" vt `"$log`""
-    if ($c.emit) { $pane += " `"$($c.emit)`"" }
+    if ($c.emit) { $pane += " `"$(Emit $c.emit)`"" }
     $a = Start-Attached "att$($c.n)" $conf $pane
     if (-not $a.client -or -not (Wait-Pump $a.client $log 'hex=\[ 30 \]')) {
         Write-Skip "attached client did not start or never read input"
@@ -341,14 +366,14 @@ foreach ($c in $attCases) {
     $col = $c.col
     $exp = [ordered]@{
         'Up latches'        = "31 1B 5B 41 32"
-        'Ctrl+Space'        = "32 $($table['C-Space'][$col]) 33"
-        'Ctrl+A'            = "33 $($table['C-a'][$col]) 34"
-        'Ctrl+['            = "34 $($table['C-['][$col]) 35"
-        'Alt+A'             = "35 $($table['M-a'][$col]) 36"
+        'Ctrl+Space'        = Seq 32 $table['C-Space'][$col] 33
+        'Ctrl+A'            = Seq 33 $table['C-a'][$col] 34
+        'Ctrl+['            = Seq 34 $table['C-['][$col] 35
+        'Alt+A'             = Seq 35 $table['M-a'][$col] 36
         'Enter'             = "36 0D 37"
         'Tab'               = "37 09 38"
-        'Shift+Enter'       = "38 $($table['S-Enter'][$col]) 39"
-        'Ctrl+Space again'  = "39 $($table['C-Space'][$col]) 31"
+        'Shift+Enter'       = Seq 38 $table['S-Enter'][$col] 39
+        'Ctrl+Space again'  = Seq 39 $table['C-Space'][$col] 31
     }
     foreach ($k in $exp.Keys) {
         if ($s.Contains($exp[$k])) { Write-Pass "attached $($c.n): $k -> [$($exp[$k])]" }
@@ -414,7 +439,9 @@ end, 10)
     }
     Start-Sleep -Milliseconds 800
     $keysSeen = (Get-Content $log | Where-Object { $_ -match '^KEY ' } | ForEach-Object { $_.Substring(4) }) -join ' '
-    if ($keysSeen -match '1 <C-Space> 2') { Write-Pass "nvim (send-keys): C-Space is <C-Space>" } else { Write-Fail "nvim (send-keys) C-Space: [$keysSeen]" }
+    if ($Win10) {
+        if ($keysSeen -match '1 2') { Write-Pass "nvim (send-keys): C-Space is nothing, as this host hands a VT reader no NUL" } else { Write-Fail "nvim (send-keys) C-Space on Windows 10, want nothing: [$keysSeen]" }
+    } elseif ($keysSeen -match '1 <C-Space> 2') { Write-Pass "nvim (send-keys): C-Space is <C-Space>" } else { Write-Fail "nvim (send-keys) C-Space: [$keysSeen]" }
     if ($keysSeen -match '2 <(Esc|C-\[)> 3') { Write-Pass "nvim (send-keys): C-[ still reads as Escape" } else { Write-Fail "nvim (send-keys) C-[: [$keysSeen]" }
     if ($keysSeen -match '3 <(C-I|Tab)> 4 <Tab> 5') { Write-Pass "nvim (send-keys): C-i and Tab arrive" } else { Write-Fail "nvim (send-keys) C-i/Tab: [$keysSeen]" }
     if ($keysSeen -match '5 <M-a> 6') { Write-Pass "nvim (send-keys): M-a is <M-a>" } else { Write-Fail "nvim (send-keys) M-a: [$keysSeen]" }
@@ -430,8 +457,13 @@ end, 10)
             "g:33.33.0" "sleep:300" "g:20.0.8" "sleep:300" "g:34.34.0" "sleep:300" "g:DB.1B.8" "sleep:300" "g:35.35.0" "sleep:600" | Out-Null
         Start-Sleep -Milliseconds 1200
         $keysSeen = (Get-Content $log | Where-Object { $_ -match '^KEY ' } | ForEach-Object { $_.Substring(4) }) -join ' '
-        if ($keysSeen -match '1 <C-Space> 2') { Write-Pass "nvim (attached): real Ctrl+Space is <C-Space>" } else { Write-Fail "nvim (attached) Ctrl+Space: [$keysSeen]" }
-        if ($keysSeen -match '3 <C-Space> 4') { Write-Pass "nvim (attached): Ctrl+Space after <Up> (latched ConPTY) is <C-Space>" } else { Write-Fail "nvim (attached) Ctrl+Space after Up: [$keysSeen]" }
+        if ($Win10) {
+            if ($keysSeen -match '1 2') { Write-Pass "nvim (attached): real Ctrl+Space is nothing, as this host hands a VT reader no NUL" } else { Write-Fail "nvim (attached) Ctrl+Space on Windows 10, want nothing: [$keysSeen]" }
+            if ($keysSeen -match '3 4') { Write-Pass "nvim (attached): Ctrl+Space after <Up> is nothing too" } else { Write-Fail "nvim (attached) Ctrl+Space after Up on Windows 10, want nothing: [$keysSeen]" }
+        } else {
+            if ($keysSeen -match '1 <C-Space> 2') { Write-Pass "nvim (attached): real Ctrl+Space is <C-Space>" } else { Write-Fail "nvim (attached) Ctrl+Space: [$keysSeen]" }
+            if ($keysSeen -match '3 <C-Space> 4') { Write-Pass "nvim (attached): Ctrl+Space after <Up> (latched ConPTY) is <C-Space>" } else { Write-Fail "nvim (attached) Ctrl+Space after Up: [$keysSeen]" }
+        }
         if ($keysSeen -match '4 <(Esc|C-\[)> 5') { Write-Pass "nvim (attached): Ctrl+[ still Escape in mode 2" } else { Write-Fail "nvim (attached) Ctrl+[: [$keysSeen]" }
         $km = Key-Mode 'nvatt'
         if ($km -eq 'Ext 2') { Write-Pass "TUI: attached nvim pane shows #{pane_key_mode} Ext 2" } else { Write-Fail "TUI: pane_key_mode [$km]" }

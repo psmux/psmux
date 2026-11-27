@@ -18,6 +18,12 @@
 #   C. a root binding on M-' fires from the real key
 #   D. nvim reads <M-'> from the real key
 #
+# Windows 10 (a build before 22000, the inbox conhost): that host drops both
+# extended forms from its input, so psmux writes the keys there as their
+# legacy bytes in mode 2 too (#1116).  It also holds a request written on its
+# own, as it does the queries of #1086, so there the recorder writes text
+# after the request.
+#
 # Every runtime check uses its own -L namespace and PSMUX_DATA_DIR, and every
 # process this script starts is stopped by PID.
 
@@ -59,6 +65,9 @@ function Hex([string]$s) { (([Text.Encoding]::ASCII.GetBytes($s) | ForEach-Objec
 function Conf($name, $text) { $p = Join-Path $TMP "$name.conf"; $text | Set-Content $p -Encoding ASCII; $p }
 
 $E = [char]27
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+# The recorder's request, with text after it on Windows 10.
+function Emit($e) { if ($e -and $Win10) { "${e}ready" } else { $e } }
 # key name -> (code point, legacy bytes)
 $keyTable = [ordered]@{
     "M-'" = @(39, '1B 27')
@@ -88,7 +97,7 @@ foreach ($mc in $modeCases) {
     Write-Host "`n[A/$($mc.n)] send-keys" -ForegroundColor Yellow
     $conf = Conf "a$($mc.n)" $mc.conf
     $log = Join-Path $TMP "a$($mc.n).txt"
-    if ($mc.emit) { & $PSMUX -L $NS -f $conf new-session -d -s "a$($mc.n)" -x 100 -y 30 -- $REC vt $log $mc.emit 2>&1 | Out-Null }
+    if ($mc.emit) { & $PSMUX -L $NS -f $conf new-session -d -s "a$($mc.n)" -x 100 -y 30 -- $REC vt $log (Emit $mc.emit) 2>&1 | Out-Null }
     else { & $PSMUX -L $NS -f $conf new-session -d -s "a$($mc.n)" -x 100 -y 30 -- $REC vt $log 2>&1 | Out-Null }
     for ($i = 0; $i -lt 40 -and -not ((Get-Content $log -EA SilentlyContinue) -match 'READY'); $i++) { Start-Sleep -Milliseconds 250 }
     Start-Sleep -Milliseconds 700
@@ -104,7 +113,8 @@ foreach ($mc in $modeCases) {
     $parts = (Stream $log) -split ' ?7C ?'
     for ($i = 0; $i -lt $names.Count; $i++) {
         $k = $names[$i]; $cp = $keyTable[$k][0]
-        $want = switch ($mc.fmt) { 'L' { $keyTable[$k][1] } 'X' { Hex "$E[27;3;$cp~" } 'U' { Hex "$E[$cp;3u" } }
+        $fmt = if ($Win10) { 'L' } else { $mc.fmt }
+        $want = switch ($fmt) { 'L' { $keyTable[$k][1] } 'X' { Hex "$E[27;3;$cp~" } 'U' { Hex "$E[$cp;3u" } }
         if ($parts[$i + 1] -eq $want) { Write-Pass "send-keys $($mc.n) $k -> [$want]" } else { Write-Fail "send-keys $($mc.n) $k got [$($parts[$i + 1])] want [$want]" }
     }
 }
@@ -174,7 +184,7 @@ foreach ($c in $attCases) {
     $conf = Conf "b$($c.n)" $c.conf
     $log = Join-Path $TMP "b$($c.n).txt"
     $pane = "`"$REC`" vt `"$log`""
-    if ($c.emit) { $pane += " `"$($c.emit)`"" }
+    if ($c.emit) { $pane += " `"$(Emit $c.emit)`"" }
     $a = Start-Attached $ns "b$($c.n)" $conf $pane $c.extra
     if (-not $a.client -or -not (Wait-Pump $a.client $log 'hex=\[ 30 \]')) {
         Write-Skip "attached client did not start or never read input"
@@ -191,7 +201,7 @@ foreach ($c in $attCases) {
     for ($i = 0; $i -lt $recCases.Count; $i++) {
         $rc = $recCases[$i]
         $want = $rc[3]
-        if ($c.fmt -eq 'X' -and $rc[0] -ne "plain '") {
+        if ($c.fmt -eq 'X' -and -not $Win10 -and $rc[0] -ne "plain '") {
             $mod = if ($rc[0] -like 'Ctrl*') { 5 } else { 3 }
             $want = Hex "$E[27;$mod;$($rc[2])~"
         }
