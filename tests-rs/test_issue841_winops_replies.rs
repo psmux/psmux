@@ -27,7 +27,7 @@
 use super::*;
 
 fn sized(rows: u16, cols: u16) -> DecrqmState {
-    DecrqmState { rows, cols, cursor_visible: true, ..DecrqmState::default() }
+    DecrqmState { rows, cols, ..DecrqmState::default() }
 }
 
 fn reply_for(bytes: &[u8], st: &DecrqmState) -> String {

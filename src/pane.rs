@@ -4666,27 +4666,17 @@ pub(crate) const UNKNOWN_SETTING_REPLY: &str = "\x1bP0$r\x1b\\";
 /// A device query psmux answers itself when the console host forwards it.
 pub(crate) use vt100::TerminalQuery as DeviceQuery;
 
-/// The pane screen state a DECRQM answer depends on.
+/// What a reply reads from the pane outside its parser: the pane's size, its
+/// default colours, and whether its `SyncGate` holds a synchronized update
+/// open.
 ///
 /// Sampled under the parser lock immediately after the batch carrying the
-/// query has been processed, so `ESC[?1049h ESC[?1049$p` in one write reports
-/// the alternate screen as set rather than as reset.
+/// query has been processed. A DECRQM of any other mode carries its value as
+/// the parser met it (`vt100::TerminalQuery::DecrqmPrivate`), so a mode set
+/// and reset again in the same write is answered as it stood at the query,
+/// as tmux answers it.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DecrqmState {
-    pub alternate_screen: bool,
-    pub application_cursor: bool,
-    pub cursor_visible: bool,
-    pub bracketed_paste: bool,
-    pub mouse_standard: bool,
-    pub mouse_button: bool,
-    pub mouse_all: bool,
-    pub mouse_utf8: bool,
-    pub mouse_sgr: bool,
-    /// Autowrap is off (DECAWM reset). The default, false, is a new screen,
-    /// which wraps.
-    pub autowrap_off: bool,
-    /// Insert mode (IRM) is on.
-    pub insert_mode: bool,
     /// A synchronized update (DECSET 2026) is open in the pane's `SyncGate`.
     pub synchronized_output: bool,
     /// The pane's size in cells, for the XTWINOPS size reports (issue #841).
@@ -4701,17 +4691,6 @@ pub(crate) struct DecrqmState {
 impl DecrqmState {
     fn from_screen(s: &vt100::Screen) -> Self {
         Self {
-            alternate_screen: s.alternate_screen(),
-            application_cursor: s.application_cursor(),
-            cursor_visible: !s.hide_cursor(),
-            bracketed_paste: s.bracketed_paste(),
-            mouse_standard: s.mouse_standard_flag(),
-            mouse_button: s.mouse_button_flag(),
-            mouse_all: s.mouse_all_flag(),
-            mouse_utf8: s.mouse_utf8_flag(),
-            mouse_sgr: s.mouse_sgr_flag(),
-            autowrap_off: !s.autowrap(),
-            insert_mode: s.insert_mode(),
             synchronized_output: false,
             rows: s.size().0,
             cols: s.size().1,
@@ -4721,39 +4700,24 @@ impl DecrqmState {
     }
 }
 
-/// tmux's DECRQM value semantics: 1 set, 2 reset, 0 the terminal does not
-/// recognise the mode, 4 permanently reset (input.c:1650-1721).
-fn decrqm_private_value(mode: u16, st: &DecrqmState) -> u8 {
+/// A private mode's DECRQM value that the parser leaves to psmux.
+///
+/// 2026 (synchronized output) answers like tmux (`MODE_SYNC ? 1 : 2`,
+/// input.c:1710-1712 at tag 3.8). The parser thread holds a pane's output
+/// between `ESC[?2026h` and `ESC[?2026l` (see `SyncGate`), so this is 1 while
+/// an update is open and 2 otherwise. Only a console host that forwards the
+/// query lets psmux answer it: OpenConsole via PSMUX_CONPTY_DIR, and the
+/// Windows 10 inbox host (build 19045). The inbox host on 26200 answers 0
+/// itself and swallows the query.
+///
+/// 12 (the cursor blink), when the program set neither a cursor shape nor a
+/// blink, is the `cursor-style` option's blink, as in tmux (input.c:1666-1680
+/// at tag 3.8): 1 for the blinking styles 1, 3 and 5, else 2.
+fn host_decrqm_value(mode: u16, st: &DecrqmState) -> u8 {
     let onoff = |b: bool| if b { 1u8 } else { 2u8 };
     match mode {
-        1 => onoff(st.application_cursor),          // DECCKM
-        3 => 4,                                     // DECCOLM, permanently reset
-        7 => onoff(!st.autowrap_off),               // DECAWM
-        25 => onoff(st.cursor_visible),             // DECTCEM
-        47 | 1047 | 1049 => onoff(st.alternate_screen),
-        1000 => onoff(st.mouse_standard),
-        1002 => onoff(st.mouse_button),
-        1003 => onoff(st.mouse_all),
-        1005 => onoff(st.mouse_utf8),
-        1006 => onoff(st.mouse_sgr),
-        2004 => onoff(st.bracketed_paste),
-        // 2026 (synchronized output) answers like tmux (input.c, case 2026:
-        // MODE_SYNC ? 1 : 2).  The parser thread holds a pane's output
-        // between `ESC[?2026h` and `ESC[?2026l` (see `SyncGate`), so this is
-        // 1 while an update is open and 2 otherwise.  Only a console host
-        // that forwards the query (OpenConsole via PSMUX_CONPTY_DIR) lets
-        // psmux answer it; the inbox host on 26200 answers 0 itself and
-        // swallows the query.  2031 stays 0.
         2026 => onoff(st.synchronized_output),
-        _ => 0,
-    }
-}
-
-/// DECRQM for an ANSI mode.  Like tmux, only IRM is known (input.c:1638-1649
-/// at tag 3.8); every other mode reports 0, "not recognised".
-fn decrqm_ansi_value(mode: u16, st: &DecrqmState) -> u8 {
-    match mode {
-        4 => if st.insert_mode { 1 } else { 2 },
+        12 => onoff(matches!(crate::rendering::configured_cursor_code(), 1 | 3 | 5)),
         _ => 0,
     }
 }
@@ -4770,12 +4734,10 @@ pub(crate) fn device_reply(q: DeviceQuery, st: &DecrqmState) -> String {
         DeviceQuery::Da1 => "\x1b[?1;2;4c".to_string(),
         DeviceQuery::Da2 => "\x1b[>84;0;0c".to_string(),
         DeviceQuery::DsrStatus => "\x1b[0n".to_string(),
-        DeviceQuery::DecrqmPrivate(m) if m > 0 => {
-            format!("\x1b[?{};{}$y", m, decrqm_private_value(m, st))
+        DeviceQuery::DecrqmPrivate { mode, value } if mode > 0 => {
+            format!("\x1b[?{mode};{}$y", value.unwrap_or_else(|| host_decrqm_value(mode, st)))
         }
-        DeviceQuery::DecrqmAnsi(m) if m > 0 => {
-            format!("\x1b[{};{}$y", m, decrqm_ansi_value(m, st))
-        }
+        DeviceQuery::DecrqmAnsi { mode, value } if mode > 0 => format!("\x1b[{mode};{value}$y"),
         DeviceQuery::WindowReport(op) => window_report(op, st.rows, st.cols),
         _ => String::new(),
     }
@@ -5449,9 +5411,9 @@ pub fn spawn_reader_thread(
             // when PSMUX_PANE_RAW=1. Off by default, one atomic load when off.
             crate::debug_log::pane_raw(&bytes);
 
-            // Issue #597: sampled inside the parser lock below, so a DECRQM
-            // that shares a write with the DECSET it asks about reports the
-            // post-write value, the way tmux's in-order dispatch does.
+            // Issue #597: the size and the synchronized update, sampled inside
+            // the parser lock below. A DECRQM of any other mode carries the
+            // value the parser met it with.
             let mut decrqm_state: Option<DecrqmState> = None;
             if let Ok(mut parser) = term_reader.lock() {
                 parser.screen_mut().capture_queries(true);
@@ -5568,6 +5530,10 @@ mod test_graphics_attribute_replies;
 #[cfg(test)]
 #[path = "../tests-rs/test_decrqss_replies.rs"]
 mod test_decrqss_replies;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_decrqm_replies.rs"]
+mod test_decrqm_replies;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue399_env_prefix.rs"]

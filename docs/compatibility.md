@@ -444,6 +444,24 @@ The inbox conhost never passes DECRQSS on, so psmux cannot answer there. The Win
 
 The reply differs from tmux's in one place. tmux writes `DCS 1 $ r SP q n SP q ST`, with the query's own `SP q` before the number. The VT510's DECRPSS reply carries "all the characters in the control function, except the CSI", so for `CSI 2 SP q` it is `DCS 1 $ r 2 SP q ST`, and a program that reads it that way, psmux's own client among them, reads tmux's form as an empty number, so as 0. psmux writes the standard form, with the same number tmux picks. `cursor-style` is one value for the whole server in psmux, so a pane's own `set -p cursor-style` is refused rather than answered.
 
+### Mode Query (DECRQM)
+
+`CSI ? n $ p` asks the terminal whether private mode `n` is set, and `CSI n $ p` the same for an ANSI mode. psmux answers as tmux does, `CSI ? n ; v $ y` with `v` 1 for set, 2 for reset, 4 for permanently reset and 0 for a mode it does not know, and answers each query with the mode as it stood where the query was, so a mode set, asked about and reset in one write is answered as set.
+
+| Mode | Answer |
+|---|---|
+| 1, 6, 7, 25, 47, 1000, 1002, 1003, 1005, 1006, 1047, 1049, 2004 | 1 or 2 |
+| 3 (DECCOLM) | 4, as in tmux |
+| 12 (cursor blink) | the blink of the shape the program set with DECSCUSR, or of `CSI ? 12 h` and `l`; with neither, the blink of `cursor-style` (1 for the `blinking-` styles) |
+| 1004 (focus reporting) | whether the program turned it on (see below) |
+| 2026 (synchronized output) | 1 while an update is open, else 2. psmux reads it once for each read of the pane's output, so this one is answered as it stands at the end of the read |
+| 2031 (theme updates) | 0, where tmux answers 1 or 2, because psmux sends no theme change notification |
+| ANSI 4 (IRM) | 1 or 2 |
+
+The console host under a pane turns focus reporting on for itself, in the same output as the program's: beside its `CSI ? 9001 h` when the pane starts and after RIS, and with OpenConsole right after the program turns the mode off. psmux does not count a `CSI ? 1004 h` written there, so the answer is the program's. A program that writes `CSI ? 9001 h` itself right after its `CSI ? 1004 h`, with no other `CSI ? ...` between, is taken for the host.
+
+The inbox conhost of build 26300 answers DECRQM itself and never passes it on, so there psmux answers only on OpenConsole (`PSMUX_CONPTY_DIR`). The Windows 10 one (build 19045) passes the query on, and psmux answers it, but that host keeps some mode changes to itself. psmux's answer there is right for 7, 1004, 2004, 2031 and IRM, whose changes reach psmux in order, and wrong for 1, 6, 12, 25, 1000 and 1049, measured: the host keeps their changes to itself, or, for 25, mixes them with its own. It also passes the query on only when it next draws, so a program that writes nothing after the query gets the answer only then.
+
 ### Tab Stops (HTS, TBC, CBT, HPA)
 
 Each pane keeps a table of tab stops, every 8 columns to begin with, which `#{pane_tabs}` lists, as tmux keeps `s->tabs`:

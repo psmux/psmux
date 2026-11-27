@@ -177,6 +177,10 @@ path = "tests/scroll_region.rs"
 name = "decrqss"
 path = "tests/decrqss.rs"
 
+[[test]]
+name = "decrqm"
+path = "tests/decrqm.rs"
+
 [dependencies.itoa]
 version = "1.0.19"
 

@@ -314,6 +314,11 @@ pub struct Screen {
     /// exactly as tmux's input.c does (INPUT_CSI_MODSET / INPUT_CSI_MODOFF),
     /// and reset by RIS.  Issue #860.
     extended_keys_mode: u8,
+    /// Focus reporting (`CSI ? 1004 h`) as the program in the pane set it,
+    /// tmux's `MODE_FOCUSON`. See [`Screen::focus_reporting`].
+    focus_reporting: bool,
+    /// The previous private mode CSI, for [`Screen::focus_reporting`].
+    focus_sequence: FocusSequence,
     /// The tab stops, one per column, as tmux's `s->tabs`. Both screens share
     /// them, as tmux keeps one table for the normal and the alternate screen,
     /// and a change of width puts back the default (screen.c:373 at tag 3.8).
@@ -461,6 +466,26 @@ struct CursorStyle {
     /// Set by DECSCUSR 1, 3 and 5 and by `CSI ? 12 h`, cleared by DECSCUSR 2,
     /// 4 and 6, by `CSI ? 12 l` and by a reset of the modes.
     blinking: bool,
+    /// tmux's `MODE_CURSOR_BLINKING_SET`: `CSI ? 12 h` or `CSI ? 12 l` set
+    /// the blink, until DECSCUSR 0 or a reset of the modes (input.c:1880-1883,
+    /// :1949-1951 and :2046-2048 at tag 3.8). With no shape either, the blink
+    /// is the `cursor-style` option's.
+    blinking_set: bool,
+}
+
+/// What the previous private mode CSI (`CSI ? ...`) was, as far as telling
+/// the console host's own `CSI ? 1004 h` from a program's goes. See
+/// [`Screen::focus_reporting`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum FocusSequence {
+    #[default]
+    Other,
+    /// `CSI ? 9001 h`.
+    Win32Input,
+    /// A `CSI ? ... l` that turned 1004 off.
+    FocusOff,
+    /// A `CSI ? 1004 h` taken as a program's, with the mode as it was before.
+    FocusOn { before: bool },
 }
 
 /// A pane's `pane-colours` default palette and the palette it draws with:
@@ -551,6 +576,8 @@ impl Screen {
             cursor_style: CursorStyle::default(),
             win32_input_requested: false,
             extended_keys_mode: initial_extended_keys_mode(),
+            focus_reporting: false,
+            focus_sequence: FocusSequence::Other,
         }
     }
 
@@ -802,6 +829,7 @@ impl Screen {
             self.cursor_style.blinking = style % 2 == 1;
         } else if style == 0 {
             self.cursor_style.shape = 0;
+            self.cursor_style.blinking_set = false;
         }
     }
 
@@ -1562,6 +1590,53 @@ impl Screen {
     /// Drain queries in parser dispatch order. Snapshots do not capture queries.
     pub fn take_queries(&mut self) -> Vec<crate::TerminalQuery> {
         std::mem::take(&mut self.pending_queries)
+    }
+
+    /// A DECRQM with the mode's value as it stands here, in the stream, where
+    /// tmux answers it (`INPUT_CSI_QUERY`, input.c:1638-1650, and
+    /// `INPUT_CSI_QUERY_PRIVATE`, input.c:1651-1722 at tag 3.8). Any other
+    /// query is returned as it is.
+    ///
+    /// 2031 stays 0, which tmux answers: psmux sends no theme change
+    /// notification (`CSI ? 997 ; Ps n`), so a program told the mode is known
+    /// would wait for notifications that never come.
+    ///
+    /// Kept out of line: the parser calls it for every query from
+    /// `csi_dispatch`, and inlined there it cost about 7% on a stream of
+    /// cursor moves and erases, which asks nothing.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn decrqm(&self, query: crate::TerminalQuery) -> crate::TerminalQuery {
+        let onoff = |on: bool| if on { 1 } else { 2 };
+        match query {
+            crate::TerminalQuery::DecrqmPrivate { mode, .. } => {
+                let value = match mode {
+                    1 => Some(onoff(self.application_cursor())),
+                    3 => Some(4),
+                    6 => Some(onoff(self.origin_mode())),
+                    7 => Some(onoff(self.autowrap())),
+                    12 => (self.cursor_style.shape != 0 || self.cursor_style.blinking_set)
+                        .then(|| onoff(self.cursor_style.blinking)),
+                    25 => Some(onoff(!self.hide_cursor())),
+                    47 | 1047 | 1049 => Some(onoff(self.alternate_screen())),
+                    1000 => Some(onoff(self.mouse_standard_flag())),
+                    1002 => Some(onoff(self.mouse_button_flag())),
+                    1003 => Some(onoff(self.mouse_all_flag())),
+                    1004 => Some(onoff(self.focus_reporting)),
+                    1005 => Some(onoff(self.mouse_utf8_flag())),
+                    1006 => Some(onoff(self.mouse_sgr_flag())),
+                    2004 => Some(onoff(self.bracketed_paste())),
+                    2026 => None,
+                    _ => Some(0),
+                };
+                crate::TerminalQuery::DecrqmPrivate { mode, value }
+            }
+            crate::TerminalQuery::DecrqmAnsi { mode, .. } => crate::TerminalQuery::DecrqmAnsi {
+                mode,
+                value: if mode == 4 { onoff(self.insert_mode()) } else { 0 },
+            },
+            other => other,
+        }
     }
 
     /// Queries past [`crate::MAX_PENDING_QUERIES`] before the host drains them
@@ -3107,12 +3182,49 @@ impl Screen {
         self.grid().origin_mode()
     }
 
+    /// Whether the program in the pane turned focus reporting on
+    /// (`CSI ? 1004 h`), tmux's `MODE_FOCUSON` (input.c:1698-1700 at tag 3.8).
+    ///
+    /// The console host turns the mode on too, for focus events of its own,
+    /// and its `CSI ? 1004 h` comes in the same output as the program's. Both
+    /// hosts write it beside a `CSI ? 9001 h`, when a pane starts and after
+    /// an RIS: the inbox conhost as `CSI ? 9001 h CSI ? 1004 h`, `OpenConsole`
+    /// 1.25 as `CSI ? 1004 h CSI ? 9001 h`. `OpenConsole`, which passes the
+    /// program's own on, also turns it back on right after the program turns
+    /// it off, before anything else, a `CSI ? 1004 ; 1000 l` included. So a
+    /// lone `CSI ? 1004 h` beside a lone `CSI ? 9001 h`, or right after a
+    /// `CSI ? ... l` that turned 1004 off, is the host's and does not count.
+    /// "Beside" and "right after" count only private mode CSIs, the one
+    /// kind the hosts write there, so that no other CSI pays for the check.
+    /// The inbox conhost of build 26300 passes neither the program's 1004 nor
+    /// a DECRQM on; the Windows 10 one (build 19045) passes both.
+    #[must_use]
+    pub fn focus_reporting(&self) -> bool {
+        self.focus_reporting
+    }
+
+    /// The previous private mode CSI, for [`Screen::focus_reporting`],
+    /// which a private mode CSI replaces. It is nearly always `Other`, which
+    /// needs no write.
+    #[inline]
+    pub(crate) fn take_focus_sequence(&mut self) -> FocusSequence {
+        match self.focus_sequence {
+            FocusSequence::Other => FocusSequence::Other,
+            previous => {
+                self.focus_sequence = FocusSequence::Other;
+                previous
+            }
+        }
+    }
+
     // CSI ? h
     pub(crate) fn decset(
         &mut self,
         params: &vte::Params,
+        previous: FocusSequence,
         mut unhandled: impl FnMut(&mut Self),
     ) {
+        let lone = params.len() == 1;
         for param in params {
             match param {
                 [1] => self.set_mode(MODE_APPLICATION_CURSOR),
@@ -3121,7 +3233,10 @@ impl Screen {
                 [7] => self.clear_mode(MODE_NO_AUTOWRAP),
                 [9] => self.set_mouse_mode(MouseProtocolMode::Press),
                 // The cursor blinks (input.c:2046-2048 at tag 3.8).
-                [12] => self.cursor_style.blinking = true,
+                [12] => {
+                    self.cursor_style.blinking = true;
+                    self.cursor_style.blinking_set = true;
+                }
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
                 // tmux clears the alternate screen for 47 as for 1049
                 // (screen_alternate_on), and keeps the cursor for both.
@@ -3155,8 +3270,26 @@ impl Screen {
                         self.enter_alternate_grid();
                     }
                 }
+                [1004] => {
+                    let host = lone && matches!(previous, FocusSequence::Win32Input | FocusSequence::FocusOff);
+                    if !host {
+                        if lone {
+                            self.focus_sequence = FocusSequence::FocusOn { before: self.focus_reporting };
+                        }
+                        self.focus_reporting = true;
+                    }
+                }
                 [2004] => self.set_mode(MODE_BRACKETED_PASTE),
-                [9001] => self.win32_input_requested = true,
+                [9001] => {
+                    self.win32_input_requested = true;
+                    if lone {
+                        // The `CSI ? 1004 h` just before it was the host's.
+                        if let FocusSequence::FocusOn { before } = previous {
+                            self.focus_reporting = before;
+                        }
+                        self.focus_sequence = FocusSequence::Win32Input;
+                    }
+                }
                 _ => unhandled(self),
             }
         }
@@ -3176,7 +3309,10 @@ impl Screen {
                 [7] => self.set_mode(MODE_NO_AUTOWRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
                 // input.c:1949-1951 at tag 3.8.
-                [12] => self.cursor_style.blinking = false,
+                [12] => {
+                    self.cursor_style.blinking = false;
+                    self.cursor_style.blinking_set = true;
+                }
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
                 // 47 saves no cursor, so the cursor stays where the
                 // alternate screen left it (screen_alternate_off with cursor
@@ -3219,6 +3355,10 @@ impl Screen {
                     } else if let Some(pos) = carried {
                         self.grid.set_pos_absolute(pos);
                     }
+                }
+                [1004] => {
+                    self.focus_reporting = false;
+                    self.focus_sequence = FocusSequence::FocusOff;
                 }
                 [2004] => self.clear_mode(MODE_BRACKETED_PASTE),
                 _ => unhandled(self),

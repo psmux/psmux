@@ -316,10 +316,26 @@ pub enum TerminalQuery {
     Da2,
     /// Device status.
     DsrStatus,
-    /// Private mode status.
-    DecrqmPrivate(u16),
-    /// ANSI mode status.
-    DecrqmAnsi(u16),
+    /// Private mode status (`CSI ? Ps $ p`).
+    DecrqmPrivate {
+        /// The mode asked about, 1 or more.
+        mode: u16,
+        /// The mode as the parser met the query, as tmux answers it
+        /// (`INPUT_CSI_QUERY_PRIVATE`, input.c:1651-1722 at tag 3.8): 1 set,
+        /// 2 reset, 4 permanently reset, 0 not known. `None` when the host
+        /// holds the answer: 2026, whose updates the host gates, and 12 when
+        /// the program set neither a cursor shape nor a blink, which the host
+        /// answers from its `cursor-style` option.
+        value: Option<u8>,
+    },
+    /// ANSI mode status (`CSI Ps $ p`).
+    DecrqmAnsi {
+        /// The mode asked about, 1 or more.
+        mode: u16,
+        /// The mode as the parser met the query: 1 set, 2 reset, 0 not known
+        /// (`INPUT_CSI_QUERY`, input.c:1638-1650 at tag 3.8).
+        value: u8,
+    },
     /// XTWINOPS pixel size report request (`CSI 14 t`, `15`, `16`).
     WindowReport(u16),
     /// XTVERSION (`CSI > q`, `CSI > 0 q`).

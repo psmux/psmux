@@ -291,10 +291,10 @@ three seconds**, because OpenConsole opens a pane by writing `ESC[1t ESC[c` towa
 parks the child inside its console connect until the DA1 reply arrives. psmux answering the
 queries removes both: prompt at 616 / 617 / 615 ms where it used to be 3777 / 3747 / 3799 ms.
 
-One deliberate difference from tmux: DECRQM for mode **2026** (synchronized output) reports `0`,
-not recognised, rather than tmux's `2`. psmux has no synchronized output to offer, and `0` is
-byte for byte what the inbox host already answers on this build, so a pane sees the same reply
-whichever console host is under it.
+One deliberate difference from tmux: DECRQM for mode **2031** (theme update notifications)
+reports `0`, not recognised, rather than tmux's `1` or `2`, because psmux sends no theme change
+notification. Every mode psmux answers is answered as it stood at the query; the modes are
+listed in [compatibility.md](compatibility.md#mode-query-decrqm).
 
 The keystroke win is real and large. Set this when you want it, knowing you are also taking on a
 console host that Windows Update does not patch for you.

@@ -8,14 +8,15 @@ use crate::types::HostColors;
 
 /// `cursor-style` and `cursor-blink` live in the environment, so a test that
 /// reads the fallback takes them out under the shared lock and puts them
-/// back afterwards (see `test_issue735_cursor_style_default.rs`).
-struct CursorEnv {
+/// back afterwards (see `test_issue735_cursor_style_default.rs`). The DECRQM
+/// tests read the same fallback.
+pub(super) struct CursorEnv {
     _lock: std::sync::MutexGuard<'static, ()>,
     saved: Vec<(&'static str, Option<String>)>,
 }
 
 impl CursorEnv {
-    fn take() -> Self {
+    pub(super) fn take() -> Self {
         let lock = crate::util::lock_test_env();
         let saved = ["PSMUX_CURSOR_STYLE", "PSMUX_CURSOR_BLINK"]
             .into_iter()

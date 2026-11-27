@@ -191,8 +191,8 @@ fn sync_gate_shared_detection_releases_every_query_split() {
         (&b"\x1b[c"[..], DeviceQuery::Da1),
         (&b"\x1b[>c"[..], DeviceQuery::Da2),
         (&b"\x1b[5n"[..], DeviceQuery::DsrStatus),
-        (&b"\x1b[?2026$p"[..], DeviceQuery::DecrqmPrivate(2026)),
-        (&b"\x1b[4$p"[..], DeviceQuery::DecrqmAnsi(4)),
+        (&b"\x1b[?2026$p"[..], DeviceQuery::DecrqmPrivate { mode: 2026, value: None }),
+        (&b"\x1b[4$p"[..], DeviceQuery::DecrqmAnsi { mode: 4, value: 2 }),
         (&b"\x1b]7501;?\x07"[..], DeviceQuery::ProgramStatus),
         (&b"\x1b]7501;?\x1b\\"[..], DeviceQuery::ProgramStatus),
     ] {
@@ -245,10 +245,10 @@ fn sync_gate_keeps_paint_and_reports_held_until_a_real_query() {
     let released = gate.feed(query.to_vec(), t0, true);
     parser.process(&released);
     let queries = parser.screen_mut().take_queries();
-    assert_eq!(queries, vec![DeviceQuery::ProgramStatus, DeviceQuery::Da1, DeviceQuery::DecrqmPrivate(2026)]);
+    assert_eq!(queries, vec![DeviceQuery::ProgramStatus, DeviceQuery::Da1, DeviceQuery::DecrqmPrivate { mode: 2026, value: None }]);
     let mut state = DecrqmState::from_screen(parser.screen());
     state.synchronized_output = gate.is_open();
-    assert!(state.bracketed_paste);
+    assert!(parser.screen().bracketed_paste());
     let replies: String = queries.into_iter().map(|q| device_reply(q, &state)).collect();
     assert_eq!(replies, format!("{}\x1b[?1;2;4c\x1b[?2026;1$y", vt100::PROGRAM_STATUS_REPLY));
     assert_eq!(parser.screen().program_status().get("").unwrap().state, vt100::ProgramState::Done);
