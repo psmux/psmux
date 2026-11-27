@@ -49,7 +49,20 @@ function Wait-PortFile {
 Write-Host "`n=== Issue #4: pane output visible (SSH proxy test) ===" -ForegroundColor Cyan
 
 $sshAvail = $false
-$sshTest = & ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=3 localhost "echo SSHPROBE_OK" 2>&1
+# ConnectTimeout only bounds the TCP connect; a session that connects and then
+# stalls in auth or the remote command would hang the suite until the runner's
+# timeout, so the whole probe gets 10 s and the ssh process is ended after that.
+$sshTest = ""
+$sshExe = (Get-Command ssh -EA SilentlyContinue).Source
+if ($sshExe) {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($sshExe, '-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=3 localhost "echo SSHPROBE_OK"')
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
+    $probe = [System.Diagnostics.Process]::Start($psi)
+    $probe.StandardInput.Close()
+    $outTask = $probe.StandardOutput.ReadToEndAsync()
+    if ($probe.WaitForExit(10000)) { $sshTest = $outTask.Result }
+    else { try { $probe.Kill() } catch {}; Write-Info "ssh probe did not finish in 10 s, treating SSH as unavailable" }
+}
 if ($sshTest -match "SSHPROBE_OK") { $sshAvail = $true }
 
 if ($sshAvail) {
