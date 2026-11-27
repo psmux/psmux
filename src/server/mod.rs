@@ -2434,6 +2434,20 @@ fn run_copy_mode_command_by_name(app: &mut AppState, cmd: &str) {
     }
 }
 
+/// The `prefix` and `prefix2` values of the client state JSON, escaped for a
+/// JSON string. The frame is assembled with `format!`, so a prefix whose name
+/// holds a `\` (`C-\`, issue #1118) has to be escaped here, or it ends the
+/// string early and the client cannot parse a single frame (blank screen,
+/// prefix never recognised).
+pub(crate) fn prefix_json_strings(
+    prefix: &Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    prefix2: Option<&(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+) -> (String, String) {
+    (
+        json_escape_string(&crate::config::format_option_key(prefix)),
+        json_escape_string(&prefix2.map(format_key_binding).unwrap_or_default()),
+    )
+}
 
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     crate::startup_trace::mark("srv.entry");
@@ -4353,8 +4367,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if meta_dirty {
                         cached_windows_json = list_windows_json_with_tabs(&app)?;
                         cached_tree_json = list_tree_json(&app)?;
-                        cached_prefix_str = crate::config::format_option_key(&app.prefix_key);
-                        cached_prefix2_str = app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_default();
+                        (cached_prefix_str, cached_prefix2_str) = prefix_json_strings(&app.prefix_key, app.prefix2_key.as_ref());
                         cached_base_index = app.window_base_index;
                         cached_pred_dim = app.prediction_dimming;
                         cached_status_style = app.status_style.clone();
@@ -9312,8 +9325,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             if meta_dirty {
                 cached_windows_json = list_windows_json_with_tabs(&app)?;
                 cached_tree_json = list_tree_json(&app)?;
-                cached_prefix_str = crate::config::format_option_key(&app.prefix_key);
-                cached_prefix2_str = app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_default();
+                (cached_prefix_str, cached_prefix2_str) = prefix_json_strings(&app.prefix_key, app.prefix2_key.as_ref());
                 cached_base_index = app.window_base_index;
                 cached_pred_dim = app.prediction_dimming;
                 cached_status_style = app.status_style.clone();
@@ -9957,3 +9969,7 @@ mod tests_select_pane_input_off;
 #[cfg(test)]
 #[path = "../../tests-rs/test_control_subscription_targets.rs"]
 mod tests_control_subscription_targets;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue1118_prefix_json_escape.rs"]
+mod tests_issue1118_prefix_json_escape;
