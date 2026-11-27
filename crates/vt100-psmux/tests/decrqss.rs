@@ -200,11 +200,10 @@ fn a_respawn_keeps_the_shape_and_not_the_blink() {
 }
 
 #[test]
-fn a_new_screen_can_keep_it() {
-    // psmux's clear-history starts the screen again; tmux keeps the style.
-    let mut old = Parser::new(24, 80, 0);
-    old.process(b"\x1b[2 q\x1b[?12h");
-    let mut fresh = Parser::new(24, 80, 0);
-    fresh.screen_mut().keep_cursor_style(old.screen());
-    assert_eq!(fresh.screen().cursor_style(), 1);
+fn clear_history_keeps_it() {
+    // tmux's clear-history frees only the history and keeps the style.
+    let mut p = Parser::new(24, 80, 0);
+    p.process(b"\x1b[2 q\x1b[?12h");
+    p.screen_mut().clear_history();
+    assert_eq!(p.screen().cursor_style(), 1);
 }

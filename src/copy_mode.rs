@@ -3403,6 +3403,10 @@ mod test_copy_mode_resize_reanchor;
 mod test_copy_mode_snapshot;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_clear_history_keeps_screen.rs"]
+mod test_clear_history_keeps_screen;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_copy_cancel_stale_state.rs"]
 mod tests_copy_cancel_stale_state;
 

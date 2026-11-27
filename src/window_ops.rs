@@ -4728,13 +4728,6 @@ pub fn break_pane_to_window(app: &mut AppState) {
     let _ = break_pane(app, &BreakPaneRequest::default());
 }
 
-/// `clear-history`: drop the active pane's scrollback.
-///
-/// tmux (cmd-capture-pane.c:418) resets every mode on the pane first and then
-/// calls `grid_clear_history(wp->base.grid)`, i.e. the LIVE grid, with copy
-/// mode gone. That ordering is load bearing: while copy mode is up `pane.term`
-/// is the frozen snapshot, so clearing it would wipe the screen the user is
-/// reading and leave the live scrollback untouched.
 /// `send-keys -R` (tmux cmd-send-keys.c: colour_palette_clear and
 /// input_reset(wp->ictx, 1)): the pane's terminal state goes back to what a
 /// new program starts with, the screen is cleared and the program is sent
@@ -4750,33 +4743,28 @@ pub fn reset_active_pane_terminal(app: &mut AppState) {
     }
 }
 
-pub fn clear_active_pane_history(app: &mut AppState) {
+/// `clear-history [-H]` on the active pane, as tmux's cmd-capture-pane.c
+/// (tag 3.8, lines 424 to 430) does it: leave every mode, then free the
+/// pane's history and nothing else (`grid_clear_history(wp->base.grid)`), and
+/// with `-H` forget its hyperlinks (`screen_reset_hyperlinks`).  The visible
+/// screen, the alternate screen, the cursor and the modes the program asked
+/// for all stay, so a full screen program keeps drawing where it was.
+///
+/// Copy mode goes first, as in tmux: while it is up `pane.term` is the frozen
+/// snapshot, so clearing it would wipe the screen the user is reading and
+/// leave the live history untouched.
+pub fn clear_active_pane_history(app: &mut AppState, reset_hyperlinks: bool) {
     if app.mode.in_copy() {
         exit_copy_mode(app);
     }
-    let history_limit = app.history_limit;
     let win = &mut app.windows[app.active_idx];
     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
         p.leave_copy_snapshot();
         if let Ok(mut parser) = p.term.lock() {
-            let host_win32_input = parser.screen().win32_input_requested();
-            let key_mode = parser.screen().extended_keys_mode();
-            // The pane's options are unchanged too (#980).
-            let pane_colours = parser.screen().pane_colours().cloned();
-            let scroll_on_clear = parser.screen().scroll_on_clear();
-            let old = std::mem::replace(&mut *parser, vt100::Parser::new(p.last_rows, p.last_cols, history_limit));
-            parser.screen_mut().keep_colours(old.screen());
-            // tmux clears only the history, so the cursor style the program
-            // set stays.
-            parser.screen_mut().keep_cursor_style(old.screen());
-            parser.screen_mut().set_pane_colours(pane_colours);
-            parser.screen_mut().set_scroll_on_clear(scroll_on_clear);
-            // The console host is unchanged, and it asked for win32 input mode
-            // only once, at startup (issue #845).
-            parser.screen_mut().set_win32_input_requested(host_win32_input);
-            // The application is unchanged too, and so is the key mode it
-            // asked for (issue #860).
-            parser.screen_mut().set_extended_keys_mode(key_mode);
+            parser.screen_mut().clear_history();
+            if reset_hyperlinks {
+                parser.screen_mut().reset_hyperlinks();
+            }
         }
     }
 }

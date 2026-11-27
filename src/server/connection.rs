@@ -6493,7 +6493,10 @@ match cmd {
         let _ = tx.send(CtrlReq::CopyModePageUp);
     }
     "clear-history" | "clearhist" => {
-        let _ = tx.send(CtrlReq::ClearHistory);
+        // -H also removes the hyperlinks (tmux.1, cmd-capture-pane.c:427),
+        // read with the flag clusters tmux allows (`-Ht %1`).
+        let (flags, _) = crate::cli::options_and_operand_start("clear-history", &args);
+        let _ = tx.send(CtrlReq::ClearHistory(flags.contains('H')));
     }
     // TEST ONLY: `debug-stall <ms>` stalls the server loop so a test can
     // reproduce a long stall on demand.  Inert (an unknown command) unless

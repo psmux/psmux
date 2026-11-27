@@ -364,7 +364,7 @@ A psmux extension that creates a pane floating above the tiled layout.
 - Not accepted: `-a`, `-C`, `-M`, `-N`, `-P`, `-q`, `-T`
 
 **clear-history** (`clearhist`)
-- Boolean: `-H` (also clear the alternate screen)
+- Boolean: `-H` (also remove all hyperlinks)
 - Value: `-t` (target pane)
 
 **list-panes** (`lsp`)

@@ -4186,31 +4186,14 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
             app.mode = Mode::BufferChooser { selected: 0 };
         }
         "clear-history" | "clearhist" => {
+            // -H also removes the hyperlinks (cmd-capture-pane.c:427).
+            let (flags, _) = crate::cli::options_and_operand_start("clear-history", &parts[1..]);
+            let reset_hyperlinks = flags.contains('H');
             if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, "clear-history\n", &app.session_key);
+                let line = if reset_hyperlinks { "clear-history -H\n" } else { "clear-history\n" };
+                let _ = send_control_to_port(port, line, &app.session_key);
             } else {
-                let allow_alt = app.allow_alternate_screen;
-                let history_limit = app.history_limit;
-                let win = &mut app.windows[app.active_idx];
-                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
-                    if let Ok(mut parser) = p.term.lock() {
-                        let mut fresh = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
-                        fresh.screen_mut().set_allow_alternate_screen(allow_alt);
-                        // Same console host, so the same answer to "does it
-                        // parse win32 input records" (issue #845).
-                        fresh.screen_mut().set_win32_input_requested(parser.screen().win32_input_requested());
-                        // Same application, same key mode (issue #860).
-                        fresh.screen_mut().set_extended_keys_mode(parser.screen().extended_keys_mode());
-                        // The pane's options are unchanged too (#980).
-                        fresh.screen_mut().set_pane_colours(parser.screen().pane_colours().cloned());
-                        fresh.screen_mut().set_scroll_on_clear(parser.screen().scroll_on_clear());
-                        fresh.screen_mut().keep_colours(parser.screen());
-                        // tmux clears only the history, so the cursor style
-                        // the program set stays.
-                        fresh.screen_mut().keep_cursor_style(parser.screen());
-                        *parser = fresh;
-                    }
-                }
+                crate::window_ops::clear_active_pane_history(app, reset_hyperlinks);
             }
         }
         "kill-session" | "kill-ses" => {

@@ -8160,10 +8160,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ResetPaneTerminal => {
                     crate::window_ops::reset_active_pane_terminal(&mut app);
                 }
-                CtrlReq::ClearHistory => {
-                    // Leaves copy mode first and clears the LIVE grid, the way
-                    // tmux does; see clear_active_pane_history.
-                    crate::window_ops::clear_active_pane_history(&mut app);
+                CtrlReq::ClearHistory(reset_hyperlinks) => {
+                    // Leaves copy mode first and frees the LIVE grid's history,
+                    // the way tmux does; see clear_active_pane_history.
+                    crate::window_ops::clear_active_pane_history(&mut app, reset_hyperlinks);
                 }
                 CtrlReq::DebugStall(ms) => {
                     // TEST ONLY, see CtrlReq::DebugStall: a deliberate stall

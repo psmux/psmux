@@ -257,8 +257,8 @@ fn targeted_sender_wraps_every_request() {
         }
     }
     let plain = TargetedSender::new(&tx, None);
-    plain.send(CtrlReq::ClearHistory).unwrap();
-    assert!(matches!(rx.try_recv().unwrap(), CtrlReq::ClearHistory));
+    plain.send(CtrlReq::ClearHistory(false)).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), CtrlReq::ClearHistory(false)));
 }
 
 // Issue #793: a target's session part is a claim about which server the

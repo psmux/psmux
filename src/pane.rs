@@ -5318,9 +5318,8 @@ pub fn spawn_reader_thread(
         // latency worth having back: a probe is far under ECHO_CHUNK_MAX, so
         // it skips the coalescing wait, and measured from the read the
         // injection was done in 2 to 3 ms here and in the reader thread alike.
-        // Query capture is armed per batch below, not once here: clear-history
-        // swaps a fresh `vt100::Parser` into this same mutex, and a flag set
-        // once would leave the pane unanswered for the rest of its life.
+        // Query capture is armed per batch below, not once here, so a parser
+        // put into this same mutex later is armed too.
         // Issue #685: the palette generation last mirrored into
         // `types::PANE_PALETTES`.  A fresh parser starts at 0 with an empty
         // palette, so a pane id reused by respawn-pane withdraws whatever the

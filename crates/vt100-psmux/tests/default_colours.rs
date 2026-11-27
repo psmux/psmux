@@ -127,13 +127,12 @@ fn a_host_that_drops_the_resets_has_the_program_colours_ignored() {
 }
 
 #[test]
-fn a_respawn_and_a_new_screen_keep_them() {
+fn a_respawn_and_clear_history_keep_them() {
     let mut p = parse("\x1b]11;#ff0000\x1b\\");
     p.screen_mut().reinit_keep_history();
     assert_eq!(p.screen().program_default_colours(), (None, Some(RED)));
-    let mut fresh = vt100::Parser::new(10, 40, 0);
-    fresh.screen_mut().keep_colours(p.screen());
-    assert_eq!(fresh.screen().program_default_colours(), (None, Some(RED)));
+    p.screen_mut().clear_history();
+    assert_eq!(p.screen().program_default_colours(), (None, Some(RED)));
 }
 
 #[test]
