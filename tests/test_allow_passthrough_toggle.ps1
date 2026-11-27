@@ -12,6 +12,15 @@
 # With set-clipboard on a paste buffer holding the tag means the parser acted
 # on the wrapped copy, which must never happen. Steps: off, on, off, all, then set -u (back to off).
 #
+# The Windows 10 inbox conhost (build 19045) unwraps the passthrough before
+# psmux reads the pane: it drops ESC P and the closing ST, prints "tmux;" as
+# text, and hands psmux the inner OSC 52, which ends with BEL here, ahead of
+# the text. psmux never sees
+# the wrapper there, so on a build before 22000 without PSMUX_CONPTY_DIR
+# every step expects the copy to be made, as for an unwrapped OSC 52 with
+# set-clipboard on; the marker must still show. OpenConsole passes the
+# wrapper on, so with PSMUX_CONPTY_DIR the steps are as on Windows 11.
+#
 # Runs under a private -L namespace and PSMUX_DATA_DIR; cleans up with
 # `psmux -L <ns> kill-server` only. PSMUX_EXE picks another binary.
 
@@ -23,6 +32,7 @@ function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
 Write-Host "psmux: $PSMUX ($(& $PSMUX -V))"
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("psmux_pttog_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force $work | Out-Null
 $ns = 'pttog_' + [guid]::NewGuid().ToString('N').Substring(0, 6)
@@ -70,6 +80,8 @@ try {
     foreach ($s in $steps) {
         $step++
         $label = $s[0]; $set = $s[1]; $want = $s[2]; $form = if ($s.Count -gt 3) { $s[3] } else { 'st' }
+        # The Windows 10 inbox conhost hands psmux the OSC 52 unwrapped.
+        if ($Win10Inbox) { $want = $true }
         if ($set -eq '-u') { & $PSMUX -L $ns set -gu allow-passthrough }
         elseif ($set) { & $PSMUX -L $ns set -g allow-passthrough $set }
         $shown = (& $PSMUX -L $ns show -gv allow-passthrough | Out-String).Trim()
