@@ -731,25 +731,29 @@ impl Grid {
     pub fn insert_cells(&mut self, count: u16, fill: crate::attrs::Attrs) {
         let size = self.size;
         let pos = self.pos;
-        let wide = pos.col < size.cols
-            && self
-                .drawing_cell(pos)
-                // we assume self.pos.row is always valid, and we know we are
-                // not off the end of a row because we just checked pos.col <
-                // size.cols
-                .unwrap()
-                .is_wide_continuation();
+        // No more than reach the right edge, as tmux (screen-write.c:1365 at
+        // tag 3.8): each insert below moves the rest of the row, so a count
+        // past the edge only cost time, about two seconds for `CSI 65535 @`.
+        let count = count.min(size.cols.saturating_sub(pos.col));
         let mut blank = crate::Cell::new();
         blank.clear(fill);
         let row = self.current_row_mut();
+        // An insert on the right half of a wide character splits it, and both
+        // halves become blanks, as both console hosts leave them. tmux moves
+        // the cells and leaves the two halves apart (grid-view.c:197-210 at
+        // tag 3.8), but a row here never keeps a lone half (#639).
+        if row
+            .get(pos.col)
+            .is_some_and(crate::Cell::is_wide_continuation)
+        {
+            row.clear_wide(pos.col);
+            if let Some(cell) = row.get_mut(pos.col) {
+                let attrs = *cell.attrs();
+                cell.clear(attrs);
+            }
+        }
         for _ in 0..count {
-            if wide {
-                row.get_mut(pos.col).unwrap().set_wide_continuation(false);
-            }
             row.insert(pos.col, blank.clone());
-            if wide {
-                row.get_mut(pos.col).unwrap().set_wide_continuation(true);
-            }
         }
         row.truncate(size.cols);
     }
