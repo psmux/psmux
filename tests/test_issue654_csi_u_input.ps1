@@ -42,7 +42,9 @@
 # 19045 hands the client inside no CSI 13;2u at all (the inner pane's child
 # got nothing in 3 of 3 runs, while the control's plain bytes arrive), as it
 # passes a VT reader no key sequence it does not know. So there Part D expects
-# nothing to arrive.
+# nothing to arrive. With PSMUX_CONPTY_DIR the panes run on OpenConsole, which
+# hands it on as Windows 11 does (3 of 3 runs on 19045), so Part D expects it
+# there, as test_altgr_letter_paste.ps1 does.
 
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_EXE) { $env:PSMUX_EXE }
@@ -370,7 +372,7 @@ if (-not $bash) {
     }
     if ($done -eq 0) {
         Write-Skip "no ConPTY link came up, so the VT path went untested"
-    } elseif ([Environment]::OSVersion.Version.Build -lt 22000) {
+    } elseif ([Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR) {
         if ($hit -eq 0) { Write-Pass "0/$done runs: the outer pane's inbox conhost hands the client inside no CSI 13;2u on this host" }
         else { Write-Fail "$hit/$done runs got CSI 13;2u through the inbox conhost of Windows 10, which passed none when measured" }
     } elseif ($hit -eq $done) {
