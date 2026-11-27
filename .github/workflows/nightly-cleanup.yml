@@ -1,0 +1,161 @@
+name: Nightly Cleanup
+
+run-name: Nightly Cleanup through ${{ inputs.cutoff_date }}${{ inputs.dry_run && ' [DRY RUN]' || ' [DELETE]' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      cutoff_date:
+        description: 'Delete nightly ZIPs and completed Nightly Build runs dated on/before YYYY-MM-DD (UTC)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Preview only: do not delete assets, runs, or logs, and do not edit release notes'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: write
+
+# Match nightly.yml so publication and cleanup do not overlap.
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preview or delete old nightly ZIPs and workflow runs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CUTOFF_DATE: ${{ inputs.cutoff_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          # Cutoff is inclusive, using UTC (00:00:00Z through 23:59:59Z).
+          if ($env:CUTOFF_DATE -cnotmatch '^\d{4}-\d{2}-\d{2}$') {
+            throw 'cutoff_date must be YYYY-MM-DD'
+          }
+          try {
+            $midnight = [DateTimeOffset]::ParseExact(
+              "$($env:CUTOFF_DATE)T00:00:00+00:00",
+              "yyyy-MM-dd'T'HH:mm:sszzz",
+              [System.Globalization.CultureInfo]::InvariantCulture)
+          } catch {
+            throw "Invalid cutoff_date: $env:CUTOFF_DATE"
+          }
+          $cutoffExclusive = $midnight.AddDays(1).UtcDateTime
+          $dryRun = ($env:DRY_RUN -eq 'true')
+          Write-Host "Repository: $env:GH_REPO"
+          Write-Host "Cutoff (inclusive, UTC): $env:CUTOFF_DATE"
+          Write-Host "Before (UTC): $($cutoffExclusive.ToString('o'))"
+          Write-Host "Dry run: $dryRun"
+
+          # Inspect only the fixed 'nightly' pre-release.
+          $release = gh release view nightly --repo $env:GH_REPO `
+            --json tagName,isPrerelease,isDraft,isImmutable,body,databaseId | ConvertFrom-Json
+          if ($release.tagName -cne 'nightly' -or $release.isDraft -or -not $release.isPrerelease) {
+            throw 'Refusing cleanup: nightly must be a published pre-release'
+          }
+
+          # REST pagination avoids truncating large release asset lists.
+          $assetPages = gh api --paginate --slurp `
+            "repos/$env:GH_REPO/releases/$($release.databaseId)/assets?per_page=100" | ConvertFrom-Json
+          $assets = @($assetPages | ForEach-Object { $_ })
+          $pattern = '^psmux-nightly-([0-9a-fA-F]{7})-windows-x64\.zip$'
+          $zipAssets = @($assets | Where-Object { $_.name -cmatch $pattern })
+          # Delete every matching ZIP uploaded before the UTC cutoff,
+          # including the newest one if it falls within the date range.
+          $toDelete = @($zipAssets | Where-Object {
+            ([DateTimeOffset]::Parse($_.created_at)).UtcDateTime -lt $cutoffExclusive
+          })
+          $toKeep = @($zipAssets | Where-Object {
+            ([DateTimeOffset]::Parse($_.created_at)).UtcDateTime -ge $cutoffExclusive
+          })
+
+          # Only runs belonging to nightly.yml, not CI, Release or Cleanup.
+          # Pagination reads the complete available history; only completed runs are eligible.
+          $runPages = gh api --paginate --slurp `
+            "repos/$env:GH_REPO/actions/workflows/nightly.yml/runs?per_page=100" | ConvertFrom-Json
+          $runs = @($runPages | ForEach-Object { $_.workflow_runs } | ForEach-Object { $_ })
+          $runsToDelete = @($runs | Where-Object {
+            $_.status -eq 'completed' -and
+            ([DateTimeOffset]::Parse($_.created_at)).UtcDateTime -lt $cutoffExclusive
+          })
+
+          Write-Host "Matching ZIP assets: $($zipAssets.Count); to delete: $($toDelete.Count)"
+          Write-Host "Completed Nightly Build runs to delete: $($runsToDelete.Count)"
+          $summary = @(
+            '## Nightly Cleanup'
+            "- Cutoff date (inclusive, UTC): **$env:CUTOFF_DATE**"
+            "- Mode: **$(if ($dryRun) { 'DRY RUN' } else { 'DELETE' })**"
+            "- ZIP assets to delete: **$($toDelete.Count)**"
+            "- Completed Nightly Build runs to delete: **$($runsToDelete.Count)**"
+            '- Scope: only `nightly` pre-release ZIP assets and `nightly.yml` runs'
+            ''
+            '### ZIP assets'
+          )
+          foreach ($asset in $toDelete) {
+            $summary += "- $($asset.name) ($($asset.created_at))"
+          }
+          if ($toDelete.Count -eq 0) { $summary += '- None' }
+          $summary += @('', '### Workflow runs (runs and their logs)')
+          foreach ($run in $runsToDelete) {
+            $summary += "- [Run $($run.id)]($($run.html_url)) ($($run.created_at))"
+          }
+          if ($runsToDelete.Count -eq 0) { $summary += '- None' }
+          $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+          if ($dryRun) {
+            Write-Host 'DRY RUN: No release assets, release notes, runs or logs were modified.'
+            exit 0
+          }
+          if ($toDelete.Count -gt 0 -and $release.isImmutable) {
+            throw 'Refusing cleanup: the nightly release is immutable'
+          }
+
+          # Update the recommended link before deleting ZIPs, including the latest if eligible.
+          # If all ZIPs are removed, show that no nightly download is available.
+          if ($toDelete.Count -gt 0) {
+            $latest = $toKeep | Sort-Object created_at -Descending | Select-Object -First 1
+            if ($null -ne $latest) {
+              $null = $latest.name -match $pattern
+              $sha = $Matches[1]
+              $download = "https://github.com/$env:GH_REPO/releases/download/nightly/$($latest.name)"
+              $commit = "https://github.com/$env:GH_REPO/commit/$sha"
+              $details = "**Latest available nightly:** [$sha]($commit)`n`n**Windows x64:** [Download $($latest.name)]($download)"
+            } else {
+              $details = '**No nightly ZIP is currently available.**'
+            }
+            $notes = @"
+          # psmux Nightly Build
+
+          $details
+
+          Development builds are for testing, not stable releases.
+          The autogenerated Source code archives refer to the fixed nightly tag,
+          not necessarily to the latest ZIP asset.
+          "@
+            $notes | Set-Content -Path release-notes.md -Encoding utf8
+            gh release edit nightly --repo $env:GH_REPO `
+              --notes-file release-notes.md --prerelease --latest=false
+            Write-Host 'Updated nightly release notes before ZIP cleanup.'
+          }
+
+          foreach ($asset in $toDelete) {
+            gh release delete-asset nightly $asset.name --repo $env:GH_REPO --yes
+            Write-Host "Deleted ZIP: $($asset.name)"
+          }
+          foreach ($run in $runsToDelete) {
+            # Deleting the run also removes its associated logs and run artifacts.
+            gh api --method DELETE "repos/$env:GH_REPO/actions/runs/$($run.id)"
+            Write-Host "Deleted Nightly Build run and logs: $($run.id)"
+          }
+          Write-Host 'Nightly Cleanup complete.'
