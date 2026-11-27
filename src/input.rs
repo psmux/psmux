@@ -2503,7 +2503,15 @@ pub(crate) const WIN32_INPUT_INBOX_MIN_BUILD: u32 = 22000;
 /// and keeps the stream's word.
 #[cfg(windows)]
 pub(crate) fn host_parses_win32_input(requested: bool, build: Option<u32>, supplied_host: bool) -> bool {
-    requested && (supplied_host || !build.is_some_and(|b| b < WIN32_INPUT_INBOX_MIN_BUILD))
+    requested && !windows10_inbox_host(build, supplied_host)
+}
+
+/// Do this process's panes run under Windows 10's inbox conhost, the host
+/// before build [`WIN32_INPUT_INBOX_MIN_BUILD`] that no `PSMUX_CONPTY_DIR`
+/// replaced?  An unknown build is not taken as one.
+#[cfg(windows)]
+pub(crate) fn windows10_inbox_host(build: Option<u32>, supplied_host: bool) -> bool {
+    !supplied_host && build.is_some_and(|b| b < WIN32_INPUT_INBOX_MIN_BUILD)
 }
 
 /// `LEFT_CTRL_PRESSED` in a console `KEY_EVENT_RECORD`'s control key state.
@@ -2678,10 +2686,11 @@ fn legacy_host_misreads_ctrl_letter(c: char) -> bool {
 /// [`legacy_host_key_record`]: the inbox conhost of a build before
 /// [`WIN32_INPUT_INBOX_MIN_BUILD`]?  Issue #1095.  An unknown build, every
 /// build from Windows 11 on and a host supplied with `PSMUX_CONPTY_DIR` keep
-/// the bytes or records they had, whatever the pane's stream carried.
+/// the bytes or records they had, whatever the pane's stream carried.  The
+/// host is the one [`windows10_inbox_host`] names.
 #[cfg(windows)]
 pub(crate) fn legacy_host_misreads_key_bytes(build: Option<u32>, supplied_host: bool) -> bool {
-    !supplied_host && build.is_some_and(|b| b < WIN32_INPUT_INBOX_MIN_BUILD)
+    windows10_inbox_host(build, supplied_host)
 }
 
 /// Write `rec` ([`legacy_host_key_record`]) straight into `p`'s console with
@@ -3108,10 +3117,19 @@ pub(crate) fn pane_extended_key_bytes(
 
 /// Only a pane reading VT input takes an extended sequence; see
 /// [`pane_extended_key_bytes`].
+///
+/// Issue #1116: nor does any pane under the Windows 10 inbox conhost.  That
+/// host's input parser knows neither `CSI 27;m;k~` nor `CSI k;m u` and drops
+/// both: measured on 19045 with a raw mode node child in mode 2, C-a, M-a,
+/// C-1, S-Enter and C-BSpace all read as nothing, in either format, while
+/// `CSI 1;5D` arrived.  There the legacy bytes are the only ones a program
+/// can read.  A host supplied with `PSMUX_CONPTY_DIR` (OpenConsole) passes
+/// both forms.
 fn pane_takes_extended_bytes(p: &mut crate::types::Pane) -> bool {
     #[cfg(windows)]
     {
-        crate::window_ops::pane_reads_vt_bytes(p)
+        !windows10_inbox_host(win32_input_host_build(), pane_host_is_supplied())
+            && crate::window_ops::pane_reads_vt_bytes(p)
     }
     #[cfg(not(windows))]
     {
@@ -5108,6 +5126,10 @@ mod tests_enter_delivery;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_win10_child_win32_input.rs"]
 mod tests_win10_child_win32_input;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_win10_extended_keys.rs"]
+mod tests_win10_extended_keys;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_input.rs"]
