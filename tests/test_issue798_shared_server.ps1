@@ -477,6 +477,11 @@ try {
     foreach ($c in $ch, $cj) { try { $c.W.WriteLine("client-detach"); $c.W.Flush() } catch {}; $c.T.Close() }
 
     # e3a0498c: C-Space reaches a pane in extended key mode 2 as CSI 27;5;32~.
+    # Windows 10 (a build before 22000, the inbox conhost): that host holds a
+    # request written on its own, so the recorder writes text after it, and it
+    # drops the extended forms, so psmux writes the legacy bytes there (#1116).
+    # It hands a VT reader no NUL either, so C-a stands in for C-Space.
+    $win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
     $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
     if (-not (Test-Path $csc)) { $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe" }
     $REC = Join-Path $ROOT "rec860.exe"
@@ -484,19 +489,23 @@ try {
     if (Test-Path $REC) {
         S $k @('set', '-g', 'extended-keys', 'on') | Out-Null
         $log = Join-Path $ROOT "rec798.txt"
-        S $k @('new-window', '-t', 'J', '--', $REC, 'vt', $log, '\e[>4;2m') | Out-Null
+        S $k @('new-window', '-t', 'J', '--', $REC, 'vt', $log, $(if ($win10) { '\e[>4;2mready' } else { '\e[>4;2m' })) | Out-Null
         $null = Wait-Until { (Get-Content $log -EA SilentlyContinue) -match 'READY' } 10000
         Start-Sleep -Milliseconds 700
         Check ((S $k @('display-message', '-p', '-t', 'J', '#{pane_key_mode}')).Out -eq 'Ext 2') "the recorder pane is in extended key mode 2"
-        foreach ($key in '|', 'C-Space', '|') { S $k @('send-keys', '-t', 'J', $key) | Out-Null; Start-Sleep -Milliseconds 150 }
+        foreach ($key in '|', $(if ($win10) { 'C-a' } else { 'C-Space' }), '|') { S $k @('send-keys', '-t', 'J', $key) | Out-Null; Start-Sleep -Milliseconds 150 }
         Start-Sleep -Milliseconds 800
         $bytes = @()
         foreach ($l in (Get-Content $log -EA SilentlyContinue)) {
             if ($l -match '^BYTES .*hex=\[ ([0-9A-Fa-f ]+) \]') { $bytes += ($Matches[1].Trim() -split '\s+') }
         }
         $stream = ($bytes -join ' ').ToUpper()
-        $want = '7C 1B 5B 32 37 3B 35 3B 33 32 7E 7C'
-        Check ($stream -match [regex]::Escape($want)) "send-keys C-Space reaches it as CSI 27;5;32~ (e3a0498c)" "[$stream]"
+        if ($win10) {
+            Check ($stream -match [regex]::Escape('7C 01 7C')) "send-keys C-a reaches it as the legacy 01 on this host (#1116)" "[$stream]"
+        } else {
+            $want = '7C 1B 5B 32 37 3B 35 3B 33 32 7E 7C'
+            Check ($stream -match [regex]::Escape($want)) "send-keys C-Space reaches it as CSI 27;5;32~ (e3a0498c)" "[$stream]"
+        }
     } else {
         Fail "could not build tests\rec860.cs for the extended keys check"
     }
