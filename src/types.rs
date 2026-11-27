@@ -1835,7 +1835,7 @@ pub struct AppState {
     /// Default: off
     pub allow_predictions: bool,
     pub drag: Option<DragState>,
-    /// In-progress mouse drag on a floating pane (move/resize), if any.
+    /// In-progress mouse drag on a floating pane's border (move/resize), if any.
     pub float_drag: Option<FloatDrag>,
     /// Most recently reported client viewport. New dynamic windows inherit it.
     pub client_area: Rect,
@@ -3791,21 +3791,16 @@ pub struct DragState {
     pub total_pixels: u16,
 }
 
-/// An in-progress mouse drag on a floating pane (tmux moves/resizes floats by
-/// dragging). Grabbing the body moves it; grabbing the bottom/right edge resizes.
+/// An in-progress mouse drag on a floating pane's border (tmux
+/// `resize-pane -M` on a floating pane): the top edge moves it, the other
+/// edges and the corners resize it, see `floating::drag_step`.
 #[derive(Clone, Copy)]
 pub struct FloatDrag {
-    /// Index into the active window's `floating` vec.
-    pub index: usize,
-    pub mode: FloatDragMode,
-}
-
-#[derive(Clone, Copy)]
-pub enum FloatDragMode {
-    /// Move: the cursor's offset (dx, dy) from the float's top-left at grab time.
-    Move { dx: u16, dy: u16 },
-    /// Resize from the bottom-right corner.
-    Resize,
+    /// The floating pane's id.
+    pub id: usize,
+    /// The pointer's last cell in the window, tmux's `m->lx`, `m->ly`: each
+    /// step decides from it which part of the border is held.
+    pub last: (u16, u16),
 }
 
 #[derive(Clone)]

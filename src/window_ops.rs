@@ -1454,30 +1454,27 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         return;
     }
 
-    // Floating panes sit above the tiled layout: a click inside a float grabs
-    // it (tmux moves/resizes floats by dragging) and gives it focus. The
-    // bottom-right edge starts a resize; the body starts a move.
-    {
-        let ox = app.last_window_area.x;
-        let oy = app.last_window_area.y;
-        let hit = {
-            let win = &app.windows[app.active_idx];
-            win.floating.iter().enumerate().rev().find_map(|(i, fp)| {
-                let x0 = ox + fp.x; let y0 = oy + fp.y;
-                if x >= x0 && x < x0 + fp.w && y >= y0 && y < y0 + fp.h {
-                    Some((i, x0, y0, fp.w, fp.h))
-                } else { None }
-            })
-        };
-        if let Some((i, x0, y0, w, h)) = hit {
-            let on_edge = x >= x0 + w.saturating_sub(1) || y >= y0 + h.saturating_sub(1);
-            let mode = if on_edge {
-                crate::types::FloatDragMode::Resize
-            } else {
-                crate::types::FloatDragMode::Move { dx: x - x0, dy: y - y0 }
-            };
-            app.windows[app.active_idx].floating_focus = Some(i);
-            app.float_drag = Some(crate::types::FloatDrag { index: i, mode });
+    // Floating panes sit above the tiled layout, so they are hit first, front
+    // one first (tmux window_get_active_at, window.c). A press on one makes it
+    // the active pane and brings it to the front (tmux MouseDown1Border and
+    // MouseDown1Pane both start with `select-pane -t=`); on its border it
+    // also starts a border drag (MouseDrag1Border, `resize-pane -M`). The
+    // client sends a press inside a float as `pane-mouse` instead, so its
+    // program gets it; this covers a raw `mouse-down`.
+    if x >= app.last_window_area.x && y >= app.last_window_area.y {
+        let area = app.last_window_area;
+        let (px, py) = (x - area.x, y - area.y);
+        let win = &mut app.windows[app.active_idx];
+        let hit = win.floating.iter().enumerate().rev().find_map(|(i, fp)| {
+            let rect = crate::floating::screen_rect(fp.x, fp.y, fp.w, fp.h, area.width, area.height)?;
+            crate::floating::hit(rect, fp.border != "none", px, py).map(|h| (i, h))
+        });
+        if let Some((i, h)) = hit {
+            let i = crate::tree::raise_floating(win, i);
+            win.floating_focus = Some(i);
+            let id = win.floating[i].id;
+            app.float_drag = (h == crate::floating::FloatHit::Border)
+                .then_some(crate::types::FloatDrag { id, last: (px, py) });
             return;
         }
     }
@@ -1555,29 +1552,27 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
     // brought back through (see `CopyGutter`).
     let gutter = CopyGutter::snapshot(app);
 
-    // A floating-pane drag moves or resizes the grabbed float, following the
-    // cursor. Runs before any tiled handling and short-circuits it.
+    // A floating pane's border drag (see `remote_mouse_down`) moves or
+    // resizes it, one step per motion as tmux does (`floating::drag_step`).
+    // Runs before any tiled handling and short-circuits it.
     if let Some(fd) = app.float_drag {
-        let ox = app.last_window_area.x;
-        let oy = app.last_window_area.y;
-        let win_w = app.last_window_area.width.max(10);
-        let win_h = app.last_window_area.height.max(10);
+        let area = app.last_window_area;
+        let (px, py) = (x.saturating_sub(area.x), y.saturating_sub(area.y));
         let win = &mut app.windows[app.active_idx];
-        if let Some(fp) = win.floating.get_mut(fd.index) {
-            match fd.mode {
-                crate::types::FloatDragMode::Move { dx, dy } => {
-                    let nx = x.saturating_sub(ox).saturating_sub(dx);
-                    let ny = y.saturating_sub(oy).saturating_sub(dy);
-                    let (cx, cy) = crate::floating::clamp_into(nx, ny, fp.w, fp.h, win_w, win_h);
-                    fp.x = cx; fp.y = cy;
-                }
-                crate::types::FloatDragMode::Resize => {
-                    let x0 = ox + fp.x;
-                    let y0 = oy + fp.y;
-                    fp.w = (x.saturating_sub(x0) + 1).max(3).min(win_w);
-                    fp.h = (y.saturating_sub(y0) + 1).max(3).min(win_h);
-                    let (cx, cy) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
-                    fp.x = cx; fp.y = cy;
+        if let Some(fp) = win.floating.iter_mut().find(|fp| fp.id == fd.id) {
+            // From where it is drawn, so the step starts from the border the
+            // pointer holds.
+            if let Some((fx, fy, fw, fh)) = crate::floating::screen_rect(fp.x, fp.y, fp.w, fp.h, area.width, area.height) {
+                let g = crate::floating::Geom::from_outer(fx, fy, fw, fh);
+                let last = (fd.last.0 as i32, fd.last.1 as i32);
+                if let Some(new) = crate::floating::drag_step(g, last, (px as i32, py as i32)) {
+                    let (nx, ny, nw, nh) = crate::floating::fit_outer(g, new, area.width, area.height);
+                    fp.x = nx;
+                    fp.y = ny;
+                    fp.w = nw;
+                    fp.h = nh;
+                    // Placed by hand now, so a terminal resize keeps it.
+                    fp.position = None;
                     let inner_h = fp.h.saturating_sub(2).max(1);
                     let inner_w = fp.w.saturating_sub(2).max(1);
                     if fp.pane.last_rows != inner_h || fp.pane.last_cols != inner_w {
@@ -1589,6 +1584,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
                 }
             }
         }
+        app.float_drag = Some(crate::types::FloatDrag { last: (px, py), ..fd });
         return;
     }
 
@@ -2011,10 +2007,43 @@ pub fn remote_scroll_down(app: &mut AppState, x: u16, y: u16) { remote_scroll_wh
 /// Handle a semantic mouse event from the client.
 /// The client has already determined the target pane and computed pane-relative
 /// coordinates, so no coordinate translation is needed.
+/// A pane mouse event for floating pane `pane_id` of the active window,
+/// content relative. A click makes it the active pane and brings it to the
+/// front (tmux MouseDown1Pane, `select-pane -t=`, and
+/// `window_redraw_active_switch`, window.c); the event goes to its program
+/// when that program asked for the mouse (`send-keys -M`), as for a tiled
+/// pane. Returns false when `pane_id` is not such a float.
+fn handle_floating_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool) -> bool {
+    let win = &mut app.windows[app.active_idx];
+    let Some(mut fi) = win.floating.iter().position(|fp| fp.id == pane_id) else { return false };
+    // A press of the left, middle or right button.
+    if button <= 2 && press {
+        fi = crate::tree::raise_floating(win, fi);
+        win.floating_focus = Some(fi);
+    }
+    let win_name = win.name.clone();
+    let pane = &mut win.floating[fi].pane;
+    let wants = if button == 35 { pane_takes_bare_motion(pane) } else { pane_takes_click(pane) };
+    if wants {
+        let button_state = match (button, press) {
+            (0, true) => mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
+            (1, true) => mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED,
+            (2, true) => mouse_inject::RIGHTMOST_BUTTON_PRESSED,
+            _ => 0,
+        };
+        let event_flags = if button == 32 || button == 35 { mouse_inject::MOUSE_MOVED } else { 0 };
+        inject_mouse_combined(pane, col, row, button, press, button_state, event_flags, &win_name);
+    }
+    true
+}
+
 pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool) {
     // The line number gutter of each pane, for the pointer column to be
     // brought back through (see `CopyGutter`).
     let gutter = CopyGutter::snapshot(app);
+    if handle_floating_pane_mouse(app, pane_id, button, col, row, press) {
+        return;
+    }
     // Find the pane by ID and focus it
     let win = &mut app.windows[app.active_idx];
     let mut found_path: Option<Vec<usize>> = None;
@@ -2498,6 +2527,21 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
 /// pane, both landing in `window_clock_key` (#1058). Returns whether a clock
 /// closed, so the caller fires pane-mode-changed.
 pub fn handle_pane_wheel(app: &mut AppState, pane_id: usize, up: bool, at: Option<(i16, i16)>, mods: u8) -> bool {
+    // A floating pane: its program gets the notch when it asked for the mouse
+    // (tmux WheelUpPane, `send -M` with #{mouse_any_flag}). psmux has no copy
+    // mode in a floating pane, so otherwise nothing happens, and the tiled
+    // pane under it never scrolls.
+    let win = &mut app.windows[app.active_idx];
+    if let Some(fp) = win.floating.iter_mut().find(|fp| fp.id == pane_id) {
+        if pane_takes_wheel(&mut fp.pane) {
+            let sgr_btn: u8 = (if up { 64 } else { 65 }) + crate::mouse_keys::sgr_mod_bits(crate::mouse_keys::mods_from_mask(mods));
+            let button_state = (((if up { 120i16 } else { -120 }) as i32) << 16) as u32;
+            let (col, row) = at.unwrap_or((0, 0));
+            let win_name = win.name.clone();
+            inject_mouse_combined(&mut fp.pane, col, row, sgr_btn, true, button_state, mouse_inject::MOUSE_WHEELED, &win_name);
+        }
+        return false;
+    }
     if !app.mouse_enabled || matches!(app.mode, Mode::PopupMode { .. }) {
         handle_pane_scroll(app, pane_id, up, at);
         return false;
@@ -2764,6 +2808,11 @@ pub fn handle_client_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, 
     if matches!(button, 0 | 1 | 2) && press && !replay && crate::copy_mode::has_clock(app, pane_id) {
         focus_pane_id(app, pane_id, true);
         return crate::copy_mode::close_clock_of(app, pane_id);
+    }
+    // A floating pane takes the event and nothing else: the double and
+    // triple click selections are copy mode, which a float does not have.
+    if handle_floating_pane_mouse(app, pane_id, button, col, row, press) {
+        return false;
     }
     handle_pane_mouse(app, pane_id, button, col, row, press);
     if button == 0 && press && !replay {
@@ -5234,3 +5283,7 @@ mod test_issue708_respawn_history_env;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue732_copy_mouse_gutter.rs"]
 mod test_issue732_copy_mouse_gutter;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_floating_pane_mouse.rs"]
+mod tests_floating_pane_mouse;

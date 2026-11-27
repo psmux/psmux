@@ -28,6 +28,10 @@ use crate::pane_border::PaneBorderIndicators;
 /// border style, focus, title, and the pane's rendered rows.
 #[derive(serde::Deserialize, Clone, Default)]
 pub(crate) struct FloatJson {
+    /// The pane id, for the mouse events the client sends it.
+    #[serde(default)] pub id: usize,
+    /// Its program asked for the mouse (a tiled leaf's `wants_mouse`).
+    #[serde(default)] pub wants_mouse: bool,
     #[serde(default)] pub x: u16,
     #[serde(default)] pub y: u16,
     #[serde(default)] pub w: u16,
@@ -134,16 +138,67 @@ fn layout_default_status_line(
 /// Content rect of a float on screen: the same placement and border inset
 /// `render_float_overlays` draws it with. `None` for a float too small to draw.
 pub(crate) fn float_inner_rect(content_chunk: Rect, fl: &FloatJson) -> Option<Rect> {
-    if fl.w < 2 || fl.h < 2 { return None; }
-    let w = fl.w.min(content_chunk.width);
-    let h = fl.h.min(content_chunk.height);
-    let x = content_chunk.x + fl.x.min(content_chunk.width.saturating_sub(w));
-    let y = content_chunk.y + fl.y.min(content_chunk.height.saturating_sub(h));
+    let outer = float_outer_rect(content_chunk, fl)?;
     if fl.border == "none" {
-        Some(Rect { x, y, width: w, height: h })
+        Some(outer)
     } else {
-        Some(Rect { x: x + 1, y: y + 1, width: w.saturating_sub(2), height: h.saturating_sub(2) })
+        Some(Rect { x: outer.x + 1, y: outer.y + 1, width: outer.width.saturating_sub(2), height: outer.height.saturating_sub(2) })
     }
+}
+
+/// Outer rect of a float on screen, border included, where
+/// `render_float_overlays` draws it (`floating::screen_rect`).
+pub(crate) fn float_outer_rect(content_chunk: Rect, fl: &FloatJson) -> Option<Rect> {
+    let (x, y, w, h) = crate::floating::screen_rect(fl.x, fl.y, fl.w, fl.h, content_chunk.width, content_chunk.height)?;
+    Some(Rect { x: content_chunk.x + x, y: content_chunk.y + y, width: w, height: h })
+}
+
+/// A left button gesture that began on a floating pane (see `float_gesture`
+/// in the client loop).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FloatGesture {
+    Inside { id: usize, origin: (u16, u16) },
+    Border,
+}
+
+/// What a pointer at screen cell `(col, row)` is on, of the floating panes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FloatUnder {
+    /// No float: the tiled layout decides.
+    None,
+    /// The content of float `id` (its program wants the mouse:
+    /// `wants_mouse`), at the content relative cell `col`, `row`.
+    Inside { id: usize, wants_mouse: bool, col: i16, row: i16 },
+    /// The border of float `id`.
+    Border { id: usize },
+}
+
+/// The front floating pane under screen cell `(col, row)`, as drawn: floats
+/// cover the tiled panes and later ones cover earlier ones, so the last hit
+/// wins (tmux `window_get_active_at` looks at floating panes first, by
+/// z-index).
+pub(crate) fn float_under(content_chunk: Rect, floats: &[FloatJson], col: u16, row: u16) -> FloatUnder {
+    if col < content_chunk.x || row < content_chunk.y {
+        return FloatUnder::None;
+    }
+    for fl in floats.iter().rev() {
+        let Some((x, y, w, h)) = crate::floating::screen_rect(fl.x, fl.y, fl.w, fl.h, content_chunk.width, content_chunk.height) else { continue };
+        let hit = crate::floating::hit((x, y, w, h), fl.border != "none", col - content_chunk.x, row - content_chunk.y);
+        match hit {
+            Some(crate::floating::FloatHit::Border) => return FloatUnder::Border { id: fl.id },
+            Some(crate::floating::FloatHit::Inside) => {
+                let inner = float_inner_rect(content_chunk, fl).unwrap_or_default();
+                return FloatUnder::Inside {
+                    id: fl.id,
+                    wants_mouse: fl.wants_mouse,
+                    col: col as i16 - inner.x as i16,
+                    row: row as i16 - inner.y as i16,
+                };
+            }
+            None => {}
+        }
+    }
+    FloatUnder::None
 }
 
 /// Where the terminal cursor goes when a floating pane holds the focus (#767).
@@ -1961,12 +2016,8 @@ pub(crate) fn render_float_overlays(
     let border_style = complete_pane_border_colors(border_style);
     let active_border_style = complete_pane_border_colors(active_border_style);
     for fl in floats {
-        if fl.w < 2 || fl.h < 2 { continue; }
-        let w = fl.w.min(content_chunk.width);
-        let h = fl.h.min(content_chunk.height);
-        let x = content_chunk.x + fl.x.min(content_chunk.width.saturating_sub(w));
-        let y = content_chunk.y + fl.y.min(content_chunk.height.saturating_sub(h));
-        let area = Rect { x, y, width: w, height: h };
+        let Some(area) = float_outer_rect(content_chunk, fl) else { continue };
+        let w = area.width;
         let border_type = match fl.border.as_str() {
             "double" => Some(BorderType::Double),
             "heavy" => Some(BorderType::Thick),
@@ -4630,6 +4681,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // pane-relative, drag handed to copy mode yet). The whole gesture then
     // goes through the key tables instead of the client selection.
     let mut pane_gesture: Option<(usize, Rect, char, char, (i16, i16), bool)> = None;
+    // A left press on a floating pane, until the release: in its content
+    // (the float's id and the content's top-left on screen; the motion and
+    // release go to it as pane-mouse) or on its border (raw mouse-drag and
+    // mouse-up, which the server turns into a move or a resize).
+    let mut float_gesture: Option<FloatGesture> = None;
     // tmux's click timer for the status line, used only while a status line
     // multi click (SecondClick1Status, DoubleClick1StatusLeft, ...) is
     // bound: (presses so far, the window's end, the hit, whether it was on a
@@ -8119,9 +8175,53 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         }
                                     }
                                 } else {
+                                    // A floating pane covers what is under it, so it is
+                                    // hit first (tmux window_get_active_at). Inside, the
+                                    // press makes it the active pane and goes to it
+                                    // (MouseDown1Pane, `select-pane -t=; send -M`); on its
+                                    // border, the server brings it to the front and moves
+                                    // or resizes it as the pointer drags (MouseDown1Border,
+                                    // MouseDrag1Border). Neither reaches the pane under it
+                                    // or starts a selection there.
+                                    let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                    match over_float {
+                                        FloatUnder::Inside { id, col, row, .. } => {
+                                            let down_name = routed_name(&mouse_overrides, "MouseDown1Pane", me.modifiers);
+                                            match mouse_route(&mouse_overrides, &down_name, client_copy_mode) {
+                                                'B' => {
+                                                    cmd_batch.push(format!("select-pane -t %{}\n", id));
+                                                    cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", id, col, row));
+                                                }
+                                                'U' => cmd_batch.push(format!("mouse-key {} %{} {} {} 0\n", down_name, id, col, row)),
+                                                'F' => cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", id, col, row)),
+                                                _ => {}
+                                            }
+                                            let origin = ((me.column as i16 - col) as u16, (me.row as i16 - row) as u16);
+                                            float_gesture = Some(FloatGesture::Inside { id, origin });
+                                        }
+                                        FloatUnder::Border { .. } => {
+                                            cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
+                                            float_gesture = Some(FloatGesture::Border);
+                                        }
+                                        FloatUnder::None => float_gesture = None,
+                                    }
+                                    if over_float != FloatUnder::None {
+                                        pane_gesture = None;
+                                        border_drag = false;
+                                        border_drag_route = None;
+                                        deferred_left_click = None;
+                                        copy_mode_drag_pending = None;
+                                        rsel_start = None;
+                                        rsel_end = None;
+                                        rsel_pane_rect = None;
+                                        rsel_pane_id = None;
+                                        rsel_block = false;
+                                        rsel_dragged = false;
+                                        selection_changed = true;
+                                    }
                                     // Border detection
                                     let mut on_border = false;
-                                    if !client_zoomed {
+                                    if !client_zoomed && over_float == FloatUnder::None {
                                         let tol = 0u16;
                                         for (bpath, bkind, bidx, bpos, btotal, bsizes, barea) in &client_borders {
                                             let hit = if bkind == "Horizontal" {
@@ -8158,7 +8258,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         }
                                     }
 
-                                    if !on_border {
+                                    if !on_border && over_float == FloatUnder::None {
                                         let clicked_pane = client_pane_rects.iter().find(|(_, rect)| {
                                             rect.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                         });
@@ -8372,7 +8472,31 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // otherwise the table decides.
                                 let name3 = routed_name(&mouse_overrides, "MouseDown3Pane", me.modifiers);
                                 let route3 = mouse_route(&mouse_overrides, &name3, client_copy_mode);
-                                if route3 != 'B' {
+                                // On a floating pane the click is the float's, never
+                                // the tiled pane's under it. A program there that
+                                // asked for the mouse gets it; otherwise the float
+                                // takes the focus and the built-in copy or paste
+                                // below acts on it. Nothing on its border.
+                                let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                let float_took = match over_float {
+                                    FloatUnder::Inside { id, wants_mouse, col, row } => match route3 {
+                                        'U' => { cmd_batch.push(format!("mouse-key {} %{} {} {} 2\n", name3, id, col, row)); true }
+                                        'F' => { cmd_batch.push(format!("pane-mouse {} 2 {} {} M\n", id, col, row)); true }
+                                        'B' => {
+                                            cmd_batch.push(format!("select-pane -t %{}\n", id));
+                                            if wants_mouse {
+                                                cmd_batch.push(format!("pane-mouse {} 2 {} {} M\n", id, col, row));
+                                            }
+                                            wants_mouse
+                                        }
+                                        _ => true,
+                                    },
+                                    FloatUnder::Border { .. } => true,
+                                    FloatUnder::None => false,
+                                };
+                                let tui_active = tui_active && over_float == FloatUnder::None;
+                                if float_took {
+                                } else if route3 != 'B' {
                                     if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                         r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                     }) {
@@ -8440,7 +8564,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Middle) => {
-                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                // A floating pane's own click (nothing on its border).
+                                let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                if let FloatUnder::Inside { id, col, row, .. } = over_float {
+                                    cmd_batch.push(format!("pane-mouse {} 1 {} {} M\n", id, col, row));
+                                } else if over_float != FloatUnder::None {
+                                } else if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
@@ -8452,7 +8581,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
-                                if let Some((pane_id, pane_rect, _down, drag_route, anchor, in_copy_drag)) = pane_gesture.as_mut() {
+                                if let Some(gesture) = float_gesture {
+                                    // A drag that began on a floating pane stays with it,
+                                    // as tmux keeps the drag on the pane it started on.
+                                    // In its content it goes to its program (no copy
+                                    // mode selection there); on its border the server
+                                    // moves or resizes it.
+                                    match gesture {
+                                        FloatGesture::Inside { id, origin } => {
+                                            let col = me.column as i16 - origin.0 as i16;
+                                            let row = me.row as i16 - origin.1 as i16;
+                                            cmd_batch.push(format!("pane-mouse {} 32 {} {} M\n", id, col, row));
+                                        }
+                                        FloatGesture::Border => {
+                                            cmd_batch.push(format!("mouse-drag {} {}\n", me.column, me.row));
+                                        }
+                                    }
+                                } else if let Some((pane_id, pane_rect, _down, drag_route, anchor, in_copy_drag)) = pane_gesture.as_mut() {
                                     let inner = pane_content_inner(*pane_rect, &client_border_status, &client_border_format);
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
                                     let rel_row = me.row as i16 - inner.y as i16;
@@ -8619,7 +8764,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                             MouseEventKind::Drag(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if let Some((pane_id, pane_rect, down_route, drag_route, _, in_copy_drag)) = pane_gesture.take() {
+                                if let Some(gesture) = float_gesture.take() {
+                                    // The release always ends the gesture, the border
+                                    // drag on the server included.
+                                    match gesture {
+                                        FloatGesture::Inside { id, origin } => {
+                                            let col = me.column as i16 - origin.0 as i16;
+                                            let row = me.row as i16 - origin.1 as i16;
+                                            cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n", id, col, row));
+                                        }
+                                        FloatGesture::Border => {
+                                            cmd_batch.push(format!("mouse-up {} {}\n", me.column, me.row));
+                                        }
+                                    }
+                                } else if let Some((pane_id, pane_rect, down_route, drag_route, _, in_copy_drag)) = pane_gesture.take() {
                                     let inner = pane_content_inner(pane_rect, &client_border_status, &client_border_format);
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
                                     let rel_row = me.row as i16 - inner.y as i16;
@@ -8812,7 +8970,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // program (tmux forward_key); so does the release
                                 // (MouseUp3Pane, unbound by default in tmux too).
                                 if mouse_route(&mouse_overrides, &routed_name(&mouse_overrides, "MouseDown3Pane", me.modifiers), client_copy_mode) == 'F' {
-                                    if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                    let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                    if let FloatUnder::Inside { id, col, row, .. } = over_float {
+                                        cmd_batch.push(format!("pane-mouse {} 2 {} {} m\n", id, col, row));
+                                    } else if over_float != FloatUnder::None {
+                                    } else if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                         r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                     }) {
                                         let rel_col = me.column as i16 - pane_rect.x as i16;
@@ -8851,7 +9013,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                                 // Detect border hover for visual preview
                                 let mut new_hover: Option<(u16, String, Rect)> = None;
-                                if !client_zoomed {
+                                if !client_zoomed && float_under(client_content_area, &srv_floats, me.column, me.row) == FloatUnder::None {
                                     let tol = 0u16;
                                     for (_, bkind, _, bpos, _, _, barea) in &client_borders {
                                         let hit = if bkind == "Horizontal" {
@@ -8871,8 +9033,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     hovered_border = new_hover;
                                     selection_changed = true; // trigger redraw
                                 }
-                                // Forward hover to PTY
-                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                // Forward hover to PTY: the floating pane over the
+                                // tiled one takes it (nothing on its border).
+                                let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                if let FloatUnder::Inside { id, col, row, .. } = over_float {
+                                    cmd_batch.push(format!("pane-mouse {} 35 {} {} M\n", id, col, row));
+                                } else if over_float != FloatUnder::None {
+                                } else if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
@@ -8888,7 +9055,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 rsel_end = None;
                                 rsel_dragged = false;
                                 selection_changed = true;
-                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                // Over a floating pane the notch is its own (the
+                                // server hands it to the program); on its border
+                                // nothing, and never the tiled pane under it.
+                                let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                if let FloatUnder::Inside { id, col, row, .. } = over_float {
+                                    cmd_batch.push(format!("pane-scroll {} up {} {} {}\n", id, col, row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers)));
+                                } else if over_float != FloatUnder::None {
+                                } else if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
@@ -8930,7 +9105,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 rsel_end = None;
                                 rsel_dragged = false;
                                 selection_changed = true;
-                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                // As ScrollUp: a floating pane's own notch.
+                                let over_float = float_under(client_content_area, &srv_floats, me.column, me.row);
+                                if let FloatUnder::Inside { id, col, row, .. } = over_float {
+                                    cmd_batch.push(format!("pane-scroll {} down {} {} {}\n", id, col, row,
+                                        crate::mouse_keys::sgr_mod_bits(me.modifiers)));
+                                } else if over_float != FloatUnder::None {
+                                } else if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
@@ -8966,7 +9147,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             // MouseDown7Pane, resolved by the server. Never a
                             // scroll; outside a pane there is nothing to do.
                             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
-                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                // Not for the tiled pane under a floating pane.
+                                if float_under(client_content_area, &srv_floats, me.column, me.row) != FloatUnder::None {
+                                } else if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;

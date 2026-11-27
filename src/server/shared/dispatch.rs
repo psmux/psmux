@@ -2595,6 +2595,9 @@ pub(crate) fn dispatch(
                         let old_path = app.windows[app.active_idx].active_path.clone();
                         if pane_is_id {
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
+                            // A floating pane comes to the front (cmd-select-pane.c:282,
+                            // window_redraw_active_switch).
+                            crate::tree::raise_floating_by_id(&mut app, p);
                         } else if let Some(pos) = p.checked_sub(app.pane_base_index_of(app.active_idx)) {
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, pos); });
                         }

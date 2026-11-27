@@ -1395,6 +1395,33 @@ fn focus_pane_by_id_inner(app: &mut AppState, pid: usize, update_mru: bool) {
     }
 }
 
+/// Bring floating pane `fi` of `win` to the front, the end of `floating`
+/// (drawn last, hit first), keeping `floating_focus` on the pane it named.
+/// Returns its new index. tmux moves a floating pane to the head of the
+/// window's z-index when it becomes the active pane
+/// (`window_redraw_active_switch`, window.c), which `select-pane` and a
+/// press on it both do.
+pub fn raise_floating(win: &mut crate::types::Window, fi: usize) -> usize {
+    let last = win.floating.len().saturating_sub(1);
+    if fi >= last {
+        return fi;
+    }
+    let focused = win.floating_focus.and_then(|i| win.floating.get(i)).map(|fp| fp.id);
+    let fp = win.floating.remove(fi);
+    win.floating.push(fp);
+    win.floating_focus = focused.and_then(|id| win.floating.iter().position(|fp| fp.id == id));
+    last
+}
+
+/// `select-pane -t %pid` on a floating pane of the active window: bring it to
+/// the front (see [`raise_floating`]). Nothing for any other pane.
+pub fn raise_floating_by_id(app: &mut AppState, pid: usize) {
+    let win = &mut app.windows[app.active_idx];
+    if let Some(fi) = win.floating.iter().position(|fp| fp.id == pid) {
+        raise_floating(win, fi);
+    }
+}
+
 /// The window and index of floating pane `pid`, if it is one.
 pub fn find_floating_by_id(app: &AppState, pid: usize) -> Option<(usize, usize)> {
     app.windows.iter().enumerate().find_map(|(wi, w)| {

@@ -1141,12 +1141,16 @@ pub fn serialize_floats_json(app: &AppState) -> String {
         let mut cur_hidden = false;
         // The program's default colours, as a tiled pane's leaf carries them.
         let mut default_colours = None;
+        // The program asked for the mouse (a tiled leaf's `wants_mouse`), so
+        // the client hands it a right click instead of pasting.
+        let mut wants_mouse = false;
         if let Ok(parser) = fp.pane.term.lock() {
             let screen = parser.screen();
             let (cr, cc) = screen.cursor_position();
             cur_row = cr;
             cur_col = cc;
             cur_hidden = screen.hide_cursor();
+            wants_mouse = screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
             default_colours = crate::layout::default_colours_json(screen.program_default_colours());
             let rows_data = serialize_screen_rows(screen, inner_h, inner_w);
             for (j, row) in rows_data.iter().enumerate() {
@@ -1182,8 +1186,8 @@ pub fn serialize_floats_json(app: &AppState) -> String {
         let _ = std::fmt::Write::write_fmt(
             &mut out,
             format_args!(
-                ",\"cursor_row\":{},\"cursor_col\":{},\"hide_cursor\":{}}}",
-                cur_row, cur_col, cur_hidden
+                ",\"cursor_row\":{},\"cursor_col\":{},\"hide_cursor\":{},\"wants_mouse\":{},\"id\":{}}}",
+                cur_row, cur_col, cur_hidden, wants_mouse, fp.id
             ),
         );
     }

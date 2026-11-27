@@ -21,7 +21,7 @@ psmux brings the tmux feature set to Windows natively: sessions that outlive the
 - Multiple windows with clickable status-bar tabs
 - Session management: detach (`Prefix + d`) and reattach from anywhere
 - 5 layouts: even-horizontal, even-vertical, main-horizontal, main-vertical, tiled
-- **Floating panes** : `new-pane` (`newp`) creates a pane that floats above the tiled layout, positioned with `-X`/`-Y`, sized with `-x`/`-y`, titled with `-T`, bordered with `-B`, and movable and resizable with the mouse. See [scripting.md](scripting.md)
+- **Floating panes** : `new-pane` (`newp`) creates a pane that floats above the tiled layout, positioned with `-X`/`-Y`, sized with `-x`/`-y`, titled with `-T`, bordered with `-B`. With the mouse, a click makes it the active pane, its top border moves it, and its other edges and corners resize it, as in tmux. See [scripting.md](scripting.md)
 - **Cross-session pane transfer** : `join-pane -s othersession:1.0` and `move-pane` move a live pane between two independent session servers. The real console stays put and its input and output are tunneled, so the running program never notices. See [scripting.md](scripting.md)
 
 ## Full Mouse Support
