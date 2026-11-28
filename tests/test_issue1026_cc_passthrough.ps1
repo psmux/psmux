@@ -10,6 +10,15 @@
 # stream must hold no `ESC P tmux;`, the inner sequence complete, and the
 # redraw after it with its ESCs intact.
 #
+# The Windows 10 inbox conhost (build 19045) unwraps the passthrough itself
+# before psmux reads the pane: it hands psmux `ESC ESC ]52;...BEL` (both of
+# the doubled ESCs, the wrapper's ESC P and ST dropped) ahead of the text,
+# prints "tmux;" as text, and redraws the rest in its own sequences. The
+# wrapper and the inner sequence are checked as elsewhere; on a build before
+# 22000 without PSMUX_CONPTY_DIR the redraw only has to come after the inner
+# sequence. OpenConsole passes the bytes on as written, so with
+# PSMUX_CONPTY_DIR every check is as on Windows 11.
+#
 # Runs under a private -L namespace and PSMUX_DATA_DIR; cleans up with
 # `psmux -L <ns> kill-server` only. PSMUX_EXE picks another binary.
 
@@ -21,6 +30,7 @@ function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
 Write-Host "psmux: $PSMUX ($(& $PSMUX -V))"
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("psmux_i1026_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force $work | Out-Null
 $ns = 'i1026_' + [guid]::NewGuid().ToString('N').Substring(0, 6)
@@ -117,7 +127,12 @@ try {
         $want = if ($name -eq 'copy') { 2 } else { 1 }
         $got = ([regex]::Matches($body, [regex]::Escape($inner))).Count
         if ($got -eq $want) { Write-Pass "${name}: $got complete inner sequence(s)" } else { Write-Fail "${name}: $got complete inner sequence(s), want ${want}: $shown" }
-        if ($body.Contains("$inner$E[?25l$E[5;3HAFTER-REDRAW")) { Write-Pass "${name}: redraw follows the inner sequence with its ESCs" }
+        if ($Win10Inbox) {
+            # The Windows 10 inbox conhost redraws the text in its own sequences.
+            $k = $body.LastIndexOf($inner)
+            if ($k -ge 0 -and $body.IndexOf('AFTER-REDRAW', $k + $inner.Length) -gt 0) { Write-Pass "${name}: redraw follows the inner sequence (redrawn by the Windows 10 inbox conhost)" }
+            else { Write-Fail "${name}: no redraw after the inner sequence: $shown" }
+        } elseif ($body.Contains("$inner$E[?25l$E[5;3HAFTER-REDRAW")) { Write-Pass "${name}: redraw follows the inner sequence with its ESCs" }
         else { Write-Fail "${name}: redraw not right after the inner sequence: $shown" }
     }
 } finally {

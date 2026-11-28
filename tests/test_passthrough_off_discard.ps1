@@ -10,6 +10,16 @@
 # the inbox conhost the closing ST is lost (#1026) and the parser must not
 # swallow what follows.
 #
+# The Windows 10 inbox conhost (build 19045) unwraps the passthrough before
+# psmux reads the pane: it drops ESC P and the closing ST, prints "tmux;" as
+# text, hands psmux an inner sequence that ends with BEL (or a CSI) ahead of
+# the text, and drops one that ends with ST. psmux never sees the wrapper
+# there, so on a build before 22000 without PSMUX_CONPTY_DIR the BEL ended
+# copies (WRAPPED1 and WRAPPED3) make paste buffers as unwrapped ones do,
+# WRAPPED2 makes none, and "tmux;" may show; the OSC 52 itself must still
+# never show, and every VISn must. OpenConsole passes the wrapper on, so
+# with PSMUX_CONPTY_DIR the checks are as on Windows 11.
+#
 # Runs under a private -L namespace and PSMUX_DATA_DIR; cleans up with
 # `psmux -L <ns> kill-server` only. PSMUX_EXE picks another binary;
 # PSMUX_CONPTY_DIR runs the pane on OpenConsole.
@@ -22,6 +32,7 @@ function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
 Write-Host "psmux: $PSMUX ($(& $PSMUX -V))"
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("psmux_ptoff_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force $work | Out-Null
 $ns = 'ptoff_' + [guid]::NewGuid().ToString('N').Substring(0, 6)
@@ -72,12 +83,20 @@ try {
     $bufs = (& $PSMUX -L $ns list-buffers -F '#{buffer_sample}' | Out-String)
     if ($cap -match '<<done>>') { Write-Pass 'pane program ran to the end' } else { Write-Fail "no <<done>> on screen: $cap" }
     $acted = [regex]::Matches($bufs, 'WRAPPED\d') | ForEach-Object { $_.Value }
-    if (-not $acted) { Write-Pass 'no wrapped OSC 52 made a paste buffer' }
+    if ($Win10Inbox) {
+        # The Windows 10 inbox conhost hands psmux the BEL ended copies unwrapped.
+        $got = (@($acted) | Sort-Object) -join ', '
+        if ($got -eq 'WRAPPED1, WRAPPED3') { Write-Pass 'the copies the Windows 10 inbox conhost unwrapped made paste buffers, the ST ended one none' }
+        else { Write-Fail "paste buffers from the wrapped OSC 52: [$got], want [WRAPPED1, WRAPPED3] on the Windows 10 inbox conhost" }
+    } elseif (-not $acted) { Write-Pass 'no wrapped OSC 52 made a paste buffer' }
     else { Write-Fail "wrapped OSC 52 acted on with allow-passthrough off: $($acted -join ', ')" }
     foreach ($n in 1..6) {
         if ($cap -match "VIS$n") { Write-Pass "VIS$n visible after its sequence" } else { Write-Fail "VIS$n missing: the text after the sequence was swallowed" }
     }
-    if ($cap -match 'mux;|\]52|V1JBUFBF') { Write-Fail "wrapper bytes on screen: $cap" } else { Write-Pass 'no wrapper bytes on screen' }
+    if ($Win10Inbox) {
+        # That host prints the wrapper's "tmux;" itself.
+        if ($cap -match '\]52|V1JBUFBF') { Write-Fail "OSC 52 bytes on screen: $cap" } else { Write-Pass 'no OSC 52 bytes on screen' }
+    } elseif ($cap -match 'mux;|\]52|V1JBUFBF') { Write-Fail "wrapper bytes on screen: $cap" } else { Write-Pass 'no wrapper bytes on screen' }
 } catch {
     Write-Fail "harness error: $_"
 } finally {
