@@ -569,14 +569,24 @@ fn release_popup_waiters(app: &mut AppState) {
 }
 
 /// Answers the command lines whose popup has gone away (closed by a key, by
-/// its command's exit, or covered by another overlay). Called on every server
-/// loop; a no-op while nothing waits.
+/// its command's exit, or covered by another overlay), and all of them once
+/// the last client has detached. Called on every server loop; a no-op while
+/// nothing waits.
+///
+/// tmux's popup belongs to the client that shows it, so that client's detach
+/// frees it and popup_free_cb answers the waiting command with pd->status
+/// (popup.c:266-283). psmux keeps the popup on the session for the next
+/// attach, but nobody is left who could close it, so the command line would
+/// otherwise wait until someone attaches again: it returns now with the same
+/// status tmux gives, and the popup stays.
 pub fn settle_popup_waiters(app: &mut AppState) {
     if app.popup_waiters.is_empty() {
         return;
     }
     let reply = current_popup_reply(app);
-    let open = matches!(app.mode, Mode::PopupMode { popup_pane: Some(_), .. }).then_some(app.popup_serial);
+    let shown = app.attached_clients > 0
+        && matches!(app.mode, Mode::PopupMode { popup_pane: Some(_), .. });
+    let open = shown.then_some(app.popup_serial);
     app.popup_waiters.retain(|(serial, tx)| {
         if Some(*serial) == open {
             return true;

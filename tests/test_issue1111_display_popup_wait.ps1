@@ -142,7 +142,19 @@ if (-not $attached) {
     } else { Write-Fail "popup did not open" }
 }
 
-Write-Test "6. No client attached: returns at once, as before"
+Write-Test "6. The client detaches while a call waits: it returns with 129, the popup stays"
+# tmux frees the popup with its client, which answers the waiting command with
+# 128 + SIGHUP. psmux keeps the popup for the next attach, but the call must not
+# wait on a popup nobody attached could close.
+$w = $null
+if ($attached) {
+    if (Get-PopupActive) { & $PSMUX -L $NS display-popup -t $S -C 2>&1 | Out-Null; Wait-PopupActive $false 2000 | Out-Null }
+    $w = Start-Popup "-E `"Start-Sleep -Seconds 30`""
+    if (Wait-PopupActive $true) {
+        Start-Sleep -Milliseconds 500
+        if (-not $w.HasExited) { Write-Pass "waiting while the client shows the popup" } else { Write-Fail "returned while the client shows the popup (exit $($w.ExitCode))" }
+    } else { Write-Fail "popup did not open"; $w = $null }
+}
 foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($con.Id)" -EA SilentlyContinue)) { Stop-Process -Id $c.ProcessId -Force -EA SilentlyContinue }
 Stop-Process -Id $con.Id -Force -EA SilentlyContinue
 $detached = $false
@@ -150,6 +162,16 @@ for ($i = 0; $i -lt 50; $i++) {
     Start-Sleep -Milliseconds 200
     if ((& $PSMUX -L $NS display-message -t $S -p '#{session_attached}' 2>&1 | Out-String).Trim() -eq '0') { $detached = $true; break }
 }
+if ($w) {
+    if ($w.WaitForExit(3000)) {
+        if ($w.ExitCode -eq 129) { Write-Pass "the waiting call returned with 129 when the client detached" } else { Write-Fail "the waiting call returned with $($w.ExitCode), expected 129" }
+    } else { Write-Fail "the waiting call still waits after the client detached" }
+    if (Get-PopupActive) { Write-Pass "the popup stays on the session for the next attach" } else { Write-Fail "the popup went away with the client" }
+    & $PSMUX -L $NS display-popup -t $S -C 2>&1 | Out-Null
+    Wait-PopupActive $false 2000 | Out-Null
+}
+
+Write-Test "7. No client attached: returns at once, as before"
 if ($detached) {
     $r = Invoke-Popup @('-E', 'Start-Sleep -Seconds 3; exit 7')
     if ($r.Ms -lt 2000 -and $r.Rc -eq 0) { Write-Pass "returned after $($r.Ms) ms with exit code 0" }

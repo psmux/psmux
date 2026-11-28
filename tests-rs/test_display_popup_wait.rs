@@ -98,6 +98,60 @@ fn a_popup_gone_by_any_other_way_is_answered_on_the_next_loop() {
     settle_popup_waiters(&mut app);
 }
 
+fn running_popup(app: &mut AppState, command: &str) -> bool {
+    let pane = create_popup_pane(
+        command,
+        None,
+        8,
+        30,
+        app.next_pane_id,
+        "popwait",
+        &app.environment.clone(),
+        &[],
+        None,
+    );
+    let Some(pane) = pane else { return false };
+    app.popup_serial += 1;
+    app.mode = Mode::PopupMode {
+        command: command.into(),
+        output: String::new(),
+        process: None,
+        width: 30,
+        height: 8,
+        close: crate::popup::PopupClose { exit_flags: 1, ..Default::default() },
+        popup_pane: Some(pane),
+        scroll_offset: 0,
+        look: PopupLook::titled(""),
+    };
+    true
+}
+
+#[test]
+fn the_last_client_detaching_answers_the_waiter_and_keeps_the_popup() {
+    // tmux frees a popup with the client that shows it, which answers the
+    // waiting command with 129 (popup.c:266-283, 609). psmux keeps the popup
+    // for the next attach, but the command line must not wait on a popup
+    // that nobody attached can close.
+    let mut app = mock_app();
+    if !running_popup(&mut app, "Start-Sleep -Seconds 30") {
+        eprintln!("skipped: the popup command could not be started here");
+        return;
+    }
+    app.attached_clients = 1;
+    assert!(command_line_waits(&app));
+    let rx = waiter(&mut app);
+    settle_popup_waiters(&mut app);
+    assert!(rx.try_recv().is_err(), "answered while a client shows the popup");
+    app.attached_clients = 0;
+    settle_popup_waiters(&mut app);
+    assert_eq!(rx.try_recv().as_deref(), Ok("129"));
+    assert!(app.popup_waiters.is_empty());
+    assert!(matches!(app.mode, Mode::PopupMode { popup_pane: Some(_), .. }), "the popup stays for the next attach");
+    if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
+        let _ = pane.child.kill();
+    }
+}
+
 #[test]
 fn a_popup_with_its_command_running_keeps_its_waiter_then_reports_the_status() {
     let mut app = mock_app();
