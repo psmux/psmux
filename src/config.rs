@@ -1879,6 +1879,15 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
         {
             crate::commands::tmux_escaped_word(&line[*off..])
         }
+        // A key option's bare value reads its escapes as tmux reads them, so
+        // `set -g prefix C-\\` is C-\ (issue #1118). A quoted value was read
+        // by extract_option_value already. Other bare values stay as written
+        // here, as they always have (a Windows path is full of backslashes).
+        Some((off, _)) if matches!(key, "prefix" | "prefix2")
+            && !line[*off..].starts_with(['"', '\'']) =>
+        {
+            unescape_key_backslashes(&extract_option_value(&line[*off..]))
+        }
         Some((off, _)) => extract_option_value(&line[*off..]),
         None => String::new(),
     };
@@ -2953,7 +2962,7 @@ pub fn parse_bind_key(app: &mut AppState, line: &str) {
     }
 
 
-    if let Some(key) = parse_key_name(key_str) {
+    if let Some(key) = parse_config_key_name(key_str) {
         let key = normalize_key_for_binding(key);
         let action = if sub_commands.len() > 1 {
             // Multiple chained commands
@@ -3019,7 +3028,7 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
     }
     
     if i < parts.len() {
-        if let Some(key) = parse_key_name(parts[i]) {
+        if let Some(key) = parse_config_key_name(parts[i]) {
             let key = normalize_key_for_binding(key);
             // Remove from the targeted table only (tmux behavior).
             // Default is "prefix" when no -n or -T is specified.
@@ -3200,24 +3209,29 @@ fn unescape_key_backslashes(name: &str) -> String {
     out
 }
 
+/// A key name token as a config line writes it. tmux's config parser turns a
+/// backslash escape into the character everywhere but inside single quotes
+/// (cmd-parse.y), so `C-\\`, `"C-\\"` and `M-\\` name C-\ and M-\, and `\;`
+/// names `;` (issue #1118). The command line keeps [`parse_key_name`]: tmux
+/// takes an argv as it is and reads no escapes in it.
+pub fn parse_config_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
+    let name = name.trim();
+    let single_quoted = name.len() >= 2 && name.starts_with('\'') && name.ends_with('\'');
+    if single_quoted || !name.contains('\\') {
+        return parse_key_name(name);
+    }
+    let double_quoted = name.len() >= 2 && name.starts_with('"') && name.ends_with('"');
+    let inner = if double_quoted { &name[1..name.len() - 1] } else { name };
+    parse_key_name(&unescape_key_backslashes(inner))
+}
+
 pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     let name = name.trim();
     // Strip surrounding quotes (single or double) — plugins often quote special chars
     // e.g., bind-key '|' split-window -h
-    let single_quoted = name.starts_with('\'') && name.ends_with('\'') && name.len() >= 2;
-    let name = if single_quoted
+    let name = if (name.starts_with('\'') && name.ends_with('\'') && name.len() >= 2)
         || (name.starts_with('"') && name.ends_with('"') && name.len() >= 2) {
         &name[1..name.len()-1]
-    } else {
-        name
-    };
-    // tmux's config parser turns `\\` into one backslash everywhere but inside
-    // single quotes (cmd-parse.y), so `C-\\`, `"C-\\"` and `M-\\` all name the
-    // key C-\ (issue #1118). The key token reaches here as written.
-    let unescaped;
-    let name = if !single_quoted && name.contains('\\') {
-        unescaped = unescape_key_backslashes(name);
-        unescaped.as_str()
     } else {
         name
     };

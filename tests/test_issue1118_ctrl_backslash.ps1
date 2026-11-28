@@ -156,6 +156,12 @@ try {
     $o = & $PSMUX -L $s.ns unbind-key -n $CBS 2>&1 | Out-String
     $keys = & $PSMUX -L $s.ns list-keys -T root 2>&1 | Out-String
     Check (($keys -notmatch '@f cli') -and ($o -notmatch 'unknown')) "unbind-key -n 'C-\' removes it"
+    # tmux reads no escapes in an argv: these are refused there, and were on
+    # master, so they must still say so rather than vanish.
+    foreach ($k in "C-$BS$BS", "$BS$BS", "$BS;", "$BS#") {
+        $o = & $PSMUX -L $s.ns bind-key -T targv $k display-message x 2>&1 | Out-String
+        Check ($o -match 'unknown key') "command line argv '$k' is 'unknown key' as in tmux (got: '$($o.Trim())')"
+    }
     Stop-Ns $s.ns $null
 
     Write-Host "`n[Test 3] set -g prefix / prefix2 C-\" -ForegroundColor Yellow
@@ -223,6 +229,46 @@ try {
     $v = ''; $sw.Restart()
     while ($sw.ElapsedMilliseconds -lt 4000) { $v = Get-Opt $c.ns '@hit2'; if ($v) { break }; Start-Sleep -Milliseconds 150 }
     Check ($v -eq 'meta') "bind -n M-\\ fires on a real Alt+\ (@hit2='$v')"
+    Stop-Ns $c.ns $c.proc
+
+    Write-Host "`n[Test 5] common escaped key forms and line ends, typed live" -ForegroundColor Yellow
+    # Config forms most tmux configs carry. Each is pressed after the prefix.
+    $conf = New-Conf "live_forms.conf" @(
+        "bind $BS$BS split-window -h",
+        "bind $BS; set -g @semi hit",
+        "bind '`"' set -g @dq hit",
+        "bind x $BS",
+        "  set -g @cont hit",
+        "bind y send-keys -l $BS$BS",
+        "set -g @after2 yes"
+    )
+    $c = Start-Client $conf
+    Check ((Get-Opt $c.ns '@after2') -eq 'yes') "a line ending in \\ does not swallow the next line (@after2='$(Get-Opt $c.ns '@after2')')"
+    $lk = (& $PSMUX -L $c.ns list-keys -T prefix 2>&1 | Out-String)
+    foreach ($want in @("$BS +split-window -h", '; +set -g @semi hit', '" +set -g @dq hit', 'x +set -g @cont hit', "y +send-keys -l $BS$BS")) {
+        $line = ($lk -split "`n" | Where-Object { $_ -match ('bind-key -T prefix ' + [regex]::Escape(($want -split ' \+')[0]) + ' ') }) -join ''
+        Check ($line -match ([regex]::Escape(($want -split ' \+')[0]) + ' +' + [regex]::Escape(($want -split ' \+', 2)[1]))) "list-keys: '$($line.Trim())'"
+    }
+    $before = Get-Panes $c.ns
+    & $injector $c.proc.Id "^b{SLEEP:200}{MOD:DC:005C:0000}" 2>&1 | Out-Null
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $n = $before
+    while ($sw.ElapsedMilliseconds -lt 5000) { $n = Get-Panes $c.ns; if ($n -gt $before) { break }; Start-Sleep -Milliseconds 150 }
+    Check ($n -eq $before + 1) "C-b \ runs bind \\ split-window -h (panes: $before -> $n)"
+    foreach ($t in @(@('{MOD:BA:003B:0000}', '@semi', 'bind \;'), @('{MOD:DE:0022:0010}', '@dq', "bind '`"'"), @('x', '@cont', 'bind x \ continued'))) {
+        & $injector $c.proc.Id "^b{SLEEP:200}$($t[0])" 2>&1 | Out-Null
+        $v = ''; $sw.Restart()
+        while ($sw.ElapsedMilliseconds -lt 4000) { $v = Get-Opt $c.ns $t[1]; if ($v) { break }; Start-Sleep -Milliseconds 150 }
+        Check ($v -eq 'hit') "C-b then the key fires $($t[2]) ($($t[1])='$v')"
+    }
+    & $injector $c.proc.Id "^b{SLEEP:200}y" 2>&1 | Out-Null
+    $txt = ''; $sw.Restart()
+    while ($sw.ElapsedMilliseconds -lt 4000) { $txt = (& $PSMUX -L $c.ns capture-pane -p 2>$null | Out-String); if ($txt -match ([regex]::Escape($BS) + '\s*$')) { break }; Start-Sleep -Milliseconds 150 }
+    $last = (($txt -split "`n") | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    # Only the line end is checked here: the binding runs on its own, and none
+    # of the next line leaks into it. How many backslashes a bare `\\` in a
+    # bound command types (tmux: one, psmux: two, mid line too) is a separate,
+    # older difference.
+    Check ($last -match ([regex]::Escape($BS) + '\s*$') -and $last -notmatch 'set|after2') "C-b y runs send-keys -l \\ alone: '$($last.Trim())'"
     Stop-Ns $c.ns $c.proc
 }
 finally {
