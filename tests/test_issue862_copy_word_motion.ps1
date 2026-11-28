@@ -12,6 +12,15 @@
 # Each check names tmux 3.7c's value for the same lines in a pane of the same
 # size.
 #
+# The inbox console host of Windows 10 (build 19045) differs in two ways
+# that sections F and G meet; with PSMUX_CONPTY_DIR the pane runs on
+# OpenConsole, which does neither:
+# - It ends a full row with CR LF instead of letting it wrap, so the wrapped
+#   line of section F is two lines there. F then checks what tmux 3.8 reports
+#   for the same rows broken with CR LF.
+# - It keeps ?1049h to itself and repaints, so the pane never reaches the
+#   alternate screen. It passes ?47h on, so section G uses that there.
+#
 # The suite runs under -L in a PSMUX_DATA_DIR of its own and kills only its own
 # namespace. Set PSMUX_TEST_BIN to test a binary that is not on PATH.
 
@@ -44,6 +53,7 @@ New-Item -ItemType Directory -Force $TMP | Out-Null
 $env:PSMUX_DATA_DIR = $TMP
 $NS = "cwm" + [guid]::NewGuid().ToString('N').Substring(0, 6)
 $S = "wm"
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 
 Write-Host "`n=== Copy mode word motions split words the way tmux does ===" -ForegroundColor Cyan
 Write-Host "  Binary:   $PSMUX"
@@ -168,7 +178,8 @@ try {
     Write-Head "F. a wrapped line and the scrollback (20x6 pane, values from tmux 3.8)"
     # Ten lines in a 20 column pane: the ninth wraps, and the first five go
     # into the scrollback. Screen row 2 is "alpha bravocharliede", row 3 its
-    # continuation "ltaecho foxtrot", row 0 is "row07 aa-bb".
+    # continuation "ltaecho foxtrot", row 0 is "row07 aa-bb". On the Windows
+    # 10 inbox host row 3 is a line of its own (see the header).
     $FILE2 = Join-Path $TMP "lines2.txt"
     $LINES2 = @(1..8 | ForEach-Object { 'row{0:D2} aa-bb' -f $_ }) + @('alpha bravocharliedeltaecho foxtrot', 'end')
     [IO.File]::WriteAllLines($FILE2, $LINES2)
@@ -178,19 +189,29 @@ try {
     for ($i = 0; $i -lt 50 -and -not $up; $i++) { Start-Sleep -Milliseconds 200; $up = ((P capture-pane -p -t $S) -join "`n") -match '(?m)^end' }
     Check $up "the wrapped lines reach the pane" "the wrapped lines never appeared"
     P set -g mode-keys vi | Out-Null
-    Check-Walk 2 0 next-word '2:6 3:8 4:0' ' (tmux: over the wrap)'
-    Check-Walk 2 6 next-word-end '3:6 3:14' ' (tmux: the word ends on the next row)'
+    if ($Win10Inbox) {
+        Check-Walk 2 0 next-word '2:6 3:0 3:8' ' (tmux: the next line starts a word)'
+        Check-Walk 2 6 next-word-end '2:19 2:19' ' (tmux: stays on the end of the row)'
+    } else {
+        Check-Walk 2 0 next-word '2:6 3:8 4:0' ' (tmux: over the wrap)'
+        Check-Walk 2 6 next-word-end '3:6 3:14' ' (tmux: the word ends on the next row)'
+    }
     Check-Walk 0 0 previous-word '0:9 0:8 0:6 0:0 0:9' ' (tmux: up into the scrollback)'
     $sp = ((P display -p -t $S '#{scroll_position}') -join '').Trim()
     Check ($sp -eq '2') "the view scrolled 2 lines to show the motion's line (tmux)" "scroll_position is $sp, want 2"
+    $WORD = if ($Win10Inbox) { 'bravocharliede' } else { 'bravocharliedeltaecho' }
     Enter-At 2 8
     $word = ((P display -p -t $S '#{copy_cursor_word}') -join '')
-    Check ($word -eq 'bravocharliedeltaecho') "copy_cursor_word takes the whole wrapped word (tmux)" "copy_cursor_word is [$word]"
+    Check ($word -eq $WORD) "copy_cursor_word takes the whole word, [$WORD] (tmux)" "copy_cursor_word is [$word], want [$WORD]"
     P send-keys -t $S -X select-word | Out-Null
     $buf = Copied
-    Check ($buf -eq 'bravocharliedeltaecho') "select-word copies the whole wrapped word (tmux)" "select-word copied [$buf]"
+    Check ($buf -eq $WORD) "select-word copies the whole word, [$WORD] (tmux)" "select-word copied [$buf], want [$WORD]"
     P set -g mode-keys emacs | Out-Null
-    Check-Walk 2 6 next-word-end '3:7 3:15' ' (tmux, emacs keys)'
+    if ($Win10Inbox) {
+        Check-Walk 2 6 next-word-end '2:20 3:7' ' (tmux, emacs keys: one past the end of the row)'
+    } else {
+        Check-Walk 2 6 next-word-end '3:7 3:15' ' (tmux, emacs keys)'
+    }
 
     Write-Head "G. an alternate screen has no lines above it"
     # 30 lines go into the history, then the pane takes the alternate
@@ -198,7 +219,8 @@ try {
     # from its top row stays there. It used to read row 0 again as the line
     # above and walk 0:8 0:4 0:0 over it.
     $S = "alt"
-    P new-session -d -s $S -x 40 -y 8 "1..30|%{ 'word{0:D2} aa' -f `$_ }; [Console]::Write([string][char]27+'[?1049h'+[char]27+'[HALT top line'); Start-Sleep 100000" | Out-Null
+    $ALT = if ($Win10Inbox) { '47' } else { '1049' }
+    P new-session -d -s $S -x 40 -y 8 "1..30|%{ 'word{0:D2} aa' -f `$_ }; [Console]::Write([string][char]27+'[?${ALT}h'+[char]27+'[HALT top line'); Start-Sleep 100000" | Out-Null
     $up = $false
     for ($i = 0; $i -lt 50 -and -not $up; $i++) { Start-Sleep -Milliseconds 200; $up = ((P capture-pane -p -t $S) -join "`n") -match 'ALT top' }
     Check $up "the alternate screen is up" "the alternate screen never appeared"

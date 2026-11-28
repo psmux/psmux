@@ -29,6 +29,19 @@
 # the way, by tests-rs/test_codepoint_widths.rs -- see
 # overwriting_the_lead_half_clears_the_continuation and its siblings there.
 # This is the same split tests/test_issue639_wide_char_clear.ps1 documents.
+#
+# The host's repaint gets in the way of the wrapping probe too. It takes
+# U+2502 as one column, so when it repaints the row as the bars followed by
+# blanks and then moves down with line feeds, psmux's two column bars take
+# one more row than the host counts and the last line feed scrolls their
+# first row out of the pane. The payload therefore clears the screen, writes
+# a marker on the last row and waits until the marker is in the pane before
+# it draws: the bars then go onto a blank row, and the host sends only them.
+#
+# The inbox console host of Windows 10 (build 19045) ends a full row with CR
+# LF instead of letting it wrap, at its own widths, so there 15 U+4E2D come
+# back as 10 + 5 whatever width psmux gives them. With PSMUX_CONPTY_DIR the
+# pane runs on OpenConsole, which wraps.
 
 $ErrorActionPreference = "Continue"
 
@@ -41,6 +54,7 @@ $ErrorActionPreference = "Continue"
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $SOCK = "cpw"
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 # Separate namespace for the psmux.conf case, which needs a server started
 # fresh with a config file rather than the anchored one the other cases share.
 $SOCK2 = "cpwconf"
@@ -81,13 +95,15 @@ function Kill-Sess([string]$n, [string]$sock = $SOCK) {
 # which some shells export, strips escape sequences out of Write-Host.
 $payload = Join-Path $work "cpw_payload.ps1"
 @'
-param([string]$Case, [int]$Count = 15)
+param([string]$Case, [int]$Count = 15, [string]$Go)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $e = [char]27
 function W([string]$s) { [Console]::Out.Write($s); [Console]::Out.Flush() }
 $bar = [string][char]0x2502   # U+2502, East Asian AMBIGUOUS
 $han = [string][char]0x4E2D   # U+4E2D, unambiguously double width
-W "$e[H$e[2J"
+W "$e[H$e[2J$e[$([Console]::WindowHeight);1H+"
+while (-not (Test-Path $Go)) { Start-Sleep -Milliseconds 50 }
+W "$e[H"
 switch ($Case) {
   "bars"  { W ($bar * $Count) }
   "han"   { W ($han * $Count) }
@@ -134,7 +150,18 @@ function Get-Rows {
         & $PSMUX @newArgs 2>&1 | Out-Null
         Start-Sleep -Milliseconds 1500
         if ($Setup) { & $Setup }
-        & $PSMUX -L $Sock send-keys -t $Name "pwsh -NoProfile -NoLogo -File '$payload' -Case $Case -Count $Count" Enter 2>&1 | Out-Null
+        $go = Join-Path $work "go_${Name}_$try"
+        Remove-Item $go -EA SilentlyContinue
+        & $PSMUX -L $Sock send-keys -t $Name "pwsh -NoProfile -NoLogo -File '$payload' -Case $Case -Count $Count -Go '$go'" Enter 2>&1 | Out-Null
+        # Let the payload draw once its cleared screen and marker are in the
+        # pane (see the header). A session that is gone is retried below.
+        for ($k = 0; $k -lt 80; $k++) {
+            if ((& $PSMUX -L $Sock capture-pane -p -t $Name 2>&1 | Out-String) -match '(?m)^\+\s*$') { break }
+            & $PSMUX -L $Sock has-session -t $Name 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        New-Item -ItemType File -Force $go | Out-Null
         Start-Sleep -Milliseconds 3000
         $cap = (& $PSMUX -L $Sock capture-pane -p -t $Name 2>&1 | Out-String)
         Kill-Sess $Name $Sock
@@ -311,7 +338,14 @@ foreach ($r in $rows) {
     if ($n -gt 0) { $hanCounts += $n }
 }
 $hanShape = ($hanCounts -join ",")
-if ($hanShape -eq "15") {
+if ($Win10Inbox) {
+    # The host broke the row after 10 by its own widths (see the header).
+    if ($hanShape -eq "10,5") {
+        Write-Pass "the Windows 10 inbox host broke the row at its own width (shape $hanShape)"
+    } else {
+        Write-Fail "expected the Windows 10 inbox host to break the row '10,5', got '$hanShape'"
+    }
+} elseif ($hanShape -eq "15") {
     Write-Pass "the appended entry narrowed U+4E2D to one column (shape $hanShape)"
 } else {
     Write-Fail "expected the appended entry to give '15', got '$hanShape'"

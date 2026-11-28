@@ -20,6 +20,12 @@
 # (tests-rs/test_capture_pane_join.rs): ConPTY decides whether those reach
 # the pane as spaces or as an erase, so a live pane cannot pin them.
 #
+# The inbox console host of Windows 10 (build 19045) ends a full row with CR
+# LF instead of letting it wrap, so there no row of the pane is wrapped and
+# -J joins nothing: each row comes back as its own line, the space at the
+# end of the first row included. tmux 3.8 gives the same for rows broken with
+# CR LF. With PSMUX_CONPTY_DIR the pane runs on OpenConsole, which wraps.
+#
 # The CLI, a capture into a buffer and a control client (-C) are all checked.
 # Runs only under -L in a private PSMUX_DATA_DIR; no window is opened. The
 # user's clipboard is saved and put back.
@@ -50,6 +56,23 @@ $file = Join-Path $tmp "content.txt"
 $child = "pwsh -NoProfile -NoLogo -Command `"[Console]::OutputEncoding=[Text.Encoding]::UTF8; Clear-Host; " +
     "[Console]::Out.Write([IO.File]::ReadAllText('$file')); Start-Sleep 120`""
 $JOINED = 'AAAAAAAAAABBBBBBBBB CCCC'
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+# The -J lines of each line of the content: one, or on that host one a row.
+$LINE = if ($Win10Inbox) {
+    @("AAAAAAAAAABBBBBBBBB `nCCCC", 'short  x', "REDREDREDREDREDREDRE`nDX", (($W * 5) + "`nX"),
+        ("123456789012345678" + $W[0] + "`n" + $W[1]))
+} else {
+    @($JOINED, 'short  x', 'REDREDREDREDREDREDREDX', (($W * 5) + 'X'), "123456789012345678$W")
+}
+# The lines of $got that hold line $n of the content, joined with newlines.
+function JLine([string[]]$got, [int]$n) {
+    $at = 0
+    for ($i = 0; $i -lt $n; $i++) { $at += @($LINE[$i] -split "`n").Count }
+    ($got[$at..($at + @($LINE[$n] -split "`n").Count - 1)]) -join "`n"
+}
+# Between two rows of a line: a newline on that host, nothing otherwise, with
+# -e the SGR around it.
+$SEP = if ($Win10Inbox) { "(`e\[[0-9;]*m)*`n(`e\[[0-9;]*m)*" } else { '' }
 
 function Utf8([scriptblock]$b) {
     $old = [Console]::OutputEncoding
@@ -72,33 +95,34 @@ try {
     Check 'without -J the wrapped line is two rows' ($plain[0] -eq 'AAAAAAAAAABBBBBBBBB' -and $plain[1] -eq 'CCCC') ($plain[0..1] -join ' | ')
 
     $j = Cap @('-pJ')
-    Check '-J joins the wrapped line and keeps the space at the wrap' ($j[0] -eq $JOINED) "[$($j[0])]"
-    Check '-J leaves a short line alone' ($j[1] -eq 'short  x') "[$($j[1])]"
-    Check '-J joins a styled wrapped line' ($j[2] -eq 'REDREDREDREDREDREDREDX') "[$($j[2])]"
-    Check '-J joins wide glyphs wrapped at the edge' ($j[3] -eq (($W * 5) + 'X')) "[$($j[3])]"
-    Check '-J joins a wide glyph that ends a full row' ($j[4] -eq "123456789012345678$W") "[$($j[4])]"
+    Check '-J joins the wrapped line and keeps the space at the wrap' ((JLine $j 0) -eq $LINE[0]) "[$(JLine $j 0)]"
+    Check '-J leaves a short line alone' ((JLine $j 1) -eq $LINE[1]) "[$(JLine $j 1)]"
+    Check '-J joins a styled wrapped line' ((JLine $j 2) -eq $LINE[2]) "[$(JLine $j 2)]"
+    Check '-J joins wide glyphs wrapped at the edge' ((JLine $j 3) -eq $LINE[3]) "[$(JLine $j 3)]"
+    Check '-J joins a wide glyph that ends a full row' ((JLine $j 4) -eq $LINE[4]) "[$(JLine $j 4)]"
 
     $r0 = @(Cap @('-pJ', '-S', '0', '-E', '0'))
     Check '-J -S 0 -E 0 is the first row, its last cell included' ($r0.Count -eq 1 -and $r0[0] -eq 'AAAAAAAAAABBBBBBBBB ') "[$($r0 -join ' | ')]"
     $r1 = @(Cap @('-pJ', '-S', '1', '-E', '1'))
     Check '-J -S 1 -E 1 is the continuation row' ($r1.Count -eq 1 -and $r1[0] -eq 'CCCC') ($r1 -join ' | ')
     $r02 = Cap @('-pJ', '-S', '0', '-E', '2')
-    Check '-J -S 0 -E 2 joins inside the range' ($r02.Count -eq 2 -and $r02[0] -eq $JOINED -and $r02[1] -eq 'short  x') ($r02 -join ' | ')
+    Check '-J -S 0 -E 2 joins inside the range' (($r02 -join "`n") -eq ($LINE[0..1] -join "`n")) ($r02 -join ' | ')
     $p01 = Cap @('-p', '-S', '0', '-E', '1')
     Check 'a range without -J still splits and trims' ($p01.Count -eq 2 -and $p01[0] -eq 'AAAAAAAAAABBBBBBBBB' -and $p01[1] -eq 'CCCC') ($p01 -join ' | ')
 
     $jn = Cap @('-pJN')
-    Check '-JN is the same as -J' (($jn[0..4] -join "`n") -eq ($j[0..4] -join "`n")) ($jn[0..4] -join ' | ')
+    $last = @(($LINE -join "`n") -split "`n").Count - 1
+    Check '-JN is the same as -J' (($jn[0..$last] -join "`n") -eq ($j[0..$last] -join "`n")) ($jn[0..$last] -join ' | ')
 
     $je = Cap @('-pJe')
-    Check '-Je joins the red run with the rest of its line' ($je[2] -match "REDREDREDREDREDREDRE`e\[[0-9;]*mDX") "[$($je[2])]"
-    Check '-Je joins the plain wrapped line too' ($je[0] -match [regex]::Escape($JOINED)) "[$($je[0])]"
+    Check '-Je joins the red run with the rest of its line' ((JLine $je 2) -match "REDREDREDREDREDREDRE$SEP`e\[[0-9;]*mDX") "[$(JLine $je 2)]"
+    Check '-Je joins the plain wrapped line too' ((JLine $je 0) -match ([regex]::Escape('AAAAAAAAAABBBBBBBBB ') + $SEP + 'CCCC')) "[$(JLine $je 0)]"
 
     # Into the paste buffer instead of stdout.
     & $Exe -L $ns capture-pane -t base -J | Out-Null
     Start-Sleep -Milliseconds 300
     $buf = Utf8 { & $Exe -L $ns show-buffer }
-    Check 'capture-pane -J into a buffer joins too' ($buf.Count -ge 2 -and $buf[0] -eq $JOINED -and $buf[1] -eq 'short  x') ($buf[0..1] -join ' | ')
+    Check 'capture-pane -J into a buffer joins too' (((JLine $buf 0) -eq $LINE[0]) -and ((JLine $buf 1) -eq $LINE[1])) ($buf[0..2] -join ' | ')
 
     # A control client runs capture-pane through its own dispatcher.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -119,7 +143,7 @@ try {
     $p.StandardInput.Close()
     if (-not $p.WaitForExit(8000)) { $p.Kill() }
     $cc = @($outTask.Result -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^%' })
-    Check 'a control client gets the joined lines' (($cc -join "`n") -eq "$JOINED`nshort  x") ($cc -join ' | ')
+    Check 'a control client gets the joined lines' (($cc -join "`n") -eq ($LINE[0..1] -join "`n")) ($cc -join ' | ')
 } finally {
     & $Exe -L $ns kill-server 2>$null | Out-Null
     if ($null -ne $savedClip) { Set-Clipboard -Value $savedClip }
