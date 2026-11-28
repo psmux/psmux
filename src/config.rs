@@ -492,9 +492,14 @@ fn join_continuations(content: &str, first_line: usize) -> Vec<(usize, String)> 
     for (idx, line) in content.lines().enumerate() {
         let lineno = idx + first_line;
         let trimmed = line.trim_end();
-        if trimmed.ends_with('\\') {
+        // Only an UNESCAPED backslash at the end continues the line. `\\` is
+        // an escaped backslash in tmux's lexer, so `set -g prefix C-\\` is a
+        // whole line (issue #1118); it used to swallow the next line and both
+        // backslashes.
+        let trailing = trimmed.len() - trimmed.trim_end_matches('\\').len();
+        if trailing % 2 == 1 {
             if continuation.is_empty() { cont_start = lineno; }
-            continuation.push_str(trimmed.trim_end_matches('\\'));
+            continuation.push_str(&trimmed[..trimmed.len() - 1]);
             continuation.push(' ');
         } else {
             if !continuation.is_empty() {
@@ -1440,8 +1445,11 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     let l = strip_inline_comment(l).trim_end();
     if l.is_empty() { return; }
 
-    let l = if l.ends_with('\\') {
-        l.trim_end_matches('\\').trim()
+    // A dangling continuation backslash. `\\` is an escaped backslash, not
+    // one, and keeps both: `set -g prefix C-\\` (issue #1118).
+    let trailing = l.len() - l.trim_end_matches('\\').len();
+    let l = if trailing % 2 == 1 {
+        l[..l.len() - 1].trim()
     } else {
         l
     };
@@ -3169,13 +3177,47 @@ fn named_key(name: &str) -> Option<KeyCode> {
     }
 }
 
+/// The backslash escapes of a key name token: a backslash before a punctuation
+/// character stands for that character (`\\` is `\`, `\"` is `"`, `\;` is
+/// `;`), as in tmux. Anything else is kept as written, so a lone backslash
+/// still names the key itself: `C-\`, the form psmux's own list-keys prints,
+/// keeps working when it is sourced again.
+fn unescape_key_backslashes(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&n) = chars.peek() {
+                if n.is_ascii_punctuation() {
+                    out.push(n);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     let name = name.trim();
     // Strip surrounding quotes (single or double) — plugins often quote special chars
     // e.g., bind-key '|' split-window -h
-    let name = if (name.starts_with('\'') && name.ends_with('\'') && name.len() >= 2)
+    let single_quoted = name.starts_with('\'') && name.ends_with('\'') && name.len() >= 2;
+    let name = if single_quoted
         || (name.starts_with('"') && name.ends_with('"') && name.len() >= 2) {
         &name[1..name.len()-1]
+    } else {
+        name
+    };
+    // tmux's config parser turns `\\` into one backslash everywhere but inside
+    // single quotes (cmd-parse.y), so `C-\\`, `"C-\\"` and `M-\\` all name the
+    // key C-\ (issue #1118). The key token reaches here as written.
+    let unescaped;
+    let name = if !single_quoted && name.contains('\\') {
+        unescaped = unescape_key_backslashes(name);
+        unescaped.as_str()
     } else {
         name
     };
@@ -4994,3 +5036,7 @@ mod test_issue823_quote_escapes;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue1014_user_keys_lines.rs"]
 mod test_issue1014_user_keys_lines;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue1118_key_name_backslash.rs"]
+mod test_issue1118_key_name_backslash;
