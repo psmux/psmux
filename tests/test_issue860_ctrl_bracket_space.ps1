@@ -24,6 +24,9 @@
 # everywhere, and a Ctrl+Space record written straight into the program's
 # console gives nothing either, where 26300 gives 00 both ways. So on that
 # host the NUL checks expect the bytes on either side and nothing between.
+# With PSMUX_CONPTY_DIR the panes run on OpenConsole, which hands the NUL on
+# both ways as 26300 does, so the checks expect it there, as
+# test_altgr_letter_paste.ps1 does.
 #
 # Every runtime check uses its own -L namespace and PSMUX_DATA_DIR, and every
 # process this script starts is stopped by PID.
@@ -37,7 +40,7 @@ New-Item -ItemType Directory -Force $TMP | Out-Null
 if (-not $env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR = Join-Path $TMP "data" }
 New-Item -ItemType Directory -Force $env:PSMUX_DATA_DIR | Out-Null
 $env:PSMUX_RUN_NOPAUSE = "1"
-$Win10 = [Environment]::OSVersion.Version.Build -lt 22000
+$Win10 = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
 
 $script:Pass = 0
 $script:Fail = 0
