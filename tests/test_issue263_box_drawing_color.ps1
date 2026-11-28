@@ -116,6 +116,14 @@ $testCases = @(
     @{ Label="│BX196"; Pattern="BX196"; ExpectSGR="38;5;196" }
     @{ Label="GRNBOX"; Pattern="GRNBOX"; ExpectSGR="38;2;0;255;0" }
 )
+# On Windows 10 (build 19045) the inbox pseudo console that hosts the pane
+# re-encodes a 256 colour index as the RGB of that index before psmux reads
+# it (measured there: 38;5;196 as 38;2;255;0;0), and psmux keeps what reaches
+# it, so the text and the box carry that spelling there. An OpenConsole
+# through PSMUX_CONPTY_DIR passes the index unchanged.
+if ([Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR) {
+    foreach ($tc in $testCases) { if ($tc.ExpectSGR -eq "38;5;196") { $tc.ExpectSGR = "38;2;255;0;0" } }
+}
 
 foreach ($tc in $testCases) {
     $outputLines = $capLines | Where-Object { $_ -match $tc.Pattern -and $_ -notmatch 'Write-Host' }

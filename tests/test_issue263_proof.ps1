@@ -88,6 +88,34 @@ $rx = [regex]::new("$ESC\[([^m]*)m│\s+(SGR-90|SGR-37|SGR-1-37|IDX-240|IDX-250|
 $matches = $rx.Matches($capOuter)
 
 Write-Host "`n--- ANALYSIS: SGR preceding each box-drawing char ---" -ForegroundColor Yellow
+# On Windows 10 (build 19045) the inbox pseudo console that hosts the pane
+# re-encodes these colours before psmux reads them (measured there): 37 is
+# its default foreground, so it writes no colour at all; bold brightens
+# (1;37 comes out as 1;97); and a 256 colour index becomes the RGB of that
+# index (38;5;240 as 38;2;88;88;88). psmux keeps what reaches it, so there
+# the box must carry that host's spelling, the same as the text. An
+# OpenConsole through PSMUX_CONPTY_DIR passes them unchanged.
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+function Get-HostSgr([string]$sgr) {
+    if (-not $Win10Inbox) { return $sgr }
+    switch ($sgr) {
+        '37' { '0' }
+        '1;37' { '1;97' }
+        '38;5;196' { '38;2;255;0;0' }
+        '38;5;240' { '38;2;88;88;88' }
+        '38;5;250' { '38;2;188;188;188' }
+        default { $sgr }
+    }
+}
+# Every part of $want is in $sgr. A $want of 0 (that host's default
+# foreground) means $sgr only resets.
+function Test-SgrHas([string]$sgr, [string]$want) {
+    $parts = @($sgr -split ';' | Where-Object { $_ -ne '' })
+    if ($want -eq '0') { return @($parts | Where-Object { $_ -ne '0' }).Count -eq 0 }
+    foreach ($wp in $want -split ';') { if ($parts -notcontains $wp) { return $false } }
+    return $true
+}
+
 $expected = @{
     "SGR-90"   = "90";
     "SGR-37"   = "37";
@@ -102,14 +130,9 @@ $pass = 0; $fail = 0
 foreach ($m in $matches) {
     $sgr = $m.Groups[1].Value
     $tag = $m.Groups[2].Value
-    $want = $expected[$tag]
+    $want = Get-HostSgr $expected[$tag]
 
-    $sgrParts = $sgr -split ';'
-    $wantParts = $want -split ';'
-    $allFound = $true
-    foreach ($wp in $wantParts) {
-        if ($sgrParts -notcontains $wp) { $allFound = $false; break }
-    }
+    $allFound = Test-SgrHas $sgr $want
     if ($allFound) {
         Write-Pass "$tag : box preceded by SGR [$sgr] (contains expected '$want')"
         $pass++

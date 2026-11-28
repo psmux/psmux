@@ -66,6 +66,34 @@ Start-Sleep -Seconds 3
 $cap = & $PSMUX capture-pane -t $SESSION -p -e 2>&1 | Out-String
 
 # Map TAG to expected SGR components
+# On Windows 10 (build 19045) the inbox pseudo console that hosts the pane
+# re-encodes these colours before psmux reads them (measured there): 37 is
+# its default foreground, so it writes no colour at all; bold brightens
+# (1;37 comes out as 1;97); and a 256 colour index becomes the RGB of that
+# index (38;5;240 as 38;2;88;88;88). psmux keeps what reaches it, so there
+# the box must carry that host's spelling, the same as the text. An
+# OpenConsole through PSMUX_CONPTY_DIR passes them unchanged.
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+function Get-HostSgr([string]$sgr) {
+    if (-not $Win10Inbox) { return $sgr }
+    switch ($sgr) {
+        '37' { '0' }
+        '1;37' { '1;97' }
+        '38;5;196' { '38;2;255;0;0' }
+        '38;5;240' { '38;2;88;88;88' }
+        '38;5;250' { '38;2;188;188;188' }
+        default { $sgr }
+    }
+}
+# Every part of $want is in $sgr. A $want of 0 (that host's default
+# foreground) means $sgr only resets.
+function Test-SgrHas([string]$sgr, [string]$want) {
+    $parts = @($sgr -split ';' | Where-Object { $_ -ne '' })
+    if ($want -eq '0') { return @($parts | Where-Object { $_ -ne '0' }).Count -eq 0 }
+    foreach ($wp in $want -split ';') { if ($parts -notcontains $wp) { return $false } }
+    return $true
+}
+
 $expected = [ordered]@{
     "TAG-090" = "90"
     "TAG-037" = "37"
@@ -88,7 +116,7 @@ Write-Host "`n--- BYTE-LEVEL VERIFICATION ---" -ForegroundColor Yellow
 
 $pass = 0; $fail = 0
 foreach ($tag in $expected.Keys) {
-    $want = $expected[$tag]
+    $want = Get-HostSgr $expected[$tag]
     $line = $relevant | Where-Object { $_.Contains($tag) } | Select-Object -First 1
     if (-not $line) {
         Write-Fail "$tag : line not in capture"
@@ -124,12 +152,7 @@ foreach ($tag in $expected.Keys) {
     $lastSgr = $sgrMatches[$sgrMatches.Count - 1].Groups[1].Value
 
     # Verify all expected components are in the last SGR
-    $wantParts = $want -split ';'
-    $lastParts = $lastSgr -split ';'
-    $allFound = $true
-    foreach ($wp in $wantParts) {
-        if ($lastParts -notcontains $wp) { $allFound = $false; break }
-    }
+    $allFound = Test-SgrHas $lastSgr $want
     if ($allFound) {
         Write-Pass "$tag : box char preceded by SGR [$lastSgr] containing expected '$want'"
         $pass++

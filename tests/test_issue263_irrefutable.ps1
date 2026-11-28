@@ -140,12 +140,8 @@ function Test-BoxLine {
     }
     $lastSgr = $sgrMatches[$sgrMatches.Count - 1].Groups[1].Value
 
-    $wantParts = $wantSgr -split ';'
-    $lastParts = $lastSgr -split ';'
-    foreach ($wp in $wantParts) {
-        if ($lastParts -notcontains $wp) {
-            return @{ Ok=$false; Reason="SGR mismatch"; LastSgr=$lastSgr }
-        }
+    if (-not (Test-SgrHas $lastSgr $wantSgr)) {
+        return @{ Ok=$false; Reason="SGR mismatch"; LastSgr=$lastSgr }
     }
     return @{ Ok=$true; LastSgr=$lastSgr }
 }
@@ -167,14 +163,38 @@ function Test-TextLine {
     }
     $lastSgr = $sgrMatches[$sgrMatches.Count - 1].Groups[1].Value
 
-    $wantParts = $wantSgr -split ';'
-    $lastParts = $lastSgr -split ';'
-    foreach ($wp in $wantParts) {
-        if ($lastParts -notcontains $wp) {
-            return @{ Ok=$false; Reason="SGR mismatch"; LastSgr=$lastSgr }
-        }
+    if (-not (Test-SgrHas $lastSgr $wantSgr)) {
+        return @{ Ok=$false; Reason="SGR mismatch"; LastSgr=$lastSgr }
     }
     return @{ Ok=$true; LastSgr=$lastSgr }
+}
+
+# On Windows 10 (build 19045) the inbox pseudo console that hosts the pane
+# re-encodes these colours before psmux reads them (measured there): 37 is
+# its default foreground, so it writes no colour at all; bold brightens
+# (1;37 comes out as 1;97); and a 256 colour index becomes the RGB of that
+# index (38;5;240 as 38;2;88;88;88). psmux keeps what reaches it, so there
+# the box must carry that host's spelling, the same as the text. An
+# OpenConsole through PSMUX_CONPTY_DIR passes them unchanged.
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+function Get-HostSgr([string]$sgr) {
+    if (-not $Win10Inbox) { return $sgr }
+    switch ($sgr) {
+        '37' { '0' }
+        '1;37' { '1;97' }
+        '38;5;196' { '38;2;255;0;0' }
+        '38;5;240' { '38;2;88;88;88' }
+        '38;5;250' { '38;2;188;188;188' }
+        default { $sgr }
+    }
+}
+# Every part of $want is in $sgr. A $want of 0 (that host's default
+# foreground) means $sgr only resets.
+function Test-SgrHas([string]$sgr, [string]$want) {
+    $parts = @($sgr -split ';' | Where-Object { $_ -ne '' })
+    if ($want -eq '0') { return @($parts | Where-Object { $_ -ne '0' }).Count -eq 0 }
+    foreach ($wp in $want -split ';') { if ($parts -notcontains $wp) { return $false } }
+    return $true
 }
 
 $expected = [ordered]@{
@@ -195,10 +215,10 @@ $boxResults = @{}
 foreach ($k in $expected.Keys) {
     $tag = "BOX-$k"
     $line = $boxLines | Where-Object { $_.Contains($tag) } | Select-Object -First 1
-    $r = Test-BoxLine -line $line -tag $tag -wantSgr $expected[$k]
+    $r = Test-BoxLine -line $line -tag $tag -wantSgr (Get-HostSgr $expected[$k])
     $boxResults[$k] = $r
     if ($r.Ok) {
-        Write-Pass "$tag : box preceded by SGR [$($r.LastSgr)] (expected '$($expected[$k])')"
+        Write-Pass "$tag : box preceded by SGR [$($r.LastSgr)] (expected '$(Get-HostSgr $expected[$k])')"
         $boxPass++
     } else {
         Write-Fail "$tag : $($r.Reason)$(if ($r.LastSgr) { " - got [$($r.LastSgr)]" })$(if ($r.Hex) { " hex=$($r.Hex)" })"
@@ -213,9 +233,9 @@ $txtPass = 0; $txtFail = 0
 foreach ($k in $expected.Keys) {
     $tag = "TXT-$k"
     $line = $txtLines | Where-Object { $_.Contains($tag) } | Select-Object -First 1
-    $r = Test-TextLine -line $line -tag $tag -wantSgr $expected[$k]
+    $r = Test-TextLine -line $line -tag $tag -wantSgr (Get-HostSgr $expected[$k])
     if ($r.Ok) {
-        Write-Pass "$tag : SGR [$($r.LastSgr)] (expected '$($expected[$k])')"
+        Write-Pass "$tag : SGR [$($r.LastSgr)] (expected '$(Get-HostSgr $expected[$k])')"
         $txtPass++
     } else {
         Write-Fail "$tag : $($r.Reason)"

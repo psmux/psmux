@@ -116,6 +116,34 @@ $capInner -split "`n" | ForEach-Object {
 # --- Compare per line: does the OUTER (live render output) carry expected SGR before each box char? ---
 Write-Host "`n--- Verification: does live render keep SGR on box-drawing chars? ---"
 
+# On Windows 10 (build 19045) the inbox pseudo console that hosts the pane
+# re-encodes these colours before psmux reads them (measured there): 37 is
+# its default foreground, so it writes no colour at all; bold brightens
+# (1;37 comes out as 1;97); and a 256 colour index becomes the RGB of that
+# index (38;5;240 as 38;2;88;88;88). psmux keeps what reaches it, so there
+# the box must carry that host's spelling, the same as the text. An
+# OpenConsole through PSMUX_CONPTY_DIR passes them unchanged.
+$Win10Inbox = [Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR
+function Get-HostSgr([string]$sgr) {
+    if (-not $Win10Inbox) { return $sgr }
+    switch ($sgr) {
+        '37' { '0' }
+        '1;37' { '1;97' }
+        '38;5;196' { '38;2;255;0;0' }
+        '38;5;240' { '38;2;88;88;88' }
+        '38;5;250' { '38;2;188;188;188' }
+        default { $sgr }
+    }
+}
+# Every part of $want is in $sgr. A $want of 0 (that host's default
+# foreground) means $sgr only resets.
+function Test-SgrHas([string]$sgr, [string]$want) {
+    $parts = @($sgr -split ';' | Where-Object { $_ -ne '' })
+    if ($want -eq '0') { return @($parts | Where-Object { $_ -ne '0' }).Count -eq 0 }
+    foreach ($wp in $want -split ';') { if ($parts -notcontains $wp) { return $false } }
+    return $true
+}
+
 $expected = @(
     @{ desc="SGR 90";   want="90";        token="SGR 90" },
     @{ desc="SGR 37";   want="37";        token="SGR 37" },
@@ -159,17 +187,13 @@ foreach ($e in $expected) {
     $lastSgr = if ($sgrs.Count -gt 0) { $sgrs[-1] } else { "(none)" }
 
     # Want all components present in the LAST SGR before bar
-    $wantParts = $e.want -split ';'
-    $lastParts = $lastSgr -split ';'
-    $allFound = $true
-    foreach ($wp in $wantParts) {
-        if ($lastParts -notcontains $wp) { $allFound = $false; break }
-    }
+    $want = Get-HostSgr $e.want
+    $allFound = Test-SgrHas $lastSgr $want
     if ($allFound) {
-        Write-Pass "$($e.desc): box preceded by SGR [$lastSgr] (contains expected '$($e.want)')"
+        Write-Pass "$($e.desc): box preceded by SGR [$lastSgr] (contains expected '$want')"
         $pass++
     } else {
-        Write-Fail "$($e.desc): expected '$($e.want)' before box, got '[$lastSgr]'. Line=$shown"
+        Write-Fail "$($e.desc): expected '$want' before box, got '[$lastSgr]'. Line=$shown"
         $fail++
     }
 }

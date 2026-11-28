@@ -39,6 +39,16 @@ $cases = @(
     @{ Sgr = "38;2;128;128;128";Tag = "T6"; ExpectedFg = "rgb:128,128,128"   },
     @{ Sgr = "38;2;255;0;0";    Tag = "T7"; ExpectedFg = "rgb:255,0,0"       }
 )
+# On Windows 10 (build 19045) the inbox pseudo console that hosts the pane
+# re-encodes three of these before psmux reads them (measured there): 37 is
+# its default foreground, so it writes no colour at all, and a 256 colour
+# index becomes the RGB of that index. psmux stores what reaches it. An
+# OpenConsole through PSMUX_CONPTY_DIR passes them unchanged.
+if ([Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR) {
+    $cases[1].ExpectedFg = "default"
+    $cases[3].ExpectedFg = "rgb:88,88,88"
+    $cases[4].ExpectedFg = "rgb:188,188,188"
+}
 
 # --- Build single binary file with all 7 lines ---
 function To-BinLine {

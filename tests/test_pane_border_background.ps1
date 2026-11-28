@@ -9,7 +9,10 @@ $outputFile = Join-Path $artifactRoot "conpty_out.bin"
 $controlFile = Join-Path $artifactRoot "conpty_ctrl.txt"
 $logFile = Join-Path $artifactRoot "conpty_host.log"
 $pidFile = Join-Path $artifactRoot "conpty_childpid.txt"
-$needle = "48;5;21"
+# The client is read back through an inbox pseudo console, and the one of
+# Windows 10 (build 19045) re-encodes a 256 colour index as the RGB of that
+# index (measured there: bg=colour21 came out as 48;2;0;0;255).
+$needle = if ([Environment]::OSVersion.Version.Build -lt 22000) { "48;2;0;0;255" } else { "48;5;21" }
 $failed = 0
 
 function Read-BinEscaped([long]$Start = 0) {
@@ -52,7 +55,7 @@ $client = $null
 
 try {
     $compiler = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-    $compilerOutput = & $compiler /nologo /optimize /out:$hostExe tests\conpty_host_0xE.cs 2>&1
+    $compilerOutput = & $compiler /nologo /optimize /out:$hostExe (Join-Path $PSScriptRoot "conpty_host_0xE.cs") 2>&1
     if (-not (Test-Path $hostExe)) {
         throw "ConPTY host compilation failed: $($compilerOutput -join [Environment]::NewLine)"
     }
