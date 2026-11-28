@@ -89,10 +89,15 @@ mode con cols=100 lines=30
     if (-not $script:client) { Write-Fail "the attached client did not start"; throw "no client" }
     $script:Started += $script:client
     for ($i = 0; $i -lt 40 -and -not (Test-Path $LOG_T); $i++) { Start-Sleep -Milliseconds 250 }
-    $T = Active
+    # The server can still be busy starting when the client appears: wait
+    # for a real pane id rather than take a timeout message for one.
+    $T = $null
+    for ($i = 0; $i -lt 40 -and $T -notmatch '^%\d+$'; $i++) { $T = Active; if ($T -notmatch '^%\d+$') { Start-Sleep -Milliseconds 500 } }
+    if ($T -notmatch '^%\d+$') { Write-Fail "setup: the server never answered [$T]"; throw "setup" }
     # A: outer (20,5) 30x10 in the window, so its border is screen rows 6..15
     # (the status line is row 0) and columns 20..49.
     $A = (P new-pane -t $S -P -F '#{pane_id}' -X 20 -Y 5 -x 30 -y 10 -- $CHILD vt $LOG_A $MOUSE_ON | Out-String).Trim()
+    if ($A -notmatch '^%\d+$') { Write-Fail "setup: new-pane gave [$A]"; throw "setup" }
     for ($i = 0; $i -lt 40 -and -not (Test-Path $LOG_A); $i++) { Start-Sleep -Milliseconds 250 }
     Start-Sleep -Seconds 1
     P select-pane -t $T | Out-Null
