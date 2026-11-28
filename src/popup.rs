@@ -573,12 +573,17 @@ fn release_popup_waiters(app: &mut AppState) {
 /// the last client has detached. Called on every server loop; a no-op while
 /// nothing waits.
 ///
-/// tmux's popup belongs to the client that shows it, so that client's detach
-/// frees it and popup_free_cb answers the waiting command with pd->status
-/// (popup.c:266-283). psmux keeps the popup on the session for the next
-/// attach, but nobody is left who could close it, so the command line would
-/// otherwise wait until someone attaches again: it returns now with the same
-/// status tmux gives, and the popup stays.
+/// tmux's popup belongs to the client that shows it: when that client goes,
+/// server_client_lost clears its overlay (server-client.c:485-493 at tag
+/// 3.8), which DESTROYS the popup, and popup_free_cb hands pd->status to the
+/// waiting command (popup.c:278). pd->status is 128 + SIGHUP = 129 until the
+/// command exits (popup.c:609), then the command's own status; the reply here
+/// is the same (current_popup_reply).
+///
+/// psmux differs on purpose: the popup lives on the session, not the client,
+/// and is KEPT for the next attach. Nobody attached could close it, though,
+/// so without this the command line would wait until someone attached again:
+/// it returns now with tmux's status, and the popup stays open.
 pub fn settle_popup_waiters(app: &mut AppState) {
     if app.popup_waiters.is_empty() {
         return;

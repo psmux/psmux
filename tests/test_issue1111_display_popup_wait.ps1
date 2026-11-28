@@ -142,6 +142,48 @@ if (-not $attached) {
     } else { Write-Fail "popup did not open" }
 }
 
+Write-Test "5b. Two sessions, two waiting calls: each settles on its own"
+# Each session has its own server and its own waiters: the client of one
+# detaching, or -C on one, must not answer the call waiting on the other.
+$S2 = "pw2"
+if ($attached) {
+    if (Get-PopupActive) { & $PSMUX -L $NS display-popup -t $S -C 2>&1 | Out-Null; Wait-PopupActive $false 2000 | Out-Null }
+    & $PSMUX -L $NS new-session -d -s $S2 -x 120 -y 30 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    $con2 = Start-Process conhost.exe -ArgumentList "`"$PSMUX`" -L $NS attach -t $S2" -PassThru
+    $started.Add($con2.Id)
+    $att2 = $false
+    for ($i = 0; $i -lt 50; $i++) {
+        Start-Sleep -Milliseconds 200
+        if ((& $PSMUX -L $NS display-message -t $S2 -p '#{session_attached}' 2>&1 | Out-String).Trim() -eq '1') { $att2 = $true; break }
+    }
+    $kids2 = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($con2.Id)" -EA SilentlyContinue | ForEach-Object { [int]$_.ProcessId })
+    foreach ($k in $kids2) { $started.Add($k) }
+    if (-not $att2) { Write-Fail "no client attached to $S2" } else {
+        $a = Start-Popup "-E `"Start-Sleep -Seconds 30`""
+        $b = Start-Process -FilePath $PSMUX -ArgumentList "-L $NS display-popup -t $S2 -E `"Start-Sleep -Seconds 30`"" -WindowStyle Hidden -PassThru
+        $null = $b.Handle; $started.Add($b.Id)
+        $open2 = $false
+        for ($i = 0; $i -lt 50; $i++) {
+            Start-Sleep -Milliseconds 100
+            if ((& $PSMUX -L $NS dump-state -t $S2 2>&1 | Out-String) -match '"popup_active":true') { $open2 = $true; break }
+        }
+        if ((Wait-PopupActive $true) -and $open2) {
+            Start-Sleep -Milliseconds 500
+            # The client of the second session detaches: only its call returns.
+            foreach ($k in $kids2) { Stop-Process -Id $k -Force -EA SilentlyContinue }
+            Stop-Process -Id $con2.Id -Force -EA SilentlyContinue
+            if ($b.WaitForExit(4000) -and $b.ExitCode -eq 129) { Write-Pass "$S2's call returned with 129 when its client detached" } else { Write-Fail "$S2's call: returned=$($b.HasExited) exit=$(if ($b.HasExited) { $b.ExitCode })" }
+            Start-Sleep -Milliseconds 500
+            if (-not $a.HasExited) { Write-Pass "$S's call still waits, its client is still there" } else { Write-Fail "$S's call returned with $($a.ExitCode) when the other session's client detached" }
+            # -C on the first session: only its call returns.
+            & $PSMUX -L $NS display-popup -t $S -C 2>&1 | Out-Null
+            if ($a.WaitForExit(3000) -and $a.ExitCode -eq 129) { Write-Pass "$S's call returned with 129 after its own -C" } else { Write-Fail "$S's call: returned=$($a.HasExited) exit=$(if ($a.HasExited) { $a.ExitCode })" }
+        } else { Write-Fail "the two popups did not open" }
+    }
+    & $PSMUX -L $NS kill-session -t $S2 2>&1 | Out-Null
+}
+
 Write-Test "6. The client detaches while a call waits: it returns with 129, the popup stays"
 # tmux frees the popup with its client, which answers the waiting command with
 # 128 + SIGHUP. psmux keeps the popup for the next attach, but the call must not

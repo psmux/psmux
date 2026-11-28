@@ -197,12 +197,14 @@ psmux display-popup -B -E -w 80 -h 24 "lazygit"
 
 As in tmux, `display-popup` run from a shell or a script waits until the popup closes and exits with the exit code of the command in it, so a script can use a popup as a step:
 
+> **Behaviour change (#1111):** before this, a `display-popup` without `-E` closed as soon as its command ended, Escape was passed to the command, and a call from a script returned at once with exit code 0. psmux now follows tmux: without `-E` the popup stays open until a key closes it, Escape or C-c close it even while the command runs, and the call waits. Add `-E` to bindings and scripts that relied on the old default.
+
 ```powershell
 psmux display-popup -E -w 90% -h 90% "vim notes.txt"
 if ($LASTEXITCODE -ne 0) { "vim exited with $LASTEXITCODE" }
 ```
 
-Without `-E`, or with `-EE` and a command that fails, the popup stays open after its command ends, so the call returns when it is closed with Escape or C-c, still with the command's exit code. A popup closed before its command ends (by Escape or C-c without `-E`, by `display-popup -C`, or by opening another popup over it) gives 129, tmux's code for it. With no client attached to the session nobody could close the popup, so the call returns at once there with exit code 0. A popup opened by a key binding or from the command prompt never holds anything up. To open a popup from a script without waiting, start the call in the background, for example with `Start-Process`.
+Without `-E`, or with `-EE` and a command that fails, the popup stays open after its command ends, so the call returns when it is closed with Escape or C-c, still with the command's exit code. A popup closed before its command ends (by Escape or C-c without `-E`, by `display-popup -C`, or by opening another popup over it) gives 129, tmux's code for it. With no client attached to the session nobody could close the popup, so the call returns at once there with exit code 0. If the last client detaches while a call is waiting, the call returns then with the code tmux gives when a popup's client goes away: the command's exit code if it has ended, else 129. Unlike tmux, which destroys the popup with its client, psmux keeps the popup on the session, so it is still there when a client attaches again. A popup opened by a key binding or from the command prompt never holds anything up. To open a popup from a script without waiting, start the call in the background, for example with `Start-Process`.
 
 ## Menus
 
