@@ -76,13 +76,6 @@ version = "0.2.191"
 [dependencies.log]
 version = "0.4.35"
 
-[dependencies.nix]
-version = "0.32.0"
-features = [
-    "term",
-    "fs",
-]
-
 [dependencies.serde]
 version = "1.0.229"
 optional = true
@@ -102,6 +95,13 @@ version = "0.3.34"
 
 [dev-dependencies.smol]
 version = "2.0.2"
+
+[target."cfg(unix)".dependencies.nix]
+version = "0.32.0"
+features = [
+    "term",
+    "fs",
+]
 
 [target."cfg(windows)".dependencies.lazy_static]
 version = "1.5.1"
