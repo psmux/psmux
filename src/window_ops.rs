@@ -2004,9 +2004,6 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
 pub fn remote_scroll_up(app: &mut AppState, x: u16, y: u16) { remote_scroll_wheel(app, x, y, true); }
 pub fn remote_scroll_down(app: &mut AppState, x: u16, y: u16) { remote_scroll_wheel(app, x, y, false); }
 
-/// Handle a semantic mouse event from the client.
-/// The client has already determined the target pane and computed pane-relative
-/// coordinates, so no coordinate translation is needed.
 /// A pane mouse event for floating pane `pane_id` of the active window,
 /// content relative. A click makes it the active pane and brings it to the
 /// front (tmux MouseDown1Pane, `select-pane -t=`, and
@@ -2037,6 +2034,9 @@ fn handle_floating_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, co
     true
 }
 
+/// Handle a semantic mouse event from the client.
+/// The client has already determined the target pane and computed pane-relative
+/// coordinates, so no coordinate translation is needed.
 pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool) {
     // The line number gutter of each pane, for the pointer column to be
     // brought back through (see `CopyGutter`).
