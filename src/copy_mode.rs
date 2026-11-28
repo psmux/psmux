@@ -699,16 +699,23 @@ fn off_padding(screen: &vt100::Screen, row: u16, col: u16) -> u16 {
 /// can stop on the second cell of the character before. A left walk therefore
 /// visits the same columns as tmux's, and a selection made leftwards copies
 /// what tmux's copies.
+///
+/// With emacs keys the cursor can be one past a full row that does not wrap,
+/// at column `cols` (see `line_end_pos`); left from there is the last column,
+/// and right stays put.
 fn step_over_wide(screen: &vt100::Screen, row: u16, col: u16, dx: i16, cols: u16) -> u16 {
     let last = cols.saturating_sub(1);
     if dx > 0 {
+        if col >= last {
+            return col.min(cols);
+        }
         let mut x = col.saturating_add(1).min(last);
         while x < last && is_padding(screen, row, x) {
             x += 1;
         }
         off_padding(screen, row, x)
     } else if dx < 0 {
-        off_padding(screen, row, col.min(last)).saturating_sub(1)
+        off_padding(screen, row, col.min(cols)).saturating_sub(1)
     } else {
         col.min(last)
     }
@@ -848,8 +855,10 @@ pub fn char_selection_highlight(start: (u16, u16), end: (u16, u16), emacs: bool,
 /// with wrap), scrolling down out of the scrollback when that row is below
 /// the screen, and stops at the end of the text there, trailing blanks left
 /// out. With vi keys the cursor stays on the last character, as tmux 3.7 and
-/// later do (window_copy_cursor_limit); with emacs keys it goes one past it.
-/// In a rectangle selection it goes to the last column, as tmux's does.
+/// later do (window_copy_cursor_limit); with emacs keys it goes one past it,
+/// which on a full row that does not wrap is column `cols`, past the pane, as
+/// in tmux. In a rectangle selection it goes to the last column, as tmux's
+/// does.
 fn line_end_pos(parser: &mut vt100::Parser, row: u16, rows: u16, cols: u16, vi: bool, rect: bool) -> (u16, u16) {
     let last_row = rows.saturating_sub(1);
     let mut r = row.min(last_row);
@@ -872,7 +881,7 @@ fn line_end_pos(parser: &mut vt100::Parser, row: u16, rows: u16, cols: u16, vi: 
     let len = row_text_length(screen, r, cols);
     let x = if vi { len.saturating_sub(1) } else { len };
     // The last character may be wide: keep vi keys on its first cell.
-    (r, off_padding(screen, r, x.min(last_col)))
+    (r, off_padding(screen, r, x))
 }
 
 /// Where back-to-indentation puts the cursor, tmux's
@@ -944,8 +953,12 @@ pub fn move_to_first_nonblank(app: &mut AppState) {
 /// to show that line (tmux `window_copy_acquire_cursor_up` and
 /// `window_copy_acquire_cursor_down`). A motion that ends on the second cell
 /// of a wide character stays there, as tmux's does, the same as cursor-left.
+/// With emacs keys a motion can end one past a full row that does not wrap,
+/// at column `cols`, where tmux's does (window_copy_cursor_limit gives the
+/// line's length); vi keys stay inside the pane.
 fn word_motion(app: &mut AppState, motion: impl FnOnce(&mut GridReader<'_, ScreenGrid<'_>>)) {
     let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
+    let vi = app.mode_keys != "emacs";
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
     let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return };
@@ -967,7 +980,8 @@ fn word_motion(app: &mut AppState, motion: impl FnOnce(&mut GridReader<'_, Scree
     };
     parser.screen_mut().set_scrollback(scrollback);
     app.copy_scroll_offset = parser.screen().scrollback();
-    app.copy_pos = Some((row as u16, px.min(cols.saturating_sub(1)) as u16));
+    let max_col = if vi { cols.saturating_sub(1) } else { cols };
+    app.copy_pos = Some((row as u16, px.min(max_col) as u16));
 }
 
 /// The separators and the key table a word motion runs with.

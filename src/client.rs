@@ -2919,10 +2919,29 @@ pub fn render_layout_json(
                     // shift on the way in, so the two directions are one pair
                     // of functions (tmux `window_copy_cursor_offset` and
                     // `window_copy_cursor_unoffset`).
+                    // A cursor past the content the pane shows, which emacs
+                    // keys reach one past a full row, sits on the last column
+                    // with a `$` there (tmux window_copy_write_line: "to
+                    // indicate the cursor is at the end of the line rather
+                    // than the cell before").
+                    let content_w = if gutter_w >= inner.width { 1 } else { inner.width - gutter_w };
+                    let past_end = *cc >= content_w;
                     let cc = (*cc).min(inner.width.saturating_sub(1).saturating_sub(gutter_w));
                     let cy = inner.y + cr;
                     let cx = inner.x + crate::copy_line_numbers::cursor_offset(
                         gutter_w as usize, cc as usize, inner.width as usize) as u16;
+                    if past_end && inner.width > 0 {
+                        let (mut fg, mut bg) = (Color::Reset, Color::Reset);
+                        apply_window_content_style(&mut fg, &mut bg, window_style, window_dim);
+                        let at = ratatui::layout::Position { x: inner.x + inner.width - 1, y: cy };
+                        let buf = f.buffer_mut();
+                        if buf.area.contains(at) {
+                            let cell = &mut buf[at];
+                            cell.reset();
+                            cell.set_symbol("$");
+                            cell.set_style(Style::default().fg(fg).bg(bg));
+                        }
+                    }
                     // While a selection is on screen the copy cursor sits on one
                     // of its endpoints.  Reversing that cell turns a selected
                     // cell into "text colour on the default background", which
