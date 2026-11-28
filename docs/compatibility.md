@@ -206,6 +206,8 @@ The `#{window_zoomed_flag}` format variable is correctly maintained during zoom/
 
 `capture-pane -p` correctly outputs pane content to stdout, enabling scripts and integrations (including Claude Code agent team coordination) to read pane state.
 
+On Windows 10 (build 19045) the inbox console host ends a full row with CR LF instead of letting it wrap, so psmux never sees a wrapped line there: `capture-pane -J` joins nothing, and copy mode takes each row as a line of its own (end-of-line, start-of-line, the word motions and `select-word`), as tmux does with rows broken that way. With `PSMUX_CONPTY_DIR` the pane runs on OpenConsole, which wraps.
+
 ### Split Window Percentage
 
 `split-window -p <percent>` correctly creates splits at the specified percentage instead of defaulting to 50/50.

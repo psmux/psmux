@@ -1503,6 +1503,13 @@ it does not change how the terminal draws it. Set a width your terminal does
 not use, and psmux and the terminal disagree about where the rest of the line
 begins.
 
+On Windows 10 (build 19045) the inbox console host that runs a pane lays the
+text out by its own widths first and ends each row it fills with CR LF, so
+there an override moves the cells but not the row breaks: 15 `U+4E2D`, two
+columns to that host, still break after 10 with `U+4E2D=1`. With
+`PSMUX_CONPTY_DIR` the pane runs on OpenConsole, which passes the text on as
+written.
+
 It is an array option, as in tmux, and each entry is an element with its own
 index, `codepoint-widths[N]`:
 

@@ -8,6 +8,12 @@
 # later) while emacs keys stay one past it. Every value checked is what tmux
 # 3.8 reports for the same lines with the same keys.
 #
+# The inbox console host of Windows 10 (build 19045) ends a full row with CR
+# LF instead of letting it wrap, so there the long line is two lines of the
+# pane, rows 4 and 5; the values checked for those rows are what tmux 3.8
+# reports for the same rows broken with CR LF. With PSMUX_CONPTY_DIR the pane
+# runs on OpenConsole, which wraps.
+#
 # The suite runs under -L in a PSMUX_DATA_DIR of its own and kills only its own
 # namespace. Set PSMUX_TEST_EXE (or PSMUX_TEST_BIN) to test a binary that is
 # not on PATH.
@@ -78,6 +84,15 @@ $EXPECT = @{
     vi    = @('8,0', '4,1', '0,2', '11,3', '19,5', '19,5', '7,6', '3,7', '4,8')
     emacs = @('9,0', '5,1', '0,2', '12,3', '20,5', '20,5', '8,6', '4,7', '6,8')
 }
+# Where start-of-line from row 5 goes: the first row of the wrapped line.
+$SOL5 = '0,4'
+if ([Environment]::OSVersion.Version.Build -lt 22000 -and -not $env:PSMUX_CONPTY_DIR) {
+    # Row 4 is a line of its own on that host (see the header): its end is
+    # its last cell, and emacs keys go one past it, to column 80.
+    $EXPECT.vi[4] = '79,4'
+    $EXPECT.emacs[4] = '80,4'
+    $SOL5 = '0,5'
+}
 
 # The copies in section D also reach the system clipboard: keep what the user
 # had there and put it back at the end.
@@ -127,7 +142,7 @@ try {
         P send-keys -t $S -X end-of-line | Out-Null
         P send-keys -t $S -X start-of-line | Out-Null
         $got = Pos
-        Check ($got -eq '0,4') "start-of-line on the wrapped row goes back to its first row, 0,4 (tmux)" "landed on $got"
+        Check ($got -eq $SOL5) "start-of-line on row 5 goes back to the first row of its line, $SOL5 (tmux)" "landed on $got"
         Enter-Row 0
         P send-keys -t $S -X -N 3 end-of-line | Out-Null
         $got = Pos

@@ -45,13 +45,21 @@ function Check($name, $got, $want) {
 function Show { (P show -s codepoint-widths) -join ' | ' }
 
 # Clear the screen first so the console host repaints from the top left, then
-# draw 15 U+2502 and wait.
+# draw 15 U+2502 and wait. The host takes U+2502 as one column: had it not yet
+# sent the cleared screen, it would repaint the row as the bars and blanks and
+# then move down with line feeds, and psmux's two column bars would take one
+# more row than it counts, so the last line feed would scroll their first row
+# out of the pane. So the payload writes a marker on the last row and draws
+# only once the marker is in the pane, and the bars go onto a blank row.
 $payload = Join-Path $TempHome "bars.ps1"
 @'
+param([string]$Go)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $e = [char]27
-[Console]::Out.Write("$e[H$e[2J")
-[Console]::Out.Write(([string][char]0x2502) * 15)
+[Console]::Out.Write("$e[H$e[2J$e[$([Console]::WindowHeight);1H+")
+[Console]::Out.Flush()
+while (-not (Test-Path $Go)) { Start-Sleep -Milliseconds 50 }
+[Console]::Out.Write("$e[H" + ([string][char]0x2502) * 15)
 [Console]::Out.Flush()
 Start-Sleep -Seconds 60
 '@ | Set-Content -Path $payload -Encoding UTF8
@@ -62,7 +70,13 @@ function Bars {
     for ($try = 1; $try -le 3; $try++) {
         $script:window++
         $w = "b$($script:window)"
-        P new-window -t s -n $w "pwsh -NoProfile -NoLogo -File $payload" | Out-Null
+        $go = Join-Path $TempHome "go_$w"
+        P new-window -t s -n $w "pwsh -NoProfile -NoLogo -File $payload $go" | Out-Null
+        for ($k = 0; $k -lt 80; $k++) {
+            if (((P capture-pane -p -t "s:$w") | Out-String) -match '(?m)^\+\s*$') { break }
+            Start-Sleep -Milliseconds 100
+        }
+        New-Item -ItemType File -Force $go | Out-Null
         $counts = @()
         for ($i = 0; $i -lt 20 -and $counts.Count -eq 0; $i++) {
             Start-Sleep -Milliseconds 250
