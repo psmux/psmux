@@ -130,34 +130,108 @@ fn unparseable_pid_anchor_falls_back_to_network_probe() {
     let _ = fs::remove_dir_all(dir.parent().unwrap());
 }
 
+/// Writes `STALE_COUNT` registries (with a `.pid` holding `pid` when given),
+/// runs one cleanup with a probe that waits `probe_cost` and answers Stale,
+/// and returns how long the cleanup took and how many probes it made. Every
+/// registry must be reaped either way.
 #[cfg(windows)]
-#[test]
-fn cleanup_with_many_dead_pid_registries_is_fast() {
-    // The measured defect: 6 stale files cost ~2.4s (serial network probes).
-    // With the PID anchor, even 6 dead registries must clean up in well under
-    // the cost of a single 100ms probe attempt.
+fn timed_cleanup(pid: Option<u32>, probe_cost: Duration) -> (Duration, usize) {
+    const STALE_COUNT: usize = 6;
     let dir = temp_psmux_dir("pid_anchor_speed");
-    let dead = dead_pid();
-    for i in 0..6 {
+    for i in 0..STALE_COUNT {
         write_registry(&dir, &format!("dead{i}"), &format!("5430{i}"));
-        fs::write(dir.join(format!("dead{i}.pid")), dead.to_string()).unwrap();
+        if let Some(pid) = pid {
+            fs::write(dir.join(format!("dead{i}.pid")), pid.to_string()).unwrap();
+        }
     }
 
+    let mut probes = 0usize;
     let start = Instant::now();
     cleanup_stale_port_files_in_with(&dir, |_, _| {
-        panic!("no network probes expected for dead-PID registries");
+        probes += 1;
+        if !probe_cost.is_zero() {
+            std::thread::sleep(probe_cost);
+        }
+        PortProbeResult::Stale
     });
     let elapsed = start.elapsed();
 
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "cleanup of 6 dead registries took {:?}; the stale-port tax is back",
-        elapsed
-    );
-    for i in 0..6 {
+    for i in 0..STALE_COUNT {
         assert!(!dir.join(format!("dead{i}.port")).exists(), "dead{i}.port must be reaped");
     }
     let _ = fs::remove_dir_all(dir.parent().unwrap());
+    (elapsed, probes)
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_with_many_dead_pid_registries_is_fast() {
+    // The measured defect: 6 stale files cost ~2.4s, because each one paid a
+    // serial network probe (3 attempts x 100ms connect timeout) even though
+    // its server was dead. With the PID anchor a dead registry is reaped
+    // without any probe.
+    //
+    // 1. The deterministic guard: a dead .pid anchor makes no probe at all.
+    // 2. The cost guard is relative, not a fixed wall clock bound, so a busy
+    //    host does not fail it (a fixed 250ms failed 20 of 20 runs with the
+    //    CPU saturated, on a build where the anchor works). The dead-PID path
+    //    is compared with a baseline measured in this same process: the same
+    //    six registries with no .pid, reaped by an instant Stale probe (the
+    //    file work), plus six of the anchor's own pid lookups. That is all a
+    //    dead registry should cost, with no network. Best of several runs
+    //    each, so a scheduling stall in one run does not decide it.
+    // 3. The budget must still catch the original slow path under the load
+    //    of this run: the same six registries with a probe that costs what
+    //    one real dead-port probe cost (3 x 100ms) must blow the budget.
+    const TRIALS: usize = 5;
+    let dead = dead_pid();
+
+    let mut dead_best = Duration::MAX;
+    for _ in 0..TRIALS {
+        let (elapsed, probes) = timed_cleanup(Some(dead), Duration::ZERO);
+        assert_eq!(probes, 0, "a dead .pid anchor must reap without a network probe; the stale-port tax is back");
+        dead_best = dead_best.min(elapsed);
+    }
+
+    let mut files_best = Duration::MAX;
+    for _ in 0..TRIALS {
+        let (elapsed, probes) = timed_cleanup(None, Duration::ZERO);
+        assert_eq!(probes, 6, "without a .pid anchor every registry is probed");
+        files_best = files_best.min(elapsed);
+    }
+
+    // The anchor's own price for a dead PID, paid once per registry: the
+    // handle check, then the process table snapshot that #650 needs when the
+    // handle cannot be opened. It grows with the number of processes on the
+    // host, which is why it is measured here and not assumed.
+    let mut lookups_best = Duration::MAX;
+    for _ in 0..TRIALS {
+        let start = Instant::now();
+        for _ in 0..6 {
+            let _ = crate::platform::process_has_exited(dead);
+            let _ = crate::platform::process_info::get_process_name_or_snapshot(dead);
+        }
+        lookups_best = lookups_best.min(start.elapsed());
+    }
+
+    let baseline = files_best + lookups_best;
+    let budget = baseline * 2 + Duration::from_millis(100);
+    assert!(
+        dead_best <= budget,
+        "cleanup of 6 dead registries took {dead_best:?} at best, over the {budget:?} budget \
+         (file work {files_best:?} + pid lookups {lookups_best:?}); the stale-port tax is back"
+    );
+
+    let (slow, _) = timed_cleanup(None, Duration::from_millis(300));
+    eprintln!(
+        "stale-port tax: dead {dead_best:?}, files {files_best:?}, lookups {lookups_best:?}, \
+         budget {budget:?}, old slow path {slow:?}"
+    );
+    assert!(
+        slow > budget,
+        "the budget {budget:?} no longer catches the original slow path ({slow:?} for 6 \
+         probed registries); the host is too loaded for this check to mean anything"
+    );
 }
 
 #[test]
