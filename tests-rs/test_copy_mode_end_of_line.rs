@@ -277,3 +277,79 @@ fn a_one_row_selection_past_the_text_copies_only_the_text() {
     assert_eq!(one_row_selection_text(s, 0, 20, 30, COLS), "");
     assert_eq!(one_row_selection_text(s, 2, 0, 9, COLS), format!("{CJK}x"));
 }
+
+// A program that writes a full row and then CR LF leaves a row that does not
+// wrap; the inbox console host of Windows 10 hands psmux every full row that
+// way. With emacs keys tmux 3.8 then puts the cursor one past the row, at
+// column sx (window_copy_cursor_limit gives the line's length,
+// window-copy.c:6315), and a selection to there takes the whole row. psmux
+// held the cursor on the last column, so the copy lost the last character.
+// tmux 3.8 gives the same positions on a 20 column pane.
+
+/// Row 0 full of 'a', row 1 "one two " and a full row of 'z', row 2 short,
+/// row 3 ending on a wide character in the last two columns, each ended
+/// with CR LF.
+fn full_rows(keys: &str) -> AppState {
+    let n = COLS as usize;
+    copy_app(
+        &format!("{}\r\none two {}\r\nshort\r\n{}\u{4e16}\r\n", "a".repeat(n), "z".repeat(n - 8), "a".repeat(n - 2)),
+        keys,
+    )
+}
+
+#[test]
+fn the_full_rows_fixture_does_not_wrap() {
+    let app = full_rows("emacs");
+    let p = match &app.windows[0].root { Node::Leaf(p) => p, _ => unreachable!() };
+    let parser = p.term.lock().expect("parser lock");
+    for r in 0..4 {
+        assert!(!parser.screen().row_wrapped(r), "row {r} must not wrap");
+    }
+}
+
+#[test]
+fn emacs_end_of_line_goes_one_past_a_full_row() {
+    let mut app = full_rows("emacs");
+    assert_eq!(eol_from(&mut app, 0, 0), (0, COLS));
+    assert_eq!(eol_from(&mut app, 3, 0), (3, COLS), "a last wide character ends the row too");
+    assert_eq!(eol_from(&mut app, 2, 0), (2, 5), "a short row as before");
+    let mut app = full_rows("vi");
+    assert_eq!(eol_from(&mut app, 0, 0), (0, COLS - 1), "vi keys stay on the last character");
+    assert_eq!(eol_from(&mut app, 3, 0), (3, COLS - 2));
+}
+
+#[test]
+fn left_from_one_past_a_full_row_is_its_last_column() {
+    let mut app = full_rows("emacs");
+    eol_from(&mut app, 0, 0);
+    move_copy_cursor(&mut app, -1, 0);
+    assert_eq!(app.copy_pos, Some((0, COLS - 1)));
+    // Right does not move it back inside the row. (tmux goes on to the next
+    // line, which psmux's cursor-right does from no column.)
+    eol_from(&mut app, 0, 0);
+    move_copy_cursor(&mut app, 1, 0);
+    assert_eq!(app.copy_pos, Some((0, COLS)));
+}
+
+#[test]
+fn emacs_next_word_end_goes_one_past_a_full_row() {
+    for (keys, want) in [("emacs", [(1, 7), (1, COLS)]), ("vi", [(1, 6), (1, COLS - 1)])] {
+        let mut app = full_rows(keys);
+        app.copy_pos = Some((1, 4));
+        move_word_end(&mut app);
+        assert_eq!(app.copy_pos, Some(want[0]), "{keys} to the end of 'two'");
+        move_word_end(&mut app);
+        assert_eq!(app.copy_pos, Some(want[1]), "{keys} to the end of the row");
+    }
+}
+
+#[test]
+fn an_emacs_selection_to_the_end_of_a_full_row_copies_all_of_it() {
+    let mut app = full_rows("emacs");
+    let (_, end) = eol_from(&mut app, 0, 0);
+    let p = match &mut app.windows[0].root { Node::Leaf(p) => p, _ => unreachable!() };
+    let mut parser = p.term.lock().expect("parser lock");
+    let mode = crate::types::SelectionMode::Char;
+    let text = selection_text(&mut parser, ROWS, COLS, (0, 0), (0, end), mode, true, 0);
+    assert_eq!(text, "a".repeat(COLS as usize));
+}

@@ -5360,6 +5360,10 @@ mod tests_pane_content_box_drawing;
 mod tests_copy_line_numbers_render;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_copy_cursor_past_end_render.rs"]
+mod tests_copy_cursor_past_end_render;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_floating_render.rs"]
 mod tests_floating_render;
 
